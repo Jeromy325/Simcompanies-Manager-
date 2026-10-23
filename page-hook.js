@@ -1080,7 +1080,9 @@
       return;
     }
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
+    const requestedTimeout = Number(event.data.timeoutMs);
+    const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout >= 3000 ? Math.min(requestedTimeout, 30000) : 8000;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       markExplicitApiGetCapture(path);
       const response = await fetch(path, {

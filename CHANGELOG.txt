@@ -1,3 +1,11 @@
+2.5.344 — 2026-10-23 — Background warehouse refresh survives a slow connection
+- Your exports (19:46–20:07): the game's own API answers took 14–70 s on the phone connection, and every
+  background failure (18 in an hour) was the warehouse refresh giving up after 8 s, retrying 8 s, then being
+  re-fired by the overlay poll every 10–40 s, adding more load to the slow link.
+- The background warehouse refresh now makes one attempt and waits up to 25 s (the game page aborts at the same
+  limit). After a failed overlay-triggered refresh, those refreshes pause for 60 s; refreshes after your game
+  actions (collect / buy / sell / contracts) still run immediately. Sync is unchanged.
+
 2.5.343 — 2026-10-23 — Abundance, research and government orders
 - After each Sync the Manager fetches (through your logged-in game tab) your research, the current government
   orders with your tier, and the abundance of every building whose abundance the game has shown (open a mine once).

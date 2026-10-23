@@ -26,5 +26,5 @@ assert.match(background,/await chrome\.alarms\.clear\(VWAP_WATCH_ALARM_NAME\)/,'
 assert.match(background,/async function runLiveMarketRefreshUnlocked\(realmArg=null\)/,'current-price stage is isolated from VWAP pair fetching');
 assert.doesNotMatch(background.slice(background.indexOf('async function runLiveMarketRefreshUnlocked'),background.indexOf('// All callers (scheduled, popup/message, and future triggers) share one refresh per realm.')),/fetchSimcoVwapPairs\(realm,pairs\)/,'current-price stage does not fetch VWAP pairs concurrently');
 assert.match(background,/Date\.now\(\)-cachedAt<15\*60\*1000/,'fresh prices are reused during retries rather than fetched again');
-assert.equal(manifest.version,'2.5.343','manifest version is bumped');
+assert.equal(manifest.version,'2.5.344','manifest version is bumped');
 console.log('sync-market-deferred-regression: 15 assertions passed');

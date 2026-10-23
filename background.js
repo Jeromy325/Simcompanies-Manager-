@@ -1355,6 +1355,21 @@ try{chrome.notifications?.onClicked?.addListener(id=>{if(String(id).startsWith('
 function backgroundJobHistoryKey(realm){return `scmBackgroundJobs:${Number(realm)}`;}
 const backgroundJobQueues=new Map();
 
+// v2.5.344 (user's exports 2026-10-23): on a slow phone connection the game's own API answers took 14–70 s,
+// so the background warehouse refresh (8 s × 2 attempts) failed 18 times in an hour and the 10 s overlay poll
+// kept re-firing it. One attempt with a longer page timeout; overlay-triggered refreshes pause after a failure.
+const WAREHOUSE_REFRESH_PAGE_TIMEOUT_MS=25000;
+const WAREHOUSE_OVERLAY_FAILURE_BACKOFF_MS=60000;
+const warehouseOverlayBackoffUntil=new Map();
+function warehouseOverlayRefreshInBackoff(realm,maxAgeMs,now=Date.now()){
+  if(Number(maxAgeMs)===0)return false; // refreshes after game actions always run
+  return now<(warehouseOverlayBackoffUntil.get(realm)||0);
+}
+function noteWarehouseOverlayRefreshResult(realm,maxAgeMs,result,now=Date.now()){
+  if(result?.ok){warehouseOverlayBackoffUntil.delete(realm);return;}
+  if(Number(maxAgeMs)===0||result?.stale)return;
+  warehouseOverlayBackoffUntil.set(realm,now+WAREHOUSE_OVERLAY_FAILURE_BACKOFF_MS);
+}
 async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000){
   const totalStartedAt=Date.now();
   const n=validRealmNumber(realm); if(n==null)return {ok:false,error:'Invalid realm.'};
@@ -1373,7 +1388,7 @@ async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000){
   const path=`/api/v3/resources/${companyId}/`;
   try{
     const requestStartedAt=Date.now();
-    const r=await pageGet(path);
+    const r=await pageGet(path,null,null,null,{timeoutMs:WAREHOUSE_REFRESH_PAGE_TIMEOUT_MS,attempts:1});
     const requestDurationMs=Date.now()-requestStartedAt;
     if(!r?.ok)return {ok:false,error:r?.error||`HTTP ${r?.status||0}`,status:r?.status||0,requestDurationMs};
     const rows=normalizeWarehouse(r.data);
@@ -3183,9 +3198,16 @@ async function verifyDurableEndpointWrite(realm,path,startedAtMs,expectedData=nu
   if(expectedData!=null&&freshRecord&&!endpointPayloadsEqual(entry.data,expectedData))return {ok:false,reason:'stored-payload-mismatch'};
   return {ok:true,realm:n,path,status,receivedAt:entry.receivedAt||null,lastAttemptAt:entry.lastAttempt?.receivedAt||null,preservedPriorData:!freshRecord&&freshAttempt};
 }
-async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticLabel=null){
-  const timeoutMs=SYNC_PAGE_API_TIMEOUT_MS;
-  const attempts=SYNC_PAGE_API_ATTEMPTS;
+// v2.5.344: callers may pass {timeoutMs, attempts}. The page hook aborts its fetch at timeoutMs and the
+// background waits a short grace beyond it, so a slow game response is reported by the page, not cut off here.
+const PAGE_GET_BACKGROUND_GRACE_MS=2000;
+async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticLabel=null, options=null){
+  const customTimeout=Number(options?.timeoutMs);
+  const hasCustomTimeout=Number.isFinite(customTimeout)&&customTimeout>0;
+  const timeoutMs=hasCustomTimeout?customTimeout:SYNC_PAGE_API_TIMEOUT_MS;
+  const raceMs=hasCustomTimeout?customTimeout+PAGE_GET_BACKGROUND_GRACE_MS:timeoutMs;
+  const customAttempts=Number(options?.attempts);
+  const attempts=Number.isInteger(customAttempts)&&customAttempts>0?customAttempts:SYNC_PAGE_API_ATTEMPTS;
   const traceDiag=(type,extra={})=>{
     try{ diagnosticTrace?.(type,{realm:targetRealm,path,label:diagnosticLabel,attempt:extra.attempt,...extra}); }catch{}
   };
@@ -3205,8 +3227,8 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
       }
       traceDiag('pageget-send',{attempt,tabId:tab.id});
       const r=await Promise.race([
-        chrome.tabs.sendMessage(tab.id,{type:'PAGE_API_GET',path,realm:targetRealm}),
-        new Promise((_,reject)=>setTimeout(()=>reject(new Error('Sim Companies page bridge timed out.')),timeoutMs))
+        chrome.tabs.sendMessage(tab.id,hasCustomTimeout?{type:'PAGE_API_GET',path,realm:targetRealm,timeoutMs}:{type:'PAGE_API_GET',path,realm:targetRealm}),
+        new Promise((_,reject)=>setTimeout(()=>reject(new Error('Sim Companies page bridge timed out.')),raceMs))
       ]);
       traceDiag('pageget-response',{attempt,tabId:tab.id,ok:!!r?.ok,status:r?.status||0,error:r?.error||null});
       return r||{ok:false,status:0,error:'No response from Sim Companies page.'};
@@ -5592,8 +5614,10 @@ const warehouseOverlayRefreshRuns=new Map();
 async function refreshRealmWarehouseForOverlay(realm,maxAgeMs=15000){
   const n=validRealmNumber(realm);if(n==null)return {ok:false,error:'Invalid realm.'};
   const existing=warehouseOverlayRefreshRuns.get(n);if(existing)return existing;
+  if(warehouseOverlayRefreshInBackoff(n,maxAgeMs))return {ok:false,backoff:true,error:'Warehouse refresh paused after a failed attempt.'};
   const startedMs=Date.now(),startedAt=new Date(startedMs).toISOString();
   const run=refreshRealmWarehouseForOverlayUnlocked(n,maxAgeMs).then(async result=>{
+    noteWarehouseOverlayRefreshResult(n,maxAgeMs,result);
     const finishedAt=new Date().toISOString();
     await recordBackgroundJobEvent(n,{job:'warehouse-refresh',trigger:maxAgeMs===0?'stock-mutation-or-forced':'overlay-refresh',startedAt,finishedAt,durationMs:Date.now()-startedMs,outcome:result?.ok?(result?.cached?'skipped':'success'):(result?.stale||result?.incomplete?'partial':'failure'),requested:1,fetched:result?.refreshed?1:0,refreshed:result?.refreshed?1:0,checked:1,cached:result?.cached?1:0,error:result?.error||null,details:{rows:result?.rows??null,requestDurationMs:result?.requestDurationMs??null,storageCommitDurationMs:result?.storageCommitDurationMs??null,totalDurationMs:result?.totalDurationMs??null}}).catch(()=>{});
     return {...result,jobStartedAt:startedAt,jobFinishedAt:finishedAt,jobDurationMs:Date.now()-startedMs};

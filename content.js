@@ -948,7 +948,7 @@ let hookReady = false;
     if (message?.type !== 'PAGE_API_GET') return;
     const id = `${Date.now()}-${++seq}`;
     pending.set(id, { resolve: sendResponse });
-    window.postMessage({ source: 'SIMCO_MANAGER', type: 'API_GET', id, path: message.path }, '*');
+    window.postMessage({ source: 'SIMCO_MANAGER', type: 'API_GET', id, path: message.path, timeoutMs: message.timeoutMs }, '*');
     return true;
   });
 })();
