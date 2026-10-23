@@ -514,8 +514,50 @@
     return { factor: eff, pct: (eff - 1) * 100, basePct: (b - 1) * 100, reductionPct: (b - 1) * coo, coo };
   }
 
+  // v2.5.342 game constants (/api/v2/constants/core|buildings|resources/, public). Game code (tSe/eSe):
+  //   base/level = producedPerHourRaw × (AVERAGE_SALARY / SALARY_MID[economyState])^building.salaryModifier
+  //   rate/level = base × abundance%/100 (abundance resources only) × (1 + event/100) ÷ (1 − bonus/100)
+  //   wage $/h/level = AVERAGE_SALARY × building.salaryModifier × (0.97 with robots)
+  function gameConstantsOk(c) { return !!(c && c.core && c.buildings && c.resources && pos(c.core.AVERAGE_SALARY) && c.core.SALARY_MID); }
+  function gameBaseRate(c, resourceId, economyState) {
+    if (!gameConstantsOk(c)) return null;
+    const r = c.resources[String(resourceId)], b = r && c.buildings[String(r.producedAt)];
+    const mid = pos(c.core.SALARY_MID[String(economyState)]), raw = pos(r && r.producedPerHourRaw), sm = Number(b && b.salaryModifier);
+    if (!raw || !mid || !Number.isFinite(sm)) return null;
+    return raw * Math.pow(c.core.AVERAGE_SALARY / mid, sm);
+  }
+  function gameRatePerLevel(c, resourceId, economyState, { eventPct = 0, bonusPct = 0, abundancePct = null } = {}) {
+    const base = gameBaseRate(c, resourceId, economyState);
+    if (base == null || bonusPct >= 100) return null;
+    const ab = abundancePct != null && Number.isFinite(Number(abundancePct)) ? Number(abundancePct) / 100 : 1;
+    return base * ab * (1 + (Number(eventPct) || 0) / 100) / (1 - (Number(bonusPct) || 0) / 100);
+  }
+  function gameWagePerLevel(c, buildingKind, robots = false) {
+    if (!gameConstantsOk(c)) return null;
+    const b = c.buildings[String(buildingKind)], sm = Number(b && b.salaryModifier);
+    return Number.isFinite(sm) ? c.core.AVERAGE_SALARY * sm * (robots ? 0.97 : 1) : null;
+  }
+  // Which economy phase a measured batch rate belongs to: the phase whose game rate is closest, if within tolPct.
+  function phaseFromMeasuredRate(c, resourceId, measuredPerLevel, opts = {}, tolPct = 2) {
+    const m = pos(measuredPerLevel); if (!m || !gameConstantsOk(c)) return null;
+    let best = null;
+    for (const st of Object.keys(c.core.SALARY_MID)) {
+      const r = gameRatePerLevel(c, resourceId, st, opts); if (!r) continue;
+      const d = Math.abs(m - r) / r * 100;
+      if (!best || d < best.diffPct) best = { state: Number(st), diffPct: d, rate: r };
+    }
+    return best && best.diffPct <= tolPct ? best : null;
+  }
+  // Exchange fee % from your own listings (/api/v2/companies/<id>/market-orders/): fees ÷ (quantity × price).
+  function listingFeePct(orders) {
+    const ok = (Array.isArray(orders) ? orders : []).filter(o => pos(o && o.fees) && pos(o.quantity) && pos(o.price));
+    if (!ok.length) return null;
+    const v = ok.reduce((a, o) => a + o.quantity * o.price, 0), f = ok.reduce((a, o) => a + o.fees, 0);
+    return f / v * 100;
+  }
+
   const api = {
-    economyLogAppend, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
+    economyLogAppend, gameConstantsOk, gameBaseRate, gameRatePerLevel, gameWagePerLevel, phaseFromMeasuredRate, listingFeePct, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
     cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
     seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,

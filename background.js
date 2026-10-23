@@ -281,6 +281,39 @@ const USEFUL_PATTERNS = [
 ];
 
 const rawStorageSet=chrome.storage.local.set.bind(chrome.storage.local);
+// v2.5.342 the game's public constants (/api/v2/constants/core|buildings|resources/) → scmGameConstants, refreshed
+// every 6 h; and your own exchange listings (/api/v2/companies/<id>/market-orders/, public) → scmMarketOrders:<realm>.
+// Plain fetches, no storage lock held while fetching.
+const GAME_CONSTANTS_ALARM='scm-game-constants';
+async function refreshGameConstants(force=false){
+  try{
+    const cur=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;
+    if(!force&&cur&&Date.now()-Date.parse(cur.at||0)<6*3600000)return {ok:true,cached:true};
+    const get=async p=>{const r=await fetch(`https://www.simcompanies.com${p}`,{credentials:'omit'});if(!r.ok)throw new Error(`${p} HTTP ${r.status}`);return r.json();};
+    const [core,buildings,resources]=await Promise.all([get('/api/v2/constants/core/'),get('/api/v2/constants/buildings/'),get('/api/v2/constants/resources/')]);
+    const next={core,buildings,resources,at:new Date().toISOString()};
+    if(!globalThis.SCM_TOOLS_CORE.gameConstantsOk(next))throw new Error('constants missing fields');
+    await rawStorageSet({scmGameConstants:next});
+    return {ok:true};
+  }catch(e){return {ok:false,error:String(e?.message||e)};}
+}
+async function refreshMarketOrders(realm,maxAgeMs=5*60000){
+  try{
+    const r=validRealmNumber(realm);if(r==null)return {ok:false};
+    const k=`scmMarketOrders:${r}`;const cur=(await chrome.storage.local.get({[k]:null}))[k];
+    if(cur&&Date.now()-Date.parse(cur.at||0)<maxAgeMs)return {ok:true,cached:true};
+    const st=await notifyRealmStore(r);const cid=Number(st?.authData?.authCompany?.companyId??st?.authData?.authCompany?.id);
+    if(!(cid>0))return {ok:false,error:'company id not captured'};
+    const res=await fetch(`https://www.simcompanies.com/api/v2/companies/${cid}/market-orders/`,{credentials:'omit'});
+    if(!res.ok)return {ok:false,error:`HTTP ${res.status}`};
+    const orders=await res.json();if(!Array.isArray(orders))return {ok:false,error:'not a list'};
+    await rawStorageSet({[k]:{companyId:cid,orders,at:new Date().toISOString()}});
+    return {ok:true};
+  }catch(e){return {ok:false,error:String(e?.message||e)};}
+}
+chrome.alarms.onAlarm.addListener(a=>{if(a?.name===GAME_CONSTANTS_ALARM)refreshGameConstants().catch(()=>{});});
+async function ensureGameConstantsAlarm(){try{await chrome.alarms.create(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});}catch{}refreshGameConstants().catch(()=>{});}
+ensureGameConstantsAlarm();
 // v2.5.338 economy phase log per realm (scmEconomyStateLog:<realm>) from auth-data temporals.economyState.
 // Seeds from the previously stored auth-data so the phase before a change is kept. Storage only, no network.
 let economyLogChain=Promise.resolve();
@@ -1231,10 +1264,13 @@ chrome.alarms.onAlarm.addListener(a=>{if(String(a?.name||'').startsWith('scm-fol
 // 7 + 8 when an exchange order book is captured (by the game or the Manager); 10 after a warehouse update.
 async function notifyOrderBook(realm,resourceId,rows){
   const n=validRealmNumber(realm);if(n==null)return;const cfg=await notifySettings();if(!cfg.undercut&&!cfg.unprofitable)return;
+  if(cfg.undercut)await refreshMarketOrders(n);
   const st=await notifyRealmStore(n);const {names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE;
   const companyId=st?.authData?.authCompany?.id??st?.authData?.authCompany?.companyId;
+  const mo=(await chrome.storage.local.get({[`scmMarketOrders:${n}`]:null}))[`scmMarketOrders:${n}`];
+  const own=Array.isArray(mo?.orders)?mo.orders.filter(o=>Number(o?.kind)===Number(resourceId)):null;
   await updateNotifyState(async state=>{
-    if(cfg.undercut){const key=`undercut:${n}`;const r=N.undercut({rows,companyId,id:Number(resourceId),names,realm:n,state:state[key]||{}});state[key]=r.state;for(const f of r.fire)await scmNotify(`undercut-${n}-${resourceId}-${Date.now()}`,f.title,f.message);}
+    if(cfg.undercut){const key=`undercut:${n}`;const r=N.undercut({rows,companyId,own,id:Number(resourceId),names,realm:n,state:state[key]||{}});state[key]=r.state;for(const f of r.fire)await scmNotify(`undercut-${n}-${resourceId}-${Date.now()}`,f.title,f.message);}
     if(cfg.unprofitable){const key=`unprof:${n}`;const r=N.unprofitable({buildings:st.buildings,store:st,realm:n,names,state:state[key]||{}});state[key]=r.state;for(const f of r.fire)await scmNotify(`unprof-${n}-${Date.now()}`,f.title,f.message);}
     return state;
   });
@@ -5204,6 +5240,7 @@ async function syncNow(requestedRealm=null){
       const committedStore=committed.realmStores?.[key]||{};
       trace('realm-store-commit',{realm:selected,endpointCount:Object.keys(committedStore.endpointData||{}).length,warehouseRows:Array.isArray(committedStore.warehouseResources)?committedStore.warehouseResources.length:0,fullSyncStatus:committedStore.syncStatus||null});
       trace('sync-complete',{ok:true,successful,failed,total,elapsedMs:Date.now()-startedAt});
+      refreshMarketOrders(selected,0).catch(()=>{});refreshGameConstants().catch(()=>{});
       const bridgeState=await state();
       if(bridgeState.liveBridge?.enabled && bridgeState.liveBridge?.pushOnSync) pushLiveBridge(selected,true).catch(()=>{});
 

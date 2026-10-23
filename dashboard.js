@@ -210,6 +210,8 @@ async function get(attempt=0){
   try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);if(r!=null){const k=`scmBackgroundJobs:${r}`;const h=(await chrome.storage.local.get({[k]:null}))[k];if(Array.isArray(h)){result.backgroundJobHistory=h;if(viewKey&&result.realmStores?.[viewKey])result.realmStores[viewKey]={...result.realmStores[viewKey],backgroundJobHistory:h};}}}catch{}
   // v2.5.331 production cost history (one entry per production run) lives in its own key.
   try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);if(r!=null){const k=`scmProductionCostHistory:${r}`;const h=(await chrome.storage.local.get({[k]:[]}))[k];result.productionCostHistory=Array.isArray(h)?h:[];}}catch{}
+  // v2.5.342 game constants (public API) and your exchange listings.
+  try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);const g=await chrome.storage.local.get({scmGameConstants:null,[`scmMarketOrders:${r}`]:null});result.gameConstants=g.scmGameConstants||null;result.marketOrders=g[`scmMarketOrders:${r}`]||null;}catch{}
   // v2.5.341 game page config (executive timing) for the admin-overhead calculation.
   try{result.gameConfig=(await chrome.storage.local.get({scmGameConfig:null})).scmGameConfig||null;}catch{}
   // v2.5.338 economy phase log (auth-data temporals.economyState) lives in its own key.
@@ -1789,8 +1791,12 @@ function plannerCaptureProductionRateSnapshot(building,product,baseRatePerLevel,
   try{chrome.runtime.sendMessage({type:'CAPTURE_PRODUCTION_RATE_SNAPSHOT',realm,buildingId:Number(b?.id),resourceId:rid,started:busy?.started,product,baseRatePerLevel:Number(baseRatePerLevel),observedRatePerHour:Number(observedRatePerHour)||null,eventModifier:Number(eventModifier)||0,companyProductionModifier:plannerCompanyProductionModifier(s),companyModifierNormalized:true,source});}catch{}
 }
 
+function plannerEconomyNow(s){const log=Array.isArray(s?.economyStateLog)?s.economyStateLog:[];const a=Number(s?.authData?.temporals?.economyState);return log.length?Number(log[log.length-1].s):(Number.isFinite(a)?a:null);}
 function plannerRate(name,recipes,rates,s){
   const target=plannerNormalizeName(name);
+  // v2.5.342 game constants: exact base rate for the current economy phase.
+  try{const C=globalThis.SCM_TOOLS_CORE,ph=plannerEconomyNow(s),rec=(Array.isArray(recipes)?recipes:[]).find(r=>plannerNormalizeName(r?.name)===target);
+    const b=ph!=null&&rec&&C?.gameBaseRate?C.gameBaseRate(s?.gameConstants,rec.id,ph):null;if(b>0)return {rate:b,source:'game constants'};}catch{}
   // Production-rate mapping is canonicalized by normalized resource name so
   // harmless capitalization differences (e.g. "Electronic components" vs
   // "Electronic Components") cannot silently remove a production rate.
@@ -2245,6 +2251,16 @@ function plannerEconomy(ctx){
   const rates=plannerLocalGet(PLANNER_PHASE_RATE_KEY);
   if(batch&&!batch.inferred&&realm!=null&&measured>0){rates[`${realm}:${ctx.productId}:${batch.state}`]={perLevel:measured/level,at:ctx.batchStarted};plannerLocalPut(PLANNER_PHASE_RATE_KEY,rates);}
   const known=current!=null?rates[`${realm}:${ctx.productId}:${current}`]:null;
+  // v2.5.342 game constants: rate = the game's own formula for the current phase (what its Profit Calculator uses);
+  // the running batch's phase is the log's, else the phase whose game rate matches its measured rate.
+  const gc=ctx.s?.gameConstants,opts={eventPct:ctx.eventPct||0,bonusPct:ctx.bonusPct||0,abundancePct:ctx.abundancePct??null};
+  const gameNow=current!=null&&C?.gameRatePerLevel?C.gameRatePerLevel(gc,ctx.productId,current,opts):null;
+  if(gameNow>0){
+    if((!batch||(batch.inferred&&!batch.matched))&&ctx.rateFromBatch&&measured>0){const m=C.phaseFromMeasuredRate(gc,ctx.productId,measured/level,opts);if(m)batch={state:m.state,inferred:true,matched:true};}
+    const changed=batch!=null&&batch.state!=null&&String(batch.state)!==String(current);
+    const diffPct=measured>0?(measured-gameNow*level)/(gameNow*level)*100:null;
+    return {rate:gameNow*level,source:'game-constants',changed,current,batch,measured,diffPct,name:v=>C?.economyName?C.economyName(v):String(v)};
+  }
   const p=C?.projectionRate?C.projectionRate({measuredRate:measured,batchPhase:batch?.state,currentPhase:current,phaseRate:known&&known.at!==ctx.batchStarted?Number(known.perLevel)*level:null,referenceRate:current===1?ctx.referenceRate:null}):{rate:measured>0?measured:null,source:'measured',changed:false};
   return {...p,current,batch,measured,name:v=>C?.economyName?C.economyName(v):String(v)};
 }
@@ -2282,7 +2298,7 @@ function renderPlannerProfit(host){
     const c=plannerProfitSettings();
     const setNum=v=>v!==''&&v!=null&&Number.isFinite(Number(v));
     const overhead=setNum(c.adminOverheadPct)?Number(c.adminOverheadPct):(autoAdmin??0);
-    const feePct=setNum(c.exchangeFeePct)?Number(c.exchangeFeePct):(salesFee?.pct??4);
+    const listFee=C.listingFeePct?C.listingFeePct(ctx.s?.marketOrders?.orders):null;const feePct=setNum(c.exchangeFeePct)?Number(c.exchangeFeePct):(salesFee?.pct??(listFee!=null?Math.round(listFee*100)/100:4));
     const productId=Number(ctx.productId);
     const sale=Number.isFinite(productId)?plannerMarketPrice(ctx.s,ctx.priceMap,productId,ctx.quality,'sell-any'):null;
     plannerRequestOrderBook(ctx,host,productId);
@@ -2290,11 +2306,15 @@ function renderPlannerProfit(host){
     const isMarket=c.inputSource==='market'||c.inputSource==='market-any';
     const inputs=(ctx.plannedInputs||[]).map(x=>{let p=isMarket?null:plannerWarehouseCost(ctx.s,x.id,x.minQuality);if(!p){p=plannerMarketPrice(ctx.s,ctx.priceMap,x.id,x.minQuality,c.inputSource==='market-any'?'buy-any':'buy');if(p&&!isMarket)p={...p,source:`${p.source} (not in warehouse)`};}return {id:x.id,name:x.name,quality:x.minQuality,qtyPerUnit:Number(x.perOutput)||0,unitPrice:p?.price??null,priceQuality:p?.quality??null,source:p?.source||null};});
     const wageOverride=setNum(c.wages?.[wageKey])?Number(c.wages[wageKey]):null;
-    const lab=wageOverride==null&&Number.isFinite(productId)?plannerLabourFromLots(ctx.s,productId,ctx.quality):null;
+    let lab=wageOverride==null&&Number.isFinite(productId)?plannerLabourFromLots(ctx.s,productId,ctx.quality):null;
     const eco=plannerEconomy(ctx);const unitsPerHour=eco.rate||ctx.outputPerHour;
-    const wage=lab?plannerWage(ctx,lab):null;
+    // v2.5.342 game wage from constants (AVERAGE_SALARY × salaryModifier × 0.97 with robots) when available.
+    const gWage=wageOverride==null&&C.gameWagePerLevel?C.gameWagePerLevel(ctx.s?.gameConstants,ctx.buildingKind,ctx.robots):null;
+    let wage=null;
+    if(gWage>0&&unitsPerHour>0){lab={quality:ctx.quality,at:null,cached:false,boughtUnits:0,...(lab||{}),workersPerUnit:gWage/(unitsPerHour/Math.max(1,Number(ctx.level)||1)),game:true};wage={wage:gWage,fresh:false,game:true};}
+    else{wage=lab?plannerWage(ctx,lab):null;
     // Labour per unit follows the projected rate (wage per hour is phase-independent).
-    if(lab&&wage&&unitsPerHour>0&&(eco.changed||!wage.fresh))lab.workersPerUnit=wage.wage/(unitsPerHour/Math.max(1,Number(ctx.level)||1));
+    if(lab&&wage&&unitsPerHour>0&&(eco.changed||!wage.fresh))lab.workersPerUnit=wage.wage/(unitsPerHour/Math.max(1,Number(ctx.level)||1));}
     // v2.5.331 the game shows Unit wage cost and Unit admin cost in cents and adds those (67.82 + 23.46 = 91.28).
     const r2=v=>Math.round(v*100)/100;const wPU=lab?r2(lab.workersPerUnit):null,aPU=lab?r2(wPU*overhead/100):null;
     const labourPerUnit=lab?wPU+aPU:null;
@@ -2309,10 +2329,11 @@ function renderPlannerProfit(host){
     const row=(label,value,note='',cls='')=>`<div class="pp-row ${cls}"><div class="pp-label">${label}${note?`<small>${note}</small>`:''}</div><div class="pp-value">${value}</div></div>`;
     const inputRows=inputs.map(i=>row(`${escapeHtml(i.name)} Q${i.quality} × ${num(i.qtyPerUnit)}`,i.unitPrice==null?'—':`−${plannerMoney(i.unitPrice*i.qtyPerUnit)}`,i.unitPrice==null?'no price captured':`${plannerMoney(i.unitPrice)} each · ${escapeHtml(i.source)}${i.priceQuality!=null&&i.priceQuality!==i.quality?` · Q${i.priceQuality} listing`:''}`)).join('');
     const labourNote=wageOverride!=null?`wage override $${num(wageOverride)}/h/level · ${num(+overhead.toFixed(2))}% admin`
+      :lab&&lab.game?`workers ${plannerMoney(wPU)} + admin ${plannerMoney(aPU)} (${num(+overhead.toFixed(2))}%) · game wage ${plannerMoney(wage.wage)}/h/level${ctx.robots?' (robots −3%)':''} ÷ ${num(+(unitsPerHour/Math.max(1,Number(ctx.level)||1)).toFixed(3))} units/h/level`
       :lab?`workers ${plannerMoney(wPU)} + admin ${plannerMoney(aPU)} (${num(+overhead.toFixed(2))}%) · from your ${escapeHtml(ctx.product)} Q${lab.quality} batch ${plannerDate(lab.at)}${lab.cached?' (last seen)':''}${lab.boughtUnits>=0.5?` · ${num(Math.round(lab.boughtUnits))} bought units in that lot left out`:''}${wage&&(eco.changed||!wage.fresh)?` · wage ${plannerMoney(wage.wage)}/h/level ÷ ${num(+(unitsPerHour/Math.max(1,Number(ctx.level)||1)).toFixed(3))} units/h/level`:''}`
       :`no produced ${escapeHtml(ctx.product||'')} batch in the warehouse yet — appears after the first batch, or enter a wage override`;
-    const ecoSrc={'phase-measured':`your ${eco.name(eco.current)}-economy rate measured earlier`,reference:`normal-economy rate ÷ (1 − your speed bonus), the game's formula`,'measured-stale':`no ${eco.name(eco.current)} rate captured yet — still the running batch's rate`}[eco.source];
-    const ecoNote=eco.changed?`<div class="pp-basis pp-economy">Economy is ${escapeHtml(eco.name(eco.current))} now; ${eco.batch?.inferred?`the running batch (${num(+eco.measured.toFixed(3))}/h) started in another phase — its rate is ${num(+eco.batch.diffPct.toFixed(1))}% off the normal rate`:`the running batch started in ${escapeHtml(eco.name(eco.batch?.state))} at ${num(+eco.measured.toFixed(3))}/h`}. Profit uses ${num(+Number(unitsPerHour).toFixed(3))}/h (${escapeHtml(ecoSrc||'')}).</div>`:'';
+    const ecoSrc={'game-constants':`the game's ${eco.name(eco.current)}-economy rate, from its constants`,'phase-measured':`your ${eco.name(eco.current)}-economy rate measured earlier`,reference:`normal-economy rate ÷ (1 − your speed bonus), the game's formula`,'measured-stale':`no ${eco.name(eco.current)} rate captured yet — still the running batch's rate`}[eco.source];
+    const ecoNote=eco.changed?`<div class="pp-basis pp-economy">Economy is ${escapeHtml(eco.name(eco.current))} now; ${eco.batch?.inferred&&!eco.batch?.matched?`the running batch (${num(+eco.measured.toFixed(3))}/h) started in another phase — its rate is ${num(+eco.batch.diffPct.toFixed(1))}% off the normal rate`:`the running batch started in ${escapeHtml(eco.name(eco.batch?.state))} at ${num(+eco.measured.toFixed(3))}/h`}. Profit uses ${num(+Number(unitsPerHour).toFixed(3))}/h (${escapeHtml(ecoSrc||'')}).</div>`:(eco.source==='game-constants'&&eco.diffPct!=null&&Math.abs(eco.diffPct)>1?`<div class="pp-basis pp-economy">Your running batch measures ${num(+eco.measured.toFixed(3))}/h; the game's formula gives ${num(+Number(unitsPerHour).toFixed(3))}/h (${num(+eco.diffPct.toFixed(1))}%). Profit uses the game's figure, as its calculator does.</div>`:'');
     const sellLabel=c.sellMode==='exchange'?`Exchange fee ${num(+feePct.toFixed(2))}%${!setNum(c.exchangeFeePct)&&salesFee?' (from your sales)':''}`:`Contract discount ${num(c.contractDiscountPct)}%`;
     const busy=ctx.building?.raw?.busy?.resource;
     const batchCost=busy&&Number(busy.kind)===productId&&Number(busy.unitCost)>0?Number(busy.unitCost):null;
@@ -2329,7 +2350,7 @@ ${row(sellLabel,`−${plannerMoney(r.feePerUnit+r.contractDiscountPerUnit)}`)}
 ${row('Transport',`−${plannerMoney(r.transportPerUnit)}`,`${num(ctx.transportUnits)} units × ${plannerMoney(transport?.price??0)}${c.sellMode==='contract'?' · 50% paid by buyer':''}`)}
 ${row('Profit / unit after fee &amp; transport',plannerMoney(r.profitPerUnit),'','pp-total')}
 ${row('Break-even sale price',plannerMoney(r.breakEvenPrice))}
-${row('Production / h',num(r.unitsPerHour),`Level ${ctx.level} · ${num(+(r.unitsPerHour/ctx.level).toFixed(3))} per level · ${eco.changed?(eco.source==='measured-stale'?'running batch rate (economy changed)':`${escapeHtml(eco.name(eco.current))} economy rate, see note above`):'measured rate from this card'}`)}
+${row('Production / h',num(r.unitsPerHour),`Level ${ctx.level} · ${num(+(r.unitsPerHour/ctx.level).toFixed(3))} per level · ${eco.changed?(eco.source==='measured-stale'?'running batch rate (economy changed)':`${escapeHtml(eco.name(eco.current))} economy rate, see note above`):eco.source==='game-constants'?'game formula (constants), as the game':'measured rate from this card'}`)}
 
 </div>${r.incomplete?`<div class="planner-profit-empty">Missing price for: ${escapeHtml(r.missingInputs.join(', '))}. Those inputs are not counted.</div>`:''}`;
   };
@@ -2555,8 +2576,9 @@ function renderBuildingPlanner(s,options={}){
   // v2.5.338 economy phase: the measured rate belongs to the running batch's phase; also pass the
   // normal-economy reference rate (× the same game modifiers) for when the phase has changed since.
   let referenceRate=null;try{const rb=plannerRate(product,recipes,rates,s);const ev=1+plannerActiveProductionEvent(s,product,recipes,Number(productRecipe?.id))/100;const cf=plannerCompanyProductionFactor(s);if(Number(rb?.rate)>0&&ev>0&&cf>0)referenceRate=Number(rb.rate)*level*ev*cf;}catch{}
+  let ctxEventPct=0;try{ctxEventPct=plannerActiveProductionEvent(s,product,recipes,Number(productRecipe?.id))||0;}catch{}
   const busyRaw=building?.raw?.busy;const rateFromBatch=Boolean(busyRaw?.started)&&Number(busyRaw?.resource?.kind)===Number(productRecipe?.id)&&!/reference/i.test(String(productRate?.source||''));
-  host.__plannerProfitCtx={s,building,product,productId:Number(productRecipe?.id),quality,level,outputPerHour,rateSource:productRate?.source||null,rateFromBatch,batchStarted:rateFromBatch?String(busyRaw.started):null,referenceRate,plannedInputs,transportUnits:Number(productRecipe?.transport)||0,priceMap:frozenVwapMap};
+  host.__plannerProfitCtx={s,building,product,productId:Number(productRecipe?.id),quality,level,outputPerHour,eventPct:ctxEventPct,bonusPct:plannerCompanyProductionModifier(s),buildingKind:String(building?.raw?.kind??building?.kind??''),robots:Boolean(building?.raw?.robotsSpecialization),rateSource:productRate?.source||null,rateFromBatch,batchStarted:rateFromBatch?String(busyRaw.started):null,referenceRate,plannedInputs,transportUnits:Number(productRecipe?.transport)||0,priceMap:frozenVwapMap};
   try{renderPlannerProfit(host);}catch(e){console.error('Planner profit render failed',e);}
     host.querySelector('[data-upgrade-projection]')?.addEventListener('click',()=>showBuildingUpgradeProjection(host,host.__upgradeProjectionContext));
     const restorePlannerScroll=()=>{

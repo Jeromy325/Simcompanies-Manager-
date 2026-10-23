@@ -4,7 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.341');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.342');
 const html = read('dashboard.html'), css = read('styles.css');
 assert.ok(html.includes('class="panel notify-panel nf-compact" id="notifyPanel"'));
 assert.equal((html.match(/class="nf-row"/g) || []).length, 11, '11 alert rows');

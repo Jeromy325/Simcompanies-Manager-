@@ -206,9 +206,10 @@
   // 7. Undercut: someone lists cheaper than your own listing at the same quality, from a captured order book.
   //    Your listings are found by your company id on the listing's seller.
   const sellerId = r => n(r?.seller?.id ?? r?.sellerId ?? r?.company?.id ?? r?.companyId ?? r?.seller);
-  function undercut({ rows, companyId, id, names, realm = 1, state = {} }) {
+  // own: your listings from /market-orders/ (v2.5.342) — used even when the order book page doesn't show them.
+  function undercut({ rows, companyId, id, names, realm = 1, state = {}, own = null }) {
     const cid = n(companyId); if (cid == null || !Array.isArray(rows)) return { fire: [], state };
-    const mine = rows.filter(r => sellerId(r) === cid && n(r?.price) > 0);
+    const mine = (Array.isArray(own) && own.length ? own : rows).filter(r => (own && own.length ? true : sellerId(r) === cid) && n(r?.price) > 0);
     const fire = [], next = { ...state };
     for (const q of [...new Set(mine.map(r => Number(r.quality)))]) {
       const my = Math.min(...mine.filter(r => Number(r.quality) === q).map(r => Number(r.price)));

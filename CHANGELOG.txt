@@ -1,3 +1,13 @@
+2.5.342 — 2026-10-23 — Game constants and your exchange listings
+- The Manager now reads the game's public constants (/api/v2/constants/core, /buildings, /resources; every 6 h and
+  after Sync). Profit / h / level uses the game's own rate for the current economy phase and its wage
+  (average salary × building salary modifier, −3% with robots), and recognises which phase a running batch
+  started in. Other cards' fallback rates also use the constants. Bulldozer Q3 L4 with your real storage:
+  $3,100.82/h/level, workers $73.94 + admin $24.66 (game $3,100.83, 73.94 + 24.66).
+- Your own exchange listings (/api/v2/companies/<id>/market-orders/) are fetched after Sync and before undercut
+  checks: the undercut alert uses them even when the order book page doesn't show your listing; the profit card
+  falls back to their fee % (4.00%).
+
 2.5.341 — 2026-10-23 — Admin and rate use the game's own formulas
 - Read from the game's code. Admin overhead = base − (base − 1) × COO/100, with COO from your captured executives
   exactly as the game counts them (in-training, settling-in and on-strike executives excluded; apprentices need the
