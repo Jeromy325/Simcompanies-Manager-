@@ -421,12 +421,12 @@
     if (last && Number(last.s) === st) last.l = iso; else list.push({ s: st, f: iso, l: iso });
     return list.slice(-30);
   }
-  // Phase in force at `at`: inside or after an entry's seen window → that entry; before the first entry →
-  // the first entry's phase (assumed); in a gap between two different phases → null (unknown).
+  // Phase in force at `at`: inside or after an entry's seen window → that entry; before the first entry or in a
+  // gap between two different phases → null (unknown).
   function economyStateAt(log, at) {
     const list = Array.isArray(log) ? log : [], t = Date.parse(String(at || ''));
     if (!list.length || !Number.isFinite(t)) return null;
-    if (t < Date.parse(list[0].f)) return { state: Number(list[0].s), assumed: true };
+    if (t < Date.parse(list[0].f)) return null; // before the first observation: phase unknown (2.5.340)
     for (let i = list.length - 1; i >= 0; i--) {
       const e = list[i];
       if (t >= Date.parse(e.f)) {
@@ -455,15 +455,25 @@
   // the batch started, use a rate measured earlier in the current phase, else the reference rate (estimate).
   function projectionRate({ measuredRate, batchPhase, currentPhase, phaseRate, referenceRate } = {}) {
     const m = pos(measuredRate);
-    const changed = batchPhase != null && currentPhase != null && Number(batchPhase) !== Number(currentPhase);
+    const changed = batchPhase != null && currentPhase != null && String(batchPhase) !== String(currentPhase);
     if (!changed) return { rate: m || null, source: 'measured', changed: false };
     if (pos(phaseRate)) return { rate: pos(phaseRate), source: 'phase-measured', changed: true };
     if (pos(referenceRate)) return { rate: pos(referenceRate), source: 'reference', changed: true };
     return { rate: m || null, source: 'measured-stale', changed: true };
   }
 
+  // 2.5.340 when the log can't say which phase a running batch started in (it started before the first
+  // observation), compare its measured rate with the normal-economy reference rate (same modifiers). A batch
+  // more than `tolPct` away from it cannot be a normal-economy batch. Only used when the economy is normal now.
+  function batchPhaseFromRate(measuredRate, referenceRate, tolPct = 5) {
+    const m = pos(measuredRate), r = pos(referenceRate);
+    if (!m || !r) return null;
+    const diffPct = (m - r) / r * 100;
+    return Math.abs(diffPct) > tolPct ? { differs: true, diffPct } : { differs: false, diffPct };
+  }
+
   const api = {
-    economyLogAppend, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
+    economyLogAppend, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
     cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
     seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,

@@ -1,3 +1,10 @@
+2.5.340 — 2026-10-23 — Economy note now shows with your real data
+- Your economy log started after the change (it only ever saw "normal"), and the running Bulldozer batch started
+  before the log's first entry. 2.5.339 assumed such a batch was in the log's first phase ("normal"), so it saw no
+  change: no note, $3,430.31. A batch that started before the log is now "unknown"; with the economy normal, a batch
+  whose measured rate is >5% off the normal rate (yours: +9.7%) is treated as another phase. Tested with your real
+  2.5.339 storage export: old code $3,430.31, new $3,072.96 with the note (game $3,100.83).
+
 2.5.339 — 2026-10-23 — Sync picks up the economy phase
 - 2.5.338 only learned the economy phase when the game page itself loaded auth-data. Sync fetches auth-data too
   (realm check) but that response was never saved, so after a Sync the card still used the recession rate

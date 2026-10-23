@@ -2234,10 +2234,13 @@ function plannerEconomy(ctx){
   const C=globalThis.SCM_TOOLS_CORE,log=Array.isArray(ctx.s?.economyStateLog)?ctx.s.economyStateLog:[];
   const authSt=Number(ctx.s?.authData?.temporals?.economyState);
   const current=log.length?Number(log[log.length-1].s):(Number.isFinite(authSt)?authSt:null);
-  const batch=ctx.rateFromBatch&&ctx.batchStarted&&C?.economyStateAt?C.economyStateAt(log,ctx.batchStarted):null;
+  let batch=ctx.rateFromBatch&&ctx.batchStarted&&C?.economyStateAt?C.economyStateAt(log,ctx.batchStarted):null;
+  // 2.5.340 batch started before the log's first entry: phase unknown. If the economy is normal now and the
+  // batch's measured rate is far from the normal rate, it was produced in another phase.
+  if(!batch&&ctx.rateFromBatch&&current===1&&C?.batchPhaseFromRate){const v=C.batchPhaseFromRate(Number(ctx.outputPerHour),ctx.referenceRate);if(v&&v.differs)batch={state:'other',inferred:true,diffPct:v.diffPct};}
   const realm=plannerRealmOf(ctx.s),level=Math.max(1,Number(ctx.level)||1),measured=Number(ctx.outputPerHour);
   const rates=plannerLocalGet(PLANNER_PHASE_RATE_KEY);
-  if(batch&&realm!=null&&measured>0){rates[`${realm}:${ctx.productId}:${batch.state}`]={perLevel:measured/level,at:ctx.batchStarted};plannerLocalPut(PLANNER_PHASE_RATE_KEY,rates);}
+  if(batch&&!batch.inferred&&realm!=null&&measured>0){rates[`${realm}:${ctx.productId}:${batch.state}`]={perLevel:measured/level,at:ctx.batchStarted};plannerLocalPut(PLANNER_PHASE_RATE_KEY,rates);}
   const known=current!=null?rates[`${realm}:${ctx.productId}:${current}`]:null;
   const p=C?.projectionRate?C.projectionRate({measuredRate:measured,batchPhase:batch?.state,currentPhase:current,phaseRate:known&&known.at!==ctx.batchStarted?Number(known.perLevel)*level:null,referenceRate:current===1?ctx.referenceRate:null}):{rate:measured>0?measured:null,source:'measured',changed:false};
   return {...p,current,batch,measured,name:v=>C?.economyName?C.economyName(v):String(v)};
@@ -2293,7 +2296,7 @@ function renderPlannerProfit(host){
       :lab?`workers ${plannerMoney(wPU)} + admin ${plannerMoney(aPU)} (${num(+overhead.toFixed(2))}%) · from your ${escapeHtml(ctx.product)} Q${lab.quality} batch ${plannerDate(lab.at)}${lab.cached?' (last seen)':''}${lab.boughtUnits>=0.5?` · ${num(Math.round(lab.boughtUnits))} bought units in that lot left out`:''}${wage&&(eco.changed||!wage.fresh)?` · wage ${plannerMoney(wage.wage)}/h/level ÷ ${num(+(unitsPerHour/Math.max(1,Number(ctx.level)||1)).toFixed(3))} units/h/level`:''}`
       :`no produced ${escapeHtml(ctx.product||'')} batch in the warehouse yet — appears after the first batch, or enter a wage override`;
     const ecoSrc={'phase-measured':`your ${eco.name(eco.current)}-economy rate measured earlier`,reference:`normal-economy reference rate × your modifiers — estimate until a ${eco.name(eco.current)} batch runs`,'measured-stale':`no ${eco.name(eco.current)} rate captured yet — still the running batch's rate`}[eco.source];
-    const ecoNote=eco.changed?`<div class="pp-basis pp-economy">Economy is ${escapeHtml(eco.name(eco.current))} now; the running batch started in ${escapeHtml(eco.name(eco.batch?.state))}${eco.batch?.assumed?' (assumed)':''} at ${num(+eco.measured.toFixed(3))}/h. Profit uses ${num(+Number(unitsPerHour).toFixed(3))}/h (${escapeHtml(ecoSrc||'')}).</div>`:'';
+    const ecoNote=eco.changed?`<div class="pp-basis pp-economy">Economy is ${escapeHtml(eco.name(eco.current))} now; ${eco.batch?.inferred?`the running batch (${num(+eco.measured.toFixed(3))}/h) started in another phase — its rate is ${num(+eco.batch.diffPct.toFixed(1))}% off the normal rate`:`the running batch started in ${escapeHtml(eco.name(eco.batch?.state))} at ${num(+eco.measured.toFixed(3))}/h`}. Profit uses ${num(+Number(unitsPerHour).toFixed(3))}/h (${escapeHtml(ecoSrc||'')}).</div>`:'';
     const sellLabel=c.sellMode==='exchange'?`Exchange fee ${num(+feePct.toFixed(2))}%${!setNum(c.exchangeFeePct)&&salesFee?' (from your sales)':''}`:`Contract discount ${num(c.contractDiscountPct)}%`;
     const busy=ctx.building?.raw?.busy?.resource;
     const batchCost=busy&&Number(busy.kind)===productId&&Number(busy.unitCost)>0?Number(busy.unitCost):null;

@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const C = require('../tools-core.js');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.339');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.340');
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg}: ${a} vs ${b}`);
 
 // --- economy log + phase at a time
@@ -17,7 +17,7 @@ log = C.economyLogAppend(log, 1, '2026-10-23T16:45:00Z');
 log = C.economyLogAppend(log, 1, '2026-10-23T16:00:00Z'); // older observation ignored
 assert.equal(log.length, 2);
 assert.deepEqual(log.map(e => e.s), [0, 1]);
-assert.deepEqual(C.economyStateAt(log, '2026-10-23T02:49:05.777233+00:00'), { state: 0, assumed: true }, 'batch before first observation → first phase, assumed');
+assert.equal(C.economyStateAt(log, '2026-10-23T02:49:05.777233+00:00'), null, 'batch before first observation → unknown (2.5.340)');
 assert.deepEqual(C.economyStateAt(log, '2026-10-23T14:50:00Z'), { state: 0, assumed: false });
 assert.equal(C.economyStateAt(log, '2026-10-23T16:10:00Z'), null, 'gap between phases → unknown');
 assert.deepEqual(C.economyStateAt(log, '2026-10-24T02:49:00Z'), { state: 1, assumed: false });
