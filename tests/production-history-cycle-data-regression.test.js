@@ -1,0 +1,35 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const root = path.join(__dirname, '..');
+const context = { console, Map, Set, Object, Number, Math, Array, String, Date };
+vm.runInNewContext(fs.readFileSync(path.join(root, 'planner-core.js'), 'utf8'), context);
+const core = context.SCMPlannerCore;
+const started = '2026-10-21T02:33:29.466796+00:00';
+const building = { id:54312828, level:1, busy:{started,duration:86286,resource:{kind:112,name:'Bulldozer',quality:3,amount:300}} };
+const history = { datetime:started, kind:112, name:'Bulldozer', quality:3, amount:634 };
+const valid = core.observedProductionRatePerHour(building,[history],1);
+assert.ok(valid && valid.rate > 0);
+assert.equal(valid.amount,634);
+assert.equal(valid.observedRateAtCurrentLevel,634*3600/86286);
+assert.equal(core.observedProductionRatePerHour(building,[],1),null,'missing history returns no observed rate');
+assert.equal(core.observedProductionRatePerHour({...building,busy:{...building.busy,duration:0}},[history],1),null,'zero duration rejected');
+const dash = fs.readFileSync(path.join(root,'dashboard.js'),'utf8');
+const start = dash.indexOf('function plannerHistoryRowsForCurrentCycle(');
+const end = dash.indexOf('\nfunction plannerRateForProduct(',start);
+assert.ok(start>=0 && end>start,'history matching helper boundaries found');
+const helperContext={Number,Math,Date,String,Array,Boolean,plannerNormalizeName:v=>String(v??'').toLowerCase().replace(/[^a-z0-9]+/g,'').replace(/s$/,''),busyObject:b=>b?.busy||{}};
+vm.createContext(helperContext);
+vm.runInContext(dash.slice(start,end)+';globalThis.matchHistory=plannerHistoryRowsForCurrentCycle;',helperContext);
+const match=rows=>helperContext.matchHistory(building,'Bulldozer',rows);
+assert.equal(match([history]).length,1,'exact product, quality and cycle timestamp accepted');
+assert.equal(match([]).length,0,'missing history rejected');
+assert.equal(match([{...history,name:'Car body'}]).length,0,'product mismatch rejected even when resource ID matches');
+assert.equal(match([{...history,datetime:'2026-10-21T02:34:29.466796+00:00'}]).length,0,'mismatched cycle timestamp rejected');
+assert.equal(match([{...history,quality:2}]).length,0,'mismatched quality rejected');
+// Exact history is returned before fallback modifier logic, so an observed
+// game rate must not be multiplied by company/resource modifiers a second time.
+assert.match(dash,/if\(cycle\?\.rate>0\)return finish\(\{rate:cycle\.rate,source:'exact current-cycle production history'\}/);
+assert.match(dash,/do not apply modifiers a second time/);
+console.log('production-history-cycle-data-regression: passed');

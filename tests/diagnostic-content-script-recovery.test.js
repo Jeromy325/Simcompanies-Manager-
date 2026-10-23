@@ -1,0 +1,16 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const dashboard = fs.readFileSync(path.join(root, 'dashboard.js'), 'utf8');
+const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
+assert.equal(manifest.version, '2.5.337');
+assert.match(manifest.permissions.join(','), /scripting/, 'scripting permission supports recovery injection');
+assert.match(dashboard, /async function sendGameTabMessage\(tabId,message/);
+assert.match(dashboard, /chrome\.scripting\.executeScript\(\{target:\{tabId\},files:\['content\.js'\]\}\)/, 'fallback initializes isolated content script');
+assert.match(dashboard, /sendGameTabMessage\(tab\.id,\{type:'RUN_DOM_RUNTIME_DIAGNOSTIC'/, 'DOM diagnostic uses recovery path');
+assert.match(dashboard, /sendGameTabMessage\(tab\.id,\{type:'RUN_REDUX_STATE_DIAGNOSTIC'/, 'Redux diagnostic uses recovery path');
+assert.match(dashboard, /type:'SCM_NET3_STOP'/, 'network stop uses browser-level recorder');
+assert.match(dashboard, /type:'SCM_NET3_START'/, 'network start uses browser-level recorder');
+console.log('Diagnostic content-script recovery regression checks passed.');

@@ -1,0 +1,17 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.join(__dirname, '..');
+const hook = fs.readFileSync(path.join(root, 'page-hook.js'), 'utf8');
+const bg = fs.readFileSync(path.join(root, 'background.js'), 'utf8');
+assert.match(hook, /const explicitApiGetCaptures = new Map\(\)/, 'explicit GET markers are restored');
+assert.match(hook, /explicitManagerApiGet = consumeExplicitApiGetCapture\(url,method\)/, 'observer consumes the marker before emitting a generic API event');
+assert.match(hook, /if\(!explicitManagerApiGet\)emitSeen/, 'explicit API_GET does not enqueue duplicate API_SEEN writes');
+assert.match(hook, /if \(!explicitManagerApiGet && isApi\(url\)/, 'explicit API_GET does not enqueue duplicate API_DATA writes');
+assert.match(hook, /markExplicitApiGetCapture\(path\)/, 'the marker is created immediately before the explicit request');
+assert.match(hook, /lastKnownRealm=authRealm/, 'explicit auth-data request still updates page realm identity');
+assert.match(bg, /function shouldPersistPassiveApiCaptureDuringSync\(/, 'sync has a passive-capture allowlist');
+assert.match(bg, /shouldPersistPassiveApiCaptureDuringSync\(session,url,m\.method\|\|'GET'\)/, 'API_DATA handler rejects unrelated passive captures during Sync');
+assert.match(bg, /coveredBySyncCapture:true/, 'API_SEEN requests during Sync do not write the full realm store');
+console.log('api-get-capture-regression: 9 assertions passed');

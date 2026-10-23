@@ -1,0 +1,15 @@
+'use strict';
+const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const root=path.join(__dirname,'..');const bg=fs.readFileSync(path.join(root,'background.js'),'utf8');const dash=fs.readFileSync(path.join(root,'dashboard.js'),'utf8');const manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8'));
+assert.equal(manifest.version,'2.5.337');
+assert.match(bg,/simcoRateLimitUntilByUrl=new Map\(\)/,'URL cooldown map is shared by market endpoints');
+assert.match(bg,/if\(Math\.max\(knownCooldown,simcoRateLimitUntil\)>Date\.now\(\)\)\{[\s\S]*?skipped:true/,'URL cooldown suppresses repeated request');
+assert.match(bg,/rateLimitedUntilByEndpoint/,'endpoint cooldowns are persisted');
+assert.match(bg,/async function recordBackgroundJobEvent\(realm,event=\{\}\)/,'background job history writer exists');
+assert.match(bg,/BACKGROUND_JOB_HISTORY_LIMIT=300/,'history is bounded');
+assert.match(bg,/requestDurationMs,storageCommitDurationMs,totalDurationMs/,'warehouse timing separates request, commit, total');
+assert.match(bg,/checked:pairs\.length/,'market counts distinguish checked pairs');
+assert.match(bg,/fetched:out\.length/,'market counts distinguish fetched rows');
+assert.match(dash,/RESOURCE_IMAGE_404_FILENAMES/,'confirmed failing guessed images are not requested again');
+assert.match(dash,/productionHistoryComparisonExport/,'production history comparison export exists');
+assert.match(dash,/backgroundJobHistory:store\?\.backgroundJobHistory/,'production export includes persistent job history');
+console.log('p0-persistent-diagnostics-regression: 12 assertions passed');

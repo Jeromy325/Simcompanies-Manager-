@@ -1,0 +1,11 @@
+'use strict';
+const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');
+const dashboard=fs.readFileSync(path.join(__dirname,'..','dashboard.js'),'utf8');
+assert.match(dashboard,/function plannerHistoryRowsForCurrentCycle\(/,'history validation helper exists');
+assert.match(dashboard,/Math\.abs\(when-started\)>5000/,'history must match the current cycle timestamp');
+assert.match(dashboard,/rowName&&rowName!==currentName/,'explicit product mismatch is rejected even when resource IDs match');
+assert.match(dashboard,/Number\(busy\.duration\)<=0/,'zero/invalid cycle duration rejects history');
+assert.match(dashboard,/source:'active cycle amount ÷ duration \(measured game rate\)'/,'measured cycle rate is an unmodified fallback');
+assert.match(dashboard,/source:'exact current-cycle production history'/,'history is preferred when exact match exists');
+assert.match(dashboard,/current-cycle rate snapshot/,'snapshot must be current-cycle matched');
+console.log('production-history-validation-regression: 7 assertions passed');

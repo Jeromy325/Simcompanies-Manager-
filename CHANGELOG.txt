@@ -1,0 +1,487 @@
+2.5.337 — 2026-10-23 — Compact Alerts page
+- Same labels; each alert is one row with its number/time setting on the right of the same row. The dashboard's generic
+  form style added a 16 px margin under every label — removed inside the Alerts panel. Measured at 360 px: panel
+  1,565 px → 799 px tall.
+
+2.5.336 — 2026-10-23 — Price target fixes
+- Product list showed "No warehouse items captured" when the Manager opened straight onto the Alerts tab (the list was
+  filled once, before warehouse data had loaded). It now fills when you tap it, and also lists products your buildings
+  are making ("· producing").
+- ≤ / ≥ replaced with "Alert when the price drops to or below" / "rises to or above"; saved targets read
+  "Alert when the price rises to $2,400.00 or higher"; short explanation above the form; one field per row.
+
+2.5.335 — 2026-10-23 — Alerts tab, plain-language alerts, 7 more alerts
+- New Alerts tab (moved out of Diagnostic): switches grouped by Production, Market, Contracts & warehouse, Summary & health,
+  with thresholds and price targets. Existing settings (time, targets) are kept.
+- All alert texts rewritten as plain sentences with the dollar result spelled out, e.g. "Water Q2 price up 8.2% in the last
+  hour · $0.367 → $0.397 now. You have 4,190,376 in stock (your cost $0.365 each). Selling now: +$0.032 each (+8.8%)
+  ≈ +$134,092 total, before fees."
+- New: batch cost changed (default ≥ 3%, from the production cost history; only runs started in the last 24 h; the
+  one-time history seed never alerts).
+- New: building idle / batch not collected, checked N hours after a batch finishes (default 1 h). Decided only from building
+  data captured after the finish; otherwise looks again hourly (3 times).
+- New: undercut — a cheaper listing than yours at the same quality, from a captured exchange order book (your listing found
+  by your company id on the listing's seller).
+- New: product no longer profitable — cheapest listing (any quality, game basis) below the running batch's cost; once until
+  it is profitable again.
+- New: warehouse running low — inputs all running batches would need to repeat once vs stock (quality ≥ q − 1); again only
+  if the shortfall grows > 10%.
+- New: background jobs failing — the same job (prices, warehouse, sync, overlay) failed 3 times in a row; resets on success.
+- No game or SimcoTools requests added; alert state in scmNotifyState; nothing runs inside the realm storage lock.
+
+2.5.334 — 2026-10-23 — Detailed notifications
+- Batch finished: product, amount, quality, cost per unit (game), cheapest market listing (any quality, as the game's
+  calculator) with its age, ≈ profit per unit and for the whole batch if sold now (before fees), realm.
+- Not enough inputs to repeat the batch: recipe quantity × the finished batch size vs warehouse stock at quality ≥
+  production quality − 1; shows need / have and the cost to buy the shortfall at the cheapest listing.
+- Price targets: pick product + quality, ≤ or ≥, price; checked after each SimcoTools current-price update; fires once,
+  re-arms when the price moves back.
+- Big 1-hour price move (default 5%, adjustable) on items you hold, with your quantity, cost and margin; 3 h cooldown.
+- New incoming contract: company, amount, product, quality, price, total; the first capture only records what exists.
+- Daily summary at your chosen time: last completed day's profit, assets (change) and rank from the game's
+  past-finances history + production runs started in the last 24 h. "Send daily summary now" button.
+- Logic in notify-core.js (pure, tested); alert state in scmNotifyState; no game or SimcoTools requests added; nothing
+  runs inside the realm storage lock.
+- Diagnostic tab: notifications panel and "What to capture" guide each take a full row (fixed 25 px overflow at 360 px).
+
+2.5.333 — 2026-10-23 — Notifications (test build)
+- New permission: notifications. Diagnostic tab › Phone notifications: "Send test notification" and a "Production
+  finished alerts" switch (on by default) with the next scheduled alerts.
+- Production finished: one alarm per running batch at busy.started + busy.duration (game data, no network), scheduled
+  whenever the Manager captures your buildings; a changed or finished batch replaces its alarm. Tapping the
+  notification opens Sim Companies. Separate from the existing manual building alarms.
+- Whether alerts appear depends on the browser's support for extension notifications (Yandex on Android: to be checked
+  with the test button). They fire only while the browser is running.
+
+2.5.332 — 2026-10-23 — Building-card sale price matches the game
+- Sale price = cheapest exchange listing of ANY quality, as the game's Profit Calculator ("Assumed wholesale price
+  (based on the market)"). Verified by the user: game $2,230 = cheapest Bulldozer listing on the Exchange (a Q0).
+  Previously the card used the exact-quality price (SimcoTools Q3 $2,300).
+- When the stored order book is older than 15 min, the card asks the background to fetch /api/v3/market/<realm>/<id>/
+  through the game tab (the same request the Exchange page makes); once per product per 5 min; network first, then the
+  normal locked save; the card re-renders with the new price. Without a game tab: cheapest SimcoTools price across the
+  captured qualities, labelled.
+
+2.5.331 — 2026-10-23 — Phone feedback round 2 (11 items)
+- Background-updates strip: no longer flashes. It used to rebuild itself every 15 s (restarting the dot animation and
+  redrawing the open list); now only changed text is written. Expanded view has a one-line legend and readable job names
+  ("VWAP download queued", "Current-price download queued", …). "prices" = last successful download.
+- Warehouse cards: cost per unit at the top right.
+- Production cost history: every production run is stored (scmProductionCostHistory:<realm>, own key, serial queue,
+  no realm lock, no network) from the running batch (busy.resource.unitCost) and building history (price per batch);
+  existing captured data is seeded once. New Warehouse "Production cost" line: last → now with the change in red/green;
+  the change opens a popup with a line chart and every run (building, units, change). Costs under $1 show 3 decimals.
+- Market: Market Alerts removed; Market data monitor collapsible (closed by default); SimcoTools card tightened on phones
+  (decorative nav hidden, toolbar on two short rows, smaller price/stat boxes; card ≈1,450 → ≈1,050 px tall at 360 px).
+- Profit / h / level: warehouse input costs and the labour parts (unit wage, unit admin) are rounded to cents before
+  adding, as the game does (4×9.54 + 627.39 + 2×482.32 + 67.82 + 23.46 = 1,721.47 exactly). Sale price now names its
+  source and age ("SimcoTools current price · 2 min ago"). Remaining differences are the sale price source and the
+  current admin rate — see notes; not guessed.
+- Cost per unit: the running batch's game cost (e.g. $1,780.226, 3 decimals) is shown at the top of the building card
+  with an explanation of how it differs from the calculator's sourcing cost.
+- Lag switching between the game and the Manager: storage listeners are detached while the Manager tab is hidden and one
+  refresh runs on return (test: 68 store-change deliveries while hidden → 0; header shows the latest sync after return).
+- Incoming/outgoing contracts: compact phone cards (≈251 → ≈100–116 px each).
+- Capital allocation: fits one phone screen; help collapsed; budget suggestion first; one compact card per option;
+  amounts accept 250k / 1.2m / $3,500.
+- Diagnostics: bundle adds environment + storage size per key, an index of every captured game endpoint, production
+  cost history, last 200 background jobs, and the exact numbers each opened building card used for profit. Diagnostic
+  tab has a short "What to capture for a problem" guide.
+
+2.5.330 — 2026-10-23 — Phone feedback fixes (13 items), E2E verified
+- Accounting: changes now compare with the previous completed day from the game's own history (past-finances) instead of a
+  dashboard baseline that turned missing values into $0 (fake "+$X N/A" / "$0 0.00%"). Sales and expenses for earlier days
+  are summed from the cash-flow ledger only after the ledger reproduces today's statement exactly. New "Last 8 days" table.
+  Current liabilities = total liabilities − bonds payable. money(null) shows "—" instead of $0.00.
+- Warehouse cards: buildings producing at the same cost collapse into one line ("$30.46 · 7 Mills"), so R1 cards no longer
+  run off the card; cards ~20% smaller with the same layout; market price and its source stacked neatly.
+- Price movers: uses SimcoTools trade closes now stored with the hourly current-price refresh (1 h / 24 h / 3 days / day VWAP)
+  for every product you make or hold; the Manager's own snapshots remain under "All products".
+- Price history: product + quality picker; daily candles + recent trades fetched on demand from SimcoTools (PRICE_HISTORY,
+  cached 3 h in scmPriceHistory:<realm>, no storage lock held while fetching).
+- Building ROI / Loan & bond / Capital allocation: "How this works" explanations and a plain-language verdict; allocation
+  suggests the best set of options within a budget.
+- Redux / DOM diagnostics: Android unloads the game tab while the Manager is open ("Cannot access contents of the page");
+  the Manager now reloads the sleeping game tab and waits before running. Results show under the button; every download
+  shows a confirmation toast.
+- The Manager reopens on the tab and scroll position you left; the popup and in-game links reuse the open Manager tab.
+- Background-update strip under the header (last warehouse refresh, last game action, prices, failures, last 10 jobs) and
+  a toast when the warehouse updates from a game action.
+- Realm switch/sync requests are no longer treated as stock changes (they caused HTTP 400 warehouse refreshes).
+- Confirmed from the phone capture: collecting from a building is POST /api/v2/order/take/<buildingId>/; the warehouse
+  refetch followed within 0.6 s.
+
+2.5.329 — Full end-to-end background verification and fixes
+- E2E run against the real extension with the user's real R2 storage, a fake game server answering from 68 captured API responses, and a fake SimcoTools: Core Sync, accounting refresh, weekly sales ledger, VWAP sync (with the 2.5.328 lock change), current market prices, price-history logging, warehouse/overlay refresh, collect -> warehouse, saved-contract create/delete -> overlay, building history, production-rate reconciliation, Market-tab product data, all overlay/helper data requests, all 8 dashboard tabs, and all 13 scheduled alarms. All pass; the background stays responsive.
+- Fixed: product images on Overview/Warehouse and building images on Production used inline onerror="..." handlers, which the extension's Content Security Policy blocks — a failed image never fell back to the next source / showed broken alt text. Replaced with one capture-phase listener.
+- Fixed: a current-price run where every price was still fresh (<15 min) was logged as a failure ("No fresh current-price data returned") in the Diagnostic job history; it is now logged as skipped.
+
+2.5.328 — Warehouse and overlay update immediately when you collect resources
+- Root cause: the VWAP market sync ran entirely inside the realm storage queue, including its SimcoTools downloads (many spaced requests, rate-limit cooldowns of minutes). While it ran, every other write for that realm waited, so the warehouse refresh after an in-game action could not save, and the overlay and Manager warehouse stayed stale. The download now runs outside the queue; its storage writes are short queued transactions; VWAP runs are still serialized.
+- Collecting resources from buildings now triggers a warehouse refresh. Previously only exchange buys (/order/take/) and market orders did. Any successful game action that can move stock now counts (collect, start production, contracts, sales); chat/settings/notification-type requests are excluded.
+- An action without a realm tag is applied to the active realm. Before, validRealmNumber(null) returned 0, so an untagged R2 action refreshed R1 and was rejected.
+- "Accept all": rapid collects are batched into one fetch, and a collect that lands while a fetch is running triggers one more fetch afterwards.
+- Verified in Chromium with the user's real data: collecting from Car factory #1 (+100 Bulldozers) updated the stored warehouse and the open Warehouse tab in ~1.9 s and the in-game overlay in 2.5–2.8 s across 6 runs, including collects during an in-flight overlay rebuild (2.5.327: never). Five rapid collects were all counted.
+- Fixed a race: a data change arriving while an older overlay rebuild was running reused that stale rebuild (seen once at 36.8 s); one more rebuild now runs immediately after it.
+- Removed the production-finish timer approach (not wanted: updates happen on collect, not when the building timer ends).
+
+2.5.327 — Mobile optimization (measured with the user's real R2 data, 360 px viewport)
+- Resource images (2.3 MB of base64) moved out of the realm store into their own key; existing stores are migrated at startup. Realm store 3.67 MB -> 1.30 MB, so every background read/write is ~65% smaller.
+- Game overlay (polled every 10 s while the game is open): payload 440 KB -> 12 KB (game image URLs instead of embedded base64); stored snapshot 450 KB -> 12.7 KB; last snapshot served from memory; poll answered in 10 ms instead of 190 ms.
+- Overlay rebuilds (realm read + recompute + live warehouse fetch through the page) now run when data changes (every warehouse/building/contract save marks the overlay dirty -> next poll rebuilds immediately) or at most every 30 s otherwise; previously on every 10 s poll. 8 -> 2 rebuilds per 100 s with no data changes; a data change still rebuilds on the next poll (verified).
+- Background job history moved to its own key (scmBackgroundJobs:<realm>); appending an entry no longer reads and rewrites the realm store. Diagnostic exports still include it.
+- Hidden game tabs no longer poll (overlay refresh, warehouse cost, production events, page localStorage reads); a refresh runs when the tab becomes visible.
+- Dashboard on phones: compact header, one-row sticky tab bar, tap targets >= 40 px, and Warehouse, Market, Production inputs, Contracts and Tools tables render as stacked cards. No page overflow on any tab at 360 px (Diagnostic overflowed by 95 px before).
+
+2.5.326 — page-hook → content.js event queue with INITIALIZED handshake
+- page-hook.js now holds intercepted Sim Companies network events (API_DATA, API_SEEN, stock mutations, realm switches, market cache, game state, etc.) in an ordered queue (max 500, oldest dropped and counted) until content.js posts 'INITIALIZED'. It then flushes the queue in order, replies 'INITIALIZED_ACK' {first, flushed, dropped, queuedTotal}, and posts later events directly.
+- Never queued: HOOK_READY and replies to content.js requests (API_RESULT, diagnostics, capture ACKs, sync-realm replies, resource images), since content.js is listening when it asks.
+- Fallback: if no handshake arrives within 15 s the queue is flushed anyway and 'BRIDGE_QUEUE_FLUSHED' is posted, so behaviour is never worse than before.
+- content.js posts INITIALIZED at the end of the file (after every listener is attached) and again on HOOK_READY until acknowledged (covers the hook starting after content.js). Repeated INITIALIZED is harmless.
+- Why: window.postMessage is fire-and-forget; events posted before content.js attached its listener were lost. Verified in Chromium: with 2.5.325 a late listener received nothing; with 2.5.326 it received the early response. Added tests/bridge-queue-handshake.test.js (runs the real queue code).
+
+2.5.325 — Building-card profit: headline on the game's basis, fee from your sales, mobile layout fixed
+- Headline Profit / h / level, Profit / h and Profit / unit now use the same basis as the game's Profit Calculator (sale price − inputs − labour, before market fee and transport). The after-fee/transport figures are shown as a second row. Previously the headline was after fee and transport, so it could never match the game.
+- Exchange fee is read from your cashflow ledger (fees-<id> ÷ marketfilled-<id>; your data: $543 on $13,560 = 4.00%). Admin overhead and labour come from your produced batches. Any field can be overridden; blank = auto.
+- Mobile: replaced the wide table with a stacked list; every value is on-screen at 360 px and 412 px (tested inside the Production tab layout with your captured data).
+- Verified with your captured R2 data: $3,363.96 /h/level, $508.69 /unit, $1,751.31 sourcing vs the game's $3,361.76, $508.36, $1,751.64. The remaining $0.33/unit is the admin rate: your last Bulldozer batch was charged 33.93% when it started (Oct 22 02:48 UTC); the game now shows 34.26% for the next batch. That current rate is computed inside the game from executive skills and is not in any captured API data.
+
+2.5.324 — Building-card profit now uses the game's own data (verified against the game's Profit Calculator)
+- Inputs: choose Warehouse cost (your actual cost per unit from the warehouse lot, as the game's "Warehouse inputs"), Market · cheapest any quality (exactly what the game's "Market inputs" shows), or Market · required quality or better (what production really needs).
+- Labour is no longer an input: it is read from your produced lots (cost.workers ÷ amount for the latest batch of that product), and admin overhead from cost.admin ÷ cost.workers. Values update as new batches are produced; the last seen value is kept if the product sells out. A wage override is still available.
+- Sale price uses the captured exchange order book first (cheapest listing at the exact quality), then captured market prices, then VWAP; each line shows its source and age.
+- New rows: Sourcing cost / unit and Profit before fee & transport (same basis as the game), and the running batch's actual unit cost from the game.
+- Verified with the user's captured R2 data for Car factory #1 (Bulldozer Q3, level 4): Manager $1,751.31 sourcing / $508.69 profit / $3,363.96 per h per level vs game $1,751.64 / $508.36 / $3,361.76. The remaining $0.33/unit is the admin rate: batches record the rate when they started (33.93%), the game shows the current rate (34.26%).
+- Note: the captured administration-overhead endpoint (1.6118, i.e. 61.18%) is the rate before your executive reduction; the Manager no longer uses it for profit.
+
+2.5.323 — Profit / h / level moved into the Production building card
+- Each building card now has a Profit / h / level section under Required Inputs, built from the card's own data: the measured production/hour for the planning level (includes production speed and events), the production quality, the recipe inputs at the input quality the card shows (production quality − 1), and current market prices (VWAP when no market price is captured; the source is shown on every line).
+- Breakdown per unit: sale price, exchange fee or contract discount, transport (recipe transport units × Transport price; 50% paid by the buyer on contracts), each input, labour, profit, break-even sale price. Admin overhead is pre-filled from captured accounting data; wages are entered once per building type because the game data the Manager captures does not include wages.
+- Contract mode now applies a contract discount % (default 0). Previously contract mode assumed selling at full market price with no fee, which is why switching from Exchange made profit jump.
+- Why the old Tools-tab numbers did not match: it used the reference base rate instead of the measured rate (Bulldozer 5.58/level vs 6.61/level measured), priced everything at Q0 instead of the qualities actually produced and consumed, and used VWAP rather than the market prices the building card shows.
+- Removed Profit / h / level from the Tools tab.
+
+2.5.322 — Exchange first-row fix, baseline lock removed, build cleanup
+- Exchange: the cheapest (first) listings change fastest, so the stored order-book snapshot often did not contain them and those rows were skipped. A row with no matching API record now gets its VWAP badge from the quality and price shown in the row itself. The overlay no longer waits for API market rows before showing badges. (Verified: 3 of 3 rows badged when the snapshot lacked the first row; the old build showed none.)
+- Removed the sync baseline lock (SYNC_BASELINE_LOCK.json, its README, verify-sync-lock.js) and the data-hash test; kept the handler-presence assertions as tests/core-handlers-regression.test.js.
+- Removed ~38 KB of dead code found by static analysis (45 unused functions/constants in background.js, plus unused variables in content.js and page-hook.js) and two unreferenced files (api-sniffer.js, CRITICAL_DATA_GUARD_FIX.txt). Every removal was checked against the tests and an undefined-name scan.
+- company-logo.png reduced from 3.0 MB (1536 px) to 41 KB (256 px); it is displayed at 82 px or smaller.
+- Audit results with no change needed: no undefined names, no duplicate declarations, no unreachable code; all manifest permissions are in use; content-script scans measured at a few ms per pass on a 4,000-node page.
+
+2.5.321 — Profit / h / level now evaluates only products you make (running buildings plus saved production plans), with your total building levels and your total profit/h per product.
+
+2.5.320 — Tools tab (features from simconomist.com, computed from the Manager's own data)
+- New Tools tab: Price movers (1h / 24h / 7d, ranked by 24h move, 7d volatility), Price history per product (1D–MAX, low/high/average/position-in-range, CSV export), Profit per hour per level for every producible product (simconomist production formula; wages and admin overhead are inputs because the Manager does not capture wages), Building ROI, Loan & bond, and Capital allocation calculators. The ROI maths reproduces simconomist's published example (-$64,000 / -64.0% / -778.7%).
+- Price history source: after each live VWAP sync the background records the lowest-quality realm VWAP per product (min 10 min apart, 120 days, 2,200 points max) under its own storage key scmPriceLog:<realm> (not the realm store). Existing daily warehouse VWAP history is used to backfill warehouse products. History starts when this build is installed; nothing is fetched from simconomist.com.
+- New files: tools-core.js (pure maths, unit-tested), tools-ui.js. Tests: tools-core.test.js, tools-tab-wiring-regression.test.js.
+
+2.5.319 — Exchange overlay speed + incoming-contract badge reliability
+- Exchange: the overlay now uses the game's own market response (seen by the page hook) directly instead of waiting for it to be saved to storage and read back, which previously forced several retry delays. VWAP rows are cached separately. Background GET_VWAP_OVERLAY_DATA no longer reads the full realm store twice. A refresh request that arrives while one is running is re-run instead of dropped.
+- Incoming contracts: a failed or empty data fetch no longer wipes the badges; fetch retries once and then backs off (0.6s/1.5s/3s/6s). Fixed a self-inflicted flicker: the page check required a word boundary after "Accept", so badge text next to the label made the page look like "not incoming" and cleared every badge. DOM is scanned once per pass instead of once per contract. A pass colliding with one in flight now reschedules instead of being dropped.
+- Added tests/overlay-reliability-regression.test.js. Verified in Chromium with simulated service-worker failures: contracts badge shown in ~1.7s after two failed fetches and survives a later failure; exchange badge shown ~40ms after the game's market response (was never, when storage lagged).
+
+2.5.318 — Runtime ReferenceError fixes (found by static undefined-name analysis)
+- content.js: REFRESH_GAME_OVERLAY handler called load() from a different scope, so the ReferenceError was swallowed by catch{} and background-triggered overlay refreshes (after sync / warehouse commits) never ran. Handler moved into the overlay scope where load() exists.
+- dashboard.js: accountingRefreshPending, accountingWeekLedgerRefreshPending, accountingWeekLedgerRetryCount and accountingWeekLedgerRetryTimer were never declared; the accounting and week-ledger refreshes threw immediately. Declarations added.
+- background.js: bundled-VWAP seeding fallback called undefined warehouseRowsForVwap(); now falls back to the root warehouse list, then [] (same as sibling code).
+- Added tests/runtime-scope-regression.test.js. No sync, market, recipe or planner logic changed.
+
+2.5.315 — Sticky Stock After Demand header and full Executive feature removal
+- The Stock After Demand & Contracts header remains visible while scrolling inside the overlay; collapse/expand controls stay accessible.
+- Removed the Executives dashboard tab, Executive API paths, sync/page-walk targets, refresh/alarm jobs, dashboard mapping and Executive impact calculations.
+- Removed Executive payout from the accounting category aggregation; raw captured accounting endpoint payloads remain available as source data.
+- Preserved the 2.5.314 draggable/collapsible mobile network-capture overlay and other unrelated sync/production/market behavior.
+
+Build 2.5.311 — Expanded Mobile Overnight Network Capture
+- Increased Android page-level capture cap from 20,000 to 100,000 events.
+- Updated capture status, limit markers, diagnostic export limitations, and regression assertions to report the new cap accurately.
+- Kept the 4 KB API response preview cap and IndexedDB persistence to bound per-event size and avoid chrome.storage quota pressure.
+- This remains a bounded capture: download/export before starting another session; Android may suspend the game tab.
+
+Build 2.5.310 — Mobile Overnight Network Capture
+- Added Android page-level fetch/XHR capture backed by extension IndexedDB, up to 20,000 events.
+- Kept desktop Chrome DevTools Protocol capture unchanged.
+- Added mobile start/stop/status/export routing and explicit coverage limits.
+- Mobile response previews capped at 4 KB; credentials and request bodies are not recorded.
+
+Build 2.5.309 — Android Network Capture Guidance
+- Detect Android browsers and disable the unsupported Chrome DevTools Protocol Network Capture control before users hit the runtime error.
+- Explain that Diagnostic Bundle/API Capture remain available on mobile and full browser-level network capture requires desktop Chrome/Chromium.
+- Preserve existing capture functionality on supported desktop browsers.
+
+2.5.304 — Immediate post-sync market start, executive eligibility audit, layout and diagnostics
+- Removed the post-sync market-start delay: staged market sync is scheduled immediately after core Sync releases its capture lock; rate-limit cooldowns remain enforced only when the API rate-limits requests.
+- Added core Sync and resource-image cache sync duration/outcome events to persistent background-job history.
+- Added per-executive training/eligibility audit, showing currentTraining skill, strike/settling status, contribution eligibility, and rule explanation. The impact formula is not silently changed solely due to training because the captured API data does not prove training suppresses role benefits.
+- Repositioned Active Production Unit Cost below the Stock After Demand overlay and bounded the stock overlay height; added resize/layout observation for desktop and mobile.
+- Compact system font and card spacing; consolidated diagnostic downloads into a primary bundle and separate network capture with specialist exports under Advanced.
+
+2.5.303 — Staged market sync and extended API cooldowns
+- Core Sync remains independent: market API work is queued only after Sync finishes and the capture boundary is released.
+- Split market collection into two Chrome-alarm stages: realm-local VWAP sync first, then current market prices after a 2-minute gap; realms are processed sequentially with another 2-minute gap.
+- Market stages use one SimcoTools request at a time with at least 1.2 seconds between requests. A 429 honors longer Retry-After values and enforces at least a 5-minute shared cooldown (maximum 30 minutes), persisted across service-worker restarts.
+- If a stage encounters rate limiting, it retries that same stage only after the cooldown; it does not immediately proceed to the next dataset.
+- Removed the independent 15-minute VWAP watch network crawl and redirected legacy VWAP/manual/Exchange triggers into the staged scheduler. Core Sync and Load Data do not wait for market requests.
+- Current-price refreshes retain valid cached rows and skip fresh rows for 15 minutes, reducing repeat calls during cooldown retries.
+- Validation: 35 regression test files passed; JavaScript syntax, sync baseline lock, and ZIP integrity verified. Live API behavior still requires post-install confirmation.
+
+2.5.300 — P0 Market Cooldown & Warehouse Refresh Coordination
+- Persisted per-resource/quality cooldowns prevent repeated market requests for pairs recently rate-limited across later refresh runs.
+- Warehouse refreshes are single-flight per realm, and successful stock-mutation refreshes notify the game overlay only after the new snapshot is committed.
+
+2.5.299 — SimcoTools Rate-Limit Protection
+- HTTP 429 responses are no longer retried per request; Retry-After is honored when present, otherwise a shared 60-second cooldown is applied (capped at 15 minutes).
+- All SimcoTools requests share a maximum of two concurrent network slots and wait through the shared cooldown.
+- Transient non-429 retries use longer delays with jitter; permanent 4xx responses return immediately.
+- Scheduled and message-triggered live market refreshes share one in-flight refresh per realm, preventing duplicate refresh fan-out.
+- Preserves existing cached prices/VWAPs when rate-limited calls fail; no market data is fabricated.
+- Added regression coverage for 429 single-attempt behavior, Retry-After, shared cooldown wiring, global concurrency, and per-realm single-flight refresh.
+- Validation: syntax checks and regression suite run recorded with this build. Live SimcoTools behavior still requires a post-install capture.
+
+2.5.298 — Active Production Unit Cost Overlay
+- Removed Building Profitability — Test Run and its dashboard mapping/calculation code.
+- Removed the floating Manager helper launcher and its page-side helper mapping; removed its unused background data provider.
+- Added active production unit cost and per-building production-minus-warehouse-stock comparison to Warehouse. Higher production cost is red; lower production cost is green.
+- Added collapsible top-right game-page Active Production Unit Cost overlay with exact product/quality warehouse comparison.
+- Kept production recipes, building definitions, realm routing, and sync behavior unchanged.
+
+Build 2.5.297 — Network coverage reconciliation, production history validation, and lot-level cost provenance
+- Network Capture export now reconciles every response against body and terminal-event evidence; missing bodies are counted and classified rather than silently reporting zero unavailable.
+- Production history matching rejects conflicting product names and qualities even when resource IDs match; added functional regression coverage for missing history, timestamp mismatch, zero duration, and modifier double-application prevention.
+- Warehouse product/quality aggregates now retain separate raw lot provenance (lot ID, timestamp, amount, quality, blocked state, materials, cost components, and cost-source label).
+- Investigated the captured bulldozer difference: history 634 minus active amount 300 implies 334 produced, while the captured Q3 warehouse lot has 431; the 97-unit surplus remains explicitly unreconciled pending transaction-level evidence.
+
+Build 2.5.296 — Network Capture 3.0 service-worker syntax hotfix
+- Fixed a missing closing parenthesis in the Network.requestWillBeSent handler that prevented the MV3 module service worker from parsing.
+- Verified background.js using Node's ES-module syntax checker.
+
+Build 2.5.295 — Network Capture 3.0
+- Replaced the primary network-capture button workflow with Chrome DevTools Protocol Network capture through chrome.debugger.
+- Captures browser-observed requests, responses, redirects, resource types, response headers (sensitive header values redacted), response bodies when Chrome makes them available, body-unavailable reasons, loading failures, cache events, and WebSocket/EventSource protocol events.
+- Stores events in IndexedDB rather than a 240-event chrome.storage.local list; exports in chunks to avoid message-size limits.
+- Removed the old 16,000-character response-body limit from the primary capture path.
+- Added debugger and unlimitedStorage permissions. Chrome will show a debugging indicator while capture is attached.
+- This is broad browser-level coverage, not a guarantee of literally every byte from every browser process. The export explicitly reports unavailable bodies and known limitations.
+
+2.5.294 — Production audit and full DOM diagnostics
+- Reject explicit product-name conflicts and stale cycle timestamps before using history; reject invalid duration; keep observed rates from receiving modifiers twice.
+- Network capture export now reports coverage for every observed API endpoint: request/response counts, successful responses, body-captured count, parse status, truncation, and timing-only evidence separately.
+- Full DOM diagnostic now scans every element and includes all attributes, outerHTML, and text without keyword/privacy filtering. The export may contain sensitive page content; inspect before sharing.
+- Warehouse diagnostics continue to retain source lot fields; no cross-lot equivalence is inferred from aggregate costs.
+
+2.5.292 - Diagnostic capture reliability fixes
+- DOM/runtime inspection now runs in the game page's MAIN world so page-owned React markers are visible; adds filtered relevant body-text snippets and a longer, correlated bridge timeout.
+- Redux/App State diagnostics now traverse React root paths correctly (including `_reactRootContainer`) and include bounded, sensitive-key-filtered component props/state snapshots when discoverable.
+- Network capture resumes the same durable capture ID after a game-page refresh, writes an explicit stop marker even if the page-hook's in-memory recording flag was reset, and rejects stale/mismatched capture events instead of corrupting the current session.
+- Improved completion summaries to report what was actually inspected/captured. No production recipes, production calculations, or sync algorithms intentionally changed.
+
+2.5.290 - Dedicated DOM & Runtime Inspection diagnostic. Adds bounded DOM inventory, React marker detection, calculator/building-related visible text snippets, embedded JSON metadata, script resource metadata, and an independent isolated-content-script export path. Keeps DOM inspection separate from Redux state discovery and does not claim a full DOM or raw-state export. No recipes, production calculations, production history, or sync behavior changed.
+
+2.5.285 - Diagnostic capture reliability
+- Network capture starts a fresh session, records request errors, shows live stored event counts, waits for writes to settle, and verifies event counts before export.
+- Redux/App State diagnostic reports tab selection, injection/execution stages, timeout details, and downloads a failure-report JSON on failure.
+- No production recipes, production calculations, or sync algorithms intentionally changed.
+
+SimCompanies Manager 2.5.282 — Targeted Production refresh
+- Background storage updates no longer schedule a full dashboard render while the Production tab is active.
+- Building/production changes refresh only the planner feature; warehouse/market price changes refresh the enabled profitability panel without rebuilding the Production page.
+- Added regression coverage for the targeted refresh routing.
+- Estimated net profit remains explicitly uncalculated until building-level operating expenses can be sourced; gross contribution is not mislabeled as net profit.
+
+SimCompanies Manager 2.5.281 — Profitability material-cost fallback correction
+- Use exact-quality captured market prices as explicitly-labelled replacement-cost estimates when warehouse sourcing cost is absent and an in-house recipe chain cannot be fully costed.
+- Incomplete in-house recipes no longer prevent fallback to valid warehouse costs or market estimates.
+- Added regression coverage for market-price material-cost fallback and source labelling.
+
+SimCompanies Manager 2.5.277 — Warehouse and in-house production cost test
+- Material cost uses recursively calculated in-house recipe costs when the input is actively produced and all lower-level costs are known.
+- Otherwise uses an exact-quality captured warehouse sourcing cost; ambiguous or missing costs remain unknown.
+- Output sales value still uses the captured market price. Market prices are not substituted for material costs.
+- Net profit remains Not calculated until operating expenses and all relevant costs are verified.
+- No production recipes, building data, production rates, or synchronization paths were changed.
+
+SimCompanies Manager 2.5.276 — Plain-language compact profitability cards
+- Changed financial labels to Sales value / hour, Material costs / hour, Left after materials / hour, and Estimated net profit: Not calculated.
+- Building cards now show a compact summary and tap-to-expand breakdown.
+- Explicitly states that material costs currently use captured market prices, not actual warehouse acquisition cost.
+- Kept calculation, building data, recipe data, production rates, and sync paths unchanged.
+- Regression suite: 14 test files passed; dashboard JavaScript syntax check passed.
+
+SimCompanies Manager 2.5.275 — Mobile-readable profitability test
+- Replaced the wide, horizontally clipped table with responsive building cards.
+- Explained the gross-contribution subtotal and excluded buildings with missing prices.
+- Made calculation assumptions collapsible; no production data, recipe, or rate logic changed.
+
+SimCompanies Manager 2.5.274 — Read-only profitability test run
+- Added an opt-in Building Profitability test panel, disabled by default.
+- Estimates per-building gross contribution using current captured market prices and recipe input quantities.
+- Requires exact captured prices for output quality and minimum input quality; missing prices are shown as incomplete, never treated as zero.
+- Explicitly excludes operating overhead, fees, sales modifiers, contract effects and inventory cost basis; this is not net profit.
+- Added isolated pure-logic regression tests.
+- Does not write production data, change production rates, or alter protected sync-path files.
+
+SimCompanies Manager 2.5.273 — Diagnostic restoration and production-history audit
+- Restored the bounded Redux / app-state diagnostic export and its page/background message path.
+- Added regression coverage for the Redux download control, handler and capture bridge.
+- Added per-building production-history audit records: cycle match, request status, selected rate source and fallback reason.
+- Retained the 2.5.272 warehouse + production market coverage fix.
+- Kept production-page layout and rate-selection calculations unchanged.
+
+Sim Companies Manager 2.5.271
+
+Exact production-cycle rate correction (logic-only):
+- Calculate output per hour from the actual output amount and duration of the exact currently running production cycle.
+- Require the history row timestamp and resource ID to match the live building cycle; do not pair an older cycle's output with the current duration.
+- Scale the measured rate to the selected planning level without applying company or resource modifiers a second time.
+- Read active resource speed modifiers from the game's production-modifiers API, not the extension's event-monitor records, for normalized-rate/reference fallbacks.
+- Request building history when the current-cycle row is absent, even when a static fallback rate is available.
+- Keep recipe-based material input calculations and the production page layout unchanged.
+- Added regression tests for exact-cycle matching, planned-level scaling, and active modifier selection.
+
+Validation:
+- Exact current-cycle history matched 12/12 active production buildings in the supplied API capture.
+- All included regression tests and JavaScript syntax checks passed.
+- Protected sync-path files remain unchanged; no live authenticated browser session was available for end-to-end validation.
+
+
+Saved-contract currency rounding edge-case fix:
+- Added a dedicated half-up currency rounding helper for the saved-contract suggested unit price.
+- Kept the change isolated to the contract editor price field; other market, planner, overlay, and sync calculations are untouched.
+- Added regression coverage for half-cent boundaries, ordinary values, zero, negative values, and non-finite input.
+
+Validation:
+- All 10 regression test files passed in the candidate source.
+- JavaScript syntax checks passed.
+- The 2.5.263 sync baseline verifier passed; all six protected sync files remain unchanged.
+- No live browser or authenticated contract-save test has been performed; verify the suggested price in the extension before replacing any installed build.
+
+Sim Companies Manager 2.5.263
+
+Sync diagnostic completion timestamp fix:
+- Preserve the terminal finishedAt and matching lastSync when the final trace checkpoint runs after status reconciliation.
+- Merge terminal checkpoint updates into the completed diagnostic so final target results and sync policy are not discarded.
+- Keep in-progress checkpoints explicitly unfinished and prevent timestamps from a prior run leaking into them.
+- Added a regression test for completed/in-progress checkpoint timestamp semantics and terminal diagnostic preservation.
+
+Validation:
+- JavaScript syntax checks and all included tests are run against this source before packaging.
+- Live authenticated browser sync/export has not been performed by this build process; a browser verification is still required before declaring the defect resolved in production.
+
+Sim Companies Manager 2.5.262
+
+Sync queue recovery while preserving the saved-contract overlay repair:
+- Restored deduplication for extension-issued API_GET requests so they are not recaptured and persisted a second time as passive API traffic.
+- Suppressed unrelated passive API_DATA persistence during an active Sync transaction; only the active target's expected endpoint paths are admitted.
+- Restored realm API-storage priority scheduling. Priority/authoritative writes can pass unrelated passive writes while preserving FIFO ordering for repeated writes to the same URL.
+- Restored durable endpoint read-back verification and added a final post-queue verification/retry barrier before Sync can report a target complete.
+- Bounded CLEAR_SYNC_REALM cleanup so a missing page response cannot indefinitely hold the Sync request open.
+- Kept 2.5.261 saved-contract overlay behavior and tests.
+
+Validation:
+- JavaScript syntax checks passed.
+- All 8 included test files passed.
+- JSON validity and ZIP integrity are checked at packaging time.
+- Live authenticated browser sync has not been tested by this build process; validate repeated R2 Sync in the browser before treating it as live-verified.
+
+
+Version 2.5.272 — Production market coverage correction
+- Live market refresh now requests prices/VWAP for stocked warehouse pairs plus active production-cycle and planned production output/input resource-quality pairs, including resources with zero stock.
+- Retains valid prior market prices when a pair fails to refresh; records source mode and requested pair counts for auditability.
+- Production page layout and production rate calculations unchanged.
+
+
+2.5.279 TEST-RUN PATCH
+- Tightened profitability panel top spacing for mobile.
+- Corrected missing-data summary wording: missing recorded cost or sale price, not 'need market prices'.
+- Warehouse cost lookup now supports active-realm flattened and realm-keyed storage shapes without mixing realms.
+- This does not manufacture missing cost records. If costs were never captured, rows correctly remain incomplete; verify the warehouse sourcing-cost capture before treating the results as complete.
+
+
+2.5.279 focused correction:
+- Mobile profitability header explicitly overrides the earlier stacked mobile header rule so the toggle stays beside the title and the marked blank area is removed.
+- Profitability uses the existing warehouse inventory cost parser before its detail-capture fallback.
+- In-house material costing now uses the canonical recipe catalog only for products represented by active company production specs, and uses the quality actually produced by that spec when recursively costing its inputs.
+- Added a regression assertion for recipe-catalog costing and quality-aware in-house chains.
+- This remains a test build. Unknown source costs remain unknown; no market-price fallback is used for material costs.
+
+SimCompanies Manager 2.5.280 — Profitability data mapping correction
+- Resolve profitability inputs from the same selected-realm state view used by the Warehouse UI.
+- Use the same exact product-ID/quality market-price map as the Warehouse table, including its selected product cache.
+- Prefer the exact unit cost already displayed in the Warehouse table before any secondary sourcing-cost parser.
+- Added regression checks for realm resolution, exact market mapping, and exact-quality warehouse unit-cost reuse.
+- No building definitions, production recipes, production-rate logic, or sync implementation changed.
+- Replaced the profitability header's mobile flex layout with a two-column grid so the toggle stays beside the title and cannot create the marked blank gap.
+
+2.5.286 — Diagnostic recorder sequencing and runtime access investigation
+- Serialize network-capture event storage writes to prevent concurrent read/modify/write races from dropping events.
+- Record explicit fetch/XHR request-start events alongside responses and request errors.
+- Report request, response, error, start, stop, and resource-snapshot counts; reject exports with zero events, count mismatch, or missing stop marker.
+- Add bounded runtime/framework evidence to state diagnostics and classify zero-node scans as no-state-found, not successful state export.
+- Add behavioral regression coverage for event sequences, serial/pending writes, export verification, zero-event failure, and empty Redux discovery.
+- No changes to production recipes, rate formulas, history calculations, or sync/realm logic.
+
+2.5.287 — Network capture start handshake
+- Content bridge now waits for the page hook to acknowledge start/stop commands.
+- Dashboard does not show capture as active until the capture-start event is persisted and status becomes recording.
+- Hook-not-ready, acknowledgement timeout, and zero-persisted-event failures are surfaced immediately.
+- No production recipes, production calculations, history or sync behavior changed.
+- Fix Redux runtime scan timeout risk: iterate DOM nodes lazily (max 500 elements / 1-second scan budget) instead of spreading the full page NodeList before slicing.
+
+2.5.289 - Redux/App State diagnostic now uses the existing page-hook/content bridge rather than chrome.scripting.executeScript, which repeatedly timed out on the user's game tab. Added bounded runtime/state path report and explicit bridge timeout failure reporting. No production recipe, production calculation, history, or sync algorithm changes.
+
+
+Sim Companies Manager 2.5.293 - Diagnostic Audit Follow-through
+- Added active-cycle amount/duration as a final measured production-rate fallback after matching history and same-cycle snapshots; it is not modified a second time by company/resource modifiers. Audit provenance records the selected source and fallback reason.
+- DOM/runtime reports now include scan coverage percentage and explicit partial-coverage warnings, so a bounded low-coverage scan is not presented as complete evidence.
+- Clarified that DOM script tags and Resource Timing script resources are different evidence sources.
+- Kept captured financial statements, cash-flow records, overhead and warehouse sourcing costs flowing through the existing realm-scoped Accounting pipeline; no transaction-ledger totals are misrepresented as a complete accounting period.
+- Added regression assertions for the new measured-rate fallback and diagnostic coverage fields.
+
+
+Sim Companies Manager 2.5.300 — P0 Market Cooldown & Warehouse Refresh Coordination
+- Added persisted per-resource/quality cooldowns after SimcoTools HTTP 429 responses so repeated market refreshes skip known rate-limited pairs until their retry time. Existing good prices remain available and stale values are not falsely marked fresh.
+- Preserved Retry-After metadata from current-market requests for pair-level cooldown decisions and diagnostics.
+- Deduplicated concurrent authoritative warehouse refreshes per realm across stock-mutation and overlay triggers.
+- Notify the in-game overlay after a successful warehouse snapshot is committed following a stock mutation.
+- Added regression coverage for cooldown persistence/skipping, Retry-After propagation, single-flight warehouse refresh, and post-commit overlay notification.
+
+
+2.5.301 — Comprehensive Diagnostic Repairs (2026-10-21)
+- Persist SimcoTools endpoint cooldowns across refresh runs and service-worker restarts; VWAP and current-price requests share URL cooldown state.
+- Report requested, checked, fetched, refreshed, cached, stale, and failed market rows separately; row timestamps reflect successful fetch time rather than refresh start time.
+- Persist bounded per-realm background job history for market refresh, warehouse refresh, and overlay refresh notifications.
+- Measure warehouse request, storage-commit, total-refresh, and overlay-notification delivery durations.
+- Add production-history endpoint/current-cycle comparison data to production diagnostics.
+- Suppress 31 resource image filenames confirmed to return HTTP 404 in the supplied HAR and retain graceful empty-image behavior.
+- Added regression coverage; protected production data/core hashes remain unchanged.
+
+
+2.5.306 — Regular-Weight Typography (2026-10-22)
+- Removed bold/heavy font weights throughout the Manager UI, including headings, labels, values, market cards, accounting cards, executive cards, and diagnostic summaries.
+- Kept the compact card layouts and switched to a predictable system font stack.
+- No background sync, market scheduling, production formulas, or protected source logic changed.
+
+2.5.307 — Single-scrollbar, laptop-readable Stock After Demand overlay (2026-10-22)
+- Removed nested scrolling by keeping the outer overlay as the only vertical scroll container.
+- Increased overlay body text, resource names, row height, icons, and control text for laptop readability.
+- Kept regular font weights to avoid restoring the heavy/bold appearance.
+- Added regression assertions for one scroll container and minimum readable font sizing.
+
+
+2.5.308 - Mobile Stock After Demand overlay
+- Prevented horizontal scrolling on narrow screens by reflowing resource metrics into two compact columns.
+- Increased mobile resource-name and metric text sizes while preserving regular font weight.
+- Added explicit width constraints and horizontal overflow containment to the overlay.
+
+
+2.5.312 - Mobile network capture status overlay
+- Added a small, fixed game-page card while mobile page capture is active.
+- Displays captured event, request, and error counts, reconciled from persistent background capture status.
+- Automatically removes the card when capture is stopped; limit-reached status remains visible.
+- Added regression coverage for overlay creation, count display, and stop cleanup.
+
+
+2.5.313 — Expand/collapse mobile network capture status overlay (2026-10-22)
+- Added a compact expand/collapse toggle to the in-game capture status card.
+- Collapsed mode shows a small live event count; expanded mode shows events, requests, and errors.
+- Added accessible button labels and regression coverage. Capture storage and sync behavior are unchanged.

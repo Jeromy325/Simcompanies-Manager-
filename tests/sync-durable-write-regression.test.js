@@ -1,0 +1,14 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const source = fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8');
+assert.match(source, /priority:Boolean\(durableOptions\),url:String\(url\|\|''\)/, 'authoritative writes request scheduler priority');
+assert.match(source, /lastSameUrl>=0\)insertAt=Math\.max\(insertAt,lastSameUrl\+1\)/, 'priority preserves FIFO for captures of the same URL');
+assert.match(source, /async function verifyDurableEndpointWrite\(/, 'physical endpoint write verifier is present');
+assert.match(source, /endpoint-durable-write-verified/, 'sync trace records verified endpoint writes');
+assert.match(source, /Persist and verify \$\{path\}/, 'authoritative writes wait on durable persistence verification');
+assert.match(source, /queuedJobsAheadAtEnqueue/, 'queue backlog at enqueue is measured');
+assert.match(source, /queuedJobsBehindAtStart/, 'queue backlog at write start is measured');
+assert.match(source, /endpoint-storage-queue-timing/, 'sync records storage-queue timings');
+console.log('sync-durable-write-regression: 8 assertions passed');

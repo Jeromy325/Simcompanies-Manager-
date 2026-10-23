@@ -1,0 +1,13 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const dashboard = fs.readFileSync(path.join(root, 'dashboard.js'), 'utf8');
+const background = fs.readFileSync(path.join(root, 'background.js'), 'utf8');
+assert.match(dashboard, /type:'SCM_NET3_STATUS'/, 'dashboard restores recorder state from durable status');
+assert.match(dashboard, /type:'SCM_NET3_STOP'/, 'stop action uses the browser-level recorder');
+assert.match(dashboard, /type:'SCM_NET3_EXPORT'/, 'download exports stored browser-level events');
+assert.match(dashboard, /events.length<total/, 'export pages through all persisted events');
+assert.match(background, /chrome.debugger.detach/, 'stop detaches the debugger session');
+assert.match(background, /scmNetGetEvents/, 'stop/recovery export reads persisted capture records');
+console.log('Network Capture 3.0 stop/recovery regression checks passed.');

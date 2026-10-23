@@ -1,0 +1,13 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const source = fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8');
+const start = source.indexOf('async function syncNow(');
+assert.notEqual(start, -1, 'syncNow exists');
+const syncSource = source.slice(start, source.indexOf('\nasync function postSyncBuildingUiRefresh', start));
+assert.match(syncSource, /withSyncTimeout\(chrome\.tabs\.sendMessage\(t\.id,\{type:'CLEAR_SYNC_REALM'\}\),1500,'Clear Sync realm capture boundary'\)/, 'capture-boundary cleanup has a bounded wait');
+assert.doesNotMatch(syncSource, /if\(t\?\.id\) await chrome\.tabs\.sendMessage\(t\.id,\{type:'CLEAR_SYNC_REALM'\}\);/, 'no unbounded CLEAR_SYNC_REALM await remains');
+assert.equal((syncSource.match(/type:'CLEAR_SYNC_REALM'/g) || []).length, 1, 'cleanup is centralized and sent once');
+assert.match(syncSource, /if\(ownsSyncSession && selected!=null\)\{ realmSyncSessions\.delete\(selected\); if\(syncCaptureRealm===selected\) syncCaptureRealm=null; \}/, 'sync session lock is always released in finally');
+console.log('sync-cleanup-timeout: 4 assertions passed');

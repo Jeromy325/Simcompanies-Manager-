@@ -1,0 +1,14 @@
+const fs = require('fs');
+const path = require('path');
+const assert = require('assert');
+const source = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+const start = source.indexOf('@media(max-width:700px){', source.indexOf('scm-game-overlay-style'));
+assert(start >= 0, 'mobile overlay media query must exist');
+const section = source.slice(start, start + 2500);
+assert(section.includes('overflow-x:hidden'), 'mobile overlay must clip horizontal overflow');
+assert(section.includes('touch-action:pan-y'), 'mobile overlay should allow vertical touch scrolling only');
+assert(section.includes('grid-template-columns:22px minmax(0,1fr) minmax(0,1fr)'), 'mobile rows must reflow to fit screen width');
+assert(section.includes('grid-column:2;grid-row:2'), 'warehouse/demand metrics must fit into the second row');
+assert(section.includes('font-size:14px'), 'resource names should be readable on mobile');
+assert(section.includes('font-size:12px'), 'resource metrics should be readable on mobile');
+console.log('mobile overlay layout regression passed');
