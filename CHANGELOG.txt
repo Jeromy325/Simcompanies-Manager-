@@ -1,3 +1,16 @@
+2.5.338 — 2026-10-23 — Profit / h / level follows the economy phase
+- The economy phase (auth-data temporals.economyState) is now logged per realm (scmEconomyStateLog:<realm>) whenever
+  the game or a Sync sends auth-data. A running batch keeps the phase it started in; the game's Profit Calculator uses
+  the current phase. When they differ, Profit / h / level projects with the current-phase rate: your own rate measured
+  earlier in that phase if known, else the normal-economy reference rate × your modifiers (estimate, labelled on the card).
+- Labour per unit now follows the rate (wage per hour per level is phase-independent: game 67.82 × 6.613 =
+  73.94 × 6.066 = 448.5). Wage is taken from your produced lot × the batch rate.
+- Labour from a warehouse lot that also holds bought units (cost.market) now uses only the produced share. The R2
+  Bulldozer Q3 lot (427 units, 68 bought) read $57.12 workers/unit; now $67.84 (game recession calculator $67.82).
+- Bulldozer Q3 L4 after recession → normal: was $3,525.46/h/level, now $3,072.90 (game $3,100.83). Remaining gap:
+  reference rate 6.027 vs game 6.066/h/level and admin 34.26% (latest batch) vs game 33.35%. Becomes exact rate-wise
+  once a batch has run in the normal economy.
+
 2.5.337 — 2026-10-23 — Compact Alerts page
 - Same labels; each alert is one row with its number/time setting on the right of the same row. The dashboard's generic
   form style added a 16 px margin under every label — removed inside the Alerts panel. Measured at 360 px: panel

@@ -408,7 +408,62 @@
     return { runs, current, last, diff: last ? current.c - last.c : null, diffPct: last ? (current.c - last.c) / last.c * 100 : null };
   }
 
+  // v2.5.338 economy phase. auth-data temporals.economyState (0 = recession, seen in R2 capture
+  // 2026-10-23). The game's FAQ: the phase changes production quantities; wages per hour do not change,
+  // so labour per unit moves inversely with the rate. A running batch keeps the phase it started in.
+  // Log entries: { s: state, f: first seen ISO, l: last seen ISO }.
+  function economyLogAppend(log, state, at) {
+    const st = Number(state), t = Date.parse(String(at || ''));
+    const list = Array.isArray(log) ? log.filter(e => e && Number.isFinite(Number(e.s)) && Number.isFinite(Date.parse(e.f))).map(e => ({ ...e })) : [];
+    if (!Number.isFinite(st) || !Number.isFinite(t)) return list;
+    const iso = new Date(t).toISOString(), last = list[list.length - 1];
+    if (last && Date.parse(last.l || last.f) > t) return list; // older observation than what we have: ignore
+    if (last && Number(last.s) === st) last.l = iso; else list.push({ s: st, f: iso, l: iso });
+    return list.slice(-30);
+  }
+  // Phase in force at `at`: inside or after an entry's seen window → that entry; before the first entry →
+  // the first entry's phase (assumed); in a gap between two different phases → null (unknown).
+  function economyStateAt(log, at) {
+    const list = Array.isArray(log) ? log : [], t = Date.parse(String(at || ''));
+    if (!list.length || !Number.isFinite(t)) return null;
+    if (t < Date.parse(list[0].f)) return { state: Number(list[0].s), assumed: true };
+    for (let i = list.length - 1; i >= 0; i--) {
+      const e = list[i];
+      if (t >= Date.parse(e.f)) {
+        if (t <= Date.parse(e.l || e.f) || i === list.length - 1) return { state: Number(e.s), assumed: false };
+        return null; // after this entry was last seen but before the next phase was first seen
+      }
+    }
+    return null;
+  }
+  const ECONOMY_NAMES = { 0: 'recession', 1: 'normal', 2: 'boom' };
+  function economyName(state) { return ECONOMY_NAMES[Number(state)] || (Number.isFinite(Number(state)) ? `phase ${Number(state)}` : 'unknown'); }
+  // Workers cost per PRODUCED unit of a warehouse lot. A lot can also hold bought units (cost.market) that
+  // carry no workers cost; dividing by the whole amount understates labour. Produced units are estimated
+  // from the lot's produced share of cost.
+  function lotWorkersPerProducedUnit(lot) {
+    const c = lot && lot.cost, amount = Number(lot && lot.amount), workers = Number(c && c.workers);
+    if (!(amount > 0) || !(workers > 0)) return null;
+    let total = 0; for (const v of Object.values(c)) { const n = Number(v); if (Number.isFinite(n)) total += n; }
+    const market = Math.max(0, Number(c.market) || 0);
+    const share = total > 0 ? (total - market) / total : 1;
+    if (!(share > 0)) return null;
+    const produced = amount * Math.min(1, share);
+    return { workersPerUnit: workers / produced, producedUnits: produced, boughtUnits: amount - produced, mixed: market > 0 };
+  }
+  // Rate to project profit with. measured = running batch (its own phase). If the economy changed since
+  // the batch started, use a rate measured earlier in the current phase, else the reference rate (estimate).
+  function projectionRate({ measuredRate, batchPhase, currentPhase, phaseRate, referenceRate } = {}) {
+    const m = pos(measuredRate);
+    const changed = batchPhase != null && currentPhase != null && Number(batchPhase) !== Number(currentPhase);
+    if (!changed) return { rate: m || null, source: 'measured', changed: false };
+    if (pos(phaseRate)) return { rate: pos(phaseRate), source: 'phase-measured', changed: true };
+    if (pos(referenceRate)) return { rate: pos(referenceRate), source: 'reference', changed: true };
+    return { rate: m || null, source: 'measured-stale', changed: true };
+  }
+
   const api = {
+    economyLogAppend, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
     cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
     seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,

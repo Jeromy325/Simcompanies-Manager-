@@ -281,6 +281,23 @@ const USEFUL_PATTERNS = [
 ];
 
 const rawStorageSet=chrome.storage.local.set.bind(chrome.storage.local);
+// v2.5.338 economy phase log per realm (scmEconomyStateLog:<realm>) from auth-data temporals.economyState.
+// Seeds from the previously stored auth-data so the phase before a change is kept. Storage only, no network.
+let economyLogChain=Promise.resolve();
+function recordEconomyState(realm,prevEntry,data){
+  const r=validRealmNumber(realm);const st=Number(data?.temporals?.economyState);
+  if(r==null||!Number.isFinite(st))return Promise.resolve();
+  const now=new Date().toISOString();
+  economyLogChain=economyLogChain.then(async()=>{
+    const k=`scmEconomyStateLog:${r}`;const C=globalThis.SCM_TOOLS_CORE;
+    let log=(await chrome.storage.local.get({[k]:[]}))[k];
+    const prevSt=Number(prevEntry?.data?.temporals?.economyState);
+    if((!Array.isArray(log)||!log.length)&&Number.isFinite(prevSt)&&prevEntry?.receivedAt)log=C.economyLogAppend([],prevSt,prevEntry.receivedAt);
+    const next=C.economyLogAppend(log,st,now);
+    await rawStorageSet({[k]:next});
+  }).catch(()=>{});
+  return economyLogChain;
+}
 // v2.5.327 mobile: resource images (base64 data URLs, ~2.3 MB) used to live inside the realm store, so
 // every state() read and every realm write serialized them. They now live in their own key and are
 // only read by the code that draws images. Any realm write that still carries image fields is routed
@@ -2939,7 +2956,7 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   if(incomingIncomeComputed) patch.accountingLastComputedIncome={data,receivedAt:new Date().toISOString(),captureRealm:targetRealm};
   if(preserveCompletedStatement && oldComputed) patch.accountingLastComputed=preservedEntry;
   if(preserveCompletedIncome && oldIncomeComputed) patch.accountingLastComputedIncome=preservedEntry;
-  if(/\/api\/v3\/companies\/auth-data\//.test(url))patch.authData=data;
+  if(/\/api\/v3\/companies\/auth-data\//.test(url)){patch.authData=data;recordEconomyState(targetRealm,old,data).catch(()=>{});}
   if(/\/api\/v2\/companies\/(?:me|\d+)\/buildings\//.test(url)){
     // Building data is captured only from the game's real API/local state.
     // Never replace a good snapshot with a Cloudflare/HTML challenge.

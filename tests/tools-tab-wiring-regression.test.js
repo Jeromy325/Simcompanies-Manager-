@@ -12,7 +12,7 @@ const fn=rd('tools-ui.js');assert.doesNotMatch(fn,/\son[a-z]+=|javascript:/i,'no
 console.log('tools-tab-wiring-regression: all assertions passed');
 assert.doesNotMatch(fn,/\['pph'|paintPph|data-tl="pph"/,'Profit / h / level moved out of the Tools tab (help text may refer to the building card)');
 assert.match(dash,/<div id="plannerProfit" class="planner-profit"><\/div>/,'building card has the Profit / h / level section');
-assert.match(dash,/host\.__plannerProfitCtx=\{s,building,product,productId:Number\(productRecipe\?\.id\),quality,level,outputPerHour,plannedInputs/,'section uses the card measured rate, quality, level and inputs');
+assert.match(dash,/host\.__plannerProfitCtx=\{s,building,product,productId:Number\(productRecipe\?\.id\),quality,level,outputPerHour,[^}]*plannedInputs/,'section uses the card measured rate, quality, level and inputs');
 assert.match(dash,/plannerWarehouseCost\(ctx\.s,x\.id,x\.minQuality\)/,'inputs can use warehouse sourcing cost at the quality the card shows');
 assert.match(dash,/plannerMarketPrice\(ctx\.s,ctx\.priceMap,x\.id,x\.minQuality,c\.inputSource==='market-any'\?'buy-any':'buy'\)/,'market inputs: required quality or better, or cheapest any quality as the game shows');
 assert.match(dash,/id="ppInputSource"/,'Warehouse / Market input selector');
