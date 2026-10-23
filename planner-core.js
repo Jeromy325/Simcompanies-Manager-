@@ -135,6 +135,9 @@
   const frozenPlanSignature = (entries, hours, modifiers = {}) => JSON.stringify({
     hours: Math.max(1, Number(hours) || 24),
     companyProductionModifier: Number(modifiers?.companyProductionModifier) || 0,
+    // v2.5.345 plans saved before the game's speed formula (rate ÷ (1 − bonus)) was used here carry no marker,
+    // so their signature never matches and they are rebuilt.
+    speedFormula: String(modifiers?.speedFormula || ''),
     events: Object.entries(modifiers?.events || {})
       .map(([k,v]) => [String(k), Number(v) || 0])
       .sort((a,b) => a[0].localeCompare(b[0])),

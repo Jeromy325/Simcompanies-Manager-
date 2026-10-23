@@ -553,12 +553,15 @@
   let lastKnownRealm = null;
   let forcedCaptureRealm = null;
   let forcedCaptureRealmUntil = 0;
+  let startupSwitchRealm = null;
   try {
     const raw = sessionStorage.getItem('SCM_SYNC_REALM');
     const saved = raw ? JSON.parse(raw) : null;
     if (saved && Number.isFinite(Number(saved.realm)) && Number(saved.until) > Date.now()) {
       forcedCaptureRealm = Number(saved.realm);
       forcedCaptureRealmUntil = Number(saved.until);
+      // v2.5.345 the game reloads the page after a confirmed realm switch: that realm is this page's realm.
+      if (saved.source === 'switch' && (forcedCaptureRealm === 0 || forcedCaptureRealm === 1)) { lastKnownRealm = forcedCaptureRealm; startupSwitchRealm = forcedCaptureRealm; }
     }
   } catch {}
   function realmFromAuthData(data) {
@@ -566,6 +569,33 @@
     for(const v of candidates){const n=Number(v);if(Number.isFinite(n))return n;}
     return null;
   }
+  // v2.5.345 the game requests auth-data, buildings and the warehouse in parallel on load, and the realm is not
+  // in the URL. Responses to requests started before this page knew its realm were tagged with no realm and the
+  // Manager filed them under the last-synced realm (R1 buildings/warehouse in the R2 store). They are now held
+  // here until auth-data proves the session's realm, then sent with that realm. A realm switch reloads the page,
+  // so held responses can only belong to the realm auth-data reports; on a switch they are dropped (old realm unknown).
+  const realmPending = [];
+  const REALM_PENDING_MAX = 300;
+  const learnRealm = (r, reason) => {
+    if (r !== 0 && r !== 1) return;
+    lastKnownRealm = r;
+    // A Sync boundary for the other realm is wrong for this session: never tag game traffic with it.
+    if ((forcedCaptureRealm === 0 || forcedCaptureRealm === 1) && forcedCaptureRealm !== r) {
+      forcedCaptureRealm = null; forcedCaptureRealmUntil = 0;
+      try { sessionStorage.removeItem('SCM_SYNC_REALM'); } catch {}
+    }
+    emit('PAGE_REALM', { realm: r, reason });
+    while (realmPending.length) {
+      const item = realmPending.shift();
+      try { emit(item.type, { ...item.payload, captureRealm: r, realmResolvedBy: reason }); } catch {}
+    }
+  };
+  const emitRealmScoped = (type, payload) => {
+    if (payload.captureRealm === 0 || payload.captureRealm === 1) { emit(type, payload); return; }
+    if (lastKnownRealm === 0 || lastKnownRealm === 1) { emit(type, { ...payload, captureRealm: lastKnownRealm, realmResolvedBy: 'known-at-response' }); return; }
+    if (realmPending.length >= REALM_PENDING_MAX) realmPending.shift();
+    realmPending.push({ type, payload });
+  };
   let gameStateRawByRealm = new Map();
   let gameStateEmitScheduled = false;
   const scheduleGameStateEmit = (delayMs=50) => {
@@ -728,10 +758,11 @@
     try {
       const switchRealm=realmSwitchFromUrl(url);
       if(switchRealm==null || !response?.ok) return null;
+      realmPending.length=0; // started in the old realm, whose identity this page never learned
       lastKnownRealm=switchRealm;
       forcedCaptureRealm=switchRealm;
       forcedCaptureRealmUntil=Date.now()+30000;
-      try { sessionStorage.setItem('SCM_SYNC_REALM', JSON.stringify({realm:switchRealm,until:forcedCaptureRealmUntil})); } catch {}
+      try { sessionStorage.setItem('SCM_SYNC_REALM', JSON.stringify({realm:switchRealm,until:forcedCaptureRealmUntil,source:'switch'})); } catch {}
       const u=new URL(url,location.href);
       emit('REALM_SWITCH_CONFIRMED',{realm:switchRealm,url:u.pathname+u.search,method:String(method||'GET').toUpperCase(),status:Number(response.status)||200});
       return switchRealm;
@@ -827,7 +858,7 @@
     if (isStockMutationUrl(url, method)) {
       try {
         const u = new URL(url, location.href);
-        if (response.ok) emit('STOCK_MUTATION_COMPLETE', { method, url: u.pathname + u.search, status: response.status, captureRealm });
+        if (response.ok) emitRealmScoped('STOCK_MUTATION_COMPLETE', { method, url: u.pathname + u.search, status: response.status, captureRealm });
       } catch {}
     }
     if (!explicitManagerApiGet && isApi(url) && (method === 'GET' || /\/api\/(?:v2|v3)\/.*contracts/i.test(url))) {
@@ -838,8 +869,9 @@
           let data = null;
           try { data = JSON.parse(text); } catch { data = text; }
           const u = new URL(url, location.href);
-          if (/\/api\/v3\/companies\/auth-data\//.test(u.pathname)) { const ar=realmFromAuthData(data); if(Number.isFinite(ar)) lastKnownRealm=ar; }
-          emit('API_DATA', { url: u.pathname + u.search, status: response.status, method, data, captureRealm });
+          const ar = /\/api\/v3\/companies\/auth-data\//.test(u.pathname) && response.ok ? realmFromAuthData(data) : null;
+          if (ar === 0 || ar === 1) { emit('API_DATA', { url: u.pathname + u.search, status: response.status, method, data, captureRealm: ar }); learnRealm(ar, 'auth-data'); }
+          else emitRealmScoped('API_DATA', { url: u.pathname + u.search, status: response.status, method, data, captureRealm });
         }
       } catch {}
     }
@@ -867,7 +899,7 @@
       this.addEventListener('load', () => {
         try {
           const u = new URL(this.__scmUrl, location.href);
-          if (this.status >= 200 && this.status < 300) emit('STOCK_MUTATION_COMPLETE', { method: this.__scmMethod, url: u.pathname + u.search, status: this.status, captureRealm: this.__scmCaptureRealm });
+          if (this.status >= 200 && this.status < 300) emitRealmScoped('STOCK_MUTATION_COMPLETE', { method: this.__scmMethod, url: u.pathname + u.search, status: this.status, captureRealm: this.__scmCaptureRealm });
         } catch {}
       });
     }
@@ -877,10 +909,12 @@
           let data = null;
           try { data = JSON.parse(this.responseText); } catch { data = this.responseText; }
           const u = new URL(this.__scmUrl, location.href);
-          if (/\/api\/v3\/companies\/auth-data\//.test(u.pathname)) { const ar=realmFromAuthData(data); if(Number.isFinite(ar)) lastKnownRealm=ar; }
+          const ar = /\/api\/v3\/companies\/auth-data\//.test(u.pathname) && this.status >= 200 && this.status < 300 ? realmFromAuthData(data) : null;
           if (String(this.responseText || '').length <= 2000000) {
-            emit('API_DATA', { url: u.pathname + u.search, status: this.status, method: this.__scmMethod, data, captureRealm: this.__scmCaptureRealm });
+            if (ar === 0 || ar === 1) emit('API_DATA', { url: u.pathname + u.search, status: this.status, method: this.__scmMethod, data, captureRealm: ar });
+            else emitRealmScoped('API_DATA', { url: u.pathname + u.search, status: this.status, method: this.__scmMethod, data, captureRealm: this.__scmCaptureRealm });
           }
+          if (ar === 0 || ar === 1) learnRealm(ar, 'auth-data');
         } catch {}
       });
     }
@@ -1081,7 +1115,7 @@
     }
     const controller = new AbortController();
     const requestedTimeout = Number(event.data.timeoutMs);
-    const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout >= 3000 ? Math.min(requestedTimeout, 30000) : 8000;
+    const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout >= 3000 ? Math.min(requestedTimeout, 60000) : 8000; // v2.5.345 max 60 s (Sync waits 45 s)
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       markExplicitApiGetCapture(path);
@@ -1095,9 +1129,9 @@
       // Explicit API_GET responses bypass the generic API_DATA observer, so
       // update the page's realm identity here before returning auth-data.
       try {
-        if(/\/api\/v3\/companies\/auth-data\//.test(new URL(path,location.href).pathname)){
+        if(response.ok&&/\/api\/v3\/companies\/auth-data\//.test(new URL(path,location.href).pathname)){
           const authRealm=realmFromAuthData(data);
-          if(Number.isFinite(authRealm))lastKnownRealm=authRealm;
+          if(authRealm===0||authRealm===1)learnRealm(authRealm,'manager-auth-check');
         }
       } catch {}
       emit('API_RESULT', { id, ok: response.ok, status: response.status, statusText: response.statusText, data, captureRealm: (Number.isFinite(forcedCaptureRealm) && forcedCaptureRealmUntil > Date.now()) ? forcedCaptureRealm : lastKnownRealm });
@@ -1203,5 +1237,12 @@
   };
   setTimeout(emitGameConfig, 1500);
   setTimeout(emitGameConfig, 6000);
+  // v2.5.345 tell content.js this page's realm as soon as it is known (reload after a confirmed realm switch).
+  // If the game has not revealed it 10 s after load, read auth-data once (the game itself re-reads it every 3 min).
+  if (startupSwitchRealm === 0 || startupSwitchRealm === 1) emit('PAGE_REALM', { realm: startupSwitchRealm, reason: 'switch-reload' });
+  setTimeout(() => {
+    if (lastKnownRealm === 0 || lastKnownRealm === 1) return;
+    try { window.fetch('/api/v3/companies/auth-data/', { credentials: 'include', headers: { Accept: 'application/json' } }).catch(() => {}); } catch {}
+  }, 10000);
   emit('HOOK_READY', {});
 })();

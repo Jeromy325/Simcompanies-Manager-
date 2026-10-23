@@ -129,7 +129,7 @@
                 "quantity": 5
             }
         ],
-        "transport": 0.1
+        "transport": 0.2
     },
     {
         "id": 139,
@@ -1936,11 +1936,11 @@
         "materials": [
             {
                 "id": 1,
-                "quantity": 0.010526315789473684
+                "quantity": 0.01
             },
             {
                 "id": 12,
-                "quantity": 0.005263157894736842
+                "quantity": 0.005
             }
         ],
         "transport": 0
@@ -2265,7 +2265,12 @@
     {
         "id": 150,
         "name": "Tree",
-        "materials": [],
+        "materials": [
+            {
+                "id": 2,
+                "quantity": 12
+            }
+        ],
         "transport": 1
     },
     {

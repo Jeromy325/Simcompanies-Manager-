@@ -548,6 +548,50 @@
     }
     return best && best.diffPct <= tolPct ? best : null;
   }
+  // v2.5.345 recipes as the game defines them: inputs per unit = constants resources[id].producedFrom
+  // ({inputId: qty}), transport units = .transportation. The bundled recipes.json is only the fallback.
+  function recipesFromGameConstants(recipes, c) {
+    const list = Array.isArray(recipes) ? recipes : [];
+    if (!gameConstantsOk(c)) return list;
+    return list.map(r => {
+      const g = r && c.resources[String(r.id)];
+      if (!g || !g.producedFrom || typeof g.producedFrom !== 'object') return r;
+      const materials = Object.entries(g.producedFrom).map(([id, q]) => ({ id: Number(id), quantity: Number(q) })).filter(m => m.id > 0 && Number.isFinite(m.quantity) && m.quantity > 0);
+      const t = Number(g.transportation);
+      return { ...r, materials, transport: Number.isFinite(t) && t >= 0 ? t : r.transport, recipeSource: 'game-constants' };
+    });
+  }
+  // v2.5.345 building outputs as the game defines them: every resource lists the building letter it is produced at
+  // (constants resources[id].producedAt). Adds buildings missing from buildings.json (research labs …) and outputs
+  // missing from a known building (e.g. Cream egg); an output the game places at another building is dropped.
+  function buildingsFromGameConstants(defs, recipes, c) {
+    const list = Array.isArray(defs) ? defs : [];
+    if (!gameConstantsOk(c)) return list;
+    const at = new Map(), placeOf = new Map();
+    for (const r of Array.isArray(recipes) ? recipes : []) {
+      const g = r && c.resources[String(r.id)]; const l = g && g.producedAt != null ? String(g.producedAt) : '';
+      if (!l || !r.name) continue;
+      placeOf.set(normalizeName(r.name), l);
+      if (!at.has(l)) at.set(l, []); at.get(l).push(String(r.name));
+    }
+    const merge = (letter, existing) => {
+      const out = [], seen = new Set();
+      for (const p of [...(existing || []), ...(at.get(letter) || [])]) {
+        const k = normalizeName(p); if (!k || seen.has(k)) continue;
+        const where = placeOf.get(k); if (where != null && where !== letter) continue;
+        seen.add(k); out.push(p);
+      }
+      return out;
+    };
+    const known = new Set(list.map(d => String(d && d.id)));
+    const next = list.map(d => (d && at.has(String(d.id)) ? { ...d, produces: merge(String(d.id), d.produces) } : d));
+    for (const [letter, names] of at) {
+      if (known.has(letter) || !names.length) continue;
+      const cat = String((c.buildings[letter] && c.buildings[letter].category) || '');
+      next.push({ id: letter, name: null, category: cat ? cat[0].toUpperCase() + cat.slice(1) : 'Other', produces: merge(letter, []), source: 'game-constants' });
+    }
+    return next;
+  }
   // Exchange fee % from your own listings (/api/v2/companies/<id>/market-orders/): fees ÷ (quantity × price).
   function listingFeePct(orders) {
     const ok = (Array.isArray(orders) ? orders : []).filter(o => pos(o && o.fees) && pos(o.quantity) && pos(o.price));
@@ -557,7 +601,7 @@
   }
 
   const api = {
-    economyLogAppend, gameConstantsOk, gameBaseRate, gameRatePerLevel, gameWagePerLevel, phaseFromMeasuredRate, listingFeePct, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
+    economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, phaseFromMeasuredRate, listingFeePct, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
     cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
     seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,

@@ -66,6 +66,7 @@ vm.runInContext([
   extractFunction(dashboard, 'exactMarketPrice'),
   extractConstArray(dashboard, 'CONSTRUCTION_MATERIALS'),
   extractFunction(dashboard, 'constructionWarehouseStock'),
+  extractFunction(dashboard, 'constructionCostUnits'),
   extractFunction(dashboard, 'constructionMaterialPlan'),
 ].join('\n'), dashContext);
 const sampleState = {

@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.344');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.345');
 const bg = read('background.js'), content = read('content.js'), hook = read('page-hook.js');
 
 const slice = (src, start, end) => { const a = src.indexOf(start); const b = src.indexOf(end, a + 1); assert.ok(a >= 0 && b > a, start); return src.slice(a, b); };
@@ -19,6 +19,7 @@ function sandbox(answerAfterMs) {
   const ctx = {
     SYNC_PAGE_API_TIMEOUT_MS: 150, SYNC_PAGE_API_ATTEMPTS: 2, setTimeout, Promise, Date, Number, Error, String, Map,
     simTab: async () => ({ id: 7 }), waitForBridge: async () => true,
+    validRealmNumber: v => (v === null || v === undefined || v === '' ? null : ([0, 1].includes(Number(v)) ? Number(v) : null)), realmDisplayNumber: r => `R${Number(r) + 1}`,
     chrome: { tabs: { sendMessage: (id, msg) => { sent.push(msg); return new Promise(r => setTimeout(() => r({ ok: true, status: 200, data: [1] }), answerAfterMs)); } } }
   };
   vm.createContext(ctx);
@@ -27,12 +28,12 @@ function sandbox(answerAfterMs) {
 }
 
 (async () => {
-  // Old behaviour kept for Sync callers: default timeout, 2 attempts, no timeoutMs in the message.
+  // v2.5.345 default (Sync) path: the page is told the timeout; attempts come from SYNC_PAGE_API_ATTEMPTS.
   {
-    const { ctx, sent } = sandbox(400);
+    const { ctx, sent } = sandbox(4000);
     await assert.rejects(ctx.pageGet('/api/v3/resources/1/'), /bridge timed out/);
-    assert.equal(sent.length, 2, 'default path retries twice');
-    assert.ok(!('timeoutMs' in sent[0]), 'default message unchanged');
+    assert.equal(sent.length, 2, 'sandbox attempts honoured');
+    assert.equal(sent[0].timeoutMs, 150, 'default message carries the Sync timeout');
   }
   // Slow answer within the longer timeout: one attempt, succeeds, page told the timeout.
   {
@@ -71,6 +72,6 @@ function sandbox(answerAfterMs) {
   assert.ok(outer.includes('noteWarehouseOverlayRefreshResult(n,maxAgeMs,result)'));
   assert.ok(!/withRealmWriteLock/.test(unlocked.slice(0, unlocked.indexOf('pageGet('))), 'no lock held around pageGet');
   assert.ok(content.includes("type: 'API_GET', id, path: message.path, timeoutMs: message.timeoutMs"));
-  assert.ok(hook.includes('Math.min(requestedTimeout, 30000) : 8000'));
+  assert.ok(hook.includes('Math.min(requestedTimeout, 60000) : 8000'));
   console.log('v344-regression ok');
 })().catch(e => { console.error(e); process.exit(1); });

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sim Companies Manager",
-  "version": "2.5.344",
+  "version": "2.5.345",
   "description": "Sim Companies Manager, optimized for mobile: lighter background work, phone layouts, Tools tab and building-card profit.",
   "permissions": [
     "storage",
@@ -78,6 +78,5 @@
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  },
-  "version_name": "2.5.337 \u00b7 Compact Alerts page"
+  }
 }

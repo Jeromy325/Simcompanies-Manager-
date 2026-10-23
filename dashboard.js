@@ -1722,10 +1722,16 @@ function renderFullSyncDiagnostics(s){
 
 let scmRecipesCache=null;
 async function loadBuildingPlannerData(){
-  if(window.__scmBuildingPlannerData)return window.__scmBuildingPlannerData;
+  // v2.5.345 recipe inputs/transport and building outputs follow the game's constants (scmGameConstants) when
+  // captured; the bundled files are the fallback. Rebuilt when the constants change.
+  const gc=window.__scmState?.gameConstants||null,gcAt=String(gc?.at||'');
+  if(window.__scmBuildingPlannerData&&window.__scmBuildingPlannerDataAt===gcAt)return window.__scmBuildingPlannerData;
   const load=async file=>{try{const r=await fetch(chrome.runtime.getURL(file));return await r.json();}catch{return null;}};
-  const [buildings,recipes,rates]=await Promise.all([load('buildings.json'),load('recipes.json'),load('production_rates_normal.json')]);
-  window.__scmBuildingPlannerData={buildings:Array.isArray(buildings)?buildings:[],recipes:Array.isArray(recipes)?recipes:[],rates:rates&&typeof rates==='object'?rates:{}};
+  if(!window.__scmBuildingPlannerRaw){const [buildings,recipes,rates]=await Promise.all([load('buildings.json'),load('recipes.json'),load('production_rates_normal.json')]);window.__scmBuildingPlannerRaw={buildings:Array.isArray(buildings)?buildings:[],recipes:Array.isArray(recipes)?recipes:[],rates:rates&&typeof rates==='object'?rates:{}};}
+  const raw=window.__scmBuildingPlannerRaw,C=globalThis.SCM_TOOLS_CORE;
+  const recipes=C?.recipesFromGameConstants?C.recipesFromGameConstants(raw.recipes,gc):raw.recipes;
+  const buildings=C?.buildingsFromGameConstants?C.buildingsFromGameConstants(raw.buildings,recipes,gc):raw.buildings;
+  window.__scmBuildingPlannerData={buildings,recipes,rates:raw.rates};window.__scmBuildingPlannerDataAt=gcAt;
   return window.__scmBuildingPlannerData;
 }
 function plannerNormalizeName(v){return globalThis.SCMPlannerCore?.normalizeName?globalThis.SCMPlannerCore.normalizeName(v):String(v??'').toLowerCase().replace(/[’']/g,'').replace(/[^a-z0-9]+/g,'').replace(/s$/,'');}
@@ -2003,12 +2009,16 @@ function plannerProductionNetwork(s, owned, recipes, rates, runHours, overrides=
   for(const b of Array.isArray(owned)?owned:[]){const isSelected=selectedId!=null&&String(b.id)===selectedId;const stored=frozenPlans?.[String(b.id)]||plannerStoredProductionPlan(s,b)||null;const frozenProduct=String(stored?.product||b.currentResource||'').trim();const product=isSelected?String(overrides.product||frozenProduct||'').trim():frozenProduct;if(!product)continue;const frozenQuality=Number.isFinite(Number(stored?.quality))?Math.max(0,Number(stored.quality)):Math.max(0,Number(b.currentQuality)||0);const quality=isSelected?Math.max(0,Number(overrides.quality)||0):frozenQuality;const plannedLevel=Math.min(20,Math.max(1,Number(planningLevels[String(b.id)])||Number(stored?.plannedLevel)||Number(b.level)||1));const level=isSelected?Math.min(20,Math.max(1,Number(overrides.level)||plannedLevel)):plannedLevel;const rateInfo=plannerRateForProduct(product,b,level,recipes,rates,s);const rate=Number(rateInfo?.rate);const recipe=recipeBy.get(plannerNormalizeName(product));const outputId=Number(recipe?.id);if(!Number.isFinite(rate)||rate<=0||!Number.isFinite(outputId)||!recipe){activeBuildings.push({building:b,product,quality,level,rate:null,outputRun:null,source:rateInfo?.source||'not available',inputs:[]});continue;}const outputRun=rate*networkHours;const inputs=(recipe.materials||[]).map(m=>{const id=Number(m.id),perOutput=Number(m.quantity)||0,required=outputRun*perOutput,minQuality=Math.max(0,quality-1);return {id,name:plannerResourceNameById(recipes,id,s),required,minQuality};});activeBuildings.push({building:b,product,quality,level,rate,outputRun,source:rateInfo?.source||'unknown',inputs});specs.push({buildingId:Number(b.id),product,productId:outputId,quality,level,ratePerHour:rate,recipe});}
   const resourceNames=new Map((recipes||[]).map(r=>[String(r.id),r.name]));const core=globalThis.SCMPlannerCore?.productionBalance?globalThis.SCMPlannerCore.productionBalance(specs,recipeBy,networkHours,resourceNames):{resources:[],deficits:[],surpluses:[],productionRows:[],demandRows:[]};return {activeBuildings,resources:core.resources,deficits:core.deficits,surpluses:core.surpluses,productionRows:core.productionRows,demandRows:core.demandRows,activeSpecs:specs,hours:networkHours};
 }
+// v2.5.345 the game's own upgrade cost (GamePages bundle: amount = perCostUnit × building costUnits × current level,
+// per level step). costUnits comes from /api/v2/constants/buildings/; perCostUnit is the game client's table
+// (not served by any API). baseQty × cost ÷ 10350 is the old estimate, kept only when the constants are missing.
 const CONSTRUCTION_MATERIALS=[
-  {id:101,name:'Reinforced concrete',baseQty:12,referencePrice:166.66},
-  {id:102,name:'Bricks',baseQty:165,referencePrice:2.16},
-  {id:108,name:'Planks',baseQty:48,referencePrice:9.08},
-  {id:111,name:'Construction units',baseQty:3,referencePrice:2501.71}
+  {id:101,name:'Reinforced concrete',perCostUnit:4,baseQty:12,referencePrice:166.66},
+  {id:102,name:'Bricks',perCostUnit:55,baseQty:165,referencePrice:2.16},
+  {id:108,name:'Planks',perCostUnit:16,baseQty:48,referencePrice:9.08},
+  {id:111,name:'Construction units',perCostUnit:1,baseQty:3,referencePrice:2501.71}
 ];
+function constructionCostUnits(s,building){const k=String(building?.raw?.kind??building?.kind??'');const cu=Number(s?.gameConstants?.buildings?.[k]?.costUnits);return k&&cu>0?cu:null;}
 function constructionWarehouseStock(s,id){
   return warehouseRows(s).filter(row=>Number(row?._id)===Number(id)).reduce((sum,row)=>sum+(Number(row?._qty)||0),0);
 }
@@ -2016,13 +2026,14 @@ function constructionMaterialPlan(s,building,currentLevel,targetLevel,discount,v
   const current=Math.min(20,Math.max(1,Number(currentLevel)||1));
   const target=Math.min(20,Math.max(1,Number(targetLevel)||current));
   if(target<=current) return {current,target,stepFactor:0,items:[],deficitItems:[],totalCost:0};
+  const costUnits=constructionCostUnits(s,building);
   const baseCost=Number(building?.raw?.cost);
-  if(!Number.isFinite(baseCost)||baseCost<=0) return {current,target,stepFactor:0,items:[],deficitItems:[],totalCost:0,unavailable:true};
+  if(costUnits==null&&(!Number.isFinite(baseCost)||baseCost<=0)) return {current,target,stepFactor:0,items:[],deficitItems:[],totalCost:0,unavailable:true};
   const stepFactor=((target-current)*(current+target-1))/2;
-  const scale=baseCost/10350;
+  const scale=costUnits!=null?null:baseCost/10350;
   const map=vwapMap instanceof Map?vwapMap:buildMarketPriceMap(s);
   const items=CONSTRUCTION_MATERIALS.map(mat=>{
-    const required=roundResourceDown(mat.baseQty*scale*stepFactor,3);
+    const required=roundResourceDown(costUnits!=null?mat.perCostUnit*costUnits*stepFactor:mat.baseQty*scale*stepFactor,3);
     // Warehouse coverage is quality-agnostic. Every stored unit counts toward
     // the construction requirement regardless of its quality level. Keep ALL
     // required material rows here so multi-building aggregation can sum the
@@ -2038,7 +2049,7 @@ function constructionMaterialPlan(s,building,currentLevel,targetLevel,discount,v
   });
   const deficitItems=items.filter(x=>x.amount>0);
   const totalCost=roundCurrencyUp(deficitItems.reduce((sum,x)=>sum+(Number(x.lineTotal)||0),0));
-  return {current,target,stepFactor,items,deficitItems,totalCost};
+  return {current,target,stepFactor,items,deficitItems,totalCost,costUnits,source:costUnits!=null?'game-constants':'cost-estimate'};
 }
 function renderConstructionMaterialText(s,plan,building,discount){
   const displayItems=Array.isArray(plan.deficitItems)?plan.deficitItems:(plan.items||[]).filter(x=>x.amount>0);
@@ -2114,8 +2125,10 @@ function showBuildingUpgradeProjection(host,ctx){
   const current=Number(plan.current)||Number(building.level)||1;
   const target=Number(plan.target)||current;
   const scale=Number(building?.raw?.cost)/10350;
+  const costUnits=Number(plan.costUnits)>0?Number(plan.costUnits):null;
   const materials=CONSTRUCTION_MATERIALS.map(mat=>{
-    const required=roundResourceDown(Number(mat.baseQty)*scale*Number(plan.stepFactor||0),3);
+    // v2.5.345 same game formula as constructionMaterialPlan (costUnits from the game's constants).
+    const required=roundResourceDown(costUnits!=null?mat.perCostUnit*costUnits*Number(plan.stepFactor||0):Number(mat.baseQty)*scale*Number(plan.stepFactor||0),3);
     const warehouse=constructionWarehouseStock(ctx.state,mat.id);
     const buy=Math.max(0,roundResourceDown(required-warehouse,3));
     const item=plan.items.find(x=>Number(x.id)===Number(mat.id));
@@ -2446,8 +2459,8 @@ function renderBuildingPlanner(s,options={}){
     const existingPlanMap=(s?.frozenNetworkPlan?.buildingPlans&&typeof s.frozenNetworkPlan.buildingPlans==='object')?s.frozenNetworkPlan.buildingPlans:{};const existingProdPlans=s?.productionPlans||{};const planModes={...(s?.frozenNetworkPlan?.plannerState?.planModes||{}),...(ui.planModes||{})};const planState={};
     for(const b of owned){const id=String(b.id);const persisted=existingPlanMap[id]||existingProdPlans[id]||{};const selected=String(b.id)===String(building.id);const p=selected?product:String(persisted.product||b.currentResource||'').trim();if(!p)continue;const rcp=recipeBy.get(plannerNormalizeName(p));const q=selected?quality:Math.max(0,Number(persisted.quality??b.currentQuality??0)||0);const lvl=selected?level:Math.min(20,Math.max(1,Number(persisted.plannedLevel)||Number(b.level)||1));const base=Number(persisted.baseRatePerLevel||0);planState[id]={buildingId:Number(b.id),product:p,productId:Number(rcp?.id||persisted.productId||0),resourceId:Number(persisted.resourceId||rcp?.id||0)||null,quality:q,plannedLevel:lvl,baseRatePerLevel:base>0?base:null,mode:planModes[id]||persisted.mode||'live'};}
     const network=plannerProductionNetwork(s,owned,recipes,rates,runHours,{buildingId:building.id,product,level,quality,planningLevels,planState});
-    for(const spec of (network.activeSpecs||[])){const id=String(spec.buildingId);const current=planState[id]||{};const eventModifier=plannerActiveProductionEvent(s,spec.product,recipes,spec.productId);const companyModifier=plannerCompanyProductionModifier(s);const divisor=(1+eventModifier/100)*(1+companyModifier/100);if(divisor>0&&Number(spec.ratePerHour)>0)current.baseRatePerLevel=Number(spec.ratePerHour)/(Math.max(1,Number(spec.level)||1)*divisor);current.product=spec.product;current.productId=Number(spec.productId);current.quality=Math.max(0,Number(spec.quality)||0);current.plannedLevel=Math.min(20,Math.max(1,Number(spec.level)||1));current.buildingId=Number(spec.buildingId);planState[id]=current;}
-    try{const eventMap={};for(const entry of Object.values(planState))eventMap[plannerNormalizeName(entry.product)]=plannerActiveProductionEvent(s,entry.product,recipes,entry.productId);const signature=globalThis.SCMPlannerCore?.frozenPlanSignature?globalThis.SCMPlannerCore.frozenPlanSignature(planState,runHours,{companyProductionModifier:plannerCompanyProductionModifier(s),events:eventMap}):JSON.stringify({hours:runHours,planState});const plannerState={selectedBuildingId:String(building.id),planningLevels,productOverrides,qualityByBuilding:{...(s?.frozenNetworkPlan?.plannerState?.qualityByBuilding||{}),[String(building.id)]:quality},runHours,discount:ui.discount||0,planModes};const frozenSignature=String(s?.frozenNetworkPlan?.signature||'');const shouldPersistFrozen=host.__lastFrozenPlanSignature!==signature&&(!frozenSignature||frozenSignature!==signature);if(shouldPersistFrozen){host.__lastFrozenPlanSignature=signature;chrome.runtime.sendMessage({type:'SAVE_FROZEN_NETWORK_PLAN',realm:Number(realm),signature,plan:{hours:runHours,productionRows:network.productionRows,demandRows:network.demandRows,activeSpecs:network.activeSpecs,buildingPlans:planState,plannerState,modifiers:{companyProductionModifier:plannerCompanyProductionModifier(s),events:eventMap},resources:network.resources,deficits:network.deficits,surpluses:network.surpluses}}).catch(()=>{});}}catch{}
+    for(const spec of (network.activeSpecs||[])){const id=String(spec.buildingId);const current=planState[id]||{};const eventModifier=plannerActiveProductionEvent(s,spec.product,recipes,spec.productId);const divisor=(1+eventModifier/100)*plannerCompanyProductionFactor(s);if(divisor>0&&Number(spec.ratePerHour)>0)current.baseRatePerLevel=Number(spec.ratePerHour)/(Math.max(1,Number(spec.level)||1)*divisor);current.product=spec.product;current.productId=Number(spec.productId);current.quality=Math.max(0,Number(spec.quality)||0);current.plannedLevel=Math.min(20,Math.max(1,Number(spec.level)||1));current.buildingId=Number(spec.buildingId);planState[id]=current;}
+    try{const eventMap={};for(const entry of Object.values(planState))eventMap[plannerNormalizeName(entry.product)]=plannerActiveProductionEvent(s,entry.product,recipes,entry.productId);const signature=globalThis.SCMPlannerCore?.frozenPlanSignature?globalThis.SCMPlannerCore.frozenPlanSignature(planState,runHours,{companyProductionModifier:plannerCompanyProductionModifier(s),events:eventMap,speedFormula:'game-divide'}):JSON.stringify({hours:runHours,planState});const plannerState={selectedBuildingId:String(building.id),planningLevels,productOverrides,qualityByBuilding:{...(s?.frozenNetworkPlan?.plannerState?.qualityByBuilding||{}),[String(building.id)]:quality},runHours,discount:ui.discount||0,planModes};const frozenSignature=String(s?.frozenNetworkPlan?.signature||'');const shouldPersistFrozen=host.__lastFrozenPlanSignature!==signature&&(!frozenSignature||frozenSignature!==signature);if(shouldPersistFrozen){host.__lastFrozenPlanSignature=signature;chrome.runtime.sendMessage({type:'SAVE_FROZEN_NETWORK_PLAN',realm:Number(realm),signature,plan:{hours:runHours,productionRows:network.productionRows,demandRows:network.demandRows,activeSpecs:network.activeSpecs,buildingPlans:planState,plannerState,modifiers:{companyProductionModifier:plannerCompanyProductionModifier(s),events:eventMap,speedFormula:'game-divide'},resources:network.resources,deficits:network.deficits,surpluses:network.surpluses}}).catch(()=>{});}}catch{}
     s=await get();
 
     const productImage=productRecipe?.id!=null?plannerResourceImage(Number(productRecipe.id),s):'';
@@ -4212,7 +4225,7 @@ document.addEventListener('error',e=>{const t=e.target;if(!t||t.tagName!=='IMG'|
     document.querySelectorAll('[data-nfv]').forEach(el=>{if(document.activeElement!==el)el.value=cfg[el.dataset.nfv]??'';});document.querySelectorAll('.nf-row').forEach(el=>{const sw=el.querySelector('[data-nf]');if(sw)el.classList.toggle('is-off',!sw.checked);});
     renderTargets();fillProducts();
     if(!r.available){st.textContent='This browser does not offer extension notifications.';return;}
-    const list=(r.alarms||[]).sort((a,b)=>a.when-b.when).slice(0,5).map(a=>{const [,realm,bid]=a.name.split(':');const b=(__scmState?.buildings||[]).find(x=>String(x?.id)===bid);return `${b?.name||'Building '+bid} (R${Number(realm)+1}) · ${when(a.when)}`;});
+    const list=(r.alarms||[]).sort((a,b)=>a.when-b.when).slice(0,5).map(a=>{const [,realm,bid]=a.name.split(':');const b=(__scmState?.buildings||[]).find(x=>String(x?.id)===bid);return `${a.buildingName||b?.name||'Building '+bid} (R${Number(realm)+1}) · ${when(a.when)}`;});
     const lines=[];
     if(cfg.productionFinished||cfg.inputsShort)lines.push(list.length?'Next: '+list.slice(0,3).map(escapeHtml).join(' · '):'No running production captured yet (open the game).');
     if(cfg.dailySummary&&r.dailyAt)lines.push('Summary: '+escapeHtml(when(r.dailyAt)));

@@ -535,6 +535,10 @@ let hookReady = false;
       safeRuntimeSend({ type: 'REALM_SWITCH', realm: r??d.realm, url: d.url, method: d.method });
       return;
     }
+    if (d.type === 'PAGE_REALM') {
+      publishGameRealm(d.realm, `page-hook-${String(d.reason||'')}`);
+      return;
+    }
     if (d.type === 'REALM_SWITCH_CONFIRMED') {
       const r=publishGameRealm(d.realm,'realm-switch-confirmed');
       safeRuntimeSend({ type: 'REALM_SWITCH_CONFIRMED', realm: r??d.realm, url: d.url, method: d.method, status:d.status });
@@ -1118,8 +1122,11 @@ let hookReady = false;
     if(dataInflight)return dataInflight;
     dataInflight=new Promise(resolve=>{
       try{
-        // v2.5.97: Exchange routes do not encode the realm. Let background.js use the selected/auth realm.
-        chrome.runtime.sendMessage({type:'GET_VWAP_OVERLAY_DATA',resourceId:hintedRid},r=>resolve(chrome.runtime.lastError?null:r||null));
+        // v2.5.97: Exchange routes do not encode the realm. v2.5.345: use this tab's realm (from the game's
+        // auth-data); until it is known, show no badge rather than the last-synced realm's VWAP.
+        const tabRealm=Number(window.__SCM_GAME_REALM__);
+        if(tabRealm!==0&&tabRealm!==1){resolve(null);return;}
+        chrome.runtime.sendMessage({type:'GET_VWAP_OVERLAY_DATA',resourceId:hintedRid,realm:tabRealm},r=>resolve(chrome.runtime.lastError?null:r||null));
       }
       catch{resolve(null);}
     }).then(response=>{
@@ -1289,7 +1296,8 @@ let hookReady = false;
     // ("Accept25.00% above market"), which made this check fail and wipe the badges (flicker).
     return /incoming contracts/i.test(body)&&/accept/i.test(body)&&/\$\s*[0-9]/.test(body);
   };
-  const getDataOnce=()=>new Promise(resolve=>{try{chrome.runtime.sendMessage({type:'GET_INCOMING_CONTRACT_VWAP_DATA'},r=>resolve(chrome.runtime.lastError?null:r||null));}catch{resolve(null);}});
+  // v2.5.345 this tab's realm only; unknown realm → no badges (was: the last-synced realm's prices).
+  const getDataOnce=()=>new Promise(resolve=>{try{const tabRealm=Number(window.__SCM_GAME_REALM__);if(tabRealm!==0&&tabRealm!==1){resolve(null);return;}chrome.runtime.sendMessage({type:'GET_INCOMING_CONTRACT_VWAP_DATA',realm:tabRealm},r=>resolve(chrome.runtime.lastError?null:r||null));}catch{resolve(null);}});
   // A sleeping/restarting service worker can drop the first message; retry once before giving up.
   const getData=async()=>{const first=await getDataOnce();if(first?.ok)return first;await new Promise(r=>setTimeout(r,400));return (await getDataOnce())||first;};
   const priceText=v=>`$${Number(v).toLocaleString(undefined,{minimumFractionDigits:3,maximumFractionDigits:3})}`;
@@ -1556,7 +1564,7 @@ let hookReady = false;
     const rows=Array.isArray(S.data?.rows)?S.data.rows:[];
     const title=`${S.realm!=null?`R${S.realm+1}`:'Game'} · Stock After Demand & Contracts`;
     const items=rows.map(r=>{const remaining=Number(r.remaining??r.difference)||0;const cls=remaining>0?'positive':remaining<0?'negative':'balanced';return `<div class="scm-go-row"><span>${r.image?`<img src="${esc(r.image)}" alt="">`:''}</span><span class="scm-go-name">${esc(r.name)}${Number.isFinite(Number(r.quality))?` Q${Number(r.quality)}`:''}</span><span class="scm-go-stock">Warehouse ${num(r.warehouse)}</span><span class="scm-go-contract">Demand ${num(r.demand)}</span><span class="scm-go-contract">Contracts (net) ${num(r.contracted)}</span><span class="scm-go-remaining ${cls}">Left ${num(remaining)}</span></div>`;}).join('');
-    host.innerHTML=`<div class="scm-go-head"><span class="scm-go-title">${esc(title)}</span><span class="scm-go-head-actions"><button type="button" class="scm-go-toggle scm-go-copy" aria-label="Copy left resources">COPY LEFT</button><button type="button" class="scm-go-toggle" aria-label="Collapse production balance">‹</button></span></div>${items?`<div class="scm-go-grid">${items}</div>`:'<div class="scm-ch-none">Waiting for production data.</div>'}`;
+    host.innerHTML=`<div class="scm-go-head"><span class="scm-go-title">${esc(title)}</span><span class="scm-go-head-actions"><button type="button" class="scm-go-toggle scm-go-copy" aria-label="Copy left resources">COPY LEFT</button><button type="button" class="scm-go-toggle" aria-label="Collapse production balance">‹</button></span></div>${items?`<div class="scm-go-grid">${items}</div>`:`<div class="scm-ch-none">${S.realm==null?'Checking which realm this game tab is in…':'Waiting for production data.'}</div>`}`;
     host.querySelector('.scm-go-copy').onclick=openLeftCopy;
     host.querySelectorAll('.scm-go-toggle:not(.scm-go-copy)').forEach(btn=>btn.onclick=()=>{S.collapsed=true;writeCollapsedPreference(true);renderBalance();schedulePosition();});
     if(S.leftCopyOpen){
@@ -1829,14 +1837,26 @@ let hookReady = false;
       // loader. The old path returned before try/finally, leaving loadInFlight
       // true forever and preventing later refreshes from rebuilding the card.
       S.loadInFlight=false;S.loadQueued=false;
+      // v2.5.345 the other realm's refresh is simply ignored: keep this realm's card as it is (it used to be
+      // wiped and force-collapsed every time the other realm's background work finished).
+      if(S.data&&Number(S.data.realm)===actualPageRealm)return;
       S.realm=actualPageRealm;S.data=null;S.signature='';S.loadEpoch++;
-      S.collapsed=true;writeCollapsedPreference(true);
       renderBalance();schedulePosition();
       document.getElementById('scm-contract-helper-card')?.remove();
       document.getElementById('scm-left-copy-card')?.remove();
       setTimeout(()=>load(actualPageRealm),0);
       return;
     }
+    // v2.5.345 until this tab's realm is known (the game's auth-data answer), show nothing realm-specific. Asking
+    // without a realm returned the last-synced realm's overlay (the R2 card in an R1 tab).
+    if(actualPageRealm==null){
+      S.loadInFlight=false;S.loadQueued=false;
+      if(S.data!=null||S.realm!=null){S.data=null;S.realm=null;S.signature='';}
+      if(!document.getElementById('scm-game-balance-card')||S.realmPendingShown!==true){S.realmPendingShown=true;renderBalance();}
+      schedulePosition();
+      return;
+    }
+    S.realmPendingShown=false;
     const pageRealm=overrideRealm??actualPageRealm;
     try{
       // Repaint the last valid realm-local snapshot immediately if the SPA
@@ -1859,7 +1879,6 @@ let hookReady = false;
         S.realm=Number(pageRealm);
         S.data=null;
         S.signature='';
-        S.collapsed=true;writeCollapsedPreference(true);
         renderBalance();schedulePosition();
         return;
       }
@@ -1918,8 +1937,10 @@ let hookReady = false;
     if(Number(S.realm)===n && S.data?.realm===n)return;
     // Invalidate the visible R1/R2 card immediately. Do not leave stale data
     // on screen while the target realm snapshot is being loaded.
+    // v2.5.345 collapse only on a real switch between two known realms, not when this tab first learns its realm.
+    const switchedFromOther=(S.realm===0||S.realm===1)&&Number(S.realm)!==n;
     S.realm=n; S.data=null; S.loadEpoch++; S.signature=''; S.buildingSignature=''; S.contractSignature=''; S.contractCardSignature=''; S.leftCopySignature=''; S.leftCopyOpen=false;
-    S.collapsed=true;writeCollapsedPreference(true);
+    if(switchedFromOther){S.collapsed=true;writeCollapsedPreference(true);}
     renderBalance();schedulePosition();
     document.getElementById('scm-contract-helper-card')?.remove();
     document.getElementById('scm-left-copy-card')?.remove();

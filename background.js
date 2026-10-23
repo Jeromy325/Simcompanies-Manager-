@@ -201,8 +201,10 @@ function simcoReleaseRequestSlot(){
   const next=simcoRequestWaiters.shift();
   if(next)next();
 }
-const SYNC_PAGE_API_TIMEOUT_MS=8000;
-const SYNC_PAGE_API_ATTEMPTS=2;
+// v2.5.345 the phone's game API answers took 14–70 s; 8 s × 2 made every Sync fail on that link. One attempt,
+// up to 45 s (the page hook aborts at the same limit, max 60 s); retrying a slow request only doubles the load.
+const SYNC_PAGE_API_TIMEOUT_MS=45000;
+const SYNC_PAGE_API_ATTEMPTS=1;
 const SYNC_CLICK_TIMEOUT_MS=2000;
 const SYNC_CAPTURE_FALLBACK_MS=8000;
 const VWAP_FALLBACK_FILE='vwap-fallback.json';
@@ -647,7 +649,8 @@ async function gameOverlayAssets(){
       if(!r.ok)throw new Error(`Unable to load ${file}`);
       return r.json();
     };
-    const [recipes,rates,images]=await Promise.all([load('recipes.json'),load('production_rates_normal.json'),load('resource-image-manifest.json')]);
+    const [bundledRecipes,rates,images]=await Promise.all([load('recipes.json'),load('production_rates_normal.json'),load('resource-image-manifest.json')]);
+    const recipes=await gameRecipesFromBundle(bundledRecipes);
     const byName=new Map((Array.isArray(recipes)?recipes:[]).map(r=>[String(r.name||'').trim().toLowerCase(),r]));
     const names=new Map((Array.isArray(recipes)?recipes:[]).map(r=>[String(r.id),r.name]));
     const normalizeName=v=>String(v??'').toLowerCase().replace(/[’']/g,'').replace(/[^a-z0-9]+/g,'').replace(/s$/,'');
@@ -823,6 +826,19 @@ function overlayActiveProductionEventModifier(store,product){
   }
   return Math.max(-99,Math.min(99,modifier));
 }
+// v2.5.345 base rate/level from the game's constants for the phase in the stored auth-data (temporals.economyState),
+// × abundance % for the building when the game has shown it. null when anything is missing.
+function overlayGameBaseRate(store,constants,resourceId,buildingId){
+  try{
+    const C=globalThis.SCM_TOOLS_CORE;const phase=Number(store?.authData?.temporals?.economyState);
+    if(!C?.gameBaseRate||!Number.isFinite(phase))return null;
+    const base=C.gameBaseRate(constants,resourceId,phase);if(!(base>0))return null;
+    const ab=Number(store?.endpointData?.[`/api/v2/companies/buildings/${Number(buildingId)}/abundance/`]?.data?.abundance?.[String(resourceId)]);
+    return Number.isFinite(ab)&&ab>0?base*ab/100:base;
+  }catch{return null;}
+}
+// v2.5.345 the game's speed formula: rate = base × event × 1/(1 − bonus/100). Frozen plans record it.
+const OVERLAY_SPEED_FORMULA='game-divide';
 function overlayCompanyProductionModifier(store){
   const n=Number(store?.authData?.authCompany?.productionModifier);
   return Number.isFinite(n)?Math.max(-99,Math.min(99,n)):0;
@@ -1226,7 +1242,10 @@ async function notifySettings(){const v=(await chrome.storage.local.get({[NOTIFY
 const NOTIFY_STATE_KEY='scmNotifyState';let notifyStateQueue=Promise.resolve();
 function updateNotifyState(mut){const run=notifyStateQueue.then(async()=>{const cur=(await chrome.storage.local.get({[NOTIFY_STATE_KEY]:{}}))[NOTIFY_STATE_KEY]||{};const next=await mut({...cur});if(next)await rawStorageSet({[NOTIFY_STATE_KEY]:next});return next;});notifyStateQueue=run.catch(()=>{});return run;}
 let notifyRecipesMemo=null;
-async function notifyRecipes(){if(notifyRecipesMemo)return notifyRecipesMemo;try{const list=await (await fetch(chrome.runtime.getURL('recipes.json'))).json();const byId=new Map(),names=new Map();for(const r of Array.isArray(list)?list:[]){byId.set(Number(r.id),r);names.set(Number(r.id),String(r.name||''));}notifyRecipesMemo={byId,names};}catch{notifyRecipesMemo={byId:new Map(),names:new Map()};}return notifyRecipesMemo;}
+// v2.5.345 recipe inputs/transport come from the game's constants (scmGameConstants) when present.
+async function gameRecipesFromBundle(list){try{const c=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;return globalThis.SCM_TOOLS_CORE.recipesFromGameConstants(list,c);}catch{return Array.isArray(list)?list:[];}}
+try{chrome.storage.onChanged.addListener((changes,area)=>{if(area==='local'&&changes.scmGameConstants){notifyRecipesMemo=null;gameOverlayAssetsPromise=null;}});}catch{}
+async function notifyRecipes(){if(notifyRecipesMemo)return notifyRecipesMemo;try{const list=await gameRecipesFromBundle(await (await fetch(chrome.runtime.getURL('recipes.json'))).json());const byId=new Map(),names=new Map();for(const r of Array.isArray(list)?list:[]){byId.set(Number(r.id),r);names.set(Number(r.id),String(r.name||''));}notifyRecipesMemo={byId,names};}catch{notifyRecipesMemo={byId:new Map(),names:new Map()};}return notifyRecipesMemo;}
 async function notifyRealmStore(realm){return (await chrome.storage.local.get({[`scmRealmStore:${realm}`]:null}))[`scmRealmStore:${realm}`]||{};}
 // 5 + 6: after each SimcoTools current-price update.
 async function notifyAfterPriceUpdate(realm){
@@ -1367,7 +1386,7 @@ function warehouseOverlayRefreshInBackoff(realm,maxAgeMs,now=Date.now()){
 }
 function noteWarehouseOverlayRefreshResult(realm,maxAgeMs,result,now=Date.now()){
   if(result?.ok){warehouseOverlayBackoffUntil.delete(realm);return;}
-  if(Number(maxAgeMs)===0||result?.stale)return;
+  if(Number(maxAgeMs)===0||result?.stale||result?.notReady)return;
   warehouseOverlayBackoffUntil.set(realm,now+WAREHOUSE_OVERLAY_FAILURE_BACKOFF_MS);
 }
 async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000){
@@ -1382,7 +1401,8 @@ async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000){
     return {ok:true,cached:true,rows:store.warehouseResources.length};
   }
   const companyId=Number(store.authData?.authCompany?.companyId||store.authData?.authCompany?.id);
-  if(!Number.isFinite(companyId)||companyId<=0)return {ok:false,error:'Realm company ID unavailable.'};
+  // v2.5.345 nothing to refresh yet (auth-data not captured): a skip, not a failure in the background-jobs count.
+  if(!Number.isFinite(companyId)||companyId<=0)return {ok:false,notReady:true,error:'Realm company ID unavailable.'};
   const activeKey=s.activeRealmKey;
   if(activeKey!==key)return {ok:false,stale:true,error:'Realm is not the active game session.'};
   const path=`/api/v3/resources/${companyId}/`;
@@ -1526,6 +1546,7 @@ async function ensureFrozenProductionRatesForRealmUnlocked(realm){
   // building has a plan, the plan remains valid even when the live cycle ends
   // or the busy payload temporarily disappears. A later product/quality change
   // simply overwrites the plan the next time the game exposes the new cycle.
+  let gameConstantsForRates;
   for(const b of productionBuildings){
     const busy=b?.busy;
     const product=String(busy?.resource?.name||'').trim();
@@ -1635,10 +1656,15 @@ async function ensureFrozenProductionRatesForRealmUnlocked(realm){
       }
     }
     if(!(baseRatePerLevel>0)){
-      const ref=Number(assets.ratesByName?.get(assets.normalizeName(product)));
+      // v2.5.345 the game's own base rate for the current economy phase (constants), × the building's abundance
+      // where the game shows one. The bundled normal-economy file is only the last resort (it was stale, e.g. Steak +76%).
+      if(gameConstantsForRates===undefined){try{gameConstantsForRates=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants||null;}catch{gameConstantsForRates=null;}}
+      const gameBase=overlayGameBaseRate(store,gameConstantsForRates,rid,b?.id);
+      const ref=gameBase>0?gameBase:Number(assets.ratesByName?.get(assets.normalizeName(product)));
       if(Number.isFinite(ref)&&ref>0){
         baseRatePerLevel=ref;
         observedRatePerHour=ref*level*companyFactor;
+        if(gameBase>0)source='reference rate (game constants)';
       }
     }
     if(!(baseRatePerLevel>0))continue;
@@ -1734,7 +1760,7 @@ async function buildGameOverlayData(store,realm,globalState){
   
   const frozenHours=Math.max(1,Number(frozenPlan?.hours)||overlayProductionRunHours(store));const companyModifier=overlayCompanyProductionModifier(store);const core=globalThis.SCMPlannerCore;
   const planEntries=frozenPlan?.buildingPlans&&typeof frozenPlan.buildingPlans==='object'?Object.values(frozenPlan.buildingPlans):[];const eventMap={};for(const entry of planEntries){const name=String(entry?.product||'').trim();if(name)eventMap[assets.normalizeName(name)]=overlayActiveProductionEventModifier(store,name);}
-  const currentSignature=core?.frozenPlanSignature&&planEntries.length?core.frozenPlanSignature(planEntries,frozenHours,{companyProductionModifier:companyModifier,events:eventMap}):'';
+  const currentSignature=core?.frozenPlanSignature&&planEntries.length?core.frozenPlanSignature(planEntries,frozenHours,{companyProductionModifier:companyModifier,events:eventMap,speedFormula:OVERLAY_SPEED_FORMULA}):'';
   const authoritativePlans=Object.values(store?.productionPlans||{}).filter(p=>p&&String(p.product||'').trim()&&p.mode!=='disabled');
   const authoritativeIds=new Set(authoritativePlans.map(p=>Number(p.buildingId)).filter(n=>Number.isFinite(n)&&n>0));
   const frozenIds=new Set(planEntries.map(p=>Number(p?.buildingId)).filter(n=>Number.isFinite(n)&&n>0));
@@ -1747,10 +1773,10 @@ async function buildGameOverlayData(store,realm,globalState){
   let productionRows=[],demandRows=[],activeSpecs=[],networkWasBootstrapped=false;
   if(hasUsableFrozenPlan){productionRows=frozenPlan.productionRows.map(x=>({...x}));demandRows=frozenPlan.demandRows.map(x=>({...x}));activeSpecs=frozenPlan.activeSpecs.map(x=>({...x}));}
   else{
-    const specs=[];const sourcePlans=planEntries.length?planEntries:(store?.productionPlans?Object.values(store.productionPlans):[]);
-    for(const rawEntry of sourcePlans){const entry=rawEntry||{};const b=buildings.find(x=>Number(x?.id)===Number(entry?.buildingId));const product=String(entry?.product||'').trim();if(!product)continue;const recipe=recipeByProduct.get(assets.normalizeName(product));if(!recipe)continue;const productId=Number(entry?.productId||recipe.id);if(!(productId>0))continue;const level=Math.min(20,Math.max(1,Number(entry?.plannedLevel)||overlayBuildingLevel(b)));const quality=Math.max(0,Number(entry?.quality)||0);const eventModifier=overlayActiveProductionEventModifier(store,product);const rateBase=Number(entry?.baseRatePerLevel);const perHour=rateBase>0?rateBase*level*(1+eventModifier/100)*(1+companyModifier/100):null;if(!(perHour>0))continue;specs.push({buildingId:Number(entry.buildingId),product,productId,quality,level,ratePerHour:perHour,recipe,source:'realm frozen plan'});}
+    const specs=[];const sourcePlans=planEntries.length?planEntries:(store?.productionPlans?Object.values(store.productionPlans):[]);const speedFactor=companyModifier<100?1/(1-companyModifier/100):0;const oldFormulaPlan=planEntries.length&&frozenPlan?.modifiers?.speedFormula!==OVERLAY_SPEED_FORMULA;const authoritativeBase=new Map(Object.values(store?.productionPlans||{}).filter(p=>Number(p?.baseRatePerLevel)>0).map(p=>[`${Number(p.buildingId)}|${assets.normalizeName(p.product)}`,Number(p.baseRatePerLevel)]));
+    for(const rawEntry of sourcePlans){const entry=rawEntry||{};const b=buildings.find(x=>Number(x?.id)===Number(entry?.buildingId));const product=String(entry?.product||'').trim();if(!product)continue;const recipe=recipeByProduct.get(assets.normalizeName(product));if(!recipe)continue;const productId=Number(entry?.productId||recipe.id);if(!(productId>0))continue;const level=Math.min(20,Math.max(1,Number(entry?.plannedLevel)||overlayBuildingLevel(b)));const quality=Math.max(0,Number(entry?.quality)||0);const eventModifier=overlayActiveProductionEventModifier(store,product);const rateBase=(oldFormulaPlan&&authoritativeBase.get(`${Number(entry?.buildingId)}|${assets.normalizeName(product)}`))||Number(entry?.baseRatePerLevel);const perHour=rateBase>0?rateBase*level*(1+eventModifier/100)*speedFactor:null;if(!(perHour>0))continue;specs.push({buildingId:Number(entry.buildingId),product,productId,quality,level,ratePerHour:perHour,recipe,source:'realm frozen plan'});}
     const network=core?.productionBalance?core.productionBalance(specs,recipeByProduct,frozenHours,assets.names):{hours:frozenHours,productionRows:[],demandRows:[],activeSpecs:[]};productionRows=Array.isArray(network.productionRows)?network.productionRows:[];demandRows=Array.isArray(network.demandRows)?network.demandRows:[];activeSpecs=Array.isArray(network.activeSpecs)?network.activeSpecs:[];networkWasBootstrapped=activeSpecs.length>0&&productionRows.length>0;
-    if(networkWasBootstrapped){const rebuiltEvents={};for(const x of specs)rebuiltEvents[assets.normalizeName(x.product)]=overlayActiveProductionEventModifier(store,x.product);const rebuiltPlans=Object.fromEntries(specs.map(x=>[String(x.buildingId),{buildingId:x.buildingId,product:x.product,productId:x.productId,resourceId:x.productId,quality:x.quality,plannedLevel:x.level,baseRatePerLevel:Number(x.ratePerHour)/(Math.max(1,Number(x.level)||1)*(1+overlayActiveProductionEventModifier(store,x.product)/100)*(1+companyModifier/100)),mode:'live'}]));const signature=core?.frozenPlanSignature?core.frozenPlanSignature(Object.values(rebuiltPlans),frozenHours,{companyProductionModifier:companyModifier,events:rebuiltEvents}):JSON.stringify({hours:frozenHours,plans:rebuiltPlans});try{await saveFrozenNetworkPlanSnapshot({realm:Number(realm),signature,plan:{hours:frozenHours,productionRows,demandRows,activeSpecs,buildingPlans:rebuiltPlans,plannerState:frozenPlan?.plannerState||null,modifiers:{companyProductionModifier:companyModifier,events:rebuiltEvents},resources:Array.isArray(network.resources)?network.resources:[],deficits:Array.isArray(network.deficits)?network.deficits:[],surpluses:Array.isArray(network.surpluses)?network.surpluses:[]}});}catch{}}
+    if(networkWasBootstrapped){const rebuiltEvents={};for(const x of specs)rebuiltEvents[assets.normalizeName(x.product)]=overlayActiveProductionEventModifier(store,x.product);const rebuiltPlans=Object.fromEntries(specs.map(x=>[String(x.buildingId),{buildingId:x.buildingId,product:x.product,productId:x.productId,resourceId:x.productId,quality:x.quality,plannedLevel:x.level,baseRatePerLevel:Number(x.ratePerHour)/(Math.max(1,Number(x.level)||1)*(1+overlayActiveProductionEventModifier(store,x.product)/100)*speedFactor),mode:'live'}]));const signature=core?.frozenPlanSignature?core.frozenPlanSignature(Object.values(rebuiltPlans),frozenHours,{companyProductionModifier:companyModifier,events:rebuiltEvents,speedFormula:OVERLAY_SPEED_FORMULA}):JSON.stringify({hours:frozenHours,plans:rebuiltPlans});try{await saveFrozenNetworkPlanSnapshot({realm:Number(realm),signature,plan:{hours:frozenHours,productionRows,demandRows,activeSpecs,buildingPlans:rebuiltPlans,plannerState:frozenPlan?.plannerState||null,modifiers:{companyProductionModifier:companyModifier,events:rebuiltEvents,speedFormula:OVERLAY_SPEED_FORMULA},resources:Array.isArray(network.resources)?network.resources:[],deficits:Array.isArray(network.deficits)?network.deficits:[],surpluses:Array.isArray(network.surpluses)?network.surpluses:[]}});}catch{}}
   }
   // The overlay is driven only by Manager-saved contracts. Never fall back to
   // `store.contracts`: that field contains captured live API contracts and must
@@ -2429,7 +2455,7 @@ async function saveResourceCatalog(catalog, receivedAt){
   const s=await state();
   const realm=realmNumberFromKey(s.activeRealmKey||identityFromAuth(s.authData)); if(realm==null)return;
   return withRealmWriteLock(realm,async()=>{
-    const latest=await state(); const key=realmKeyFromRealm(realm);
+    const latest=await state(realm); const key=realmKeyFromRealm(realm);
     const stores={...(latest.realmStores||{})}; const store={...(stores[key]||{})};
     const old=store.resourceCatalog&&typeof store.resourceCatalog==='object'?store.resourceCatalog:{};
     const merged={...old,...catalog,receivedAt:receivedAt||new Date().toISOString()};
@@ -2931,7 +2957,14 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
     await appendRealmQuarantine(validRealmNumber(before.selectedRealm??before.activeRealmKey?.replace(/^realm:/,'')),'apiData',{url,method:String(method||'GET').toUpperCase(),status:Number(status)||0,captureRealm:null,expectedRealm:validRealmNumber(before.selectedRealm),reason:'Accounting response missing capture realm; quarantined to prevent cross-realm contamination'});
     return;
   }
-  const targetRealm=captureSession?.realm??responseRealm??capturedRealm??companyRealm??switchHint??realmNumberFromKey(before.activeRealmKey||identityFromAuth(before.authData));
+  // v2.5.345 a game response with no realm tag and nothing in it that proves its realm is never filed under the
+  // active (last-synced) realm: that put R1 buildings/warehouse into the R2 store. page-hook now holds such
+  // responses until the game's auth-data names the realm, so this only catches stragglers.
+  if(!captureSession&&capturedRealm==null&&responseRealm==null&&companyRealm==null&&buildingRealm==null&&explicitUrlRealm==null&&switchHint==null){
+    await appendRealmQuarantine(null,'apiData',{url,method:String(method||'GET').toUpperCase(),status:Number(status)||0,captureRealm:null,expectedRealm:null,reason:'No capture realm and nothing in the response proves its realm; not filed under the active realm'});
+    return;
+  }
+  const targetRealm=captureSession?.realm??responseRealm??capturedRealm??companyRealm??buildingRealm??explicitUrlRealm??switchHint??realmNumberFromKey(before.activeRealmKey||identityFromAuth(before.authData));
   const targetKey=targetRealm!=null?realmKeyFromRealm(targetRealm):null;
   const endpointResult=await saveEndpointUnlocked(url,method,targetRealm,false,targetRealm!=null?await state(targetRealm):before);
 
@@ -3205,7 +3238,8 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
   const customTimeout=Number(options?.timeoutMs);
   const hasCustomTimeout=Number.isFinite(customTimeout)&&customTimeout>0;
   const timeoutMs=hasCustomTimeout?customTimeout:SYNC_PAGE_API_TIMEOUT_MS;
-  const raceMs=hasCustomTimeout?customTimeout+PAGE_GET_BACKGROUND_GRACE_MS:timeoutMs;
+  // v2.5.345 the page is always told the timeout (it used to fall back to its own 8 s for default callers).
+  const raceMs=timeoutMs+PAGE_GET_BACKGROUND_GRACE_MS;
   const customAttempts=Number(options?.attempts);
   const attempts=Number.isInteger(customAttempts)&&customAttempts>0?customAttempts:SYNC_PAGE_API_ATTEMPTS;
   const traceDiag=(type,extra={})=>{
@@ -3227,10 +3261,15 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
       }
       traceDiag('pageget-send',{attempt,tabId:tab.id});
       const r=await Promise.race([
-        chrome.tabs.sendMessage(tab.id,hasCustomTimeout?{type:'PAGE_API_GET',path,realm:targetRealm,timeoutMs}:{type:'PAGE_API_GET',path,realm:targetRealm}),
+        chrome.tabs.sendMessage(tab.id,{type:'PAGE_API_GET',path,realm:targetRealm,timeoutMs}),
         new Promise((_,reject)=>setTimeout(()=>reject(new Error('Sim Companies page bridge timed out.')),raceMs))
       ]);
       traceDiag('pageget-response',{attempt,tabId:tab.id,ok:!!r?.ok,status:r?.status||0,error:r?.error||null});
+      // v2.5.345 a /me/ answer from a tab that is in the other realm belongs to that realm: never hand it to a
+      // caller that will file it under targetRealm. (auth-data is exempt: Sync checks it and explains the mismatch.)
+      const tr=validRealmNumber(targetRealm),rr=validRealmNumber(r?.captureRealm);
+      if(r?.ok&&tr!=null&&rr==null&&/\/me\//.test(String(path))&&!/\/api\/v3\/companies\/auth-data\//.test(String(path))){traceDiag('pageget-realm-unknown',{attempt,tabId:tab.id,targetRealm:tr});return {ok:false,status:0,error:'The game tab has not shown which realm it is in yet.',realmUnknown:true};}
+      if(r?.ok&&tr!=null&&rr!=null&&rr!==tr&&!/\/api\/v3\/companies\/auth-data\//.test(String(path))){traceDiag('pageget-realm-mismatch',{attempt,tabId:tab.id,targetRealm:tr,tabRealm:rr});return {ok:false,status:0,error:`The game tab is in ${realmDisplayNumber(rr)||'the other realm'}, not ${realmDisplayNumber(tr)||'the requested realm'}.`,captureRealm:rr,realmMismatch:true};}
       return r||{ok:false,status:0,error:'No response from Sim Companies page.'};
     }catch(e){
       traceDiag('pageget-error',{attempt,tabId:tab.id,error:e?.message||String(e)});
@@ -3502,7 +3541,7 @@ async function seedBundledVwapFallback(reason='startup'){
   const fallback=await loadBundledVwapFallback();
   if(!fallback.ok||!fallback.rows.length) return {ok:false,error:fallback.error||'Bundled VWAP fallback unavailable.'};
   return withRealmWriteLock(0,async()=>{
-    const latest=await state(); const key=realmKeyFromRealm(0);
+    const latest=await state(0); const key=realmKeyFromRealm(0);
     const stores={...(latest.realmStores||{})}; const store={...(stores[key]||{})};
     const existing=store.vwapData;
     if(Array.isArray(existing?.rows)&&existing.rows.length&&Number(existing?.sourceRealm)===0) return {ok:true,existing:true,rows:existing.rows.length};
@@ -4221,7 +4260,9 @@ async function fetchAndCacheResourceImage(id,{forceValidate=false}={}){
     const writeRealm=realmNumberFromKey(key);
     if(writeRealm!=null){
       await withRealmWriteLock(writeRealm,async()=>{
-        const latest=await state(); const stores={...(latest.realmStores||{})}; const latestStore={...(stores[key]||{})};
+        // v2.5.345 read THIS realm's store: state() holds only the active realm, so after a realm switch
+        // {...undefined} + image fields replaced the whole other-realm store (R2 wiped to {}; images are routed out).
+        const latest=await state(writeRealm); const stores={...(latest.realmStores||{})}; const latestStore={...(stores[key]||{})};
         const latestCache={...(latestStore.resourceImageCache||{})}; const latestMeta={...(latestStore.resourceImageMeta||{})};
         const latestPrevious=latestMeta[sid]||{};
         changedFinal=Boolean(latestCache[sid]&&latestPrevious.sha256&&latestPrevious.sha256!==hash);
@@ -4254,7 +4295,7 @@ async function syncAllResourceImages({forceValidate=false}={}){
   await Promise.all(workers);
   const s=await state(); const key=s.activeRealmKey||identityFromAuth(s.authData); const realm=realmNumberFromKey(key); if(realm!=null){
     await withRealmWriteLock(realm,async()=>{
-      const latest=await state(); const stores={...(latest.realmStores||{})}; const store={...(stores[key]||{})};
+      const latest=await state(realm); const stores={...(latest.realmStores||{})}; const store={...(stores[key]||{})};
       const status={lastRunAt:new Date().toISOString(),forceValidate,resourceCount:ids.length,verified,updated,failed};
       store.resourceImageCacheStatus=status; stores[key]=store;
       const patch={realmStores:stores}; if(key===latest.activeRealmKey) patch.resourceImageCacheStatus=status;
@@ -4327,6 +4368,24 @@ async function runCriticalDataGuard(reason='scheduled'){
   return {ok:true,reason,report};
 }
 
+const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX];
+// v2.5.345 Chrome drops an extension's alarms when it is updated (and may on a browser restart), so the alarms that
+// carry your state are re-created from storage: building reminders (buildingAlarms) and batch-finished alerts
+// (from the stored buildings). Storage reads + alarm calls only, no network, no lock.
+async function restorePersistedAlarms(reason='restore'){
+  const out={reason,buildingReminders:0,production:[]};
+  for(const n of [0,1]){
+    try{
+      const st=(await chrome.storage.local.get({[`scmRealmStore:${n}`]:null}))[`scmRealmStore:${n}`]||{};
+      for(const a of Object.values(st.buildingAlarms||{})){
+        const bid=Number(a?.buildingId),when=Number(a?.readyAt);if(!(bid>0)||!(when>Date.now()))continue;
+        const name=`scm-building-${n}-${bid}`;if(!(await chrome.alarms.get(name))){await chrome.alarms.create(name,{when});out.buildingReminders++;}
+      }
+      if(Array.isArray(st.buildings)&&st.buildings.length)out.production.push(await scheduleProductionFinishAlarms(n,st.buildings));
+    }catch(e){out.error=e?.message||String(e);}
+  }
+  return out;
+}
 chrome.runtime.onInstalled.addListener(async()=>{
   const current=await chrome.storage.local.get(null);
   // Preserve existing physical realm containers and global settings, but do
@@ -4340,7 +4399,10 @@ chrome.runtime.onInstalled.addListener(async()=>{
   globalPatch.activeRealmKey=current.activeRealmKey??null;
   await storageSet(globalPatch);
   await ensureRealmStorageMigration();
-  await chrome.alarms.clearAll();
+  // v2.5.345 an update used to clear every alarm, dropping the building reminders you set, batch-finished
+  // alerts, follow-ups, the daily summary and the constants refresh. Only the scheduler alarms re-created below
+  // (and retired legacy ones) are cleared now.
+  for(const a of await chrome.alarms.getAll()){if(!INSTALL_KEEP_ALARM_PREFIXES.some(p=>String(a?.name||'').startsWith(p)))await chrome.alarms.clear(a.name);}
   await ensureLiveMarketRefreshAlarm('installed');
   await chrome.alarms.create('scm-vwap-daily',{periodInMinutes:720});
   await chrome.alarms.create('scm-production-events-daily',{periodInMinutes:720});
@@ -4348,6 +4410,7 @@ chrome.runtime.onInstalled.addListener(async()=>{
   await ensureCriticalDataGuard('installed');
   await ensureVwapWatchAlarm('installed');
   await chrome.alarms.create('scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080});
+  await restorePersistedAlarms('installed').catch(()=>{});
   syncAllResourceImages({forceValidate:false}).catch(()=>{});
   const installRealmState=await state();
   const installRealm=validRealmNumber(installRealmState.activeRealmKey?.replace(/^realm:/,'')??installRealmState.selectedRealm??installRealmState.authData?.authCompany?.realmId);
@@ -4356,6 +4419,7 @@ chrome.runtime.onInstalled.addListener(async()=>{
 });
 chrome.runtime.onStartup.addListener(async()=>{
   await ensureLiveMarketRefreshAlarm('service-worker-startup');
+  await restorePersistedAlarms('browser-startup').catch(()=>{});
   await recoverInterruptedSyncJobs('service-worker-startup');
   await ensureVwapWatchAlarm('service-worker-startup');
   await ensureCriticalDataGuard('startup');
@@ -4390,7 +4454,7 @@ async function scanOpenGameTabsForProductionEvents(reason='scheduled') {
   if(realm!=null){
     const key=realmKeyFromRealm(realm);
     await withRealmWriteLock(realm,async()=>{
-      const latest=await state();
+      const latest=await state(realm);
       const stores={...(latest.realmStores||{})};
       const store={...(stores[key]||{})};
       const existing=store.productionEventMonitor||{};
@@ -5130,7 +5194,7 @@ async function syncNow(requestedRealm=null){
     // They run from a delayed post-sync alarm after game API captures and durable
     // storage verification have completed, so SimcoTools latency cannot fail Sync.
 
-    let finalState=await state();
+    let finalState=await state(selected);
     const key=realmKeyFromRealm(selected);
     const store=finalState.realmStores?.[key]||{};
     const entries=Object.values(store.endpointData||{});
@@ -5229,7 +5293,7 @@ async function syncNow(requestedRealm=null){
     session.phase='finalizing';
     await syncStorageWrite('Sync finalizing job persistence',()=>setFullSyncJob(selected,{status:'finalizing',step:targets.length,total:targets.length,currentPage:null}));
     finishedAt=new Date().toISOString();
-    const diagnosticState=await state();
+    const diagnosticState=await state(selected);
     const diagnosticStore=diagnosticState.realmStores?.[key]||{};
     await withSyncTimeout(saveFullSyncDiagnostic({
       realm:selected,
@@ -5247,7 +5311,7 @@ async function syncNow(requestedRealm=null){
     },selected),5000,'Final Sync diagnostic persistence');
 
     await withSyncTimeout(enqueueApiStorage(async()=>{
-      const finalPersist=await state();
+      const finalPersist=await state(selected); // v2.5.345 the synced realm's own store, even if the tab switched realms meanwhile
       const finalStores={...(finalPersist.realmStores||{})};
       finalStores[key]={...(finalStores[key]||{}),syncStatus:finalStatus,syncError:finalSyncError,lastSync:finishedAt,fullSyncJob:null};
       await storageSet({activeRealmKey:key,selectedRealm:selected,syncStatus:finalStatus,syncError:finalSyncError,lastSync:finishedAt,fullSyncJob:null,realmStores:finalStores});
@@ -5269,10 +5333,10 @@ async function syncNow(requestedRealm=null){
       // the root FROM the committed realm store before handing the capture lock
       // to the optional post-sync UI refresh. This closes the handoff race where
       // another Sync could observe a still-finalizing root while the tail starts.
-      const committedBeforeHydrate=await state();
+      const committedBeforeHydrate=await state(selected);
       const committedStoreBeforeHydrate=committedBeforeHydrate.realmStores?.[key]||{};
       await activateRealmByRealm(selected, committedStoreBeforeHydrate.authData?.authCompany ? committedStoreBeforeHydrate.authData : null);
-      const committed=await state();
+      const committed=await state(selected);
       const committedStore=committed.realmStores?.[key]||{};
       trace('realm-store-commit',{realm:selected,endpointCount:Object.keys(committedStore.endpointData||{}).length,warehouseRows:Array.isArray(committedStore.warehouseResources)?committedStore.warehouseResources.length:0,fullSyncStatus:committedStore.syncStatus||null});
       trace('sync-complete',{ok:true,successful,failed,total,elapsedMs:Date.now()-startedAt});
@@ -5351,7 +5415,7 @@ async function syncNow(requestedRealm=null){
       const status=`Sync failed · ${realmDisplayNumber(sel)||'selected realm'}`;
       await withSyncTimeout(setRealmLoadStatus(sel,status,error),5000,'Sync failure status persistence').catch(()=>{});
       try{
-        const failedState=await state();
+        const failedState=await state(sel);
         const failedStore=failedState.realmStores?.[realmKeyFromRealm(sel)]||{};
         const finishedAt=new Date().toISOString();
         await withSyncTimeout(saveFullSyncDiagnostic({realm:sel,mode:'api-first-sync-with-ui-fallback',status,syncError:error,walkResults:[],endpointCount:Object.keys(failedStore.endpointData||{}).length,warehouseRows:Array.isArray(failedStore.warehouseResources)?failedStore.warehouseResources.length:0,startedAt,finishedAt,error,syncTrace:typeof syncTrace!=='undefined'?syncTrace:[]},sel),5000,'Sync failure diagnostic persistence').catch(()=>{});
@@ -5619,7 +5683,7 @@ async function refreshRealmWarehouseForOverlay(realm,maxAgeMs=15000){
   const run=refreshRealmWarehouseForOverlayUnlocked(n,maxAgeMs).then(async result=>{
     noteWarehouseOverlayRefreshResult(n,maxAgeMs,result);
     const finishedAt=new Date().toISOString();
-    await recordBackgroundJobEvent(n,{job:'warehouse-refresh',trigger:maxAgeMs===0?'stock-mutation-or-forced':'overlay-refresh',startedAt,finishedAt,durationMs:Date.now()-startedMs,outcome:result?.ok?(result?.cached?'skipped':'success'):(result?.stale||result?.incomplete?'partial':'failure'),requested:1,fetched:result?.refreshed?1:0,refreshed:result?.refreshed?1:0,checked:1,cached:result?.cached?1:0,error:result?.error||null,details:{rows:result?.rows??null,requestDurationMs:result?.requestDurationMs??null,storageCommitDurationMs:result?.storageCommitDurationMs??null,totalDurationMs:result?.totalDurationMs??null}}).catch(()=>{});
+    await recordBackgroundJobEvent(n,{job:'warehouse-refresh',trigger:maxAgeMs===0?'stock-mutation-or-forced':'overlay-refresh',startedAt,finishedAt,durationMs:Date.now()-startedMs,outcome:result?.ok?(result?.cached?'skipped':'success'):(result?.notReady?'skipped':(result?.stale||result?.incomplete?'partial':'failure')),requested:1,fetched:result?.refreshed?1:0,refreshed:result?.refreshed?1:0,checked:1,cached:result?.cached?1:0,error:result?.error||null,details:{rows:result?.rows??null,requestDurationMs:result?.requestDurationMs??null,storageCommitDurationMs:result?.storageCommitDurationMs??null,totalDurationMs:result?.totalDurationMs??null}}).catch(()=>{});
     return {...result,jobStartedAt:startedAt,jobFinishedAt:finishedAt,jobDurationMs:Date.now()-startedMs};
   }).finally(()=>{if(warehouseOverlayRefreshRuns.get(n)===run)warehouseOverlayRefreshRuns.delete(n);});
   warehouseOverlayRefreshRuns.set(n,run);return run;
@@ -6423,7 +6487,9 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='CAPTURE_PRODUCTION_RATE_SNAPSHOT'){saveProductionRateSnapshot(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_TEST_DAILY_SUMMARY'){fireDailySummary().then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_TEST_NOTIFICATION'){scmNotify(`test-${Date.now()}`,'Sim Companies Manager','Test notification — if you can read this, alerts work on this phone.').then(send);return true;}
-  if(m?.type==='SCM_NOTIFY_SETTINGS'){(async()=>{try{if(m.set&&typeof m.set==='object'){const cur=await notifySettings();await rawStorageSet({[NOTIFY_SETTINGS_KEY]:{...cur,...m.set}});await scheduleDailySummary();for(const n of [0,1]){const st=(await chrome.storage.local.get({[`scmRealmStore:${n}`]:null}))[`scmRealmStore:${n}`];if(st)await scheduleProductionFinishAlarms(n,st.buildings);}}const alarms=(await chrome.alarms.getAll()).filter(x=>String(x.name).startsWith('scm-prodfin:')).map(x=>({name:x.name,when:x.scheduledTime}));const daily=await chrome.alarms.get('scm-daily-summary');send({ok:true,settings:await notifySettings(),available:!!chrome.notifications?.create,alarms,dailyAt:daily?.scheduledTime||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;}
+  if(m?.type==='SCM_NOTIFY_SETTINGS'){(async()=>{try{if(m.set&&typeof m.set==='object'){const cur=await notifySettings();await rawStorageSet({[NOTIFY_SETTINGS_KEY]:{...cur,...m.set}});await scheduleDailySummary();for(const n of [0,1]){const st=(await chrome.storage.local.get({[`scmRealmStore:${n}`]:null}))[`scmRealmStore:${n}`];if(st)await scheduleProductionFinishAlarms(n,st.buildings);}}const prodfin=(await chrome.alarms.getAll()).filter(x=>String(x.name).startsWith('scm-prodfin:'));const nameStores={};for(const a of prodfin){const r=String(a.name).split(':')[1];if(!(r in nameStores))nameStores[r]=(await chrome.storage.local.get({[`scmRealmStore:${r}`]:null}))[`scmRealmStore:${r}`]||{};}
+// v2.5.345 building names for the Alerts "Next" line (the dashboard rendered it before its own state had loaded).
+const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(Array.isArray(nameStores[r]?.buildings)?nameStores[r].buildings:[]).find(y=>String(y?.id)===bid);return {name:x.name,when:x.scheduledTime,buildingName:b?.name?String(b.name):null};});const daily=await chrome.alarms.get('scm-daily-summary');send({ok:true,settings:await notifySettings(),available:!!chrome.notifications?.create,alarms,dailyAt:daily?.scheduledTime||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;}
   if(m?.type==='FETCH_EXCHANGE_ORDER_BOOK'){fetchExchangeOrderBookForRealm(m.realm,m.resourceId).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='FETCH_BUILDING_HISTORY'){fetchBuildingHistoryForRealm(m.realm,m.buildingId).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SAVE_PRODUCTION_PLANNER_STATE'){
@@ -6481,7 +6547,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     if(m.resource&&m.dataUrl){
       const s=await state(); const realm=realmNumberFromKey(s.activeRealmKey||identityFromAuth(s.authData));
       if(realm!=null) await withRealmWriteLock(realm,async()=>{
-        const latest=await state(); const key=realmKeyFromRealm(realm); const stores={...(latest.realmStores||{})}; const store={...(stores[key]||{})};
+        const latest=await state(realm); const key=realmKeyFromRealm(realm); const stores={...(latest.realmStores||{})}; const store={...(stores[key]||{})};
         const map={...(store.resourceImageCache||{})}; map[String(Number(m.resource))]=m.dataUrl; store.resourceImageCache=map; stores[key]=store;
         const patch={realmStores:stores}; if(key===latest.activeRealmKey) patch.resourceImageCache=map; await storageSet(patch);
       });

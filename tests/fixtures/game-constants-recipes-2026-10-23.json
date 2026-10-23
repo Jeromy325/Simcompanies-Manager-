@@ -1,0 +1,440 @@
+{
+ "note": "Real /api/v2/constants/core|buildings|resources/ responses fetched 2026-10-23 (public, no login), trimmed to the ids used by v345-regression.",
+ "core": {
+  "AVERAGE_SALARY": 345,
+  "SALARY_MID": {
+   "0": 655,
+   "1": 700,
+   "2": 745
+  }
+ },
+ "buildings": {
+  "1": {
+   "dbLetter": "1",
+   "sincePhase": 6,
+   "category": "production",
+   "costUnits": 27,
+   "buildDuration": 21600,
+   "salaryModifier": 1.3
+  },
+  "e": {
+   "dbLetter": "e",
+   "sincePhase": 0,
+   "category": "production",
+   "costUnits": 6,
+   "buildDuration": 14400,
+   "salaryModifier": 1.2
+  },
+  "k": {
+   "dbLetter": "k",
+   "sincePhase": 2,
+   "category": "production",
+   "costUnits": 25,
+   "buildDuration": 21600,
+   "salaryModifier": 1.1
+  },
+  "p": {
+   "dbLetter": "p",
+   "sincePhase": 1,
+   "category": "research",
+   "costUnits": 30,
+   "buildDuration": 18000,
+   "salaryModifier": 1.3
+  },
+  "v": {
+   "dbLetter": "v",
+   "sincePhase": 1,
+   "frontImages": [
+    {
+     "level": 1,
+     "image": "images/buildings/production/forrest_nursery_tier01_front.png"
+    },
+    {
+     "level": 2,
+     "image": "images/buildings/production/forrest_nursery_tier02_front.png"
+    },
+    {
+     "level": 3,
+     "image": "images/buildings/production/forrest_nursery_tier03_front.png"
+    },
+    {
+     "level": 6,
+     "image": "images/buildings/production/forrest_nursery_tier04_front.png"
+    }
+   ],
+   "category": "production",
+   "costUnits": 5,
+   "buildDuration": 7200,
+   "salaryModifier": 0.23
+  },
+  "P": {
+   "dbLetter": "P",
+   "sincePhase": 0,
+   "category": "production",
+   "costUnits": 2,
+   "buildDuration": 3600,
+   "salaryModifier": 0.3
+  },
+  "E": {
+   "dbLetter": "E",
+   "sincePhase": 0,
+   "category": "production",
+   "costUnits": 15,
+   "buildDuration": 10800,
+   "salaryModifier": 1.2
+  },
+  "Y": {
+   "dbLetter": "Y",
+   "sincePhase": 3,
+   "category": "production",
+   "costUnits": 14,
+   "buildDuration": 10800,
+   "salaryModifier": 1.2
+  },
+  "D": {
+   "dbLetter": "D",
+   "sincePhase": 6,
+   "category": "production",
+   "costUnits": 30,
+   "buildDuration": 25200,
+   "salaryModifier": 1.8
+  }
+ },
+ "resources": {
+  "1": {
+   "dbLetter": 1,
+   "sincePhase": 0,
+   "producedPerHourRaw": 6000,
+   "producedAt": "E",
+   "producedFrom": {},
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": false,
+   "consumption": 0,
+   "image": "images/resources/power.png",
+   "imageNew": "images/resource/energy/power.png",
+   "transportation": 0,
+   "unitsSoldAnHour": 0,
+   "productionSeason": null,
+   "retailSeason": null,
+   "decay": 0
+  },
+  "2": {
+   "dbLetter": 2,
+   "sincePhase": 0,
+   "producedPerHourRaw": 3300,
+   "producedAt": "W",
+   "producedFrom": {
+    "1": 0.2
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": false,
+   "consumption": 0,
+   "image": "images/resources/water.png",
+   "imageNew": null,
+   "transportation": 0,
+   "unitsSoldAnHour": 0,
+   "productionSeason": null,
+   "retailSeason": null,
+   "decay": 0
+  },
+  "7": {
+   "dbLetter": 7,
+   "sincePhase": 0,
+   "producedPerHourRaw": 60,
+   "producedAt": "e",
+   "producedFrom": {
+    "115": 0.125
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": true,
+   "consumption": 1.0371148135420547,
+   "image": "images/resources/steak.png",
+   "imageNew": null,
+   "transportation": 1,
+   "unitsSoldAnHour": 35,
+   "productionSeason": null,
+   "retailSeason": null,
+   "decay": 0
+  },
+  "8": {
+   "dbLetter": 8,
+   "sincePhase": 0,
+   "producedPerHourRaw": 180,
+   "producedAt": "e",
+   "producedFrom": {
+    "116": 0.0625
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": true,
+   "consumption": 4.434424375876213,
+   "image": "images/resources/sausages.png",
+   "imageNew": null,
+   "transportation": 0.1,
+   "unitsSoldAnHour": 110,
+   "productionSeason": null,
+   "retailSeason": null,
+   "decay": 0
+  },
+  "12": {
+   "dbLetter": 12,
+   "sincePhase": 2,
+   "producedPerHourRaw": 310,
+   "producedAt": "R",
+   "producedFrom": {
+    "1": 15,
+    "10": 0.75,
+    "73": 0.25
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": true,
+   "consumption": 19.544842047471025,
+   "image": "images/resources/diesel.png",
+   "imageNew": "images/resource/energy/diesel.png",
+   "transportation": 1,
+   "unitsSoldAnHour": 105,
+   "productionSeason": null,
+   "retailSeason": null,
+   "decay": 0
+  },
+  "13": {
+   "dbLetter": 13,
+   "sincePhase": 0,
+   "producedPerHourRaw": 6000,
+   "producedAt": "S",
+   "producedFrom": {
+    "1": 0.01,
+    "12": 0.005
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": false,
+   "consumption": 0,
+   "image": "images/resources/transport.png",
+   "imageNew": null,
+   "transportation": 0,
+   "unitsSoldAnHour": 0,
+   "productionSeason": null,
+   "retailSeason": null,
+   "decay": 0
+  },
+  "29": {
+   "dbLetter": 29,
+   "sincePhase": 1,
+   "producedPerHourRaw": 12,
+   "producedAt": "p",
+   "producedFrom": {},
+   "isExchangeTradable": true,
+   "isResearch": true,
+   "hasEconomyModel": false,
+   "consumption": 0,
+   "image": "images/resources/plant-research.png",
+   "imageNew": null,
+   "transportation": 0,
+   "unitsSoldAnHour": 0,
+   "productionSeason": null,
+   "retailSeason": null,
+   "improvesQualityOf": [
+    3,
+    4,
+    5,
+    6,
+    40,
+    66,
+    72,
+    106,
+    118,
+    136,
+    120,
+    139,
+    146,
+    150
+   ],
+   "decay": 0
+  },
+  "43": {
+   "dbLetter": 43,
+   "sincePhase": 3,
+   "producedPerHourRaw": 450,
+   "producedAt": "Y",
+   "producedFrom": {
+    "1": 5,
+    "17": 0.1,
+    "42": 1
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": false,
+   "consumption": 0,
+   "image": "images/resources/steel.png",
+   "imageNew": null,
+   "transportation": 1,
+   "unitsSoldAnHour": 0,
+   "productionSeason": null,
+   "retailSeason": null,
+   "decay": 0
+  },
+  "51": {
+   "dbLetter": 51,
+   "sincePhase": 6,
+   "producedPerHourRaw": 60,
+   "producedAt": "1",
+   "producedFrom": {
+    "18": 30,
+    "43": 5,
+    "45": 5
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": false,
+   "consumption": 0,
+   "image": "images/resources/car-body.png",
+   "imageNew": "images/resource/automotive/car-body.png",
+   "transportation": 2,
+   "unitsSoldAnHour": 0,
+   "productionSeason": null,
+   "retailSeason": null,
+   "decay": 0
+  },
+  "52": {
+   "dbLetter": 52,
+   "sincePhase": 6,
+   "producedPerHourRaw": 20,
+   "producedAt": "D",
+   "producedFrom": {
+    "17": 5,
+    "21": 5,
+    "43": 6
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": false,
+   "consumption": 0,
+   "image": "images/resources/combustion-engine.png",
+   "imageNew": "images/resource/automotive/combustion-engine.png",
+   "transportation": 2,
+   "unitsSoldAnHour": 0,
+   "productionSeason": null,
+   "retailSeason": null,
+   "decay": 0
+  },
+  "66": {
+   "dbLetter": 66,
+   "sincePhase": 0,
+   "producedPerHourRaw": 1100,
+   "producedAt": "P",
+   "producedFrom": {
+    "2": 0.1
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": false,
+   "consumption": 0,
+   "image": "images/resources/seeds.png",
+   "imageNew": "images/resource/agriculture/seeds.png",
+   "transportation": 0.1,
+   "unitsSoldAnHour": 0,
+   "productionSeason": null,
+   "retailSeason": null,
+   "decay": 0
+  },
+  "112": {
+   "dbLetter": 112,
+   "sincePhase": 4,
+   "producedPerHourRaw": 14,
+   "producedAt": "1",
+   "producedFrom": {
+    "43": 4,
+    "51": 1,
+    "52": 2
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": false,
+   "consumption": 0,
+   "image": "images/resources/bulldozer.png",
+   "imageNew": "images/resource/automotive/bulldozer.png",
+   "transportation": 5,
+   "unitsSoldAnHour": 0,
+   "productionSeason": null,
+   "retailSeason": null,
+   "decay": 0
+  },
+  "120": {
+   "dbLetter": 120,
+   "sincePhase": 0,
+   "producedPerHourRaw": 350,
+   "producedAt": "P",
+   "producedFrom": {
+    "2": 2,
+    "66": 5
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": false,
+   "consumption": 0,
+   "image": "images/resources/vegetables.png",
+   "imageNew": "images/resource/agriculture/vegetables.png",
+   "transportation": 0.2,
+   "unitsSoldAnHour": 0,
+   "productionSeason": null,
+   "retailSeason": null,
+   "decay": 0
+  },
+  "150": {
+   "dbLetter": 150,
+   "sincePhase": 1,
+   "producedPerHourRaw": 11.7672277,
+   "producedAt": "v",
+   "producedFrom": {
+    "2": 12
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": true,
+   "consumption": 0.2237218601236336,
+   "image": "images/resources/tree.png",
+   "imageNew": null,
+   "transportation": 1,
+   "unitsSoldAnHour": 10,
+   "productionSeason": null,
+   "retailSeason": "Xmas",
+   "productionMechanic": {
+    "type": "accumulator",
+    "accumulatorParameters": {
+     "baseValue": 10,
+     "max": 81910,
+     "amountPerLevel": 1,
+     "bonusPerQuality": 4
+    }
+   },
+   "decay": 0
+  },
+  "155": {
+   "dbLetter": 155,
+   "sincePhase": 8,
+   "producedPerHourRaw": 25,
+   "producedAt": "k",
+   "producedFrom": {
+    "134": 0.5,
+    "135": 0.75,
+    "140": 0.1
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": true,
+   "consumption": 1.0433208761863204,
+   "image": "images/resources/cream-egg.png",
+   "imageNew": null,
+   "transportation": 1,
+   "unitsSoldAnHour": 70,
+   "productionSeason": null,
+   "retailSeason": "Easter",
+   "decay": 0
+  }
+ }
+}

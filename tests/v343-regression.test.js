@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const C = require('../tools-core.js');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.344');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.345');
 const fx = JSON.parse(read('tests/fixtures/game-constants-2026-10-23.json'));
 const c = { core: fx.core, buildings: fx.buildings, resources: fx.resources };
 const ab = fx.abundance.abundance['14'];

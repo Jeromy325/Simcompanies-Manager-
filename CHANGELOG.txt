@@ -1,3 +1,29 @@
+2.5.345 — 2026-10-23 — Audit fixes: realm mix-up, slow Sync, overlay demand, game recipes
+- R2 overlay in R1 / data in the wrong realm: the game loads auth-data, buildings and warehouse in parallel and
+  the realm isn't in the URL. Responses that arrived before auth-data were filed under the last-synced realm (R1
+  Farm + warehouse written into the R2 store; the R1 tab showed "R2 · Stock After…"). Now the page holds them until
+  auth-data names the realm; the overlay and VWAP badges show nothing realm-specific until then ("Checking which
+  realm…"); an untagged response is never filed under the active realm; a /me/ answer from a tab in the other realm
+  is refused. The other realm's background refresh no longer collapses your card.
+- Found while testing that: background writers (resource-image sync, image results, resource catalog, production
+  monitor, R1 VWAP seed, final Sync commit) read only the active realm and then rewrote the other realm's store —
+  a realm switch during the image sync wiped the R2 store to {} (3 of 3 runs). They now read their own realm.
+- Sync on a slow connection: one attempt, up to 45 s per game request (was 8 s × 2; your phone saw 14–70 s). With
+  12 s answers Sync now completes (64 s) instead of failing after 17 s.
+- Game overlay demand used × (1 + speed bonus) instead of the game's ÷ (1 − bonus): Steel 2,314 → 2,329 per 24 h,
+  now equal to the Production tab. Old frozen plans are rebuilt.
+- Recipes and building outputs follow the game's constants (/constants/resources producedFrom, transportation,
+  producedAt): Transport inputs 0.01 Power + 0.005 Diesel (was 0.0105/0.0053), Vegetables transport 0.2, Tree needs
+  Water ×12; research labs and Cream egg now appear in Production. Bundled recipes.json corrected too.
+- Fallback production rates (game overlay, buildings without history) use the game's constants for the current
+  economy phase and abundance; bundled Steak/Sausages corrected (were 76% high); "Dresses" → "Dress".
+- Construction materials use the game's formula: RC 4, Bricks 55, Planks 16, Construction units 1 × the building's
+  costUnits × level (Car factory L4→5: 432 / 5,940 / 1,728 / 108). Old estimate kept if the constants are missing.
+- Chrome drops alarms when the extension updates: building reminders and batch-finished alerts are re-created from
+  storage after an update or browser start. An update no longer clears every alarm itself.
+- Alerts "Next:" shows building names. "Realm company ID unavailable" counts as skipped, not failed.
+- manifest version_name removed (the browser showed "2.5.337").
+
 2.5.344 — 2026-10-23 — Background warehouse refresh survives a slow connection
 - Your exports (19:46–20:07): the game's own API answers took 14–70 s on the phone connection, and every
   background failure (18 in an hour) was the warehouse refresh giving up after 8 s, retrying 8 s, then being
