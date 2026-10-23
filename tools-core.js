@@ -472,8 +472,50 @@
     return Math.abs(diffPct) > tolPct ? { differs: true, diffPct } : { differs: false, diffPct };
   }
 
+  // v2.5.341 effective administration overhead, as the game computes it (game bundle index-*.js, 2026-10-23):
+  //   effective = base − (base − 1) × COO / 100, base = /administration-overhead/ (e.g. 1.6176).
+  //   COO = floor(diminish(floor(Σ))) over active executives: COO 'o' full coo skill, COO apprentice 'v' half
+  //   (only if the academy's active size ≥ 5), other C-suite ('f','m','t') a quarter; staff '1'–'5' excluded.
+  //   Not active: settling in (C-suite/apprentice started < settle s ago, not accelerated, not candidate), in
+  //   training (training started < train s ago, not accelerated), on strike. Diminish: >80 → 80+(x−80)/2, >60 → 60+(x−60)/2.
+  //   trainS / settleS come from the game page config (window.reactjs.props), never hardcoded.
+  const EXEC_CSUITE = ['o', 'f', 'm', 't'], EXEC_APPRENTICE = { v: 'coo', x: 'cfo', y: 'cmo', z: 'cto' }, EXEC_STAFF = ['1', '2', '3', '4', '5'];
+  const EXEC_APPRENTICE_ACADEMY = { v: 5, x: 10, y: 15, z: 20 }; // game: Nh*1..Nh*4, Nh = 5
+  function academyActiveSize(buildings) {
+    return (Array.isArray(buildings) ? buildings : []).filter(b => b && b.kind === 'y' && !b.purchasedRecently)
+      .reduce((n, b) => n + (!b.busy && !String(b.position || '').startsWith('l') ? Number(b.size) || 0 : 0), 0);
+  }
+  function executiveSkill(executives, skill, { now = Date.now(), trainS, settleS, academyActive = 0 } = {}) {
+    const list = Array.isArray(executives) ? executives : [];
+    const pos = e => String(e && e.currentWorkHistory && e.currentWorkHistory.position || '');
+    const active = list.filter(e => e && e.currentWorkHistory && !EXEC_STAFF.includes(pos(e))).filter(e => {
+      const p = pos(e), w = e.currentWorkHistory, start = Date.parse(w.start);
+      if ((EXEC_CSUITE.includes(p) || EXEC_APPRENTICE[p]) && now - start < settleS * 1000 && !w.accelerated && !e.isCandidate) return false;
+      const t = e.currentTraining, ts = t && !t.accelerated && Date.parse(t.datetime);
+      if (ts && ts > now - trainS * 1000) return false;
+      if (e.strikeUntil && Date.parse(e.strikeUntil) > now) return false;
+      return !EXEC_APPRENTICE[p] || academyActive >= EXEC_APPRENTICE_ACADEMY[p];
+    });
+    const own = { coo: 'o', cfo: 'f', cmo: 'm', cto: 't' }[skill];
+    const raw = Math.floor(active.map(e => {
+      const p = pos(e), v = Number(e.skills && e.skills[skill]) || 0;
+      if (p === own) return v;
+      if (EXEC_APPRENTICE[p] === skill) return v / 2;
+      return EXEC_CSUITE.includes(p) ? v / 4 : 0;
+    }).reduce((a, b) => a + b, 0));
+    let r = raw; if (r > 80) r = 80 + (r - 80) / 2; if (r > 60) r = 60 + (r - 60) / 2;
+    return Math.floor(r);
+  }
+  function effectiveAdminOverhead({ base, executives, buildings, now = Date.now(), trainS, settleS } = {}) {
+    const b = Number(base);
+    if (!(b >= 1) || !Array.isArray(executives) || !pos(trainS) || !pos(settleS)) return null;
+    const coo = executiveSkill(executives, 'coo', { now, trainS, settleS, academyActive: academyActiveSize(buildings) });
+    const eff = b - (b - 1) * coo / 100;
+    return { factor: eff, pct: (eff - 1) * 100, basePct: (b - 1) * 100, reductionPct: (b - 1) * coo, coo };
+  }
+
   const api = {
-    economyLogAppend, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
+    economyLogAppend, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
     cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
     seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,

@@ -210,6 +210,8 @@ async function get(attempt=0){
   try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);if(r!=null){const k=`scmBackgroundJobs:${r}`;const h=(await chrome.storage.local.get({[k]:null}))[k];if(Array.isArray(h)){result.backgroundJobHistory=h;if(viewKey&&result.realmStores?.[viewKey])result.realmStores[viewKey]={...result.realmStores[viewKey],backgroundJobHistory:h};}}}catch{}
   // v2.5.331 production cost history (one entry per production run) lives in its own key.
   try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);if(r!=null){const k=`scmProductionCostHistory:${r}`;const h=(await chrome.storage.local.get({[k]:[]}))[k];result.productionCostHistory=Array.isArray(h)?h:[];}}catch{}
+  // v2.5.341 game page config (executive timing) for the admin-overhead calculation.
+  try{result.gameConfig=(await chrome.storage.local.get({scmGameConfig:null})).scmGameConfig||null;}catch{}
   // v2.5.338 economy phase log (auth-data temporals.economyState) lives in its own key.
   try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);if(r!=null){const k=`scmEconomyStateLog:${r}`;const h=(await chrome.storage.local.get({[k]:[]}))[k];result.economyStateLog=Array.isArray(h)?h:[];}}catch{}
   commitDashboardState(result);
@@ -1771,8 +1773,9 @@ function plannerCompanySalesModifier(s){
   const modifier=Number(plannerCompanyAuthData(s)?.salesModifier);
   return Number.isFinite(modifier)?Math.max(-99,Math.min(99,modifier)):null;
 }
+// v2.5.341 game formula (bundle tSe): rate = base × event / (1 − bonus/100), e.g. 8% → ÷0.92 = ×1.08696.
 function plannerCompanyProductionFactor(s){
-  return 1+plannerCompanyProductionModifier(s)/100;
+  const m=plannerCompanyProductionModifier(s);return m<100?1/(1-m/100):0;
 }
 function plannerCaptureProductionRateSnapshot(building,product,baseRatePerLevel,observedRatePerHour,eventModifier,source,s){
   if(!chrome?.runtime?.id||!Number.isFinite(Number(baseRatePerLevel))||Number(baseRatePerLevel)<=0)return;
@@ -2255,17 +2258,30 @@ function plannerWage(ctx,lab){
   if(cache[key]&&Number(cache[key].wage)>0)return {wage:Number(cache[key].wage),fresh:false,at:cache[key].at};
   return measured>0?{wage:lab.workersPerUnit*measured/level,fresh:false,at:lab.at}:null;
 }
+// v2.5.341 current admin overhead exactly as the game computes it: captured base (/administration-overhead/) and
+// executives, plus the game page's executive timing config (scmGameConfig). Null when anything is missing.
+function plannerGameAdmin(s){
+  try{
+    const C=globalThis.SCM_TOOLS_CORE,ep=s?.endpointData||{},cfg=s?.gameConfig||{};
+    const base=Number(ep['/api/v2/companies/me/administration-overhead/']?.data);
+    const exKey=Object.keys(ep).find(k=>/^\/api\/v3\/companies\/\d+\/executives\/$/.test(k));
+    const ex=exKey?ep[exKey]?.data?.executives:null;
+    const r=C?.effectiveAdminOverhead?C.effectiveAdminOverhead({base,executives:ex,buildings:s?.buildings,trainS:cfg.executivesTimeToTrainS,settleS:cfg.executivesTimeToSettleInS}):null;
+    return r?{...r,at:ep[exKey]?.receivedAt||null}:null;
+  }catch{return null;}
+}
 function renderPlannerProfit(host){
   const ctx=host.__plannerProfitCtx,el=host.querySelector('#plannerProfit'),C=globalThis.SCM_TOOLS_CORE;
   if(!ctx||!el||!C)return;
   const cfg=plannerProfitSettings(),wageKey=plannerProfitWageKey(ctx.building);
-  const lotAdmin=plannerAdminOverheadFromLots(ctx.s),salesFee=plannerExchangeFeeFromSales(ctx.s);
+  const lotAdmin=plannerAdminOverheadFromLots(ctx.s),gameAdmin=plannerGameAdmin(ctx.s),salesFee=plannerExchangeFeeFromSales(ctx.s);
+  const autoAdmin=gameAdmin?gameAdmin.pct:lotAdmin?.pct;
   const fld=(id,label,value,extra='')=>`<label>${label}<input id="${id}" type="number" step="any" inputmode="decimal" value="${escapeHtml(value??'')}" ${extra}></label>`;
-  el.innerHTML=`<div class="planner-profit-controls"><label>Inputs<select id="ppInputSource"><option value="warehouse"${cfg.inputSource!=='market'&&cfg.inputSource!=='market-any'?' selected':''}>Warehouse cost</option><option value="market-any"${cfg.inputSource==='market-any'?' selected':''}>Market · cheapest any Q (as game)</option><option value="market"${cfg.inputSource==='market'?' selected':''}>Market · required Q or better</option></select></label><label>Sell via<select id="ppSellMode"><option value="exchange"${cfg.sellMode==='exchange'?' selected':''}>Exchange</option><option value="contract"${cfg.sellMode==='contract'?' selected':''}>Contract</option></select></label>${cfg.sellMode==='exchange'?fld('ppFee','Exchange fee %',cfg.exchangeFeePct??'',`placeholder="${salesFee?salesFee.pct.toFixed(2):'4'} auto"`):fld('ppDiscount','Contract discount %',cfg.contractDiscountPct)}${fld('ppOverhead','Admin overhead %',cfg.adminOverheadPct??'',`placeholder="${lotAdmin?lotAdmin.pct.toFixed(2):'0'} auto"`)}${fld('ppWage','Wages $/h/level (override)',cfg.wages[wageKey]??'','placeholder="auto"')}</div><div class="pp-hint">Blank = auto from your data: fee ${salesFee?`${salesFee.pct.toFixed(2)}% from your exchange sales`:'4% default (no exchange sale captured yet)'} · admin ${lotAdmin?`${lotAdmin.pct.toFixed(2)}% from your latest batch`:'0% (no batch captured yet)'} · labour from your produced batches. Type a value to override.</div><div id="plannerProfitResults"></div>`;
+  el.innerHTML=`<div class="planner-profit-controls"><label>Inputs<select id="ppInputSource"><option value="warehouse"${cfg.inputSource!=='market'&&cfg.inputSource!=='market-any'?' selected':''}>Warehouse cost</option><option value="market-any"${cfg.inputSource==='market-any'?' selected':''}>Market · cheapest any Q (as game)</option><option value="market"${cfg.inputSource==='market'?' selected':''}>Market · required Q or better</option></select></label><label>Sell via<select id="ppSellMode"><option value="exchange"${cfg.sellMode==='exchange'?' selected':''}>Exchange</option><option value="contract"${cfg.sellMode==='contract'?' selected':''}>Contract</option></select></label>${cfg.sellMode==='exchange'?fld('ppFee','Exchange fee %',cfg.exchangeFeePct??'',`placeholder="${salesFee?salesFee.pct.toFixed(2):'4'} auto"`):fld('ppDiscount','Contract discount %',cfg.contractDiscountPct)}${fld('ppOverhead','Admin overhead %',cfg.adminOverheadPct??'',`placeholder="${autoAdmin!=null?autoAdmin.toFixed(2):'0'} auto"`)}${fld('ppWage','Wages $/h/level (override)',cfg.wages[wageKey]??'','placeholder="auto"')}</div><div class="pp-hint">Blank = auto from your data: fee ${salesFee?`${salesFee.pct.toFixed(2)}% from your exchange sales`:'4% default (no exchange sale captured yet)'} · admin ${gameAdmin?`${gameAdmin.pct.toFixed(2)}% (${gameAdmin.basePct.toFixed(2)}% − ${gameAdmin.reductionPct.toFixed(2)}% executives, as the game)`:lotAdmin?`${lotAdmin.pct.toFixed(2)}% from your latest batch (open the game once to load the executives calculation)`:'0% (no batch captured yet)'} · labour from your produced batches. Type a value to override.</div><div id="plannerProfitResults"></div>`;
   const results=()=>{
     const c=plannerProfitSettings();
     const setNum=v=>v!==''&&v!=null&&Number.isFinite(Number(v));
-    const overhead=setNum(c.adminOverheadPct)?Number(c.adminOverheadPct):(lotAdmin?.pct??0);
+    const overhead=setNum(c.adminOverheadPct)?Number(c.adminOverheadPct):(autoAdmin??0);
     const feePct=setNum(c.exchangeFeePct)?Number(c.exchangeFeePct):(salesFee?.pct??4);
     const productId=Number(ctx.productId);
     const sale=Number.isFinite(productId)?plannerMarketPrice(ctx.s,ctx.priceMap,productId,ctx.quality,'sell-any'):null;
@@ -2283,7 +2299,7 @@ function renderPlannerProfit(host){
     const r2=v=>Math.round(v*100)/100;const wPU=lab?r2(lab.workersPerUnit):null,aPU=lab?r2(wPU*overhead/100):null;
     const labourPerUnit=lab?wPU+aPU:null;
     const r=C.buildingProfit({unitsPerHour,level:ctx.level,salePrice:sale?.price??null,inputs,transportUnits:ctx.transportUnits,transportUnitCost:transport?.price??0,sellMode:c.sellMode,exchangeFeePct:feePct,contractDiscountPct:Number(c.contractDiscountPct),wagePerHourPerLevel:wageOverride??0,adminOverheadPct:overhead,labourPerUnit});
-    try{__plannerProfitLast[String(ctx.building?.id??ctx.building?.raw?.id??ctx.product)]={at:new Date().toISOString(),building:String(ctx.building?.name||''),product:ctx.product,productId,quality:ctx.quality,level:ctx.level,unitsPerHour,measuredUnitsPerHour:ctx.outputPerHour,economy:{current:eco.current,batch:eco.batch,source:eco.source,changed:eco.changed},wage,sale,inputs,labour:lab?{workersPerUnit:lab.workersPerUnit,lotAt:lab.at,lotQuality:lab.quality,cached:lab.cached}:null,adminOverheadPct:overhead,adminSource:setNum(c.adminOverheadPct)?'override':lotAdmin?'latest batch':'none',exchangeFeePct:feePct,labourPerUnit,result:r.ok?{inputCostPerUnit:r.inputCostPerUnit,labourPerUnit:r.labourPerUnit,profitPerUnitGameBasis:r.profitPerUnit+r.feePerUnit+r.contractDiscountPerUnit+r.transportPerUnit,profitPerHourPerLevelAfterFee:r.profitPerHourPerLevel}:{error:r.error},runningBatchUnitCost:Number(ctx.building?.raw?.busy?.resource?.unitCost)||null};}catch{}
+    try{__plannerProfitLast[String(ctx.building?.id??ctx.building?.raw?.id??ctx.product)]={at:new Date().toISOString(),building:String(ctx.building?.name||''),product:ctx.product,productId,quality:ctx.quality,level:ctx.level,unitsPerHour,measuredUnitsPerHour:ctx.outputPerHour,economy:{current:eco.current,batch:eco.batch,source:eco.source,changed:eco.changed},wage,sale,inputs,labour:lab?{workersPerUnit:lab.workersPerUnit,lotAt:lab.at,lotQuality:lab.quality,cached:lab.cached}:null,adminOverheadPct:overhead,adminSource:setNum(c.adminOverheadPct)?'override':gameAdmin?'game formula (executives)':lotAdmin?'latest batch':'none',gameAdmin,exchangeFeePct:feePct,labourPerUnit,result:r.ok?{inputCostPerUnit:r.inputCostPerUnit,labourPerUnit:r.labourPerUnit,profitPerUnitGameBasis:r.profitPerUnit+r.feePerUnit+r.contractDiscountPerUnit+r.transportPerUnit,profitPerHourPerLevelAfterFee:r.profitPerHourPerLevel}:{error:r.error},runningBatchUnitCost:Number(ctx.building?.raw?.busy?.resource?.unitCost)||null};}catch{}
     const out=host.querySelector('#plannerProfitResults');if(!out)return;
     if(!r.ok){out.innerHTML=`<div class="planner-profit-empty">${escapeHtml(sale?r.error:`No market or VWAP price captured for ${ctx.product||'this product'} Q${ctx.quality} yet.`)}</div>`;return;}
     const tone=v=>v>0.0001?'is-profit':v<-0.0001?'is-loss':'';
@@ -2295,7 +2311,7 @@ function renderPlannerProfit(host){
     const labourNote=wageOverride!=null?`wage override $${num(wageOverride)}/h/level · ${num(+overhead.toFixed(2))}% admin`
       :lab?`workers ${plannerMoney(wPU)} + admin ${plannerMoney(aPU)} (${num(+overhead.toFixed(2))}%) · from your ${escapeHtml(ctx.product)} Q${lab.quality} batch ${plannerDate(lab.at)}${lab.cached?' (last seen)':''}${lab.boughtUnits>=0.5?` · ${num(Math.round(lab.boughtUnits))} bought units in that lot left out`:''}${wage&&(eco.changed||!wage.fresh)?` · wage ${plannerMoney(wage.wage)}/h/level ÷ ${num(+(unitsPerHour/Math.max(1,Number(ctx.level)||1)).toFixed(3))} units/h/level`:''}`
       :`no produced ${escapeHtml(ctx.product||'')} batch in the warehouse yet — appears after the first batch, or enter a wage override`;
-    const ecoSrc={'phase-measured':`your ${eco.name(eco.current)}-economy rate measured earlier`,reference:`normal-economy reference rate × your modifiers — estimate until a ${eco.name(eco.current)} batch runs`,'measured-stale':`no ${eco.name(eco.current)} rate captured yet — still the running batch's rate`}[eco.source];
+    const ecoSrc={'phase-measured':`your ${eco.name(eco.current)}-economy rate measured earlier`,reference:`normal-economy rate ÷ (1 − your speed bonus), the game's formula`,'measured-stale':`no ${eco.name(eco.current)} rate captured yet — still the running batch's rate`}[eco.source];
     const ecoNote=eco.changed?`<div class="pp-basis pp-economy">Economy is ${escapeHtml(eco.name(eco.current))} now; ${eco.batch?.inferred?`the running batch (${num(+eco.measured.toFixed(3))}/h) started in another phase — its rate is ${num(+eco.batch.diffPct.toFixed(1))}% off the normal rate`:`the running batch started in ${escapeHtml(eco.name(eco.batch?.state))} at ${num(+eco.measured.toFixed(3))}/h`}. Profit uses ${num(+Number(unitsPerHour).toFixed(3))}/h (${escapeHtml(ecoSrc||'')}).</div>`:'';
     const sellLabel=c.sellMode==='exchange'?`Exchange fee ${num(+feePct.toFixed(2))}%${!setNum(c.exchangeFeePct)&&salesFee?' (from your sales)':''}`:`Contract discount ${num(c.contractDiscountPct)}%`;
     const busy=ctx.building?.raw?.busy?.resource;

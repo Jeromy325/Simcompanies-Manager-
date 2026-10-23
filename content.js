@@ -550,6 +550,10 @@ let hookReady = false;
       safeRuntimeSend({type:'NETWORK_CAPTURE_EVENT',event:d.event||{},captureId:d.captureId||''});
       return;
     }
+    if (d.type === 'GAME_CONFIG') {
+      safeRuntimeSend({ type: 'GAME_CONFIG', config: d.config });
+      return;
+    }
     if (d.type === 'API_SEEN') {
       safeRuntimeSend({ type: 'API_SEEN', method: d.method, url: d.url, captureRealm: d.captureRealm });
       return;

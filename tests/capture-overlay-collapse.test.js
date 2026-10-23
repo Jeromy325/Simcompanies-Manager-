@@ -5,7 +5,7 @@ const path=require('node:path');
 const root=path.join(__dirname,'..');
 const content=fs.readFileSync(path.join(root,'content.js'),'utf8');
 const manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8'));
-assert.equal(manifest.version,'2.5.340');
+assert.equal(manifest.version,'2.5.341');
 assert.match(content,/data-capture-toggle/,'capture overlay has an explicit toggle control');
 assert.match(content,/Collapse network capture status/,'expanded state has accessible collapse label');
 assert.match(content,/Expand network capture status/,'collapsed state has accessible expand label');

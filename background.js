@@ -1432,7 +1432,8 @@ async function ensureFrozenProductionRatesForRealmUnlocked(realm){
   if(!buildings.length)return {ok:true,captured:0,requested:0,plans:0};
   const assets=await gameOverlayAssets();
   const companyModifier=Number(store?.authData?.authCompany?.productionModifier);
-  const companyFactor=Number.isFinite(companyModifier)?Math.max(0,1+companyModifier/100):1;
+  // v2.5.341 game formula: speed bonus divides by (1 − bonus/100).
+  const companyFactor=Number.isFinite(companyModifier)?(companyModifier<100?1/(1-companyModifier/100):0):1;
   const productionBuildings=buildings.filter(b=>b&&String(b?.category||'').toLowerCase()==='production');
   const liveProductionIds=new Set(productionBuildings.map(b=>Number(b?.id)).filter(n=>Number.isFinite(n)&&n>0));
   const stalePlans=Object.keys(store.productionPlans||{}).filter(id=>Number.isFinite(Number(id))&&!liveProductionIds.has(Number(id)));
@@ -6247,6 +6248,12 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       await chrome.storage.local.set({[key]:{schemaVersion:2,captureId,startedAt:isStart?safeEvent.capturedAt:(prior.startedAt||null),stoppedAt:safeEvent.kind==='capture-stop'?safeEvent.capturedAt:(prior.stoppedAt||null),status,updatedAt:new Date().toISOString(),eventCount:retained.length,droppedEventCount,truncated:droppedEventCount>0,events:retained}});
       send({ok:true,count:retained.length,captureId,status});
     }).catch(e=>send({ok:false,error:e?.message||String(e)}));
+    return true;
+  }
+  if(m?.type==='GAME_CONFIG'){
+    // v2.5.341 game config (executive training/settling times) for the admin-overhead calculation. Storage only.
+    (async()=>{const c={};for(const k of ['executivesTimeToTrainS','executivesTimeToSettleInS']){const n=Number(m?.config?.[k]);if(Number.isFinite(n)&&n>0)c[k]=n;}
+      if(Object.keys(c).length)await rawStorageSet({scmGameConfig:{...c,at:new Date().toISOString()}});send({ok:true});})().catch(e=>send({ok:false,error:String(e?.message||e)}));
     return true;
   }
   if(m?.type==='API_SEEN'){

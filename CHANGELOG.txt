@@ -1,3 +1,12 @@
+2.5.341 — 2026-10-23 — Admin and rate use the game's own formulas
+- Read from the game's code. Admin overhead = base − (base − 1) × COO/100, with COO from your captured executives
+  exactly as the game counts them (in-training, settling-in and on-strike executives excluded; apprentices need the
+  academy). The game's training/settling times are read from the game page. Your data: 61.76% − 28.41% = 33.35%.
+  Falls back to the latest batch's admin until the game page has been opened once on this build.
+- Production speed bonus now divides like the game (rate ÷ (1 − 8%) = × 1.087), not × 1.08. Affects reference /
+  fallback rates everywhere (about +0.6% at 8%).
+- Bulldozer Q3 L4 with your real storage: $3,100.64/h/level (game $3,100.83).
+
 2.5.340 — 2026-10-23 — Economy note now shows with your real data
 - Your economy log started after the change (it only ever saw "normal"), and the running Bulldozer batch started
   before the log's first entry. 2.5.339 assumed such a batch was in the log's first phase ("normal"), so it saw no

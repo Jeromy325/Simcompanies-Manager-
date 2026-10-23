@@ -1189,5 +1189,17 @@
   } catch {}
   setTimeout(emitMarketCache, 1000);
   setTimeout(emitMarketCache, 3000);
+  // v2.5.341 the game's own executive timing config (window.reactjs.props), used by the game to decide which
+  // executives count toward the admin-overhead reduction. Read-only; sent once the page has set it.
+  const emitGameConfig = () => {
+    try {
+      const p = (window.reactjs && window.reactjs.props) || {};
+      const config = {};
+      for (const k of ['executivesTimeToTrainS', 'executivesTimeToSettleInS']) { const n = Number(p[k]); if (Number.isFinite(n) && n > 0) config[k] = n; }
+      if (Object.keys(config).length) emit('GAME_CONFIG', { config });
+    } catch {}
+  };
+  setTimeout(emitGameConfig, 1500);
+  setTimeout(emitGameConfig, 6000);
   emit('HOOK_READY', {});
 })();
