@@ -83,6 +83,44 @@
    "costUnits": 14,
    "buildDuration": 10800,
    "salaryModifier": 1.2
+  },
+  "M": {
+   "dbLetter": "M",
+   "sincePhase": 3,
+   "images": [
+    "images/landscape/mine-lvl1.png",
+    "images/landscape/mine-lvl2.png"
+   ],
+   "levelImages": [
+    {
+     "level": 1,
+     "image": "images/buildings/production/mine_tier01.png"
+    },
+    {
+     "level": 2,
+     "image": "images/buildings/production/mine_tier02.png"
+    },
+    {
+     "level": 3,
+     "image": "images/buildings/production/mine_tier03.png"
+    },
+    {
+     "level": 6,
+     "image": "images/buildings/production/mine_tier04.png"
+    },
+    {
+     "level": 10,
+     "image": "images/buildings/production/mine_tier05.png"
+    },
+    {
+     "level": 15,
+     "image": "images/buildings/production/mine_tier06.png"
+    }
+   ],
+   "category": "production",
+   "costUnits": 7,
+   "buildDuration": 14400,
+   "salaryModifier": 0.8
   }
  },
  "resources": {
@@ -173,6 +211,27 @@
    "productionSeason": null,
    "retailSeason": null,
    "decay": 0
+  },
+  "14": {
+   "dbLetter": 14,
+   "sincePhase": 3,
+   "producedPerHourRaw": 210,
+   "producedAt": "M",
+   "producedFrom": {
+    "1": 20,
+    "2": 1
+   },
+   "isExchangeTradable": true,
+   "isResearch": false,
+   "hasEconomyModel": false,
+   "consumption": 0.0,
+   "image": "images/resources/minerals.png",
+   "imageNew": null,
+   "transportation": 1.0,
+   "unitsSoldAnHour": 0.0,
+   "productionSeason": null,
+   "retailSeason": null,
+   "decay": 0
   }
  },
  "marketOrders": [
@@ -209,5 +268,206 @@
     "id": 5294950
    }
   }
- ]
+ ],
+ "abundance": {
+  "buildingId": 58251161,
+  "abundance": {
+   "14": 99.57069211725734,
+   "15": 56.808845016210064,
+   "42": 46.09532476943521,
+   "68": 60.57934331957965
+  }
+ },
+ "govOrders": {
+  "governmentOrders": [
+   {
+    "id": 877,
+    "projectKey": "CULINARY_RESEARCH",
+    "size": 2,
+    "created": "2026-10-21T13:00:25.188243+00:00",
+    "realm": 1,
+    "estimatedBaseValue": 5944321,
+    "governmentorderrequiredresourceSet": [
+     {
+      "id": 1811,
+      "templateId": 877,
+      "kind": 133,
+      "quality": 3,
+      "amountBase": 134550
+     },
+     {
+      "id": 1812,
+      "templateId": 877,
+      "kind": 141,
+      "quality": 3,
+      "amountBase": 38442
+     },
+     {
+      "id": 1813,
+      "templateId": 877,
+      "kind": 145,
+      "quality": 0,
+      "amountBase": 6407
+     }
+    ],
+    "daysToFulfill": 10
+   },
+   {
+    "id": 876,
+    "projectKey": "SAFETY_GEAR",
+    "size": 0,
+    "created": "2026-10-21T13:00:25.188243+00:00",
+    "realm": 1,
+    "estimatedBaseValue": 2972160,
+    "governmentorderrequiredresourceSet": [
+     {
+      "id": 1809,
+      "templateId": 876,
+      "kind": 61,
+      "quality": 2,
+      "amountBase": 79505
+     },
+     {
+      "id": 1810,
+      "templateId": 876,
+      "kind": 46,
+      "quality": 2,
+      "amountBase": 39752
+     }
+    ],
+    "daysToFulfill": 3
+   },
+   {
+    "id": 875,
+    "projectKey": "FEED_THE_POOR",
+    "size": 2,
+    "created": "2026-10-21T13:00:25.188243+00:00",
+    "realm": 1,
+    "estimatedBaseValue": 5944321,
+    "governmentorderrequiredresourceSet": [
+     {
+      "id": 1806,
+      "templateId": 875,
+      "kind": 121,
+      "quality": 1,
+      "amountBase": 13255
+     },
+     {
+      "id": 1807,
+      "templateId": 875,
+      "kind": 122,
+      "quality": 3,
+      "amountBase": 13255
+     },
+     {
+      "id": 1808,
+      "templateId": 875,
+      "kind": 134,
+      "quality": 2,
+      "amountBase": 39766
+     }
+    ],
+    "daysToFulfill": 10
+   },
+   {
+    "id": 871,
+    "projectKey": "WIND_TURBINES_2",
+    "size": 2,
+    "created": "2026-10-14T13:00:33.563205+00:00",
+    "realm": 1,
+    "resourceMultiplierAwarded": 51,
+    "estimatedBaseValue": 5977324,
+    "governmentorderrequiredresourceSet": [
+     {
+      "id": 1797,
+      "templateId": 871,
+      "kind": 18,
+      "quality": 3,
+      "amountBase": 49690
+     },
+     {
+      "id": 1798,
+      "templateId": 871,
+      "kind": 48,
+      "quality": 3,
+      "amountBase": 9938
+     },
+     {
+      "id": 1799,
+      "templateId": 871,
+      "kind": 76,
+      "quality": 2,
+      "amountBase": 39752
+     }
+    ],
+    "daysToFulfill": 10
+   },
+   {
+    "id": 870,
+    "projectKey": "SOLAR_POWER_INITIATIVE",
+    "size": 0,
+    "created": "2026-10-14T13:00:33.563205+00:00",
+    "realm": 1,
+    "resourceMultiplierAwarded": 78,
+    "estimatedBaseValue": 2988662,
+    "governmentorderrequiredresourceSet": [
+     {
+      "id": 1794,
+      "templateId": 870,
+      "kind": 22,
+      "quality": 3,
+      "amountBase": 12896
+     },
+     {
+      "id": 1795,
+      "templateId": 870,
+      "kind": 16,
+      "quality": 0,
+      "amountBase": 156905
+     },
+     {
+      "id": 1796,
+      "templateId": 870,
+      "kind": 30,
+      "quality": 0,
+      "amountBase": 2149
+     }
+    ],
+    "daysToFulfill": 3
+   },
+   {
+    "id": 869,
+    "projectKey": "SMART_ROADS",
+    "size": 1,
+    "created": "2026-10-14T13:00:33.563205+00:00",
+    "realm": 1,
+    "resourceMultiplierAwarded": 207,
+    "estimatedBaseValue": 4269517,
+    "governmentorderrequiredresourceSet": [
+     {
+      "id": 1792,
+      "templateId": 869,
+      "kind": 23,
+      "quality": 2,
+      "amountBase": 14380
+     },
+     {
+      "id": 1793,
+      "templateId": 869,
+      "kind": 21,
+      "quality": 2,
+      "amountBase": 43141
+     }
+    ],
+    "daysToFulfill": 6
+   }
+  ]
+ },
+ "govTier": {
+  "tier": {
+   "id": 2133,
+   "resourceMultiplicator": 3.4837071505022386,
+   "tierIndex": 2
+  }
+ }
 }

@@ -1,3 +1,13 @@
+2.5.343 — 2026-10-23 — Abundance, research and government orders
+- After each Sync the Manager fetches (through your logged-in game tab) your research, the current government
+  orders with your tier, and the abundance of every building whose abundance the game has shown (open a mine once).
+- Rates for mines/oil rigs/quarries include abundance like the game: Mine #1 Minerals (99.57%) 129.045/h/level,
+  identical to its measured rate.
+- Building card: research level and patents for the product.
+- Contracts tab: government orders with the exact amount at your tier (ceil(base × 3.484)) and your stock.
+- Not built: admin "plus-one" (only loaded from the build menu; your slots are full) and the production queue
+  (only loaded when queuing) — their responses haven't been captured.
+
 2.5.342 — 2026-10-23 — Game constants and your exchange listings
 - The Manager now reads the game's public constants (/api/v2/constants/core, /buildings, /resources; every 6 h and
   after Sync). Profit / h / level uses the game's own rate for the current economy phase and its wage

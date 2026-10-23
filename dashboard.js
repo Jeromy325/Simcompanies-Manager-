@@ -1791,6 +1791,9 @@ function plannerCaptureProductionRateSnapshot(building,product,baseRatePerLevel,
   try{chrome.runtime.sendMessage({type:'CAPTURE_PRODUCTION_RATE_SNAPSHOT',realm,buildingId:Number(b?.id),resourceId:rid,started:busy?.started,product,baseRatePerLevel:Number(baseRatePerLevel),observedRatePerHour:Number(observedRatePerHour)||null,eventModifier:Number(eventModifier)||0,companyProductionModifier:plannerCompanyProductionModifier(s),companyModifierNormalized:true,source});}catch{}
 }
 
+// v2.5.343 abundance % of a natural resource at a building (mines, oil rigs, quarries), from the game's
+// /api/v2/companies/buildings/<id>/abundance/ — only resources the game lists there have one.
+function plannerAbundancePct(s,buildingId,resourceId){const d=s?.endpointData?.[`/api/v2/companies/buildings/${Number(buildingId)}/abundance/`]?.data?.abundance;const v=Number(d?.[String(resourceId)]);return d&&Number.isFinite(v)?v:null;}
 function plannerEconomyNow(s){const log=Array.isArray(s?.economyStateLog)?s.economyStateLog:[];const a=Number(s?.authData?.temporals?.economyState);return log.length?Number(log[log.length-1].s):(Number.isFinite(a)?a:null);}
 function plannerRate(name,recipes,rates,s){
   const target=plannerNormalizeName(name);
@@ -1933,6 +1936,7 @@ function plannerRateForProduct(name,building,level,recipes,rates,s){
   if(eventFactor<=0||companyFactor<=0)return finish({rate:null,source:'invalid production modifier'},'modifier factor was non-positive');
   const base=plannerRate(name,recipes,rates,s);
   if(Number.isFinite(Number(base?.rate))&&Number(base.rate)>0)
+    {const ab=plannerAbundancePct(s,raw?.id??building?.id,recipe?.id??resourceId);if(ab!=null)return finish({rate:Number(base.rate)*level*eventFactor*companyFactor*ab/100,source:`${base.source} fallback × game modifiers × abundance ${ab.toFixed(1)}%`},'reference rate with the building abundance');}
     return finish({rate:Number(base.rate)*level*eventFactor*companyFactor,source:`${base.source} fallback × game modifiers`},'no matching current-cycle history or usable live rate; reference rate used');
   return finish(base,base?.rate>0?'no matching current-cycle history or usable live rate; reference rate used':'no usable current-cycle history, snapshot, live rate or reference rate');
 }
@@ -2334,11 +2338,14 @@ function renderPlannerProfit(host){
       :`no produced ${escapeHtml(ctx.product||'')} batch in the warehouse yet — appears after the first batch, or enter a wage override`;
     const ecoSrc={'game-constants':`the game's ${eco.name(eco.current)}-economy rate, from its constants`,'phase-measured':`your ${eco.name(eco.current)}-economy rate measured earlier`,reference:`normal-economy rate ÷ (1 − your speed bonus), the game's formula`,'measured-stale':`no ${eco.name(eco.current)} rate captured yet — still the running batch's rate`}[eco.source];
     const ecoNote=eco.changed?`<div class="pp-basis pp-economy">Economy is ${escapeHtml(eco.name(eco.current))} now; ${eco.batch?.inferred&&!eco.batch?.matched?`the running batch (${num(+eco.measured.toFixed(3))}/h) started in another phase — its rate is ${num(+eco.batch.diffPct.toFixed(1))}% off the normal rate`:`the running batch started in ${escapeHtml(eco.name(eco.batch?.state))} at ${num(+eco.measured.toFixed(3))}/h`}. Profit uses ${num(+Number(unitsPerHour).toFixed(3))}/h (${escapeHtml(ecoSrc||'')}).</div>`:(eco.source==='game-constants'&&eco.diffPct!=null&&Math.abs(eco.diffPct)>1?`<div class="pp-basis pp-economy">Your running batch measures ${num(+eco.measured.toFixed(3))}/h; the game's formula gives ${num(+Number(unitsPerHour).toFixed(3))}/h (${num(+eco.diffPct.toFixed(1))}%). Profit uses the game's figure, as its calculator does.</div>`:'');
+    // v2.5.343 research progress for this product (/api/v3/players/research/).
+    const rs=(Array.isArray(ctx.s?.endpointData?.['/api/v3/players/research/']?.data)?ctx.s.endpointData['/api/v3/players/research/'].data:[]).find(x=>Number(x?.kind)===productId);
+    const researchNote=rs?`<div class="pp-basis">Research level Q${num(rs.quality)} · ${num(rs.patents)} / ${num(rs.patentsNeeded)} patents for the next level</div>`:'';
     const sellLabel=c.sellMode==='exchange'?`Exchange fee ${num(+feePct.toFixed(2))}%${!setNum(c.exchangeFeePct)&&salesFee?' (from your sales)':''}`:`Contract discount ${num(c.contractDiscountPct)}%`;
     const busy=ctx.building?.raw?.busy?.resource;
     const batchCost=busy&&Number(busy.kind)===productId&&Number(busy.unitCost)>0?Number(busy.unitCost):null;
     out.innerHTML=`<div class="pp-stats"><div class="pp-stat ${tone(gameUnit)}"><strong>${plannerMoney(perLevel(gameUnit))}</strong><span>Profit / h / level</span></div><div class="pp-stat ${tone(gameUnit)}"><strong>${plannerMoney(gameUnit*r.unitsPerHour)}</strong><span>Profit / h · Level ${ctx.level}</span></div><div class="pp-stat ${tone(gameUnit)}"><strong>${plannerMoney(gameUnit)}</strong><span>Profit / unit</span></div></div>
-<div class="pp-basis">Same basis as the game’s Profit Calculator (before market fee &amp; transport).</div>${ecoNote}${batchCost!=null?`<div class="pp-batch"><div><strong>$${batchCost.toLocaleString(undefined,{minimumFractionDigits:3,maximumFractionDigits:3})}</strong><span>Cost per unit · running batch (game)</span></div><small>What the game charged for the batch in progress: the inputs it actually consumed when the batch started + labour. “Sourcing cost / unit” below is what a new batch would cost at today’s warehouse costs (the game’s Profit Calculator figure). Difference ${plannerMoney(batchCost-(r.inputCostPerUnit+r.labourPerUnit))}.</small></div>`:''}
+<div class="pp-basis">Same basis as the game’s Profit Calculator (before market fee &amp; transport).</div>${ecoNote}${researchNote}${batchCost!=null?`<div class="pp-batch"><div><strong>$${batchCost.toLocaleString(undefined,{minimumFractionDigits:3,maximumFractionDigits:3})}</strong><span>Cost per unit · running batch (game)</span></div><small>What the game charged for the batch in progress: the inputs it actually consumed when the batch started + labour. “Sourcing cost / unit” below is what a new batch would cost at today’s warehouse costs (the game’s Profit Calculator figure). Difference ${plannerMoney(batchCost-(r.inputCostPerUnit+r.labourPerUnit))}.</small></div>`:''}
 <div class="pp-stats pp-stats-net"><div class="pp-stat ${tone(r.profitPerHourPerLevel)}"><strong>${plannerMoney(r.profitPerHourPerLevel)}</strong><span>/ h / level after ${c.sellMode==='exchange'?'fee':'discount'} &amp; transport</span></div><div class="pp-stat ${tone(r.profitPerUnit)}"><strong>${plannerMoney(r.profitPerUnit)}</strong><span>/ unit after ${c.sellMode==='exchange'?'fee':'discount'} &amp; transport</span></div></div>
 <div class="pp-list">
 ${row('Sale price (market, any quality)',plannerMoney(sale.price),`${escapeHtml(sale.source)} · Q${sale.quality} listing`)}
@@ -2578,7 +2585,7 @@ function renderBuildingPlanner(s,options={}){
   let referenceRate=null;try{const rb=plannerRate(product,recipes,rates,s);const ev=1+plannerActiveProductionEvent(s,product,recipes,Number(productRecipe?.id))/100;const cf=plannerCompanyProductionFactor(s);if(Number(rb?.rate)>0&&ev>0&&cf>0)referenceRate=Number(rb.rate)*level*ev*cf;}catch{}
   let ctxEventPct=0;try{ctxEventPct=plannerActiveProductionEvent(s,product,recipes,Number(productRecipe?.id))||0;}catch{}
   const busyRaw=building?.raw?.busy;const rateFromBatch=Boolean(busyRaw?.started)&&Number(busyRaw?.resource?.kind)===Number(productRecipe?.id)&&!/reference/i.test(String(productRate?.source||''));
-  host.__plannerProfitCtx={s,building,product,productId:Number(productRecipe?.id),quality,level,outputPerHour,eventPct:ctxEventPct,bonusPct:plannerCompanyProductionModifier(s),buildingKind:String(building?.raw?.kind??building?.kind??''),robots:Boolean(building?.raw?.robotsSpecialization),rateSource:productRate?.source||null,rateFromBatch,batchStarted:rateFromBatch?String(busyRaw.started):null,referenceRate,plannedInputs,transportUnits:Number(productRecipe?.transport)||0,priceMap:frozenVwapMap};
+  host.__plannerProfitCtx={s,building,product,productId:Number(productRecipe?.id),quality,level,outputPerHour,eventPct:ctxEventPct,abundancePct:plannerAbundancePct(s,building?.raw?.id??building?.id,Number(productRecipe?.id)),bonusPct:plannerCompanyProductionModifier(s),buildingKind:String(building?.raw?.kind??building?.kind??''),robots:Boolean(building?.raw?.robotsSpecialization),rateSource:productRate?.source||null,rateFromBatch,batchStarted:rateFromBatch?String(busyRaw.started):null,referenceRate,plannedInputs,transportUnits:Number(productRecipe?.transport)||0,priceMap:frozenVwapMap};
   try{renderPlannerProfit(host);}catch(e){console.error('Planner profit render failed',e);}
     host.querySelector('[data-upgrade-projection]')?.addEventListener('click',()=>showBuildingUpgradeProjection(host,host.__upgradeProjectionContext));
     const restorePlannerScroll=()=>{
@@ -3454,6 +3461,27 @@ async function renderContractSurplusAfterOutgoing(s,force=false){
     if(renderToken===contractSurplusRenderToken){body.innerHTML=`<tr><td colspan="5">Unable to calculate surplus: ${escapeHtml(e?.message||String(e))}</td></tr>`;body.dataset.ready='1';}
   }
 }
+// v2.5.343 current government orders (/api/v3/government-orders/<realm>/) with the amount at your tier
+// (/government-orders/tier/: game = ceil(amountBase × resourceMultiplicator)) and your stock at that quality or better.
+function renderGovernmentOrders(s){
+  const sec=document.getElementById('contracts');if(!sec)return;
+  let box=document.getElementById('govOrders');
+  const realm=validRealmNumber(s?.viewRealm??s?.captureRealm),ep=s?.endpointData||{};
+  const orders=realm!=null?ep[`/api/v3/government-orders/${realm}/`]?.data?.governmentOrders:null;
+  const mult=Number(ep['/api/v3/government-orders/tier/']?.data?.tier?.resourceMultiplicator);
+  if(!Array.isArray(orders)||!orders.length){if(box)box.remove();return;}
+  if(!box){box=document.createElement('div');box.id='govOrders';box.className='gov-orders';sec.appendChild(box);}
+  let rows=[];try{rows=warehouseRows(s);}catch{}
+  const have=(id,q)=>rows.filter(r=>Number(r?._id)===Number(id)&&Number(r?._quality)>=Number(q)).reduce((a,r)=>a+(Number(r._qty)||0),0);
+  const title=k=>String(k||'').toLowerCase().replace(/_/g,' ').replace(/^./,c=>c.toUpperCase());
+  const at=Date.parse(String(ep[`/api/v3/government-orders/${realm}/`]?.receivedAt||''));
+  box.innerHTML=`<h3>Government orders</h3><p class="gov-sub">${Number.isFinite(mult)?`Amounts at your tier (×${num(+mult.toFixed(3))})`:'Base amounts (tier not captured yet)'}${Number.isFinite(at)?` · ${plannerAge(Date.now()-at)}`:''}</p>`+orders.map(o=>{
+    const req=(Array.isArray(o?.governmentorderrequiredresourceSet)?o.governmentorderrequiredresourceSet:[]).map(r=>{
+      const need=Number.isFinite(mult)?Math.max(1,Math.ceil(Number(r.amountBase)*mult)):Number(r.amountBase),got=have(r.kind,r.quality);
+      return `<div class="gov-row"><span>${escapeHtml(resourceInfo({kind:Number(r.kind)},s).name||`#${r.kind}`)} Q${num(r.quality)}</span><span class="${got>=need?'gov-ok':'gov-short'}">${num(got)} / ${num(need)}</span></div>`;}).join('');
+    return `<div class="gov-card"><div class="gov-head"><strong>${escapeHtml(title(o?.projectKey))}</strong><span>${num(o?.daysToFulfill)} days</span></div>${req}</div>`;
+  }).join('');
+}
 function renderContracts(s){
   try{
   const rows=currentContracts(s);
@@ -3482,6 +3510,7 @@ function renderContracts(s){
   document.querySelectorAll('.saved-edit').forEach(b=>b.onclick=async()=>{const s2=await get();const c=savedContracts(s2).find(x=>String(x.id)===String(b.dataset.id));if(c)startContractEdit(c);});
   document.querySelectorAll('.saved-delete').forEach(b=>b.onclick=async()=>{const id=b.dataset.id;const s2=await get();const realm=Number(s2.viewRealm??s2.captureRealm);if(!Number.isFinite(realm))return;const r=await chrome.runtime.sendMessage({type:'SAVE_SAVED_CONTRACT',realm,mode:'delete',editId:String(id)});if(r?.ok)render(await get());});
   renderContractSurplusAfterOutgoing(s);
+  try{renderGovernmentOrders(s);}catch(e){console.error('Government orders render failed',e);}
   }catch(error){console.error('Saved Contracts render failed',error);const table=$('#savedContractRows');if(table)table.innerHTML='<tr><td colspan="10">Unable to render saved contracts. Other Manager sections remain available.</td></tr>';}
 }
 

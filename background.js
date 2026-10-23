@@ -311,6 +311,20 @@ async function refreshMarketOrders(realm,maxAgeMs=5*60000){
     return {ok:true};
   }catch(e){return {ok:false,error:String(e?.message||e)};}
 }
+// v2.5.343 logged-in extras through the game tab after Sync: research, government orders + your tier, and the
+// abundance of every building whose abundance the game has shown (mines etc.). Each pageGet runs without a lock;
+// saveData takes its own lock per response.
+async function refreshExtraGameData(realm){
+  const r=validRealmNumber(realm);if(r==null)return {ok:false};
+  const st=await notifyRealmStore(r);const ep=st?.endpointData||{};
+  const ab=new Set(Object.keys(ep).map(k=>(k.match(/^\/api\/v2\/companies\/buildings\/(\d+)\/abundance\/$/)||[])[1]).filter(Boolean));
+  const kinds=new Set((Array.isArray(st?.buildings)?st.buildings:[]).filter(b=>ab.has(String(b?.id))).map(b=>String(b?.kind)));
+  for(const b of (Array.isArray(st?.buildings)?st.buildings:[]))if(kinds.has(String(b?.kind)))ab.add(String(b.id));
+  const paths=['/api/v3/players/research/',`/api/v3/government-orders/${r}/`,'/api/v3/government-orders/tier/',...[...ab].map(id=>`/api/v2/companies/buildings/${id}/abundance/`)];
+  const out=[];
+  for(const p of paths){try{const x=await pageGet(p,r);if(x?.ok){await saveData(p,x.data,x.status,'GET',r);out.push(p);}}catch{}}
+  return {ok:true,saved:out};
+}
 chrome.alarms.onAlarm.addListener(a=>{if(a?.name===GAME_CONSTANTS_ALARM)refreshGameConstants().catch(()=>{});});
 async function ensureGameConstantsAlarm(){try{await chrome.alarms.create(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});}catch{}refreshGameConstants().catch(()=>{});}
 ensureGameConstantsAlarm();
@@ -5240,7 +5254,7 @@ async function syncNow(requestedRealm=null){
       const committedStore=committed.realmStores?.[key]||{};
       trace('realm-store-commit',{realm:selected,endpointCount:Object.keys(committedStore.endpointData||{}).length,warehouseRows:Array.isArray(committedStore.warehouseResources)?committedStore.warehouseResources.length:0,fullSyncStatus:committedStore.syncStatus||null});
       trace('sync-complete',{ok:true,successful,failed,total,elapsedMs:Date.now()-startedAt});
-      refreshMarketOrders(selected,0).catch(()=>{});refreshGameConstants().catch(()=>{});
+      refreshMarketOrders(selected,0).catch(()=>{});refreshGameConstants().catch(()=>{});refreshExtraGameData(selected).catch(()=>{});
       const bridgeState=await state();
       if(bridgeState.liveBridge?.enabled && bridgeState.liveBridge?.pushOnSync) pushLiveBridge(selected,true).catch(()=>{});
 
