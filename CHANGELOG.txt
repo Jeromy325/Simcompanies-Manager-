@@ -1,3 +1,8 @@
+2.5.339 — 2026-10-23 — Sync picks up the economy phase
+- 2.5.338 only learned the economy phase when the game page itself loaded auth-data. Sync fetches auth-data too
+  (realm check) but that response was never saved, so after a Sync the card still used the recession rate
+  ($3,430.31 vs game $3,100.83). Sync now records the phase right after the realm check.
+
 2.5.338 — 2026-10-23 — Profit / h / level follows the economy phase
 - The economy phase (auth-data temporals.economyState) is now logged per realm (scmEconomyStateLog:<realm>) whenever
   the game or a Sync sends auth-data. A running batch keeps the phase it started in; the game's Profit Calculator uses

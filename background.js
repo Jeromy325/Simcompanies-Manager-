@@ -4718,6 +4718,9 @@ async function syncNow(requestedRealm=null){
     if(!authBoundary?.ok) throw new Error(`Could not verify the game session for ${realmDisplayNumber(selected)||'selected realm'} before sync (HTTP ${authBoundary?.status||0}).`);
     if(authRealm!==selected) throw new Error(`Game session is still ${realmDisplayNumber(authRealm)||'an unknown realm'}; selected sync target is ${realmDisplayNumber(selected)||'the selected realm'}. Switch the game first, then Sync again.`);
     trace('auth-verified',{realm:selected,captureRealm:validRealmNumber(authBoundary.captureRealm),status:Number(authBoundary.status)||0});
+    // v2.5.339 the explicit auth-data GET bypasses saveData, so record the economy phase from it here
+    // (storage only; seeded from the previously stored auth-data).
+    try{const es=await state(selected);const ek=realmKeyFromRealm(selected);await recordEconomyState(selected,es?.realmStores?.[ek]?.endpointData?.['/api/v3/companies/auth-data/']||null,authBoundary.data);trace('economy-state-recorded',{realm:selected,economyState:Number(authBoundary.data?.temporals?.economyState)});}catch{}
     await saveData('/api/v3/companies/auth-data/',authBoundary.data,authBoundary.status,'GET',selected);
     await activateRealmByRealm(selected,authBoundary.data?.authCompany?authBoundary.data:null);
     const activated=await state();

@@ -3,7 +3,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.338');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.339');
 const N = require('../notify-core.js');
 const now = Date.parse('2026-10-23T13:00:00Z');
 const names = new Map([[112, 'Bulldozer'], [43, 'Steel'], [51, 'Car body'], [52, 'Combustion engine'], [1, 'Power'], [3, 'Water']]);
