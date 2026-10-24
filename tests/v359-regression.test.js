@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.359');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.360');
 const C = require('../tools-core.js');
 const N = require('../notify-core.js');
 const fx = require('./fixtures/profit-calc-2026-10-24.json');
@@ -135,16 +135,22 @@ assert.equal(C.upgradePayback({ cost: null, gainPerHour: 5 }).reason, 'no-cost')
   assert.ok(ins.includes(`<span class="si-phase">Recession ${money(ecPh[0])} · <b>Normal $474.45</b> · Boom ${money(ecPh[2])}</span>`), `phase line: ${ins}`);
   // payback: E-comps level 7 → 8: materials = 24 costUnits × 7 × (4×160 + 55×2.1 + 16×9 + 1×2400) / profit 474.45 per h
   const cost = 24 * 7 * (4 * 160 + 55 * 2.1 + 16 * 9 + 2400);
-  const hours = cost / 474.45;
+  // 2.5.360: + upgrade time (level × buildDuration, no production) and the extra admin (1/170 on every producing level's wages)
+  const wage = k => 345 * full.buildings[k].salaryModifier;
+  const wageAll = wage('L') * 7 + wage('E') * 11 + wage('E') * 20;
+  const upE = 7 * full.buildings.L.buildDuration / 3600, extraE = (wageAll + wage('L')) / 170;
+  const hours = upE + (cost + 474.45 * 7 * upE) / (474.45 - extraE);
   const rowE = pay.match(/Electronics factory #1 <em class="si-tag">L7→8<\/em><small>([^<]*)<\/small><\/div><div class="pp-value"><span class="(si-\w+)">([^<]+)<\/span>/);
   assert.ok(rowE, pay);
   assert.ok(rowE[1].includes(`materials ${money(cost)}`) && rowE[1].includes('+$474.45/h from Electronic components'), rowE[1]);
   assert.equal(rowE[3], hours < 48 ? `${num(+hours.toFixed(1))} h` : `${num(+(hours / 24).toFixed(1))} d`, 'payback hours');
   assert.ok(/Max one <em class="si-tag">L20<\/em><small>already level 20/.test(pay), 'max level row');
-  const powerHours = 24 * 11 * (4 * 160 + 55 * 2.1 + 16 * 9 + 2400) / C.gameCalcProduct({ c: full, resourceId: 1, economyState: 1, bonusPct: 8, adminPct: fx.adminOverheadPctGameScreen, salePrice: 0.252, inputCostOf }).profitPerHourPerLevel;
+  const gP = C.gameCalcProduct({ c: full, resourceId: 1, economyState: 1, bonusPct: 8, adminPct: fx.adminOverheadPctGameScreen, salePrice: 0.252, inputCostOf }).profitPerHourPerLevel;
+  const upP = 11 * full.buildings.E.buildDuration / 3600, extraP = (wageAll + wage('E')) / 170;
+  const powerHours = gP - extraP > 0 ? upP + (24 * 11 * (4 * 160 + 55 * 2.1 + 16 * 9 + 2400) + gP * 11 * upP) / (gP - extraP) : Infinity;
   assert.equal(pay.indexOf('Power plant #1') < pay.indexOf('Electronics factory #1'), powerHours < hours, 'sorted by payback (shortest first)');
   assert.ok(pay.indexOf('Max one') > pay.indexOf('Electronics factory #1') && pay.indexOf('Max one') > pay.indexOf('Power plant #1'), 'max level last');
-  assert.ok(/Not counted: the higher admin overhead/.test(pay), 'limits stated');
+  assert.ok(/one more level adds 1\/170 to the base overhead/.test(pay) && /\− \$[\d,.]+\/h more admin/.test(pay) && /upgrade [\d.]+ (h|d), \$[\d,.]+ profit lost/.test(pay), 'admin and upgrade time counted');
   assert.ok(dash.includes('<div class="planner-section-label">Upgrade payback <span>(all buildings · next level)</span></div><div id="plannerPayback"'), 'own collapsible section');
 }
 console.log('v359 four upgrades: ok');

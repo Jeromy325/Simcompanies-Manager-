@@ -2462,10 +2462,16 @@ function renderPlannerPayback(host,d){
   const owned=Array.isArray(ctx.owned)?ctx.owned:[];
   const dur=h=>h==null?'—':h<48?`${num(+h.toFixed(1))} h`:`${num(+(h/24).toFixed(1))} d`;
   const rows=[];
+  // v2.5.360 extra admin per hour from one more level: wages of every producing level × (1/170) × (1 − COO%).
+  let ga=null;try{ga=plannerGameAdmin(s);}catch{}
+  const coo=Number(ga?.coo)||0,dAdmin=C.adminIncreasePerLevel(coo);
+  const wageAll=owned.filter(b=>Number(b.currentResourceId)>0).reduce((a,b)=>a+(Number(C.gameWagePerLevel(gc,String(b.kind||''),Boolean(b.robotsSpecialization)))||0)*Math.max(1,Number(b.level)||1),0);
   for(const b of owned){
     const pid=Number(b.currentResourceId),lvl=Math.max(1,Number(b.level)||1);
     if(!(pid>0))continue;
     if(lvl>=20){rows.push({b,lvl,max:true});continue;}
+    const bd=Number(gc.buildings?.[String(b.kind||'')]?.buildDuration),upHours=bd>0?lvl*bd/3600:0;
+    const extraAdmin=(wageAll+(Number(C.gameWagePerLevel(gc,String(b.kind||''),Boolean(b.robotsSpecialization)))||0))*dAdmin;
     const sale=plannerMarketPrice(s,map,pid,0,'sell-any');
     const res=C.gameCalcProduct({c:gc,resourceId:pid,economyState,eventPct:eventPctOf(pid),bonusPct,adminPct,robots:Boolean(b.robotsSpecialization),salePrice:sale?.price??null,inputCostOf,abundancePct:plannerAbundancePct(s,b.raw?.id??b.id,pid)});
     let plan=null;try{plan=constructionMaterialPlan(s,b,lvl,lvl+1,0,map);}catch{}
@@ -2473,18 +2479,18 @@ function renderPlannerPayback(host,d){
     const missing=items.filter(it=>it.price==null).map(it=>it.name);
     const cost=items.length&&!missing.length?items.reduce((a,it)=>a+Number(it.required)*it.price,0):null;
     const gain=res.ok&&res.complete?res.profitPerHourPerLevel:null;
-    rows.push({b,lvl,pid,cost,gain,missing,unavailable:!items.length,pay:C.upgradePayback({cost,gainPerHour:gain})});
+    rows.push({b,lvl,pid,cost,gain,missing,unavailable:!items.length,upHours,extraAdmin,pay:C.upgradePaybackFull({cost,gainPerHour:gain,currentProfitPerHour:gain!=null?gain*lvl:0,upgradeHours:upHours,extraAdminPerHour:extraAdmin})});
   }
   rows.sort((a,b)=>(a.pay?.hours==null)-(b.pay?.hours==null)||(a.pay?.hours??0)-(b.pay?.hours??0));
   const row=(label,value,note='',cls='')=>`<div class="pp-row ${cls}"><div class="pp-label">${label}${note?`<small>${note}</small>`:''}</div><div class="pp-value">${value}</div></div>`;
   const html=rows.map((r,i)=>{
     const label=`${escapeHtml(r.b.name)} <em class="si-tag">L${num(r.lvl)}${r.max?'':`→${num(r.lvl+1)}`}</em>`;
     if(r.max)return row(label,'max','already level 20');
-    const note=[r.unavailable?'construction cost not available (game constants missing)':r.missing.length?`no price for ${escapeHtml(r.missing.join(', '))}`:`materials ${plannerMoney(r.cost)}`,r.gain==null?'profit unknown (missing price)':`${r.gain>0?'+':''}${plannerMoney(r.gain)}/h from ${escapeHtml(nameOf(r.pid))}`].join(' · ');
+    const note=[r.unavailable?'construction cost not available (game constants missing)':r.missing.length?`no price for ${escapeHtml(r.missing.join(', '))}`:`materials ${plannerMoney(r.cost)}`,r.gain==null?'profit unknown (missing price)':`${r.gain>0?'+':''}${plannerMoney(r.gain)}/h from ${escapeHtml(nameOf(r.pid))} − ${plannerMoney(r.extraAdmin)}/h more admin`,r.upHours>0?`upgrade ${dur(r.upHours)}${r.pay.lostProfit>0?`, ${plannerMoney(r.pay.lostProfit)} profit lost`:''}`:''].filter(Boolean).join(' · ');
     const v=r.pay.hours!=null?`<span class="${r.pay.hours<72?'si-good':r.pay.hours<336?'si-warn':'si-bad'}">${dur(r.pay.hours)}</span>`:r.pay.reason==='not-profitable'&&r.gain!=null?'<span class="si-bad">never</span>':'—';
     return row(label,v,note,i===0&&r.pay.hours!=null?'si-best':'');
   }).join('');
-  el.innerHTML=rows.length?`<div class="pp-list">${html}</div><div class="pp-basis">Payback = next level's construction materials (at the cheapest market price) ÷ the extra profit / h of the building's current product (game Profit Calculator basis). Not counted: the higher admin overhead one more level brings (the game's /administration-overhead/plus-one/ is not captured yet) and the time the building spends upgrading. Green &lt; 3 days, orange &lt; 2 weeks.</div>`:'<div class="planner-profit-empty">No building is producing anything right now.</div>';
+  el.innerHTML=rows.length?`<div class="pp-list">${html}</div><div class="pp-basis">Payback from the start of the upgrade = upgrade time (level × build time; the building doesn't produce) + (materials at the cheapest market price + profit lost while upgrading) ÷ (extra profit / h − extra admin / h). Extra admin: one more level adds 1/170 to the base overhead${coo?`, ${num(coo)}% less with your COO`:''}, on the wages of every producing building (game formula). Upgrade-speed boosts are not counted. Green &lt; 3 days, orange &lt; 2 weeks.</div>`:'<div class="planner-profit-empty">No building is producing anything right now.</div>';
 }
 // v2.5.358 inputs run-out & make or buy lives on the Warehouse tab (all buildings). ctx: {s, priceMap, recipes,
 // owned, runHours, bonusPct}. Returns HTML.

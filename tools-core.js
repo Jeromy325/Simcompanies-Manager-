@@ -722,6 +722,19 @@
     if (!(g > 0)) return { hours: null, reason: 'not-profitable' };
     return { hours: c / g };
   }
+  // v2.5.360 full upgrade payback (game code, user-confirmed 2026-10-24):
+  //   admin overhead base = 1 + (total building levels − 1) / 170 → one more level adds 1/170 to the base; the COO cuts
+  //   (base − 1) by coo %, so the effective factor rises by (1/170) × (1 − coo/100), on the wages of every producing level.
+  //   upgrade time = level × buildDuration ÷ acceleration (default 1) — the building does not produce meanwhile.
+  //   payback (from the start) = upgrade time + (materials + profit lost while upgrading) ÷ (extra profit − extra admin) per h.
+  function adminIncreasePerLevel(cooPct = 0) { return (1 / 170) * (1 - Math.max(0, Math.min(100, Number(cooPct) || 0)) / 100); }
+  function upgradePaybackFull({ cost, gainPerHour, currentProfitPerHour = 0, upgradeHours = 0, extraAdminPerHour = 0 } = {}) {
+    const c = pos(cost), g = Number(gainPerHour), up = Math.max(0, Number(upgradeHours) || 0), cur = Number(currentProfitPerHour) || 0;
+    if (!c) return { hours: null, reason: 'no-cost' };
+    const net = g - (Number(extraAdminPerHour) || 0), lost = Math.max(0, cur) * up;
+    if (!(net > 0)) return { hours: null, reason: 'not-profitable', netGainPerHour: net, lostProfit: lost, upgradeHours: up };
+    return { hours: up + (c + lost) / net, netGainPerHour: net, lostProfit: lost, upgradeHours: up };
+  }
   // #4 sell price advice for a lot of quality q. Competing listings = quality ≥ q (the game's sell page shows
   // "Current exchange orders for Q<q>+"), your own listings excluded. history = daily VWAP [{date, vwap}] of id:q.
   function sellPriceAdvice({ listings, quality, history, unitCost = null, feePct = null, companyId = null, ownIds = [], now = Date.now(), days = 7 } = {}) {
@@ -762,7 +775,7 @@
   }
 
   const api = {
-    economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, phaseProfits, phaseRateRatio, upgradePayback, sellPriceAdvice, contractVerdict, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
+    economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, phaseProfits, phaseRateRatio, upgradePayback, adminIncreasePerLevel, upgradePaybackFull, sellPriceAdvice, contractVerdict, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
     cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
     seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,

@@ -1,3 +1,10 @@
+2.5.360 — 2026-10-24 — Upgrade payback counts admin overhead and upgrade time
+- From the game's code, confirmed with your data (R2 ≈ 106 building levels; base overhead 1.6176 = 1 + 105/170):
+  one more level adds 1/170 to the base admin overhead (less with your COO), paid on the wages of every producing
+  building. The card shows that "− $x/h more admin" and subtracts it from the extra profit.
+- Upgrade time = level × the building's build time (Electronics factory L7→8 = 35 h). You confirmed the building
+  doesn't produce meanwhile, so that lost profit is added to the cost and the time to the payback.
+
 2.5.359 — 2026-10-24 — Economy phases, upgrade payback, smart sell price, contract verdict
 - Production › Best product: each product shows profit / h / level in Recession · Normal · Boom (current phase in
   bold), from the game's rate formula with today's prices; "Best by phase" appears when the best product changes
