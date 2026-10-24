@@ -412,8 +412,13 @@ function recordEconomyState(realm,prevEntry,data){
     let log=(await chrome.storage.local.get({[k]:[]}))[k];
     const prevSt=Number(prevEntry?.data?.temporals?.economyState);
     if((!Array.isArray(log)||!log.length)&&Number.isFinite(prevSt)&&prevEntry?.receivedAt)log=C.economyLogAppend([],prevSt,prevEntry.receivedAt);
+    const last=Array.isArray(log)&&log.length?log[log.length-1]:null;
     const next=C.economyLogAppend(log,st,now);
     await rawStorageSet({[k]:next});
+    // v2.5.359 phase changed since the last observation → notification (setting "economyChange").
+    if(last&&Number.isFinite(Number(last.s))&&Number(last.s)!==st&&next.length&&Number(next[next.length-1].s)===st){
+      try{const cfg=await notifySettings();if(cfg.economyChange){const gc=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;const store=await notifyRealmStore(r);const msg=globalThis.SCM_NOTIFY_CORE.economyChanged({from:Number(last.s),to:st,realm:r,constants:gc,buildings:store?.buildings});await scmNotify(`economy-${r}-${Date.now()}`,msg.title,msg.message);}}catch(e){console.debug('economy notification failed',e);}
+    }
   }).catch(()=>{});
   return economyLogChain;
 }
@@ -1306,7 +1311,7 @@ setTimeout(()=>{seedProductionCostHistoryOnce().catch(()=>{});},4000);
 // game's own busy.started + busy.duration; one alarm per running batch, named scm-prodfin:<realm>:<buildingId>:<finishMs>.
 // No network work. Whether the phone shows them depends on the browser's support for extension notifications.
 const NOTIFY_SETTINGS_KEY='scmNotifySettings';
-const NOTIFY_DEFAULTS={productionFinished:true,sales:true,priceTargets:[],bigMove:true,bigMovePct:5,incomingContracts:true,dailySummary:true,dailySummaryTime:'08:00',costChange:true,costChangePct:3,idle:true,idleHours:1,undercut:true,unprofitable:true,jobTrouble:true};
+const NOTIFY_DEFAULTS={productionFinished:true,sales:true,priceTargets:[],bigMove:true,bigMovePct:5,incomingContracts:true,dailySummary:true,dailySummaryTime:'08:00',costChange:true,costChangePct:3,idle:true,idleHours:1,undercut:true,unprofitable:true,jobTrouble:true,economyChange:true};
 async function notifySettings(){const v=(await chrome.storage.local.get({[NOTIFY_SETTINGS_KEY]:null}))[NOTIFY_SETTINGS_KEY];return {...NOTIFY_DEFAULTS,...(v&&typeof v==='object'?v:{})};}
 // v2.5.334 notification state (dedupe/re-arm) in its own key, written through one serial queue.
 const NOTIFY_STATE_KEY='scmNotifyState';let notifyStateQueue=Promise.resolve();
@@ -6171,6 +6176,29 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       try{const realm=validRealmNumber(m.realm);const r=await getRealmBuildingVwapData(realm,m.resourceName,m.quality);send(r);}catch(e){send({ok:false,error:e?.message||String(e)});}
     })(); return true;
   }
+  // v2.5.359 #4 smart sell price for the game's Sell page: cheapest competing listing (quality ≥ the lot's, your own
+  // listings left out), 7-day daily VWAP range of id:quality, your warehouse cost, fee from your listings. An order book
+  // older than 15 min is refreshed through the game tab (throttled 5 min per product, no lock held while fetching).
+  if(m?.type==='GET_SELL_PRICE_INFO'){
+    (async()=>{
+      try{
+        const realm=validRealmNumber(m.realm),id=Number(m.resourceId),q=Number(m.quality);
+        if(realm==null||!(id>0)||!Number.isFinite(q)){send({ok:false,error:'Invalid request.'});return;}
+        const s=await state(realm);const store={...(s.realmStores?.[realmKeyFromRealm(realm)]||{})};const C=globalThis.SCM_TOOLS_CORE;
+        const path=`/api/v3/market/${realm}/${id}/`,ep=store.endpointData?.[path],at=Date.parse(String(ep?.receivedAt||''));
+        const haveBook=Array.isArray(ep?.data)&&Number.isFinite(at)&&Date.now()-at<6*3600e3;
+        let refreshing=false;
+        if(!haveBook||Date.now()-at>15*60e3){refreshing=true;fetchExchangeOrderBookForRealm(realm,id).catch(()=>{});}
+        const mo=(await chrome.storage.local.get({[`scmMarketOrders:${realm}`]:null}))[`scmMarketOrders:${realm}`];
+        const own=Array.isArray(mo?.orders)?mo.orders:[];
+        const lots=(Array.isArray(store.warehouseResources)?store.warehouseResources:[]).filter(l=>Number(l?.kind)===id&&Number(l?.quality)===q);
+        const cost=C.warehouseUnitCostAsGame(lots,id);
+        const companyId=store.authData?.authCompany?.companyId??store.authData?.authCompany?.id??null;
+        const advice=C.sellPriceAdvice({listings:haveBook?ep.data:[],quality:q,history:store.history?.[simcoVwapHistoryKey(id,q)],unitCost:cost?.unitCost??null,feePct:C.listingFeePct(own),companyId,ownIds:own.map(o=>o?.id),now:Date.now()});
+        send({ok:true,realm,id,quality:q,orderBookAt:haveBook?ep.receivedAt:null,refreshing,...advice});
+      }catch(e){send({ok:false,error:e?.message||String(e)});}
+    })(); return true;
+  }
   if(m?.type==='GET_INCOMING_CONTRACT_VWAP_DATA'){
     (async()=>{
       try{
@@ -6185,10 +6213,23 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const key=realmKeyFromRealm(realm),store={...(realmState.realmStores?.[key]||{})};
         const incomingRaw=helperLatestEndpoint(store,/\/api\/v3\/contracts-incoming\/\d+\/me\/?$/i);
         const incoming=helperArray(incomingRaw,['incomingContracts','data','items','results']).map(c=>({id:Number(c?.id),kind:Number(c?.kind),quality:Number(c?.quality)||0,quantity:Number(c?.quantity)||0,price:Number(c?.price)||0,company:String(c?.seller?.company||c?.company||'Unknown seller'),datetime:c?.datetime||null})).filter(c=>Number.isFinite(c.id));
+        // v2.5.359 #6 verdict: cheapest exchange listing at quality ≥ the contract's (captured order book, < 6 h; refreshed
+        // through the game tab when older than 15 min, ≤ 3 products per pass, throttled 5 min each) and your warehouse cost.
+        const C=globalThis.SCM_TOOLS_CORE,lots=Array.isArray(store.warehouseResources)?store.warehouseResources:[];let asked=0;
         for(const c of incoming){
           const comparison=overlayIncomingContractMarketComparison(store,c,realm);
           c.marketPrice=comparison.marketPrice;
           c.savingsPct=comparison.savingsPct;
+          try{
+            const ep=store.endpointData?.[`/api/v3/market/${realm}/${c.kind}/`],at=Date.parse(String(ep?.receivedAt||''));
+            const book=Array.isArray(ep?.data)&&Number.isFinite(at)&&Date.now()-at<6*3600e3?ep.data:null;
+            if((!book||Date.now()-at>15*60e3)&&asked<3&&c.kind>0){asked++;fetchExchangeOrderBookForRealm(realm,c.kind).catch(()=>{});}
+            const comp=(book||[]).filter(r=>Number(r?.price)>0&&Number(r?.quality)>=c.quality);
+            c.exchangePrice=comp.length?Math.min(...comp.map(r=>Number(r.price))):null;
+            c.exchangeAt=book?ep.receivedAt:null;
+            c.stockCost=C?.warehouseUnitCostAsGame?C.warehouseUnitCostAsGame(lots,c.kind)?.unitCost??null:null;
+            c.verdict=C?.contractVerdict?C.contractVerdict({price:c.price,quantity:c.quantity,exchangePrice:c.exchangePrice,stockCost:c.stockCost}):null;
+          }catch{}
         }
         send({ok:true,realm,contracts:incoming,marketPriceUpdatedAt:store.liveMarketPriceData?.updatedAt||store.liveMarketPriceData?.fetchedAt||null});
       }catch(e){send({ok:false,error:e?.message||String(e)});}

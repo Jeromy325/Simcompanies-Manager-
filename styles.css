@@ -1328,3 +1328,4 @@ html.scm-mobile .contract-table.saved-contract-table.mobile-cards:not(.contract-
 .scm-auto-section.is-collapsed>.planner-section-label{padding-bottom:8px}
 .panel>h3.collapse-head{display:flex;align-items:center}
 .panel>h3.collapse-head::after{margin-left:auto}
+.planner-insights .si-phase b{color:#eef4f9;font-weight:700}

@@ -1,3 +1,17 @@
+2.5.359 — 2026-10-24 — Economy phases, upgrade payback, smart sell price, contract verdict
+- Production › Best product: each product shows profit / h / level in Recession · Normal · Boom (current phase in
+  bold), from the game's rate formula with today's prices; "Best by phase" appears when the best product changes
+  with the phase. New alert (Alerts › Summary & health, on by default): "Economy: Normal → Boom" with how fast each
+  of your building types produces now.
+- Production › Upgrade payback (all buildings): next level's construction materials at the cheapest market price
+  ÷ the extra profit / h of the current product → hours / days to pay back, shortest first. Not counted: the higher
+  admin overhead from one more level (not captured yet) and the upgrade time.
+- Game Sell page helper: "Price · match cheapest" fills the price with the cheapest competing listing (quality ≥
+  yours, your own listings left out), plus the 7-day VWAP range, your cost, what you get after the fee, and a red
+  warning when that price is below the 7-day low or below your cost. Stale listings are refreshed through the game.
+- Incoming contracts badge (game page): adds "saves $x/u vs exchange $y ($total)" or "exchange is $x/u cheaper",
+  using the cheapest exchange listing at that quality or better, and your stock cost. The badge now wraps on phones.
+
 2.5.358 — 2026-10-24 — Every card expands / collapses; run-out & make or buy moved to the Warehouse
 - Tap a card's title to collapse it to its header; tap again to open. Your choice is remembered, also after the
   page refreshes. Now on every tab: Overview, Accounting, Warehouse, Market, Production (Your Buildings,

@@ -317,7 +317,28 @@
     const d = new Date(now); d.setHours(h, mi, 0, 0); if (d.getTime() <= now) d.setDate(d.getDate() + 1); return d.getTime();
   }
 
-  const api = { saleKind, newSales, money, total, cheapestListing, batchFinishedMessage, inputShortage, priceTargetHits, bigMoves, newIncomingContracts, contractRows, dailySummary, nextDailyTime, lotCost, costChanged, followUp, undercut, unprofitable, lowStock, jobTrouble, holdings };
+  // v2.5.359 economy phase changed (auth-data temporals.economyState). Rate factor per building kind you own, from the
+  // game's formula: rate ∝ (AVERAGE_SALARY / SALARY_MID[phase])^salaryModifier → factor = (MID[from] / MID[to])^sm.
+  function economyChanged({ from, to, realm = 1, constants = null, buildings = [], buildingNames = null }) {
+    const nm = { 0: 'Recession', 1: 'Normal', 2: 'Boom' };
+    const name = v => nm[Number(v)] || `Phase ${v}`;
+    const lines = [];
+    const mid = constants && constants.core && constants.core.SALARY_MID, defs = constants && constants.buildings;
+    if (mid && defs && n(mid[from]) && n(mid[to])) {
+      const seen = new Map();
+      for (const b of Array.isArray(buildings) ? buildings : []) {
+        const k = String(b?.kind ?? ''); if (!k || seen.has(k)) continue;
+        const sm = n(defs[k]?.salaryModifier); if (sm == null) continue;
+        seen.set(k, { label: (buildingNames && buildingNames[k]) || String(b?.name || k).replace(/\s*#\d+.*$/, ''), f: Math.pow(Number(mid[from]) / Number(mid[to]), sm) });
+      }
+      const parts = [...seen.values()].slice(0, 6).map(x => `${x.label} ${pct((x.f - 1) * 100)}`);
+      if (parts.length) lines.push(`Production speed now (game formula): ${parts.join(', ')}.`);
+    }
+    lines.push('Best product on the Production tab shows profit per phase.');
+    lines.push(R(realm));
+    return { title: `Economy: ${name(from)} → ${name(to)}`, message: lines.join('\n') };
+  }
+  const api = { saleKind, economyChanged, newSales, money, total, cheapestListing, batchFinishedMessage, inputShortage, priceTargetHits, bigMoves, newIncomingContracts, contractRows, dailySummary, nextDailyTime, lotCost, costChanged, followUp, undercut, unprofitable, lowStock, jobTrouble, holdings };
   root.SCM_NOTIFY_CORE = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

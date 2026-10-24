@@ -700,6 +700,59 @@
     return { verdict: saves >= 0 ? 'make' : 'buy', ownCost: o, marketPrice: m, savesPerUnit: Math.abs(saves), savesPct: Math.abs(saves) / m * 100 };
   }
 
+  // v2.5.359 #5 profit/h/level in every economy phase. Same sale price and input costs; the game's rate (and so labour
+  // per unit, wage per hour being phase-independent) changes with SALARY_MID[phase]. {state: value|null}.
+  function phaseProfits(args = {}) {
+    const c = args.c; if (!gameConstantsOk(c)) return null;
+    const out = {};
+    for (const st of Object.keys(c.core.SALARY_MID)) { const r = gameCalcProduct({ ...args, economyState: Number(st) }); out[st] = r.ok ? r.profitPerHourPerLevel : null; }
+    return out;
+  }
+  // Rate factor when the economy goes from → to, for a building kind: rate ∝ (AVERAGE_SALARY / SALARY_MID)^salaryModifier.
+  function phaseRateRatio(c, buildingKind, from, to) {
+    if (!gameConstantsOk(c)) return null;
+    const b = c.buildings[String(buildingKind)], sm = Number(b && b.salaryModifier);
+    const mf = pos(c.core.SALARY_MID[String(from)]), mt = pos(c.core.SALARY_MID[String(to)]);
+    return Number.isFinite(sm) && mf && mt ? Math.pow(mf / mt, sm) : null;
+  }
+  // #7 upgrade payback: hours until the extra level's profit pays the construction materials.
+  function upgradePayback({ cost, gainPerHour } = {}) {
+    const c = pos(cost), g = Number(gainPerHour);
+    if (!c) return { hours: null, reason: 'no-cost' };
+    if (!(g > 0)) return { hours: null, reason: 'not-profitable' };
+    return { hours: c / g };
+  }
+  // #4 sell price advice for a lot of quality q. Competing listings = quality ≥ q (the game's sell page shows
+  // "Current exchange orders for Q<q>+"), your own listings excluded. history = daily VWAP [{date, vwap}] of id:q.
+  function sellPriceAdvice({ listings, quality, history, unitCost = null, feePct = null, companyId = null, ownIds = [], now = Date.now(), days = 7 } = {}) {
+    const q = Number(quality) || 0, own = new Set((ownIds || []).map(Number)), cid = companyId == null ? null : Number(companyId);
+    const sid = r => Number(r && (r.seller && r.seller.id != null ? r.seller.id : r.sellerId));
+    const comp = (Array.isArray(listings) ? listings : []).filter(r => r && Number(r.price) > 0 && Number(r.quality) >= q && !own.has(Number(r.id)) && !(cid != null && sid(r) === cid));
+    const cheapest = comp.length ? comp.reduce((a, b) => (Number(b.price) < Number(a.price) ? b : a)) : null;
+    const from = now - days * 24 * HOUR;
+    const pts = (Array.isArray(history) ? history : []).map(h => ({ t: Date.parse(String(h && h.date)), v: Number(h && h.vwap) })).filter(p => Number.isFinite(p.t) && p.t >= from - 24 * HOUR && p.v > 0);
+    const vs = pts.map(p => p.v);
+    const range = vs.length ? { low: Math.min(...vs), high: Math.max(...vs), average: vs.reduce((a, b) => a + b, 0) / vs.length, days: vs.length } : null;
+    const suggested = cheapest ? Number(cheapest.price) : null;
+    const fee = feePct != null && Number.isFinite(Number(feePct)) ? Number(feePct) : null;
+    const net = suggested != null && fee != null ? suggested * (1 - fee / 100) : null;
+    const cost = unitCost != null && Number.isFinite(Number(unitCost)) && Number(unitCost) > 0 ? Number(unitCost) : null;
+    const warnings = [];
+    if (suggested != null && range && suggested < range.low) warnings.push('below-7d-low');
+    if (suggested != null && cost != null && (net != null ? net : suggested) < cost) warnings.push('below-cost');
+    return { suggested, cheapestQuality: cheapest ? Number(cheapest.quality) : null, competing: comp.length, range, unitCost: cost, feePct: fee, net, warnings };
+  }
+  // #6 incoming contract (you buy): unit price vs the cheapest exchange listing at quality ≥ the contract's, and vs
+  // your warehouse cost of that product. Positive saves = the contract is cheaper.
+  function contractVerdict({ price, quantity, exchangePrice = null, stockCost = null } = {}) {
+    const p = pos(price), qty = pos(quantity) || 0, x = pos(exchangePrice), s = pos(stockCost);
+    if (!p) return null;
+    const out = { price: p, quantity: qty };
+    if (x) { out.exchangePrice = x; out.savesPerUnit = x - p; out.savesTotal = (x - p) * qty; out.savesPct = (x - p) / x * 100; out.verdict = x - p >= 0 ? 'cheaper' : 'dearer'; }
+    if (s) { out.stockCost = s; out.vsStockPerUnit = s - p; }
+    return out;
+  }
+
   // Exchange fee % from your own listings (/api/v2/companies/<id>/market-orders/): fees ÷ (quantity × price).
   function listingFeePct(orders) {
     const ok = (Array.isArray(orders) ? orders : []).filter(o => pos(o && o.fees) && pos(o.quantity) && pos(o.price));
@@ -709,7 +762,7 @@
   }
 
   const api = {
-    economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
+    economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, phaseProfits, phaseRateRatio, upgradePayback, sellPriceAdvice, contractVerdict, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
     cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
     seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,
