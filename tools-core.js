@@ -55,7 +55,7 @@
     const earn = num(fundedProfitPerHour), lead = Math.max(0, num(leadTimeHours));
     const earnedOverTerm = earn * Math.max(0, termHours - lead);
     return {
-      ok: true, principal: P, ratePct: r, ratePeriod, termDays: term, termHours,
+      ok: true, principal: P, ratePct: r, ratePeriod, termDays: term, termHours, leadTimeHours: lead,
       totalInterest: interest, totalRepayment: P + interest, hourlyDebtCost,
       fundedProfitPerHour: earn, netHourly: earn - hourlyDebtCost,
       earnedOverTerm, netOverTerm: earnedOverTerm - interest,

@@ -1,3 +1,12 @@
+2.5.349 — 2026-10-24 — Abundance for every mine; loan build time
+- After each Sync the Manager now asks the game for the abundance of every mine, oil rig and quarry you own (from the
+  game's constants: buildings that make Minerals, Bauxite, Iron ore, Sand, Gold ore, Crude oil, Methane, Clay,
+  Limestone). Before, it only re-checked buildings whose abundance it had already captured, so Mine #1 had none.
+- Loan & bond: the verdict now uses the earnings over the whole term after the build time (was per hour, which
+  ignored build time). Total interest is unchanged by build time, as it should be.
+- Profit / h / level is per level (as the game's calculator), so the planning level does not change it; the
+  "Profit / h · Level N" figure does follow the planning level. Checked, no change.
+
 2.5.348 — 2026-10-24 — Profit / h / level matches the game's Profit Calculator
 - Your screens vs the Manager (same data, R2 2026-10-24 02:04–02:09 UTC): Power $145.09 vs game $151.04, Minerals
   $522.29 vs $422.05, Electronic components $474.36 vs $474.45. Read the game's calculator code (GamePages bundle) and

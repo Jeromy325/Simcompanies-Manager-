@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const C = require('../tools-core.js');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.348');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.349');
 const realLog = [{ f: '2026-10-23T17:43:48.671Z', l: '2026-10-23T17:45:44.994Z', s: 1 }];
 assert.equal(C.economyStateAt(realLog, '2026-10-23T02:49:05.777233+00:00'), null, 'batch before log → unknown, not "normal"');
 const measured = 26.451568041165427, ref = 5.58040099212704 * 4 * 1.08;

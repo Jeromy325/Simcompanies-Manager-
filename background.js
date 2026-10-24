@@ -322,6 +322,11 @@ async function refreshExtraGameData(realm){
   const ab=new Set(Object.keys(ep).map(k=>(k.match(/^\/api\/v2\/companies\/buildings\/(\d+)\/abundance\/$/)||[])[1]).filter(Boolean));
   const kinds=new Set((Array.isArray(st?.buildings)?st.buildings:[]).filter(b=>ab.has(String(b?.id))).map(b=>String(b?.kind)));
   for(const b of (Array.isArray(st?.buildings)?st.buildings:[]))if(kinds.has(String(b?.kind)))ab.add(String(b.id));
+  // v2.5.349 also every building that makes an abundance resource (mines, oil rigs, quarries: constants producedAt),
+  // even when its abundance was never captured or the record was lost.
+  try{const gc=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;const T=globalThis.SCM_TOOLS_CORE;
+    const abKinds=new Set(Object.entries(gc?.resources||{}).filter(([id])=>T?.isAbundanceResource?.(id)).map(([,x])=>String(x?.producedAt)));
+    for(const b of (Array.isArray(st?.buildings)?st.buildings:[]))if(abKinds.has(String(b?.kind)))ab.add(String(b.id));}catch{}
   const paths=['/api/v3/players/research/',`/api/v3/government-orders/${r}/`,'/api/v3/government-orders/tier/',...[...ab].map(id=>`/api/v2/companies/buildings/${id}/abundance/`)];
   const out=[];
   for(const p of paths){try{const x=await pageGet(p,r);if(x?.ok){await saveData(p,x.data,x.status,'GET',r);out.push(p);}}catch{}}

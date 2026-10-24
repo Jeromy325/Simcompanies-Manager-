@@ -17,5 +17,5 @@ assert.match(bg, /scmMobileNetSave/);
 assert.match(bg, /SCM_MOBILE_NET_START/);
 assert.match(bg, /scmMobileNetLogBackground/);
 assert.match(bg, /extension-background/);
-assert.equal(manifest.version, '2.5.348');
+assert.equal(manifest.version, '2.5.349');
 console.log('Android overnight network capture regression checks passed.');
