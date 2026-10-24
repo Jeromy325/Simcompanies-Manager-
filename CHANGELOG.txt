@@ -1,3 +1,13 @@
+2.5.347 — 2026-10-23 — Saved-contract match by resource; Sell page Left/Surplus helper
+- Saved contract on the Electronic components contract page injected $8.15 (and 768.395 units): the helper matched
+  saved contracts by page text, and the exchange-order list on that page shows "PATO SILICON AND METALS", so your
+  Chemi Kitties Silicon contract won. The page's resource now comes from the game's header link
+  (/encyclopedia/<realm>/resource/<id>/) and quality from "Current exchange orders for Q<q>+" (or the header stars);
+  only saved contracts for that resource can match. Left/Surplus amounts are whole units.
+- New: on the warehouse "Sell on the exchange" page a small card shows Left (overlay Left: stock after demand and
+  saved contracts) and Surplus (production surplus) for that resource and quality. Tap one to fill the Amount box.
+  Drag the card by its title bar (position is remembered); × closes it until you open Sell again.
+
 2.5.346 — 2026-10-23 — Compact saved-contract cards
 - Phone layout for Saved Contracts: product and total on the first line, then company · direction, qty · Q · price,
   market · discount · Edit/Delete. The price no longer sits unlabelled on top of the total, and the buttons are

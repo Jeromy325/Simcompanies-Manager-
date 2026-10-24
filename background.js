@@ -1906,7 +1906,9 @@ async function buildGameOverlayData(store,realm,globalState){
       if(alternatives.length){marketPrice=alternatives[0].price;marketPriceQuality=alternatives[0].quality;}
     }
     const vwap=overlayVwap(store,r.id,quality,realm);
-    return {...r,contracted:netContracts,incoming,outgoing,leftover:left,difference:left,warehouseOnlyLeft:left,name,quality,vwap,marketPrice,marketPriceQuality,marketPriceExact:marketPriceQuality===quality,image:local||(file?`${assets.imageBase}${file}`:'')};
+    // 2.5.347 production surplus for this resource+quality (game-page Sell helper "Surplus").
+    const surplus=Math.max(0,Number(productionSurplusByKey.get(key))||0);
+    return {...r,contracted:netContracts,incoming,outgoing,leftover:left,difference:left,warehouseOnlyLeft:left,surplus,name,quality,vwap,marketPrice,marketPriceQuality,marketPriceExact:marketPriceQuality===quality,image:local||(file?`${assets.imageBase}${file}`:'')};
   }).filter(r=>{
     const key=`${Number(r.id)}:${Number(r.quality)||0}`;
     // Show every produced resource quality plus every resource/quality explicitly
@@ -5577,6 +5579,7 @@ function overlaySnapshotSignature(data){
       outgoing:Number(r.outgoing)||0,
       stock:Number(r.stock)||0,
       difference:Number(r.difference)||0,
+      surplus:Number(r.surplus)||0,
       vwap:Number.isFinite(Number(r.vwap))?Number(r.vwap):null
     })).sort((a,b)=>a.id-b.id||a.quality-b.quality)
   });

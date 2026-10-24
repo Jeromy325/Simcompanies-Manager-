@@ -1460,6 +1460,7 @@ let hookReady = false;
 #scm-game-balance-card,#scm-contract-helper-card,#scm-left-copy-card{position:fixed;z-index:2147483000;box-sizing:border-box;left:5px;right:5px;width:auto;max-width:none;max-height:48vh;overflow-y:auto;overflow-x:hidden;background:rgba(10,15,21,.97);color:#e7edf5;border:1px solid #2a394b;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.30);font:12px/1.3 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:6px;pointer-events:auto}
 #scm-game-balance-card *,#scm-contract-helper-card *,#scm-left-copy-card *{box-sizing:border-box}.scm-go-head,.scm-ch-head{display:flex;align-items:center;justify-content:space-between;gap:5px;min-height:28px}
 #scm-game-balance-card .scm-go-head{position:sticky;top:-6px;z-index:5;margin:-6px -6px 0;padding:6px;background:rgba(10,15,21,.98);border-bottom:1px solid #26364a;isolation:isolate}.scm-go-title,.scm-ch-title{font-size:13px;font-weight:400;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}.scm-go-head-actions{display:flex;align-items:center;gap:4px;flex:0 0 auto} .scm-go-copy{width:auto;min-width:72px;padding:0 8px;font-size:11px;flex:0 0 auto}.scm-left-copy-card{padding:8px}.scm-left-copy-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.scm-left-copy-title{font-size:11px;font-weight:800}.scm-left-copy-meta{color:#9babbc;font-size:8px;margin-top:2px}.scm-left-copy-controls{display:flex;align-items:center;gap:6px;margin-top:7px}.scm-left-copy-controls label{color:#9babbc;font-size:8px;white-space:nowrap}.scm-left-copy-controls select{height:28px;border:1px solid #3a4c62;background:#101b28;color:#e7edf5;border-radius:5px;padding:0 7px;font:700 9px system-ui;min-width:76px}.scm-left-copy-text{display:block;width:100%;min-height:150px;margin-top:7px;border:1px solid #3a4c62;background:#0e1722;color:#e7edf5;border-radius:6px;padding:8px;font:10px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;resize:vertical}.scm-left-copy-actions{display:flex;justify-content:flex-end;gap:6px;margin-top:7px}.scm-left-copy-btn,.scm-left-copy-close{height:28px;border:1px solid #3a4c62;background:#152030;color:#e7edf5;border-radius:5px;padding:0 10px;font:700 9px system-ui;cursor:pointer}.scm-left-copy-btn{font-weight:800}.scm-left-copy-none{color:#9babbc;font-size:9px;padding:12px 4px;text-align:center}.scm-go-toggle,.scm-ch-fill{border:1px solid #3a4c62;background:#152030;color:#dce8f5;border-radius:5px;padding:0;font:700 9px/1 system-ui;cursor:pointer;white-space:nowrap;width:26px;height:26px;min-width:26px;min-height:26px;display:inline-flex;align-items:center;justify-content:center}.scm-go-grid{display:flex;flex-direction:column;gap:4px;margin-top:4px;max-height:none;overflow:visible;padding-bottom:4px;align-items:stretch}.scm-go-row{display:grid;grid-template-columns:18px minmax(120px,1.4fr) repeat(4,minmax(90px,1fr));align-items:center;gap:5px;width:100%;min-width:0;min-height:36px;height:auto;padding:5px 7px;border:1px solid #26364a;border-radius:4px;background:#0e1722}.scm-go-row img{width:20px;height:20px;object-fit:contain}.scm-go-name{font-size:13px;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.scm-go-stock,.scm-go-contract,.scm-go-remaining{color:#dbe6f0;white-space:nowrap;font-size:11px;min-width:0;overflow:hidden;text-overflow:ellipsis}.scm-go-contract{color:#f0c674}.scm-go-remaining{font-weight:500}.scm-go-remaining.negative{color:#ff5f6d}.scm-go-remaining.positive{color:#35d07f}.scm-go-status{font-weight:800;white-space:nowrap}.scm-go-status.surplus{color:#35d07f}.scm-go-status.deficit{color:#ff5f6d}.scm-go-status.balanced{color:#b9c6d4}.scm-go-collapsed{width:28px!important;min-width:28px!important;min-height:28px!important;height:28px!important;padding:0!important;display:flex;align-items:center;justify-content:center;left:8px!important}.scm-go-collapsed .scm-go-toggle{width:26px;height:26px;min-width:26px;min-height:26px}.scm-ch-card{padding:5px}.scm-ch-close{width:26px;height:26px;min-width:26px;border:1px solid #3a4c62;border-radius:5px;background:#152030;color:#e7edf5;font:700 14px/1 system-ui;cursor:pointer;padding:0;display:inline-flex;align-items:center;justify-content:center}.scm-ch-meta{color:#9babbc;font-size:8px;margin-top:2px}.scm-ch-row{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-top:4px;padding:5px;border:1px solid #26364a;border-radius:5px;background:#0e1722}.scm-ch-info{min-width:0}.scm-ch-info strong{display:block;font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.scm-ch-info span{display:block;color:#9babbc;font-size:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.scm-ch-actions{display:flex;align-items:center;gap:4px}.scm-ch-price{font-size:8px;color:#dbe7f1;white-space:nowrap}.scm-ch-fill{padding:0;width:26px;height:26px;min-width:26px}.scm-ch-none{color:#9babbc;font-size:8px;padding:5px}.scm-ch-qty{display:flex;align-items:center;gap:5px;margin-top:5px}.scm-ch-qty label{color:#9babbc;font-size:8px;white-space:nowrap}.scm-ch-qty select,.scm-ch-qty input{height:26px;border:1px solid #3a4c62;background:#101b28;color:#e7edf5;border-radius:5px;padding:0 6px;font:700 9px system-ui;min-width:120px;max-width:180px}.scm-ch-qty input{min-width:90px;width:90px}.scm-ch-cap{color:#8090a2;font-size:8px;margin-top:3px}
+#scm-sell-qty-card{position:fixed;z-index:2147483001;box-sizing:border-box;width:min(230px,calc(100vw - 8px));background:rgba(10,15,21,.97);color:#e7edf5;border:1px solid #2a394b;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.35);font:12px/1.3 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:5px;pointer-events:auto}#scm-sell-qty-card *{box-sizing:border-box}.scm-sq-head{display:flex;align-items:center;gap:5px;min-height:28px;cursor:move;touch-action:none;user-select:none;-webkit-user-select:none}.scm-sq-grip{color:#7f93a8;font-size:14px;line-height:1}.scm-sq-title{flex:1;min-width:0;font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.scm-sq-close{width:28px;height:28px;min-width:28px;border:1px solid #3a4c62;border-radius:5px;background:#152030;color:#e7edf5;font:700 15px/1 system-ui;cursor:pointer;padding:0}.scm-sq-btns{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:5px}.scm-sq-fill{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:40px;border:1px solid #3a4c62;border-radius:6px;background:#152030;color:#e7edf5;font:600 10px/1.2 system-ui;cursor:pointer;padding:3px}.scm-sq-fill b{font-size:14px;font-weight:800;color:#35d07f}.scm-sq-fill:disabled{opacity:.5;cursor:default}.scm-sq-fill:disabled b{color:#9babbc}.scm-sq-fill.scm-sq-done{border-color:#35d07f;background:#173326}.scm-sq-note{color:#9babbc;font-size:9px;margin-top:4px}
 @media(max-width:700px){
 #scm-game-balance-card,#scm-contract-helper-card,#scm-left-copy-card{left:5px;right:5px;width:auto;max-width:none;max-height:48vh;overflow-x:hidden;overscroll-behavior-x:none;touch-action:pan-y}
 #scm-game-balance-card{max-width:calc(100vw - 10px);min-width:0}
@@ -1719,23 +1720,62 @@ let hookReady = false;
     }
     return out;
   };
+  // 2.5.347 the game's warehouse resource page (/headquarters/warehouse/<resource>/sell/ or /contract/) names its
+  // resource only through the header's encyclopedia link /encyclopedia/<realm>/resource/<id>/ (game bundle). Quality:
+  // "Current exchange orders for Q<q>+" (selected lot), else the header's stars. Page text is never used for the
+  // product: the exchange-order list holds company names such as "PATO SILICON AND METALS".
+  const warehousePageResource=()=>{
+    const tab=(String(location.pathname||'').match(/\/headquarters\/warehouse\/[^/]+\/(sell|contract)\/?$/i)||[])[1];
+    if(!tab)return null;
+    const links=[...document.querySelectorAll('a[href*="/encyclopedia/"][href*="/resource/"]')];
+    const link=links.find(a=>a.querySelector('img'))||links[0];
+    const idMatch=String(link?.getAttribute('href')||'').match(/\/resource\/(\d+)\/?(?:[?#].*)?$/);
+    if(!idMatch)return null;
+    let quality=null;
+    const q=String(document.body?.innerText||'').match(/exchange orders for Q(\d+)\+/i);
+    if(q)quality=Number(q[1]);
+    else{
+      const block=link.parentElement?.parentElement;
+      for(const sel of ['svg[data-icon="star"]','svg.fa-star','.fa-star','[class*="fa-star"]']){
+        const stars=block?[...block.querySelectorAll(sel)]:[];
+        if(!stars.length)continue;
+        const holder=stars[0].parentElement;const lead=String(holder?.textContent||'').trim().match(/^(\d+)/);
+        quality=lead?Number(lead[1]):stars.filter(x=>x.parentElement===holder).length;break;
+      }
+    }
+    const name=String(link.querySelector('img')?.getAttribute('alt')||'').trim();
+    return {id:Number(idMatch[1]),quality:Number.isFinite(quality)?quality:null,name,tab:tab.toLowerCase()};
+  };
   const detectContractContext=()=>{
     const raw=String(document.body?.innerText||'').replace(/\r/g,'');
     const lines=raw.split('\n').map(s=>s.replace(/\s+/g,' ').trim()).filter(Boolean);
     const selectedRecipients=selectedRecipientCandidates();
     const fieldRecipient=fieldText(['recipient']);
     const recipient=selectedRecipients[0]||'';
+    const pageResource=warehousePageResource();
     const product=fieldText(['product','resource'])||labeledValue(lines,['product','resource']);
     const qualityText=fieldText(['quality'])||labeledValue(lines,['quality']);
-    const quality=(qualityText.match(/\bQ?([0-9]{1,2})\b/i)||[])[1];
+    const quality=(qualityText.match(/\bQ?([0-9]{1,2})\b/i)||[])[1]??pageResource?.quality;
     const contractPage=/(?:recipient|amount|price per unit|please enter amount)/i.test(raw)||/contract/i.test(String(location.pathname||''));
     if(!contractPage&&!selectedRecipients.length&&!fieldRecipient&&!product)return null;
-    return {body:raw,lines,recipient,fieldRecipient,selectedRecipient:selectedRecipients.length>0,product,quality:Number.isFinite(Number(quality))?Number(quality):null};
+    return {body:raw,lines,recipient,fieldRecipient,selectedRecipient:selectedRecipients.length>0,product,productId:pageResource?.id??null,quality:quality!=null&&Number.isFinite(Number(quality))?Number(quality):null};
   };
   const matchSavedContract=(ctx,saved)=>{
     if(!ctx)return null;
     const recipientCandidates=[ctx.recipient,...(ctx.fieldRecipient?[ctx.fieldRecipient]:[])].map(norm).filter(Boolean);
     if(!recipientCandidates.length)return null;
+    const pageId=Number(ctx.productId);
+    if(pageId>0){
+      // 2.5.347 the page names its resource: only saved contracts for that resource id can match.
+      let hit=null,hitScore=-1;
+      for(const c of saved){
+        const id=Number(c?.productId??(String(c?.product||'').match(/^(\d+):/)||[])[1]);
+        if(id!==pageId||!recipientCandidates.includes(norm(c?.company)))continue;
+        const score=ctx.quality!=null&&Number(c.quality)===ctx.quality?2:1;
+        if(score>hitScore){hitScore=score;hit=c;}
+      }
+      return hit;
+    }
     const prod=norm(ctx.product);const body=String(ctx.body||'').toLowerCase();
     let best=null,bestScore=-1;
     for(const c of saved){
@@ -1767,8 +1807,9 @@ let hookReady = false;
     // The selected helper mode is the source of truth for the Amount field.
     // Saved amount = saved contract quantity; Surplus = current production surplus after demand;
     // Custom = user-entered quantity. Left = current positive Stock-After-Demand-And-Contracts leftover.
-    const surplus=Math.max(0,Number(c.surplus??c.available)||0);
-    const left=Math.max(0,Number(c.left)||0);
+    // 2.5.347 whole units only: the game's Amount box is step 1 (screenshot showed 768.395… injected).
+    const surplus=Math.floor(Math.max(0,Number(c.surplus??c.available)||0));
+    const left=Math.floor(Math.max(0,Number(c.left)||0));
     if(S.contractQtyMode==='surplus')return surplus;
     if(S.contractQtyMode==='custom'){const raw=Number(S.contractCustomQty);return Number.isFinite(raw)&&raw>0?raw:null;}
     const savedMode=String(c.quantityMode||'custom').toLowerCase();
@@ -1800,7 +1841,7 @@ let hookReady = false;
       // makes Android close the popup immediately (the visible flash).
       if(modeElBefore!==document.activeElement && renderSig!==S.contractCardSignature){
         S.contractCardSignature=renderSig;
-        card.innerHTML=`<div class="scm-ch-head"><span class="scm-ch-title">Saved contract matched</span><button type="button" class="scm-ch-close" data-contract-close aria-label="Close saved contract helper">×</button></div><div class="scm-ch-meta">${esc(c.company)} · ${esc(c.productName)} · Q${esc(c.quality)} · ${money(c.price)}/unit</div><div class="scm-ch-qty"><label>Quantity</label><select id="scm-contract-qty-mode"><option value="saved"${selectedSaved}>Saved · ${esc(savedModeText)}</option><option value="surplus"${selectedSurplus}>Surplus · ${num(c.surplus??c.available)}</option><option value="custom"${selectedCustom}>Custom amount</option></select>${S.contractQtyMode==='custom'?`<input id="scm-contract-custom-qty" type="number" min="1" step="1" value="${esc(customValue)}" aria-label="Custom amount">`:''}</div><div class="scm-ch-cap">Maximum available surplus: ${num(available)}</div>`;
+        card.innerHTML=`<div class="scm-ch-head"><span class="scm-ch-title">Saved contract matched</span><button type="button" class="scm-ch-close" data-contract-close aria-label="Close saved contract helper">×</button></div><div class="scm-ch-meta">${esc(c.company)} · ${esc(c.productName)} · Q${esc(c.quality)} · ${money(c.price)}/unit</div><div class="scm-ch-qty"><label>Quantity</label><select id="scm-contract-qty-mode"><option value="saved"${selectedSaved}>Saved · ${esc(savedModeText)}</option><option value="surplus"${selectedSurplus}>Surplus · ${num(Math.floor(Number(c.surplus??c.available)||0))}</option><option value="custom"${selectedCustom}>Custom amount</option></select>${S.contractQtyMode==='custom'?`<input id="scm-contract-custom-qty" type="number" min="1" step="1" value="${esc(customValue)}" aria-label="Custom amount">`:''}</div><div class="scm-ch-cap">Maximum available surplus: ${num(available)}</div>`;
       }
       const modeEl=card.querySelector('#scm-contract-qty-mode');
       if(modeEl)modeEl.onchange=()=>{S.contractQtyMode=String(modeEl.value||'saved');if(S.contractQtyMode!=='custom')S.contractCustomQty='';S.contractSignature='';S.contractCardSignature='';loadContractHelper();};
@@ -1811,6 +1852,59 @@ let hookReady = false;
     }catch{existing?.remove();}
   };
   window.addEventListener('scm-open-saved-contract-helper',()=>{S.contractDismissedKey='';S.contractSignature='';S.contractCardSignature='';Promise.resolve(loadContractHelper()).finally(()=>schedulePosition());});
+  // 2.5.347 "Sell on the exchange" quantity helper. The game's sell form (warehouse …/sell/) has
+  // input[name="amount"] and input[name="price"] (game bundle). Left = the overlay row's Left (stock after
+  // demand & saved contracts), Surplus = the overlay row's production surplus; both whole units, never < 0.
+  const SELL_POS_KEY='scmSellQtyCardPos';
+  const sellAmountInput=()=>{const el=[...document.querySelectorAll('form input[name="amount"]')].find(x=>visible(x)&&x.closest('form')?.querySelector('input[name="price"]'));return el||null;};
+  const sellQuantities=res=>{
+    const rows=S.data&&res&&res.quality!=null&&Number(S.data.realm)===Number(S.realm)&&Array.isArray(S.data.rows)?S.data.rows:[];
+    const row=rows.find(r=>Number(r?.id)===res.id&&(Number(r?.quality)||0)===res.quality)||null;
+    const whole=v=>Number.isFinite(Number(v))?Math.floor(Math.max(0,Number(v))):null;
+    return {row,left:row?whole(row.remaining??row.difference):null,surplus:row?whole(row.surplus):null};
+  };
+  const placeSellCard=(card,x,y)=>{
+    const w=card.offsetWidth||220,h=card.offsetHeight||90;
+    const left=Math.min(Math.max(4,x),Math.max(4,window.innerWidth-w-4)),top=Math.min(Math.max(4,y),Math.max(4,window.innerHeight-h-4));
+    card.style.left=`${Math.round(left)}px`;card.style.top=`${Math.round(top)}px`;
+  };
+  const removeSellCard=()=>{document.getElementById('scm-sell-qty-card')?.remove();S.sellCardSignature='';};
+  const loadSellHelper=()=>{
+    const res=warehousePageResource();const amountEl=res?.tab==='sell'?sellAmountInput():null;
+    if(!amountEl||S.sellDismissedPath===location.pathname||!Number.isFinite(S.realm)){removeSellCard();return;}
+    const q=sellQuantities(res);
+    const title=`${res.name||'Resource'}${res.quality!=null?` Q${res.quality}`:''}`;
+    const note=res.quality==null?'Quality not found on this page.':!S.data?'Waiting for Manager data…':!q.row?'Not in your Stock After Demand overlay.':q.surplus==null?'Surplus not built yet — refreshing.':'Tap to fill Amount.';
+    const sig=JSON.stringify([S.realm,res.id,res.quality,title,q.left,q.surplus,note]);
+    let card=document.getElementById('scm-sell-qty-card');
+    if(card&&S.sellCardSignature===sig)return;
+    const fresh=!card;
+    if(!card){card=document.createElement('section');card.id='scm-sell-qty-card';document.documentElement.appendChild(card);}
+    S.sellCardSignature=sig;
+    const btn=(kind,label,value)=>`<button type="button" class="scm-sq-fill" data-sq-fill="${kind}"${value==null?' disabled':''}><span>${label}</span><b>${value==null?'—':num(value)}</b></button>`;
+    card.innerHTML=`<div class="scm-sq-head" data-sq-drag><span class="scm-sq-grip" aria-hidden="true">⠿</span><span class="scm-sq-title">${esc(title)}</span><button type="button" class="scm-sq-close" data-sq-close aria-label="Close sell helper">×</button></div><div class="scm-sq-btns">${btn('left','Left',q.left)}${btn('surplus','Surplus',q.surplus)}</div><div class="scm-sq-note">${esc(note)}</div>`;
+    card.querySelectorAll('[data-sq-fill]').forEach(b=>{b.onclick=()=>{const cur=sellQuantities(warehousePageResource());const v=cur[b.dataset.sqFill];const input=sellAmountInput();if(v!=null&&input){setNativeValue(input,v);b.classList.add('scm-sq-done');setTimeout(()=>b.classList.remove('scm-sq-done'),700);}};});
+    card.querySelector('[data-sq-close]').onclick=()=>{S.sellDismissedPath=location.pathname;removeSellCard();};
+    const head=card.querySelector('[data-sq-drag]');
+    head.onpointerdown=e=>{
+      if(e.target.closest('[data-sq-close]'))return;
+      const r=card.getBoundingClientRect();const dx=e.clientX-r.left,dy=e.clientY-r.top;
+      try{head.setPointerCapture(e.pointerId);}catch{}
+      head.onpointermove=m=>{placeSellCard(card,m.clientX-dx,m.clientY-dy);};
+      head.onpointerup=head.onpointercancel=()=>{head.onpointermove=null;try{localStorage.setItem(SELL_POS_KEY,JSON.stringify({x:parseFloat(card.style.left)||0,y:parseFloat(card.style.top)||0}));}catch{}};
+      e.preventDefault();
+    };
+    if(fresh){
+      let saved=null;try{saved=JSON.parse(localStorage.getItem(SELL_POS_KEY)||'null');}catch{}
+      if(saved&&Number.isFinite(saved.x)&&Number.isFinite(saved.y))placeSellCard(card,saved.x,saved.y);
+      else placeSellCard(card,window.innerWidth-(card.offsetWidth||220)-8,window.innerHeight-(card.offsetHeight||90)-96);
+    }else placeSellCard(card,parseFloat(card.style.left)||0,parseFloat(card.style.top)||0);
+  };
+  const scheduleSellHelper=()=>{
+    if(!/\/headquarters\/warehouse\/[^/]+\/sell\/?$/i.test(String(location.pathname||''))){if(document.getElementById('scm-sell-qty-card'))removeSellCard();return;}
+    if(S.sellTimer)return;
+    S.sellTimer=setTimeout(()=>{S.sellTimer=0;try{loadSellHelper();}catch{}},250);
+  };
   const cleanupStaleOverlays=()=>{
     document.getElementById('scm-vwap-button')?.remove();
     document.getElementById('scm-vwap-overlay')?.remove();
@@ -1902,7 +1996,7 @@ let hookReady = false;
       });
       S.realm=r.realm;S.data=r;
       if(signature!==S.signature||!document.getElementById('scm-game-balance-card')){S.signature=signature;renderBalance();}
-      if(likelyContractPage())await loadContractHelper();schedulePosition();
+      if(likelyContractPage())await loadContractHelper();schedulePosition();scheduleSellHelper();
     }catch{
       if(requestEpoch!==S.loadEpoch)return;
       // Keep the existing card and data intact on bridge/API failures.
@@ -1919,8 +2013,8 @@ let hookReady = false;
     // helpers. The production balance itself is realm-scoped and is allowed to
     // survive until the new realm snapshot has been rendered.
     cleanupStaleOverlays();
-    if(location.href!==S.lastUrl){S.lastUrl=location.href;S.loadEpoch++;S.signature='';S.buildingSignature='';S.contractSignature='';S.contractCardSignature='';S.contractDismissedKey='';S.leftCopySignature='';S.leftCopyOpen=false;document.getElementById('scm-left-copy-card')?.remove();}
-    load();
+    if(location.href!==S.lastUrl){S.lastUrl=location.href;S.loadEpoch++;S.signature='';S.buildingSignature='';S.contractSignature='';S.contractCardSignature='';S.contractDismissedKey='';S.leftCopySignature='';S.leftCopyOpen=false;document.getElementById('scm-left-copy-card')?.remove();S.sellDismissedPath='';removeSellCard();}
+    load();scheduleSellHelper();
   };
   chrome.runtime.onMessage.addListener((message)=>{
     if(message?.type!=='REFRESH_GAME_OVERLAY')return false;
@@ -1970,6 +2064,7 @@ let hookReady = false;
       }
     },3000);
     if(S.observer)S.observer.disconnect();S.observer=new MutationObserver(()=>{
+      scheduleSellHelper();
       const card=document.getElementById('scm-game-balance-card');
       if(!card){
         const pageRealm=currentRealm();
