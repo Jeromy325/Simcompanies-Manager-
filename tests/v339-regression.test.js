@@ -6,7 +6,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.353');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.354');
 const bg = read('background.js');
 const i = bg.indexOf("trace('auth-verified'");
 assert.ok(i > 0);

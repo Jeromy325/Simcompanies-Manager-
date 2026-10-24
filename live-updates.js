@@ -2,7 +2,8 @@
  * Reads the background job history (scmBackgroundJobs:<realm>) that background.js records for
  * every warehouse refresh, overlay notification and price update, and shows it under the header.
  * A toast appears whenever the warehouse is refreshed because of something you did in the game
- * (collecting from buildings, buying, selling, contracts). Read-only: never writes storage. */
+ * (collecting from buildings, buying, selling, contracts). Writes only its own display setting
+ * (scmMonitorGameMode: how the game-page monitor shows: bar / mini / hidden). */
 (function () {
   'use strict';
   if (!globalThis.chrome?.storage?.local) return;
@@ -13,7 +14,9 @@
   function gameHost() {
     const host = document.createElement('div');
     host.id = 'scmMonitor'; host.className = 'live-updates scm-monitor';
-    host.innerHTML = '<div class="scm-monitor-grip" title="Drag to move" aria-label="Drag to move">⠿</div><div class="scm-monitor-body"></div>';
+    // v2.5.354 more ways to get it out of the way: − = small dot, × = hidden (bring it back from the Manager's
+    // Background updates panel); tapping outside closes the expanded list.
+    host.innerHTML = '<div class="scm-monitor-grip" title="Drag to move" aria-label="Drag to move">⠿</div><div class="scm-monitor-body"></div><div class="scm-monitor-ctrl"><button type="button" class="scm-monitor-min" aria-label="Shrink to a small dot" title="Shrink to a small dot">−</button><button type="button" class="scm-monitor-hide" aria-label="Hide on the game page" title="Hide (show again from the Manager: Background updates)">×</button></div><button type="button" class="scm-monitor-mini" aria-label="Show background updates"><span class="lu-dot"></span><b></b></button>';
     (document.body || document.documentElement).appendChild(host);
     const place = (x, y) => { const w = host.offsetWidth || 260, h = host.offsetHeight || 40; x = Math.max(0, Math.min(window.innerWidth - Math.min(w, window.innerWidth), x)); y = Math.max(0, Math.min(window.innerHeight - Math.min(h, window.innerHeight), y)); host.style.left = x + 'px'; host.style.top = y + 'px'; return { x, y }; };
     let pos = null; try { pos = JSON.parse(localStorage.getItem(POS_KEY) || 'null'); } catch {}
@@ -26,6 +29,13 @@
     grip.addEventListener('pointerup', end); grip.addEventListener('pointercancel', end);
     window.addEventListener('resize', () => place(host.offsetLeft, host.offsetTop), { passive: true });
     host.__refit = () => requestAnimationFrame(() => place(host.offsetLeft, host.offsetTop)); // keep an expanded panel on screen
+    const setMode = m => { try { chrome.storage.local.set({ scmMonitorGameMode: m }); } catch {} applyMode(m); };
+    const applyMode = m => { const mode = ['bar', 'mini', 'hidden'].includes(m) ? m : 'bar'; host.classList.toggle('is-mini', mode === 'mini'); host.hidden = mode === 'hidden'; host.__refit(); };
+    host.querySelector('.scm-monitor-min').addEventListener('click', e => { e.stopPropagation(); setMode('mini'); });
+    host.querySelector('.scm-monitor-hide').addEventListener('click', e => { e.stopPropagation(); setMode('hidden'); });
+    host.querySelector('.scm-monitor-mini').addEventListener('click', () => setMode('bar'));
+    chrome.storage.local.get({ scmMonitorGameMode: 'bar' }).then(r => applyMode(r.scmMonitorGameMode)).catch(() => {});
+    chrome.storage.onChanged.addListener((c, area) => { if (area === 'local' && c.scmMonitorGameMode) applyMode(c.scmMonitorGameMode.newValue); });
     return host.querySelector('.scm-monitor-body');
   }
   let el = GAME ? null : document.getElementById('liveUpdates');
@@ -80,9 +90,11 @@
   // redrawing the open list = visible flash). Now the structure is built once and only changed text is written.
   let ui = null, lastListKey = '';
   function build() {
-    el.innerHTML = '<button type="button" class="lu-bar" aria-expanded="false"><span class="lu-dot"></span><span class="lu-text"></span><span class="lu-more">▼</span></button><div class="lu-panel" hidden><p class="lu-legend"></p><p class="lu-count"></p><ol class="lu-list"></ol></div>';
+    el.innerHTML = '<button type="button" class="lu-bar" aria-expanded="false"><span class="lu-dot"></span><span class="lu-text"></span><span class="lu-more">▼</span></button><div class="lu-panel" hidden>' + (GAME ? '' : '<label class="lu-game-mode">Monitor on the game page <select><option value="bar">Bar</option><option value="mini">Small dot</option><option value="hidden">Hidden</option></select></label>') + '<p class="lu-legend"></p><p class="lu-count"></p><ol class="lu-list"></ol></div>';
     ui = { bar: el.querySelector('.lu-bar'), dot: el.querySelector('.lu-dot'), text: el.querySelector('.lu-text'), more: el.querySelector('.lu-more'), panel: el.querySelector('.lu-panel'), list: el.querySelector('.lu-list'), count: el.querySelector('.lu-count') };
     el.querySelector('.lu-legend').textContent = LEGEND;
+    const gm = el.querySelector('.lu-game-mode select');
+    if (gm) { chrome.storage.local.get({ scmMonitorGameMode: 'bar' }).then(r => { gm.value = r.scmMonitorGameMode; }).catch(() => {}); gm.addEventListener('change', () => { chrome.storage.local.set({ scmMonitorGameMode: gm.value }).catch(() => {}); }); }
     lastListKey = '';
   }
   const setHtml = (node, html) => { if (node.__h !== html) { node.innerHTML = html; node.__h = html; } };
@@ -101,7 +113,8 @@
       fails ? `<span class="lu-bad">${fails} failed in the last hour</span>` : null
     ].filter(Boolean);
     ui.dot.classList.toggle('on', fresh);
-    setHtml(ui.text, `Background updates · ${parts.join(' · ')}`);
+    if (GAME) { const mini = document.querySelector('#scmMonitor .scm-monitor-mini'); if (mini) { mini.querySelector('.lu-dot').classList.toggle('on', fresh); mini.querySelector('b').textContent = fails ? String(fails) : ''; mini.classList.toggle('has-bad', !!fails); } }
+    setHtml(ui.text, `${GAME ? "" : "Background updates · "}${parts.join(' · ')}`);
     ui.bar.setAttribute('aria-expanded', String(open));
     ui.more.textContent = open ? '▲' : '▼';
     ui.panel.hidden = !open;
@@ -135,6 +148,7 @@
       paint();
     } catch { /* storage unavailable: keep last view */ }
   }
+  if (GAME) document.addEventListener('pointerdown', e => { if (open && !e.target.closest?.('#scmMonitor')) { open = false; try { localStorage.setItem('scmMonitorOpen', '0'); } catch {} paint(); document.getElementById('scmMonitor')?.__refit?.(); } }, true);
   el.addEventListener('click', e => { if (e.target.closest('.lu-bar')) { open = !open; if (GAME) { try { localStorage.setItem('scmMonitorOpen', open ? '1' : '0'); } catch {} } paint(); if (GAME) document.getElementById('scmMonitor')?.__refit?.(); } });
   (globalThis.scmOnStorageChanged || (fn => chrome.storage.onChanged.addListener(fn)))((changes, area) => {
     if (area !== 'local') return;

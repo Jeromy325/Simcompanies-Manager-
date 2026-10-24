@@ -1,3 +1,11 @@
+2.5.354 — 2026-10-24 — Monitor out of the way; every game overlay draggable
+- Background updates monitor on the game page: − shrinks it to a small dot (green = warehouse fresh, red number =
+  failures in the last hour; tap to bring the bar back), × hides it. Tapping outside closes the expanded list.
+  The Manager's Background updates panel has "Monitor on the game page: Bar / Small dot / Hidden" to bring it back.
+- Stock After Demand & Contracts (also its collapsed › button), Copy Left Resources and the contract helper can be
+  dragged by their header; each remembers its place. Double-tap a header to put it back in its default place.
+  (The Sell helper and Network capture card were already draggable.)
+
 2.5.353 — 2026-10-24 — Abundance checked when the game page loads
 - From your files (2026-10-24 12:26–12:30 UTC): after Sync the Manager fetched research and government orders but
   no abundance (its mine list was empty at that moment; fixed in 2.5.352), and on game load your phone's game never

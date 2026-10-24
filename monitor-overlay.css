@@ -20,3 +20,18 @@
 #scmMonitor.lu-flash .lu-bar{border-color:#35d07f}
 #scmToast.scm-game-toast{position:fixed;left:50%;bottom:18px;transform:translate(-50%,40px);opacity:0;background:#14532d;color:#e7fff1;border:1px solid #2f8f5b;border-radius:10px;padding:10px 14px;font:13px/1.3 system-ui,sans-serif;z-index:2147483001;transition:transform .25s,opacity .25s;max-width:calc(100vw - 32px);pointer-events:none}
 #scmToast.scm-game-toast.show{transform:translate(-50%,0);opacity:1}
+/* v2.5.354 controls: − small dot, × hide; mini mode */
+#scmMonitor[hidden]{display:none!important}
+#scmMonitor .lu-bar{border-radius:0}
+#scmMonitor .scm-monitor-ctrl{display:flex;flex:0 0 auto;align-self:flex-start;height:34px;background:#0d151e;border:1px solid #2c3b4b;border-left:0;border-radius:0 10px 10px 0}
+#scmMonitor .scm-monitor-ctrl button{width:30px;height:100%;margin:0;padding:0;border:0;border-left:1px solid #2c3b4b;background:transparent;color:#c5d1dc;font:16px/1 system-ui,sans-serif;cursor:pointer}
+#scmMonitor .scm-monitor-mini{display:none}
+#scmMonitor.is-mini{width:auto}
+#scmMonitor.is-mini .scm-monitor-body,#scmMonitor.is-mini .scm-monitor-ctrl{display:none}
+#scmMonitor.is-mini .scm-monitor-grip{flex-basis:22px;min-height:34px}
+#scmMonitor.is-mini .scm-monitor-mini{display:flex;align-items:center;gap:4px;height:34px;min-width:34px;margin:0;padding:0 10px;background:#0d151e;border:1px solid #2c3b4b;border-radius:0 17px 17px 0;color:#ff6875;font:700 11px/1 system-ui,sans-serif;cursor:pointer}
+#scmMonitor.is-mini .scm-monitor-mini .lu-dot{width:11px;height:11px}
+#scmMonitor.is-mini .scm-monitor-mini.has-bad{border-color:#ff6875}
+#scmMonitor .lu-text{white-space:nowrap}
+#scmMonitor .scm-monitor-ctrl{align-self:stretch;height:auto;min-height:34px}
+#scmMonitor .scm-monitor-ctrl button{height:auto;min-height:32px}
