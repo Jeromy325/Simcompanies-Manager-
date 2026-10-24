@@ -8,7 +8,7 @@ const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const C = require('../tools-core.js');
 require('../planner-core.js'); const P = globalThis.SCMPlannerCore;
 const manifest = JSON.parse(read('manifest.json'));
-assert.equal(manifest.version, '2.5.347');
+assert.equal(manifest.version, '2.5.348');
 const bg = read('background.js'), dash = read('dashboard.js'), hook = read('page-hook.js'), content = read('content.js');
 const fx = JSON.parse(read('tests/fixtures/game-constants-recipes-2026-10-23.json'));
 const gc = { core: fx.core, buildings: fx.buildings, resources: fx.resources, at: '2026-10-23T20:00:00Z' };

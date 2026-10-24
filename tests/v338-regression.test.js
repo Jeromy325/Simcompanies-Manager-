@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const C = require('../tools-core.js');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.347');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.348');
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg}: ${a} vs ${b}`);
 
 // --- economy log + phase at a time
@@ -58,7 +58,7 @@ const bg = read('background.js'), dash = read('dashboard.js');
 assert.ok(bg.includes('recordEconomyState(targetRealm,old,data)') && bg.includes('scmEconomyStateLog:${r}'), 'background logs economyState from auth-data');
 assert.ok(!/recordEconomyState[^]{0,900}fetch\(/.test(bg.slice(bg.indexOf('function recordEconomyState'), bg.indexOf('function recordEconomyState') + 900)), 'no network work in the log writer');
 assert.ok(dash.includes('result.economyStateLog=') && dash.includes('function plannerEconomy(ctx)') && dash.includes('function plannerWage(ctx,lab)'));
-assert.ok(dash.includes('const r=C.buildingProfit({unitsPerHour,'), 'profit uses the projected rate');
+assert.ok(dash.includes('const r=C.buildingProfit({...profitArgs,unitsPerHour,labourPerUnit});'), 'profit uses the projected rate (2.5.348: game-calculator rate for abundance resources)');
 assert.ok(dash.includes('lotWorkersPerProducedUnit'), 'labour uses produced share');
 for (const fn of ['function plannerEconomy(ctx)', 'function plannerWage(ctx,lab)']) assert.ok(!/\son[a-z]+="/i.test(dash.slice(dash.indexOf(fn), dash.indexOf(fn) + 2500)), 'no inline handlers in new code');
 assert.ok(!/\son[a-z]+="/i.test(dash.slice(dash.indexOf('const ecoSrc='), dash.indexOf('const ecoSrc=') + 900)), 'no inline handlers in the economy note');

@@ -1,3 +1,17 @@
+2.5.348 — 2026-10-24 — Profit / h / level matches the game's Profit Calculator
+- Your screens vs the Manager (same data, R2 2026-10-24 02:04–02:09 UTC): Power $145.09 vs game $151.04, Minerals
+  $522.29 vs $422.05, Electronic components $474.36 vs $474.45. Read the game's calculator code (GamePages bundle) and
+  matched it line by line:
+  - Labour per unit was rounded to cents before use (Power $0.20); the game uses it unrounded ($0.19787).
+  - Mine/oil/quarry products: the game's Profit Calculator always assumes 90% abundance (Minerals 116.641/h/level);
+    the card used 100% (129.601). The card now uses 90% too and says so; when your building's abundance is captured
+    it also shows your own figure (e.g. 99.57% → $506.08 / h / level).
+  - Warehouse inputs: the game takes the cheapest lot of that resource in any quality (Σ cost ÷ amount, unrounded);
+    the card took the lowest quality ≥ the recipe's and rounded it (Water Q1 $0.37 instead of Q0 $0.35). Not in the
+    warehouse → cheapest listing of any quality, as the game.
+- Result with your data: Power $151.04, Minerals $422.05, Electronic components $474.45 — equal to the game.
+- Diagnostic export: profitCalculatorInputs now records the game-basis rate, sourcing cost and profit / h / level.
+
 2.5.347 — 2026-10-23 — Saved-contract match by resource; Sell page Left/Surplus helper
 - Saved contract on the Electronic components contract page injected $8.15 (and 768.395 units): the helper matched
   saved contracts by page text, and the exchange-order list on that page shows "PATO SILICON AND METALS", so your

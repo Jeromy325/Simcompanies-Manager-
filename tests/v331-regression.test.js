@@ -7,7 +7,7 @@ const vm = require('vm');
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
 const manifest = JSON.parse(read('manifest.json'));
-assert.equal(manifest.version, '2.5.347');
+assert.equal(manifest.version, '2.5.348');
 const C = require('../tools-core.js');
 
 // --- production cost history (pure core) ---
@@ -46,7 +46,8 @@ assert.ok(html.includes('<th>Production cost</th>'), 'warehouse column added');
 assert.ok(dash.includes('function warehouseHeadCost(r)') && css.includes('.wh-head-cost'), 'cost at top right of warehouse cards');
 // profit: warehouse unit costs and labour parts rounded to cents (game: 4×9.54 + 627.39 + 2×482.32 + 67.82 + 23.46 = 1721.47)
 assert.ok(dash.includes('price:Math.round(Number(c)*100)/100'), 'warehouse input cost rounded to cents');
-assert.ok(dash.includes('const labourPerUnit=lab?wPU+aPU:null;'), 'labour = cents wage + cents admin');
+// 2.5.348: the game's Profit Calculator uses labour unrounded (game code B = wage ÷ rate × admin factor); cents only in the display.
+assert.ok(dash.includes('const labourPerUnit=lab?lab.workersPerUnit*(1+overhead/100):null;'), 'labour unrounded, as the game');
 const r2 = v => Math.round(v * 100) / 100;
 const game = 4 * r2(9.5354) + r2(627.391) + 2 * r2(482.3204) + r2(67.82) + r2(67.82 * 0.3459);
 assert.ok(Math.abs(game - 1721.47) < 1e-9, `rounded sum matches the game's sourcing cost (${game})`);

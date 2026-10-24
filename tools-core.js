@@ -537,6 +537,29 @@
     const b = c.buildings[String(buildingKind)], sm = Number(b && b.salaryModifier);
     return Number.isFinite(sm) ? c.core.AVERAGE_SALARY * sm * (robots ? 0.97 : 1) : null;
   }
+  // v2.5.348 the game's Profit Calculator (GamePages bundle, encyclopedia resource page, read 2026-10-24):
+  //   units/h/level L = tSe(resource, productionModifier, recreationBonus, 90, 1, base, event): abundance resources
+  //     (game list xjr) always at 90 % abundance, whatever your building's abundance is.
+  //   labour/unit = AVERAGE_SALARY × salaryModifier ÷ L × admin factor (no robots, not rounded).
+  //   warehouse input = cheapest lot of that resource, any quality: Σ cost ÷ amount (not rounded); none → cheapest listing.
+  //   profit/unit = cheapest listing (any quality) − (Σ qty × input + labour); profit/h/level = profit/unit × L.
+  // The 90 % and the resource list are literals in the game's code, not in its API.
+  const GAME_PROFIT_CALC_ABUNDANCE_PCT = 90;
+  const GAME_ABUNDANCE_RESOURCE_IDS = [10, 14, 15, 42, 44, 68, 74, 104, 105]; // Crude oil, Minerals, Bauxite, Iron ore, Sand, Gold ore, Methane, Clay, Limestone
+  function isAbundanceResource(id) { return GAME_ABUNDANCE_RESOURCE_IDS.includes(Number(id)); }
+  function warehouseUnitCostAsGame(lots, resourceId) {
+    let best = null;
+    for (const l of Array.isArray(lots) ? lots : []) {
+      if (!l || Number(l.kind) !== Number(resourceId) || !l.cost || typeof l.cost !== 'object') continue;
+      const amount = Number(l.amount); if (!(amount > 0)) continue;
+      const unitCost = Object.values(l.cost).reduce((a, v) => a + Number(v), 0) / amount;
+      if (Number.isFinite(unitCost) && (!best || unitCost < best.unitCost)) best = { unitCost, quality: Number(l.quality), amount };
+    }
+    return best && best.unitCost > 0 ? best : null; // game: a $0 cheapest lot falls back to the market price
+  }
+  function gameProfitCalcRatePerLevel(c, resourceId, economyState, { eventPct = 0, bonusPct = 0 } = {}) {
+    return gameRatePerLevel(c, resourceId, economyState, { eventPct, bonusPct, abundancePct: isAbundanceResource(resourceId) ? GAME_PROFIT_CALC_ABUNDANCE_PCT : null });
+  }
   // Which economy phase a measured batch rate belongs to: the phase whose game rate is closest, if within tolPct.
   function phaseFromMeasuredRate(c, resourceId, measuredPerLevel, opts = {}, tolPct = 2) {
     const m = pos(measuredPerLevel); if (!m || !gameConstantsOk(c)) return null;
@@ -601,7 +624,7 @@
   }
 
   const api = {
-    economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, phaseFromMeasuredRate, listingFeePct, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
+    economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
     cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
     seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,
