@@ -154,6 +154,38 @@
     return { fresh, seen: ids.slice(-500), firstRun: false };
   }
 
+  // v2.5.350 sales from the game's cash-flow ledger (/api/v2/companies/me/cashflow/recent/ → data[]), the same
+  // rows the Accounting tab reads: category 'm' + descriptionKey 'marketfilled-<id>' = exchange sale,
+  // descriptionKey 'cs-…' = money from an outgoing contract the buyer accepted. First capture only records ids.
+  function saleKind(row) {
+    const k = String(row?.descriptionKey || '').toLowerCase();
+    if (k.startsWith('cs-')) return 'contract';
+    if (String(row?.category || '').toLowerCase() === 'm' && k.startsWith('marketfilled-')) return 'exchange';
+    return null;
+  }
+  function newSales(rows, seen, names, realm = 1, now = Date.now(), maxAgeMs = 24 * 3600e3) {
+    const list = (Array.isArray(rows) ? rows : []).filter(r => saleKind(r));
+    const idOf = r => String(r?.id ?? `${r?.datetime || ''}|${r?.descriptionKey || ''}|${r?.money ?? ''}`);
+    const ids = list.map(idOf);
+    if (!Array.isArray(seen)) return { fresh: [], seen: ids.slice(-500), firstRun: true };
+    const known = new Set(seen), fresh = [];
+    for (const r of list) {
+      if (known.has(idOf(r))) continue;
+      const t = Date.parse(String(r?.datetime || ''));
+      if (Number.isFinite(t) && now - t > maxAgeMs) continue;
+      const d = r?.details && typeof r.details === 'object' ? r.details : {};
+      const kind = n(d.resource ?? d.resourceId ?? r.resource ?? r.resourceId);
+      const qty = n(d.amount ?? r.amount), price = n(d.price ?? r.price), got = n(r.money ?? d.money), profit = n(d.profit ?? r.profit);
+      const gross = qty != null && price != null ? qty * price : got;
+      const what = `${qty != null ? int(qty) + ' ' : ''}${kind ? nameOf(names, kind) : 'items'}`;
+      const nums = `${price != null ? `${money(price)} each` : ''}${gross != null ? `${price != null ? ', ' : ''}${total(gross)}` : ''}${profit != null ? ` · profit ${signed(profit, total)}` : ''}`;
+      const when = Number.isFinite(t) ? ` · ${clock(t)}` : '';
+      if (saleKind(r) === 'contract') fresh.push({ title: `Contract accepted: ${what}`, message: `The buyer accepted your outgoing contract${nums ? ': ' + nums : ''}.\n${R(realm)}${when}` });
+      else fresh.push({ title: `Sold on the exchange: ${what}`, message: `${nums || 'Sale filled'}.\n${R(realm)}${when}` });
+    }
+    return { fresh, seen: [...new Set([...seen, ...ids])].slice(-500), firstRun: false };
+  }
+
   // 12. Daily summary: latest completed day from the game's past-finances-overview (evaProfit, total assets,
   //     rank) + production runs started in the last 24 h from the Manager's cost history.
   function dailySummary({ overview, runs, realm, names, now = Date.now() }) {
@@ -285,7 +317,7 @@
     const d = new Date(now); d.setHours(h, mi, 0, 0); if (d.getTime() <= now) d.setDate(d.getDate() + 1); return d.getTime();
   }
 
-  const api = { money, total, cheapestListing, batchFinishedMessage, inputShortage, priceTargetHits, bigMoves, newIncomingContracts, contractRows, dailySummary, nextDailyTime, lotCost, costChanged, followUp, undercut, unprofitable, lowStock, jobTrouble, holdings };
+  const api = { saleKind, newSales, money, total, cheapestListing, batchFinishedMessage, inputShortage, priceTargetHits, bigMoves, newIncomingContracts, contractRows, dailySummary, nextDailyTime, lotCost, costChanged, followUp, undercut, unprofitable, lowStock, jobTrouble, holdings };
   root.SCM_NOTIFY_CORE = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

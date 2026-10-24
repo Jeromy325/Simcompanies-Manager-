@@ -1,3 +1,18 @@
+2.5.350 — 2026-10-24 — Abundance colours, level difference, collapsible cards, sales alerts
+- Production · Your Buildings: mine/oil rig/quarry cards show the building's abundance from the game
+  (/api/v2/companies/buildings/<id>/abundance/): 90–100 % green, above 85 % orange, 85 % or below red;
+  "not captured" when the game has not sent it yet.
+- Production Output: with a Planning Level other than the current level, two cards show the difference
+  (per hour and per production time) vs the current level, from the same rate function.
+- Accounting: Last 8 days is one card per day (collapsed: day + profit on the right). Last 8 days, Balance Sheet
+  Summary, Cash Flow, Income Statement and Balance Sheet Detail collapse/expand. Choices are remembered.
+- Contracts: Incoming, Outgoing, Surplus, Saved Contracts, Government orders (and each order) collapse/expand;
+  New Contract opens a collapsed Saved Contracts card.
+- Alerts: removed "Not enough inputs to repeat a finished batch" and "Warehouse running low on inputs".
+  New: "Item sold on the exchange or outgoing contract accepted" from the game's cash-flow ledger
+  (marketfilled-<id> / cs-<id> rows: amount, product, price, total, profit). The first ledger capture only records.
+  Refused contracts are not alerted yet: their response has not been captured.
+
 2.5.349 — 2026-10-24 — Abundance for every mine; loan build time
 - After each Sync the Manager now asks the game for the abundance of every mine, oil rig and quarry you own (from the
   game's constants: buildings that make Minerals, Bauxite, Iron ore, Sand, Gold ore, Crude oil, Methane, Clay,

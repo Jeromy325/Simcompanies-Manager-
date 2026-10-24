@@ -547,6 +547,8 @@
   const GAME_PROFIT_CALC_ABUNDANCE_PCT = 90;
   const GAME_ABUNDANCE_RESOURCE_IDS = [10, 14, 15, 42, 44, 68, 74, 104, 105]; // Crude oil, Minerals, Bauxite, Iron ore, Sand, Gold ore, Methane, Clay, Limestone
   function isAbundanceResource(id) { return GAME_ABUNDANCE_RESOURCE_IDS.includes(Number(id)); }
+  // v2.5.350 colour band for a building's abundance (user's thresholds): ≥ 90 % good, > 85 % warn, ≤ 85 % bad.
+  function abundanceTone(pct) { const v = Number(pct); if (pct == null || pct === '' || !Number.isFinite(v)) return null; return v >= 90 ? 'good' : v > 85 ? 'warn' : 'bad'; }
   function warehouseUnitCostAsGame(lots, resourceId) {
     let best = null;
     for (const l of Array.isArray(lots) ? lots : []) {
@@ -624,7 +626,7 @@
   }
 
   const api = {
-    economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
+    economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
     cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
     seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,

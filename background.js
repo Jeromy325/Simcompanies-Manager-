@@ -1241,7 +1241,7 @@ setTimeout(()=>{seedProductionCostHistoryOnce().catch(()=>{});},4000);
 // game's own busy.started + busy.duration; one alarm per running batch, named scm-prodfin:<realm>:<buildingId>:<finishMs>.
 // No network work. Whether the phone shows them depends on the browser's support for extension notifications.
 const NOTIFY_SETTINGS_KEY='scmNotifySettings';
-const NOTIFY_DEFAULTS={productionFinished:true,inputsShort:true,priceTargets:[],bigMove:true,bigMovePct:5,incomingContracts:true,dailySummary:true,dailySummaryTime:'08:00',costChange:true,costChangePct:3,idle:true,idleHours:1,undercut:true,unprofitable:true,lowStock:true,jobTrouble:true};
+const NOTIFY_DEFAULTS={productionFinished:true,sales:true,priceTargets:[],bigMove:true,bigMovePct:5,incomingContracts:true,dailySummary:true,dailySummaryTime:'08:00',costChange:true,costChangePct:3,idle:true,idleHours:1,undercut:true,unprofitable:true,jobTrouble:true};
 async function notifySettings(){const v=(await chrome.storage.local.get({[NOTIFY_SETTINGS_KEY]:null}))[NOTIFY_SETTINGS_KEY];return {...NOTIFY_DEFAULTS,...(v&&typeof v==='object'?v:{})};}
 // v2.5.334 notification state (dedupe/re-arm) in its own key, written through one serial queue.
 const NOTIFY_STATE_KEY='scmNotifyState';let notifyStateQueue=Promise.resolve();
@@ -1313,10 +1313,12 @@ async function notifyOrderBook(realm,resourceId,rows){
     return state;
   });
 }
-async function notifyLowStock(realm){
-  const n=validRealmNumber(realm);if(n==null)return;const cfg=await notifySettings();if(!cfg.lowStock)return;
-  const st=await notifyRealmStore(n);const {byId,names}=await notifyRecipes();
-  await updateNotifyState(async state=>{const key=`low:${n}`;const r=globalThis.SCM_NOTIFY_CORE.lowStock({buildings:st.buildings,recipes:byId,lots:st.warehouseResources,store:st,realm:n,names,state:state[key]||{}});state[key]=r.state;for(const f of r.fire)await scmNotify(`low-${n}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,f.title,f.message);return state;});
+// v2.5.350 sales and accepted contracts from the cash-flow ledger the game/Manager just captured. No network.
+async function notifySales(realm,data){
+  const n=validRealmNumber(realm);if(n==null)return;const cfg=await notifySettings();if(!cfg.sales)return;
+  const rows=Array.isArray(data?.data)?data.data:(Array.isArray(data)?data:[]);if(!rows.length)return;
+  const {names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE;
+  await updateNotifyState(async state=>{const key=`sales:${n}`;const r=N.newSales(rows,state[key],names,n);state[key]=r.seen;for(const f of r.fresh)await scmNotify(`sale-${n}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,f.title,f.message);return state;});
 }
 async function notifyJobTrouble(realm,event){
   const n=validRealmNumber(realm);if(n==null)return;const cfg=await notifySettings();if(!cfg.jobTrouble)return;
@@ -1351,7 +1353,7 @@ async function scheduleProductionFinishAlarms(realm,buildings){
   const n=validRealmNumber(realm);if(n==null)return {ok:false};
   const cfg=await notifySettings();const all=await chrome.alarms.getAll();
   const mine=all.filter(a=>String(a.name).startsWith(`scm-prodfin:${n}:`));
-  if(!cfg.productionFinished&&!cfg.inputsShort){for(const a of mine)await chrome.alarms.clear(a.name);return {ok:true,disabled:true};}
+  if(!cfg.productionFinished){for(const a of mine)await chrome.alarms.clear(a.name);return {ok:true,disabled:true};}
   const wanted=productionFinishAlarms(n,buildings).filter(x=>x.when>Date.now());
   const wantedNames=new Set(wanted.map(x=>x.name));
   const seenBuildings=new Set(wanted.map(x=>x.buildingId));
@@ -1364,12 +1366,12 @@ async function scheduleProductionFinishAlarms(realm,buildings){
 async function fireProductionFinished(name){
   const m=String(name).match(/^scm-prodfin:(\d+):(\d+):(\d+)$/);if(!m)return;
   const realm=Number(m[1]),bid=Number(m[2]);
-  const cfg=await notifySettings();if(!cfg.productionFinished&&!cfg.inputsShort)return;
+  const cfg=await notifySettings();if(!cfg.productionFinished)return;
   const st=await notifyRealmStore(realm);
   const b=(Array.isArray(st.buildings)?st.buildings:[]).find(x=>Number(x?.id)===bid)||{id:bid,name:`Building ${bid}`};
-  const {byId,names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE;
+  const {names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE;
   if(cfg.productionFinished){const r=N.batchFinishedMessage({building:b,store:st,realm,names});await scmNotify(`prodfin-${realm}-${bid}-${m[3]}`,r.title,r.message);}
-  if(cfg.inputsShort){const kind=Number(b?.busy?.resource?.kind);const sh=N.inputShortage({building:b,recipe:byId.get(kind),lots:st.warehouseResources,store:st,realm,names});if(sh)await scmNotify(`short-${realm}-${bid}-${m[3]}`,sh.title,sh.message);}
+  // v2.5.350 'Not enough inputs to repeat a finished batch' removed at the user's request.
   // 4 + 11: look again idleHours after the finish (idle, or still not collected).
   const st0=Date.parse(String(b?.busy?.started||''));
   if(cfg.idle&&Number.isFinite(st0)){const h=Math.max(0.25,Number(cfg.idleHours)||1);await chrome.alarms.create(`scm-followup:${realm}:${bid}:${st0}:${m[3]}:0`,{when:Number(m[3])+h*3600e3>Date.now()?Number(m[3])+h*3600e3:Date.now()+60000});}
@@ -2956,7 +2958,7 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   // v2.5.334 new incoming contract notification (own state key, not awaited, no network).
   if(incomingContractRealm&&Number(status)>=200&&Number(status)<300)notifyIncomingContracts(validRealmNumber(incomingContractRealm[1]),data).catch(()=>{});
   {const ob=String(url||'').match(/\/api\/v3\/market\/(\d+)\/(\d+)\/?(?:\?.*)?$/);if(ob&&Number(status)>=200&&Number(status)<300&&Array.isArray(data)){const r=Number(ob[1]),id=Number(ob[2]);setTimeout(()=>{notifyOrderBook(r,id,data).catch(()=>{});},1500);}}
-  if(isResourceUrl(url)&&Number(status)>=200&&Number(status)<300){const r=validRealmNumber(capturedRealm??before?.selectedRealm);if(r!=null)setTimeout(()=>{notifyLowStock(r).catch(()=>{});},1500);}
+  if(/\/api\/v2\/companies\/me\/cashflow\/recent\/?(?:\?.*)?$/i.test(String(url||''))&&Number(status)>=200&&Number(status)<300){const r=validRealmNumber(capturedRealm);if(r!=null)setTimeout(()=>{notifySales(r,data).catch(()=>{});},1500);}
   // Accounting responses are realm-sensitive even when the API path uses /me/.
   // A missing capture realm must never be assigned to the current active realm:
   // an old R2 response racing an R1 switch would otherwise become R1 data.

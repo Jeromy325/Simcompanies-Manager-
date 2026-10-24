@@ -1281,3 +1281,32 @@ html.scm-mobile .contract-table.saved-contract-table.mobile-cards:not(.contract-
 html.scm-mobile .contract-table.saved-contract-table.mobile-cards:not(.contract-surplus-table) tr:not(.mc-full) td:nth-child(10){grid-column:3;grid-row:4;flex-direction:row;align-items:flex-end;justify-content:flex-end;gap:6px}
 html.scm-mobile .contract-table.saved-contract-table.mobile-cards:not(.contract-surplus-table) tr:not(.mc-full) td:nth-child(10)::before{display:none!important}
 html.scm-mobile .contract-table.saved-contract-table.mobile-cards:not(.contract-surplus-table) td:nth-child(10) button{min-height:30px;padding:4px 9px;font-size:11.5px;margin:0;width:auto}
+
+/* v2.5.350 abundance on Your Buildings cards: ≥ 90 % green, > 85 % orange, ≤ 85 % red */
+.owned-building-abundance em{font-style:normal;font-weight:800}
+.owned-building-abundance.ab-good em{color:#4ee68b}
+.owned-building-abundance.ab-warn em{color:#ffa94d}
+.owned-building-abundance.ab-bad em{color:#ff6b78}
+.owned-building-abundance.ab-none{color:#7f8c9b}
+/* v2.5.350 output difference vs the building's current level */
+@media(min-width:801px){.planner-output-grid.has-diff{grid-template-columns:1.2fr 1fr 1fr 1fr 1fr}}
+.planner-output-diff span{color:#8f9eae}
+/* v2.5.350 expandable / collapsible cards */
+.collapse-head{cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent;position:relative}
+.collapse-head::after{content:'▾';margin-left:8px;color:#8f9eae;font-size:12px;flex:0 0 auto;transition:transform .15s}
+[data-collapse].is-collapsed>.collapse-head::after{transform:rotate(-90deg)}
+[data-collapse].is-collapsed>:not([data-collapse-head]){display:none!important}
+[data-collapse].is-collapsed>.collapse-head{margin-bottom:0!important}
+.accounting-subpanel>h3.collapse-head,#govOrders>h3.collapse-head{display:flex;justify-content:space-between;align-items:center}
+.acct-day-list{display:flex;flex-direction:column;gap:5px}
+.acct-day{border:1px solid #2a3949;background:#0d1721;border-radius:8px}
+.acct-day-head{display:flex;align-items:center;gap:8px;padding:8px 10px;font-size:12px}
+.acct-day-head>span{flex:1 1 auto;color:#c5d1dc}
+.acct-day-head>strong{font-size:13px;white-space:nowrap}
+.acct-day-body{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:4px 10px;padding:0 10px 8px}
+.acct-day-field{display:flex;justify-content:space-between;gap:6px;font-size:11px;border-top:1px solid #1d2a37;padding-top:4px}
+.acct-day-field span{color:#8f9eae}
+.acct-day .positive{color:#4ee68b}.acct-day .negative{color:#ff6b78}
+.gov-card>.gov-head.collapse-head{display:flex;align-items:center}
+.contract-card-head.collapse-head{padding-right:18px}
+.contract-card-head.collapse-head::after{position:absolute;top:2px;right:0;margin-left:0}

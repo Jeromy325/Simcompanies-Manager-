@@ -11,6 +11,6 @@ assert.ok(bg.includes("'scm-daily-summary'"));
 const glue = bg.slice(bg.indexOf('const NOTIFY_DEFAULTS='), bg.indexOf('function productionFinishAlarms('));
 assert.ok(!/pageGet\(|simcoFetch|api\.simcotools/.test(glue), 'notification glue does no game/SimcoTools network work');
 const html = read('dashboard.html');
-for (const k of ['productionFinished', 'inputsShort', 'bigMove', 'incomingContracts', 'dailySummary']) assert.ok(html.includes(`data-nf="${k}"`), k);
+for (const k of ['productionFinished', 'bigMove', 'incomingContracts', 'dailySummary']) assert.ok(html.includes(`data-nf="${k}"`), k);
 assert.ok(html.includes('id="nfTAdd"') && html.includes('id="notifyDailyNow"'));
 console.log('v334-regression: all assertions passed');
