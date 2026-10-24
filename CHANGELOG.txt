@@ -1,3 +1,6 @@
+2.5.366 — 2026-10-24 — Production: Building Type list lines up
+- Building Type is a plain A–Z list again. The category groups made Yandex's phone picker indent rows unevenly.
+
 2.5.365 — 2026-10-24 — Production: no blank rows in Building Type
 - The game's constants list 10 building kinds with no name (research labs, one "Tree" producer); they showed as
   blank rows. The picker now lists only named building types that produce something.
