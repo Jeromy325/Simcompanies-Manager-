@@ -3787,7 +3787,9 @@ function scmBuildingsSignature(store){
       Number(b?.id??b?.buildingId)||0, String(b?.category||''), String(b?.kind||''), String(b?.name||''),
       Number(b?.size??b?.level??b?.buildingLevel)||0, Number(b?.pinnedResource??resource?.kind)||0,
       String(busy?.started||''), Number(busy?.duration)||0, Number(resource?.kind??resource?.resourceId)||0,
-      String(resource?.name||''), Number(resource?.quality)||0, Boolean(busy?.expanding)
+      String(resource?.name||''), Number(resource?.quality)||0, Boolean(busy?.expanding),
+      // v2.5.351 a new abundance capture repaints the building cards
+      JSON.stringify(store?.endpointData?.[`/api/v2/companies/buildings/${Number(b?.id??b?.buildingId)||0}/abundance/`]?.data?.abundance||null)
     ].join(',');
   }).sort().join('|')+`#${buildings.length}`;
 }

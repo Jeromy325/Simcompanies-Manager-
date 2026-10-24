@@ -316,6 +316,34 @@ async function refreshMarketOrders(realm,maxAgeMs=5*60000){
 // v2.5.343 logged-in extras through the game tab after Sync: research, government orders + your tier, and the
 // abundance of every building whose abundance the game has shown (mines etc.). Each pageGet runs without a lock;
 // saveData takes its own lock per response.
+// Buildings that make an abundance resource (game constants: resources[id].producedAt for the abundance ids).
+async function abundanceBuildingIds(st){
+  try{const gc=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;const T=globalThis.SCM_TOOLS_CORE;
+    const abKinds=new Set(Object.entries(gc?.resources||{}).filter(([id])=>T?.isAbundanceResource?.(id)).map(([,x])=>String(x?.producedAt)));
+    return (Array.isArray(st?.buildings)?st.buildings:[]).filter(b=>abKinds.has(String(b?.kind))).map(b=>String(b.id));}catch{return [];}
+}
+// v2.5.351 abundance without a Sync or opening the mine: whenever the game's buildings list is captured, fetch
+// /abundance/ through the game tab for each mine/oil rig/quarry whose capture is missing or older than 1 h.
+// One run per realm at a time, at most every 5 min; skipped during a Sync (Sync fetches them itself afterwards).
+// No storage lock is held while fetching (pageGet, then saveData per building).
+const ABUNDANCE_AUTO_MAX_AGE_MS=60*60*1000,ABUNDANCE_AUTO_MIN_GAP_MS=5*60*1000;
+const abundanceAutoState=new Map();
+function staleAbundanceIds(ids,endpointData,now=Date.now(),maxAgeMs=ABUNDANCE_AUTO_MAX_AGE_MS){
+  return ids.filter(id=>{const e=endpointData?.[`/api/v2/companies/buildings/${id}/abundance/`];const t=Date.parse(String(e?.receivedAt||''));return !e?.data?.abundance||!Number.isFinite(t)||now-t>maxAgeMs;});
+}
+async function refreshAbundanceIfStale(realm){
+  const r=validRealmNumber(realm);if(r==null)return {ok:false};
+  const cur=abundanceAutoState.get(r)||{};if(cur.running||Date.now()-(cur.at||0)<ABUNDANCE_AUTO_MIN_GAP_MS)return {ok:true,skipped:true};
+  if(currentCaptureSyncSession())return {ok:true,skipped:'sync'};
+  abundanceAutoState.set(r,{running:true,at:Date.now()});
+  const saved=[];
+  try{
+    const st=await notifyRealmStore(r);
+    const ids=staleAbundanceIds(await abundanceBuildingIds(st),st?.endpointData||{});
+    for(const id of ids){const p=`/api/v2/companies/buildings/${id}/abundance/`;try{const x=await pageGet(p,r);if(x?.ok){await saveData(p,x.data,x.status,'GET',r);saved.push(id);}}catch{}}
+    return {ok:true,saved,wanted:ids.length};
+  }finally{abundanceAutoState.set(r,{running:false,at:Date.now()});}
+}
 async function refreshExtraGameData(realm){
   const r=validRealmNumber(realm);if(r==null)return {ok:false};
   const st=await notifyRealmStore(r);const ep=st?.endpointData||{};
@@ -324,9 +352,7 @@ async function refreshExtraGameData(realm){
   for(const b of (Array.isArray(st?.buildings)?st.buildings:[]))if(kinds.has(String(b?.kind)))ab.add(String(b.id));
   // v2.5.349 also every building that makes an abundance resource (mines, oil rigs, quarries: constants producedAt),
   // even when its abundance was never captured or the record was lost.
-  try{const gc=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;const T=globalThis.SCM_TOOLS_CORE;
-    const abKinds=new Set(Object.entries(gc?.resources||{}).filter(([id])=>T?.isAbundanceResource?.(id)).map(([,x])=>String(x?.producedAt)));
-    for(const b of (Array.isArray(st?.buildings)?st.buildings:[]))if(abKinds.has(String(b?.kind)))ab.add(String(b.id));}catch{}
+  for(const id of await abundanceBuildingIds(st))ab.add(id);
   const paths=['/api/v3/players/research/',`/api/v3/government-orders/${r}/`,'/api/v3/government-orders/tier/',...[...ab].map(id=>`/api/v2/companies/buildings/${id}/abundance/`)];
   const out=[];
   for(const p of paths){try{const x=await pageGet(p,r);if(x?.ok){await saveData(p,x.data,x.status,'GET',r);out.push(p);}}catch{}}
@@ -2957,6 +2983,7 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   }
   // v2.5.334 new incoming contract notification (own state key, not awaited, no network).
   if(incomingContractRealm&&Number(status)>=200&&Number(status)<300)notifyIncomingContracts(validRealmNumber(incomingContractRealm[1]),data).catch(()=>{});
+  if(/\/api\/v2\/companies\/me\/buildings\/?(?:\?.*)?$/i.test(String(url||''))&&Number(status)>=200&&Number(status)<300&&capturedRealm!=null){const r=capturedRealm;setTimeout(()=>{refreshAbundanceIfStale(r).catch(()=>{});},3000);}
   {const ob=String(url||'').match(/\/api\/v3\/market\/(\d+)\/(\d+)\/?(?:\?.*)?$/);if(ob&&Number(status)>=200&&Number(status)<300&&Array.isArray(data)){const r=Number(ob[1]),id=Number(ob[2]);setTimeout(()=>{notifyOrderBook(r,id,data).catch(()=>{});},1500);}}
   if(/\/api\/v2\/companies\/me\/cashflow\/recent\/?(?:\?.*)?$/i.test(String(url||''))&&Number(status)>=200&&Number(status)<300){const r=validRealmNumber(capturedRealm);if(r!=null)setTimeout(()=>{notifySales(r,data).catch(()=>{});},1500);}
   // Accounting responses are realm-sensitive even when the API path uses /me/.

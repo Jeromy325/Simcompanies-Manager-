@@ -1,3 +1,10 @@
+2.5.351 — 2026-10-24 — Abundance without Sync or opening the mine
+- Abundance was only fetched after a Sync (or when you opened the mine in the game). Now, whenever the game
+  loads your buildings list (game start, after actions), the Manager asks the game for the abundance of each
+  mine / oil rig / quarry whose figure is missing or older than 1 hour. One run at a time, at most every 5 min,
+  skipped during a Sync (Sync fetches them itself). No storage lock while fetching.
+- An open Production tab repaints the building cards when a new abundance arrives.
+
 2.5.350 — 2026-10-24 — Abundance colours, level difference, collapsible cards, sales alerts
 - Production · Your Buildings: mine/oil rig/quarry cards show the building's abundance from the game
   (/api/v2/companies/buildings/<id>/abundance/): 90–100 % green, above 85 % orange, 85 % or below red;
