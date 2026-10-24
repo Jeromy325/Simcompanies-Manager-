@@ -48,6 +48,7 @@
     'core-sync': 'Sync',
     'accounting-week-ledger': 'Accounting week ledger',
     'abundance-refresh': 'Abundance of your mines / oil rigs / quarries',
+    'abundance-refresh|game-auth-data': 'Abundance checked (game page loaded)',
     'extra-game-data': 'After Sync: research, government orders, abundance',
     'game-constants': 'Game constants downloaded (rates, recipes)',
     'market-orders': 'Your exchange listings checked',

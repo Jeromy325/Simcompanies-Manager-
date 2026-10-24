@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.352');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.353');
 const C = require('../tools-core.js');
 const N = require('../notify-core.js');
 

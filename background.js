@@ -365,7 +365,7 @@ const abundanceAutoState=new Map();
 function staleAbundanceIds(ids,endpointData,now=Date.now(),maxAgeMs=ABUNDANCE_AUTO_MAX_AGE_MS){
   return ids.filter(id=>{const e=endpointData?.[`/api/v2/companies/buildings/${id}/abundance/`];const t=Date.parse(String(e?.receivedAt||''));return !e?.data?.abundance||!Number.isFinite(t)||now-t>maxAgeMs;});
 }
-async function refreshAbundanceIfStale(realm){
+async function refreshAbundanceIfStale(realm,trigger='game-buildings'){
   const r=validRealmNumber(realm);if(r==null)return {ok:false};
   const cur=abundanceAutoState.get(r)||{};if(cur.running||Date.now()-(cur.at||0)<ABUNDANCE_AUTO_MIN_GAP_MS)return {ok:true,skipped:true};
   if(currentCaptureSyncSession())return {ok:true,skipped:'sync'};
@@ -374,10 +374,10 @@ async function refreshAbundanceIfStale(realm){
   try{
     const st=await notifyRealmStore(r);const info=await abundanceBuildingInfo(st);
     const ids=staleAbundanceIds(info.ids,st?.endpointData||{});
-    if(!info.ids.length){logActivity(r,'abundance-refresh','skipped',{buildings:info.buildings,sources:info.sources.join(', ')},'No mine, oil rig or quarry found in your buildings',t0,'game-buildings');return {ok:true,saved,wanted:0};}
-    if(!ids.length){logActivity(r,'abundance-refresh','skipped',{mines:info.ids.length},'all fresh (under 1 h)',t0,'game-buildings');return {ok:true,saved,wanted:0};}
+    if(!info.ids.length){logActivity(r,'abundance-refresh','skipped',{buildings:info.buildings,sources:info.sources.join(', ')},'No mine, oil rig or quarry found in your buildings',t0,trigger);return {ok:true,saved,wanted:0};}
+    if(!ids.length){logActivity(r,'abundance-refresh','skipped',{mines:info.ids.length},'all fresh (under 1 h)',t0,trigger);return {ok:true,saved,wanted:0};}
     for(const id of ids){const p=`/api/v2/companies/buildings/${id}/abundance/`;try{const x=await pageGet(p,r);if(x?.ok){await saveData(p,x.data,x.status,'GET',r);saved.push(id);}else errors.push(`#${id}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){errors.push(`#${id}: ${e?.message||e}`);}}
-    logActivity(r,'abundance-refresh',saved.length===ids.length?'success':saved.length?'partial':'failure',{rows:saved.length,wanted:ids.length,sources:info.sources.join(', ')},errors.join(' · ')||null,t0,'game-buildings');
+    logActivity(r,'abundance-refresh',saved.length===ids.length?'success':saved.length?'partial':'failure',{rows:saved.length,wanted:ids.length,sources:info.sources.join(', ')},errors.join(' · ')||null,t0,trigger);
     return {ok:true,saved,wanted:ids.length};
   }finally{abundanceAutoState.set(r,{running:false,at:Date.now()});}
 }
@@ -3025,7 +3025,10 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   // v2.5.334 new incoming contract notification (own state key, not awaited, no network).
   if(incomingContractRealm&&Number(status)>=200&&Number(status)<300)notifyIncomingContracts(validRealmNumber(incomingContractRealm[1]),data).catch(()=>{});
   if(Number(status)>=200&&Number(status)<300&&capturedRealm!=null)logGameCapture(capturedRealm,url);
-  if(/\/api\/v2\/companies\/me\/buildings\/?(?:\?.*)?$/i.test(String(url||''))&&Number(status)>=200&&Number(status)<300&&capturedRealm!=null){const r=capturedRealm;setTimeout(()=>{refreshAbundanceIfStale(r).catch(()=>{});},3000);}
+  // v2.5.353 also on auth-data: on the phone the game does not load the buildings list at start (user's API
+  // capture 2026-10-24), but it loads auth-data on every page load and every 3 min. Uses the stored buildings.
+  {const isB=/\/api\/v2\/companies\/me\/buildings\/?(?:\?.*)?$/i.test(String(url||'')),isA=/\/api\/v3\/companies\/auth-data\//i.test(String(url||''));const r=capturedRealm??(isA?responseRealm:null);
+   if((isB||isA)&&Number(status)>=200&&Number(status)<300&&r!=null)setTimeout(()=>{refreshAbundanceIfStale(r,isA?'game-auth-data':'game-buildings').catch(()=>{});},3000);}
   {const ob=String(url||'').match(/\/api\/v3\/market\/(\d+)\/(\d+)\/?(?:\?.*)?$/);if(ob&&Number(status)>=200&&Number(status)<300&&Array.isArray(data)){const r=Number(ob[1]),id=Number(ob[2]);setTimeout(()=>{notifyOrderBook(r,id,data).catch(()=>{});},1500);}}
   if(/\/api\/v2\/companies\/me\/cashflow\/recent\/?(?:\?.*)?$/i.test(String(url||''))&&Number(status)>=200&&Number(status)<300){const r=validRealmNumber(capturedRealm);if(r!=null)setTimeout(()=>{notifySales(r,data).catch(()=>{});},1500);}
   // Accounting responses are realm-sensitive even when the API path uses /me/.

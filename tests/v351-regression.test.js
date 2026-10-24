@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.352');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.353');
 const bg = read('background.js');
 // stale filter: missing, no abundance object, older than 1 h → fetch; fresh → skip
 const src = bg.slice(bg.indexOf('const ABUNDANCE_AUTO_MAX_AGE_MS'), bg.indexOf('async function refreshAbundanceIfStale('));
@@ -17,8 +17,8 @@ const ep = {
 };
 assert.deepEqual(ctx.f(['1', '2', '3', '4'], ep, now), ['2', '3', '4']);
 // hooked on the buildings capture, with the capture's own realm
-const hook = bg.slice(bg.indexOf('if(/\\/api\\/v2\\/companies\\/me\\/buildings\\/?'), bg.indexOf('refreshAbundanceIfStale(r)') + 40);
-assert.ok(hook.includes('capturedRealm!=null') && hook.includes('setTimeout('), 'triggered by the game buildings capture');
+const hook = bg.slice(bg.indexOf('const isB=/\\/api\\/v2\\/companies\\/me\\/buildings') /* 2.5.353 combined buildings + auth-data trigger */, bg.indexOf('refreshAbundanceIfStale(r,') + 60);
+assert.ok(hook.includes('capturedRealm??') && hook.includes('r!=null') && hook.includes('setTimeout('), 'triggered by the game buildings capture (2.5.353: realm from the capture or auth-data)');
 const fn = bg.slice(bg.indexOf('async function refreshAbundanceIfStale('), bg.indexOf('async function refreshExtraGameData('));
 assert.ok(fn.includes('currentCaptureSyncSession()') && fn.includes('ABUNDANCE_AUTO_MIN_GAP_MS') && fn.includes('cur.running'), 'throttled, one at a time, not during Sync');
 assert.ok(!/withStorageLock|storageLock/.test(fn), 'no storage lock around the game fetches');
