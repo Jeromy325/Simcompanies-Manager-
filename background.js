@@ -296,8 +296,9 @@ async function refreshGameConstants(force=false){
     const next={core,buildings,resources,at:new Date().toISOString()};
     if(!globalThis.SCM_TOOLS_CORE.gameConstantsOk(next))throw new Error('constants missing fields');
     await rawStorageSet({scmGameConstants:next});
+    logActivity(await activeRealmNumber(),'game-constants','success',{});
     return {ok:true};
-  }catch(e){return {ok:false,error:String(e?.message||e)};}
+  }catch(e){logActivity(await activeRealmNumber(),'game-constants','failure',{},String(e?.message||e));return {ok:false,error:String(e?.message||e)};}
 }
 async function refreshMarketOrders(realm,maxAgeMs=5*60000){
   try{
@@ -310,17 +311,50 @@ async function refreshMarketOrders(realm,maxAgeMs=5*60000){
     if(!res.ok)return {ok:false,error:`HTTP ${res.status}`};
     const orders=await res.json();if(!Array.isArray(orders))return {ok:false,error:'not a list'};
     await rawStorageSet({[k]:{companyId:cid,orders,at:new Date().toISOString()}});
+    logActivity(r,'market-orders','success',{rows:orders.length});
     return {ok:true};
-  }catch(e){return {ok:false,error:String(e?.message||e)};}
+  }catch(e){logActivity(validRealmNumber(realm),'market-orders','failure',{},String(e?.message||e));return {ok:false,error:String(e?.message||e)};}
 }
 // v2.5.343 logged-in extras through the game tab after Sync: research, government orders + your tier, and the
 // abundance of every building whose abundance the game has shown (mines etc.). Each pageGet runs without a lock;
 // saveData takes its own lock per response.
-// Buildings that make an abundance resource (game constants: resources[id].producedAt for the abundance ids).
-async function abundanceBuildingIds(st){
-  try{const gc=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;const T=globalThis.SCM_TOOLS_CORE;
-    const abKinds=new Set(Object.entries(gc?.resources||{}).filter(([id])=>T?.isAbundanceResource?.(id)).map(([,x])=>String(x?.producedAt)));
-    return (Array.isArray(st?.buildings)?st.buildings:[]).filter(b=>abKinds.has(String(b?.kind))).map(b=>String(b.id));}catch{return [];}
+// Buildings that make an abundance resource. v2.5.352: the game constants (scmGameConstants, downloaded in the
+// background) are one source; if they are missing on the phone, the bundled buildings.json/recipes.json (same game
+// data: Mine, Oil Rig, Quarry) are used, plus any building producing an abundance resource now or of a kind whose
+// abundance was captured before. Returns {ids, sources}.
+let bundledAbundanceKindsMemo=null;
+async function bundledAbundanceKinds(){
+  if(bundledAbundanceKindsMemo)return bundledAbundanceKindsMemo;
+  try{const T=globalThis.SCM_TOOLS_CORE;const [b,r]=await Promise.all(['buildings.json','recipes.json'].map(async f=>(await fetch(chrome.runtime.getURL(f))).json()));
+    const byName=new Map((Array.isArray(r)?r:Object.values(r||{})).map(x=>[String(x?.name||'').toLowerCase(),Number(x?.id)]));
+    bundledAbundanceKindsMemo=new Set((Array.isArray(b)?b:[]).filter(x=>(x?.produces||[]).some(n=>T?.isAbundanceResource?.(byName.get(String(n).toLowerCase())))).map(x=>String(x.id)));}
+  catch{bundledAbundanceKindsMemo=new Set();}
+  return bundledAbundanceKindsMemo;
+}
+async function abundanceBuildingInfo(st){
+  const T=globalThis.SCM_TOOLS_CORE,list=Array.isArray(st?.buildings)?st.buildings:[],ids=new Set(),sources=[];
+  try{const gc=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;
+    const k=new Set(Object.entries(gc?.resources||{}).filter(([id])=>T?.isAbundanceResource?.(id)).map(([,x])=>String(x?.producedAt)));
+    sources.push(k.size?'game constants':'game constants missing');for(const b of list)if(k.has(String(b?.kind)))ids.add(String(b.id));}catch{sources.push('game constants unreadable');}
+  const bk=await bundledAbundanceKinds();for(const b of list)if(bk.has(String(b?.kind)))ids.add(String(b.id));
+  const ep=st?.endpointData||{},capturedKinds=new Set(list.filter(b=>ep[`/api/v2/companies/buildings/${b?.id}/abundance/`]).map(b=>String(b?.kind)));
+  for(const b of list)if(T?.isAbundanceResource?.(b?.busy?.resource?.kind)||capturedKinds.has(String(b?.kind)))ids.add(String(b.id));
+  return {ids:[...ids],sources,buildings:list.length};
+}
+async function abundanceBuildingIds(st){return (await abundanceBuildingInfo(st)).ids;}
+// v2.5.352 one line in the Background updates monitor for work the Manager does (job history scmBackgroundJobs:<n>).
+function logActivity(realm,job,outcome,details={},error=null,startedMs=Date.now(),trigger='manager'){
+  const n=validRealmNumber(realm);if(n==null)return Promise.resolve();
+  return recordBackgroundJobEvent(n,{job,trigger,outcome,startedAt:new Date(startedMs).toISOString(),finishedAt:new Date().toISOString(),durationMs:Date.now()-startedMs,details,error}).catch(()=>{});
+}
+async function activeRealmNumber(){try{const r=await chrome.storage.local.get({activeRealmKey:null});return validRealmNumber(realmNumberFromKey(r.activeRealmKey));}catch{return null;}}
+// v2.5.352 "Game data saved" lines in the monitor: one per kind of data, at most once a minute each.
+const GAME_CAPTURE_FAMILIES=[[/\/companies\/me\/buildings\/?$/,'Buildings'],[/\/resources\/\d+\/?$/,'Warehouse'],[/\/contracts-(?:incoming|outgoing)/,'Contracts'],[/\/abundance\/?$/,'Abundance'],[/\/cashflow\/recent/,'Cash flow (sales)'],[/\/market\/\d+\/\d+\/?$/,'Exchange order book'],[/\/buildings\/\d+\/history/,'Building history'],[/\/government-orders/,'Government orders'],[/\/(?:balance-sheet|income-statement|cashflow-statement|past-finances)/,'Accounting'],[/\/executives\/?$/,'Executives']];
+const gameCaptureLogAt=new Map();
+function logGameCapture(realm,url){
+  const path=String(url||'').split('?')[0];const f=GAME_CAPTURE_FAMILIES.find(([rx])=>rx.test(path));if(!f)return;
+  const k=`${realm}|${f[1]}`;if(Date.now()-(gameCaptureLogAt.get(k)||0)<60000)return;gameCaptureLogAt.set(k,Date.now());
+  logActivity(realm,'game-data-saved','success',{what:f[1]},null,Date.now(),'game');
 }
 // v2.5.351 abundance without a Sync or opening the mine: whenever the game's buildings list is captured, fetch
 // /abundance/ through the game tab for each mine/oil rig/quarry whose capture is missing or older than 1 h.
@@ -336,11 +370,14 @@ async function refreshAbundanceIfStale(realm){
   const cur=abundanceAutoState.get(r)||{};if(cur.running||Date.now()-(cur.at||0)<ABUNDANCE_AUTO_MIN_GAP_MS)return {ok:true,skipped:true};
   if(currentCaptureSyncSession())return {ok:true,skipped:'sync'};
   abundanceAutoState.set(r,{running:true,at:Date.now()});
-  const saved=[];
+  const saved=[],errors=[],t0=Date.now();
   try{
-    const st=await notifyRealmStore(r);
-    const ids=staleAbundanceIds(await abundanceBuildingIds(st),st?.endpointData||{});
-    for(const id of ids){const p=`/api/v2/companies/buildings/${id}/abundance/`;try{const x=await pageGet(p,r);if(x?.ok){await saveData(p,x.data,x.status,'GET',r);saved.push(id);}}catch{}}
+    const st=await notifyRealmStore(r);const info=await abundanceBuildingInfo(st);
+    const ids=staleAbundanceIds(info.ids,st?.endpointData||{});
+    if(!info.ids.length){logActivity(r,'abundance-refresh','skipped',{buildings:info.buildings,sources:info.sources.join(', ')},'No mine, oil rig or quarry found in your buildings',t0,'game-buildings');return {ok:true,saved,wanted:0};}
+    if(!ids.length){logActivity(r,'abundance-refresh','skipped',{mines:info.ids.length},'all fresh (under 1 h)',t0,'game-buildings');return {ok:true,saved,wanted:0};}
+    for(const id of ids){const p=`/api/v2/companies/buildings/${id}/abundance/`;try{const x=await pageGet(p,r);if(x?.ok){await saveData(p,x.data,x.status,'GET',r);saved.push(id);}else errors.push(`#${id}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){errors.push(`#${id}: ${e?.message||e}`);}}
+    logActivity(r,'abundance-refresh',saved.length===ids.length?'success':saved.length?'partial':'failure',{rows:saved.length,wanted:ids.length,sources:info.sources.join(', ')},errors.join(' · ')||null,t0,'game-buildings');
     return {ok:true,saved,wanted:ids.length};
   }finally{abundanceAutoState.set(r,{running:false,at:Date.now()});}
 }
@@ -354,8 +391,10 @@ async function refreshExtraGameData(realm){
   // even when its abundance was never captured or the record was lost.
   for(const id of await abundanceBuildingIds(st))ab.add(id);
   const paths=['/api/v3/players/research/',`/api/v3/government-orders/${r}/`,'/api/v3/government-orders/tier/',...[...ab].map(id=>`/api/v2/companies/buildings/${id}/abundance/`)];
-  const out=[];
-  for(const p of paths){try{const x=await pageGet(p,r);if(x?.ok){await saveData(p,x.data,x.status,'GET',r);out.push(p);}}catch{}}
+  const out=[],errs=[],t0=Date.now();
+  for(const p of paths){try{const x=await pageGet(p,r);if(x?.ok){await saveData(p,x.data,x.status,'GET',r);out.push(p);}else errs.push(`${p.replace('/api/','')}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){errs.push(`${p.replace('/api/','')}: ${e?.message||e}`);}}
+  const abN=paths.filter(p=>/abundance/.test(p)).length,abOk=out.filter(p=>/abundance/.test(p)).length;
+  logActivity(r,'extra-game-data',errs.length?(out.length?'partial':'failure'):'success',{rows:out.length,wanted:paths.length,abundance:`${abOk}/${abN}`},errs.slice(0,4).join(' · ')||null,t0,'after-sync');
   return {ok:true,saved:out};
 }
 chrome.alarms.onAlarm.addListener(a=>{if(a?.name===GAME_CONSTANTS_ALARM)refreshGameConstants().catch(()=>{});});
@@ -1358,6 +1397,7 @@ async function notifyCostChanges(realm,history,newEntries){
 }
 chrome.alarms.get('scm-daily-summary').then(a=>{if(!a)scheduleDailySummary().catch(()=>{});}).catch(()=>{});
 function scmNotify(id,title,message){
+  {const m=String(id).match(/^[a-z]+-([01])-/);if(m&&!String(id).startsWith('jobs-'))logActivity(Number(m[1]),'alert-sent','success',{title:String(title).slice(0,80)});}
   return new Promise(resolve=>{
     try{
       if(!chrome.notifications?.create)return resolve({ok:false,error:'This browser does not provide extension notifications (chrome.notifications is missing).'});
@@ -2909,6 +2949,7 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
   const failed=results.filter(r=>!r.ok);
   const status=successful===paths.length?`${realmDisplayNumber(realm)||'Realm'} Accounting captured · ${successful}/${paths.length} APIs`:`${realmDisplayNumber(realm)||'Realm'} Accounting partial · ${successful}/${paths.length} APIs`;
   await setRealmLoadStatus(realm,status,successful===paths.length?null:`${failed.length} Accounting API request(s) failed.`);
+  logActivity(realm,'accounting-refresh',failed.length?(successful?'partial':'failure'):'success',{rows:successful,wanted:pending.length},failed.length?`${failed.length} of ${pending.length} statements failed`:null,Date.now(),reason);
   return {ok:successful>0,realm,reason,requested:pending.length,successful,total:paths.length,failed,results,status};
 }
 
@@ -2983,6 +3024,7 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   }
   // v2.5.334 new incoming contract notification (own state key, not awaited, no network).
   if(incomingContractRealm&&Number(status)>=200&&Number(status)<300)notifyIncomingContracts(validRealmNumber(incomingContractRealm[1]),data).catch(()=>{});
+  if(Number(status)>=200&&Number(status)<300&&capturedRealm!=null)logGameCapture(capturedRealm,url);
   if(/\/api\/v2\/companies\/me\/buildings\/?(?:\?.*)?$/i.test(String(url||''))&&Number(status)>=200&&Number(status)<300&&capturedRealm!=null){const r=capturedRealm;setTimeout(()=>{refreshAbundanceIfStale(r).catch(()=>{});},3000);}
   {const ob=String(url||'').match(/\/api\/v3\/market\/(\d+)\/(\d+)\/?(?:\?.*)?$/);if(ob&&Number(status)>=200&&Number(status)<300&&Array.isArray(data)){const r=Number(ob[1]),id=Number(ob[2]);setTimeout(()=>{notifyOrderBook(r,id,data).catch(()=>{});},1500);}}
   if(/\/api\/v2\/companies\/me\/cashflow\/recent\/?(?:\?.*)?$/i.test(String(url||''))&&Number(status)>=200&&Number(status)<300){const r=validRealmNumber(capturedRealm);if(r!=null)setTimeout(()=>{notifySales(r,data).catch(()=>{});},1500);}

@@ -5,8 +5,33 @@
  * (collecting from buildings, buying, selling, contracts). Read-only: never writes storage. */
 (function () {
   'use strict';
-  const el = document.getElementById('liveUpdates');
-  if (!el || !globalThis.chrome?.storage?.local) return;
+  if (!globalThis.chrome?.storage?.local) return;
+  // v2.5.352 also runs on the game page (content script): a floating monitor you can drag, tap to expand.
+  const GAME = typeof location !== 'undefined' && /(^|\.)simcompanies\.com$/i.test(location.hostname);
+  if (GAME && (window.top !== window || document.getElementById('scmMonitor'))) return;
+  const POS_KEY = 'scmMonitorPos';
+  function gameHost() {
+    const host = document.createElement('div');
+    host.id = 'scmMonitor'; host.className = 'live-updates scm-monitor';
+    host.innerHTML = '<div class="scm-monitor-grip" title="Drag to move" aria-label="Drag to move">⠿</div><div class="scm-monitor-body"></div>';
+    (document.body || document.documentElement).appendChild(host);
+    const place = (x, y) => { const w = host.offsetWidth || 260, h = host.offsetHeight || 40; x = Math.max(0, Math.min(window.innerWidth - Math.min(w, window.innerWidth), x)); y = Math.max(0, Math.min(window.innerHeight - Math.min(h, window.innerHeight), y)); host.style.left = x + 'px'; host.style.top = y + 'px'; return { x, y }; };
+    let pos = null; try { pos = JSON.parse(localStorage.getItem(POS_KEY) || 'null'); } catch {}
+    requestAnimationFrame(() => place(pos?.x ?? 8, pos?.y ?? Math.max(60, window.innerHeight - 110)));
+    const grip = host.querySelector('.scm-monitor-grip');
+    let drag = null;
+    grip.addEventListener('pointerdown', e => { drag = { dx: e.clientX - host.offsetLeft, dy: e.clientY - host.offsetTop }; try { grip.setPointerCapture(e.pointerId); } catch {} e.preventDefault(); });
+    grip.addEventListener('pointermove', e => { if (drag) place(e.clientX - drag.dx, e.clientY - drag.dy); });
+    const end = () => { if (!drag) return; drag = null; try { localStorage.setItem(POS_KEY, JSON.stringify({ x: host.offsetLeft, y: host.offsetTop })); } catch {} };
+    grip.addEventListener('pointerup', end); grip.addEventListener('pointercancel', end);
+    window.addEventListener('resize', () => place(host.offsetLeft, host.offsetTop), { passive: true });
+    host.__refit = () => requestAnimationFrame(() => place(host.offsetLeft, host.offsetTop)); // keep an expanded panel on screen
+    return host.querySelector('.scm-monitor-body');
+  }
+  let el = GAME ? null : document.getElementById('liveUpdates');
+  if (!GAME && !el) return;
+  if (GAME) { const start = () => { if (!el) { el = gameHost(); init(); } }; if (document.body) start(); else document.addEventListener('DOMContentLoaded', start, { once: true }); }
+  function init() {
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const ago = t => { const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? `${Math.round(s)}s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`; };
   const LABEL = {
@@ -21,16 +46,31 @@
     'post-sync-market-refresh-scheduled': 'Price refresh queued after Sync',
     'resource-image-cache-sync': 'Product images checked',
     'core-sync': 'Sync',
-    'accounting-week-ledger': 'Accounting week ledger'
+    'accounting-week-ledger': 'Accounting week ledger',
+    'abundance-refresh': 'Abundance of your mines / oil rigs / quarries',
+    'extra-game-data': 'After Sync: research, government orders, abundance',
+    'game-constants': 'Game constants downloaded (rates, recipes)',
+    'market-orders': 'Your exchange listings checked',
+    'accounting-refresh': 'Accounting statements refreshed',
+    'alert-sent': 'Alert sent',
+    'game-data-saved': 'Saved from the game'
   };
+  // v2.5.352 extra detail per line (what, alert title, counts).
+  const detail = j => { const d = j.details || {}; const out = [];
+    if (d.what) out.push(d.what); if (d.title) out.push(d.title);
+    if (d.rows != null && d.wanted != null) out.push(`${d.rows}/${d.wanted}`); else if (d.rows != null) out.push(`${d.rows} items`);
+    if (d.abundance) out.push(`abundance ${d.abundance}`); if (d.mines != null) out.push(`${d.mines} mines`);
+    if (d.sources && /missing|unreadable/.test(d.sources)) out.push(d.sources);
+    return out.length ? ' · ' + out.map(esc).join(' · ') : ''; };
   // v2.5.331 one-line legend shown above the job list.
   const LEGEND = 'Warehouse = last time the Manager re-read your warehouse from the game · last game action = last collect/buy/sell/contract it reacted to · prices = last SimcoTools price download (VWAP + current prices, about every 10 min). Green dot = warehouse refreshed in the last 15 min. "skipped" = nothing needed (data still fresh), not an error.';
   const label = j => LABEL[`${j.job}|${j.trigger}`] || LABEL[j.job] || String(j.job || 'job').replace(/-/g, ' ');
   let realm = null, jobs = [], lastSeenId = null, toastTimer = 0, open = false;
+  try { open = GAME && localStorage.getItem('scmMonitorOpen') === '1'; } catch {}
 
   function toast(text) {
     let t = document.getElementById('scmToast');
-    if (!t) { t = document.createElement('div'); t.id = 'scmToast'; t.className = 'scm-toast'; t.setAttribute('role', 'status'); document.body.appendChild(t); }
+    if (!t) { t = document.createElement('div'); t.id = 'scmToast'; t.className = GAME ? 'scm-toast scm-game-toast' : 'scm-toast'; t.setAttribute('role', 'status'); document.body.appendChild(t); }
     t.textContent = text; t.classList.add('show');
     clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 4500);
   }
@@ -39,8 +79,8 @@
   // redrawing the open list = visible flash). Now the structure is built once and only changed text is written.
   let ui = null, lastListKey = '';
   function build() {
-    el.innerHTML = '<button type="button" class="lu-bar" aria-expanded="false"><span class="lu-dot"></span><span class="lu-text"></span><span class="lu-more">▼</span></button><div class="lu-panel" hidden><p class="lu-legend"></p><ol class="lu-list"></ol></div>';
-    ui = { bar: el.querySelector('.lu-bar'), dot: el.querySelector('.lu-dot'), text: el.querySelector('.lu-text'), more: el.querySelector('.lu-more'), panel: el.querySelector('.lu-panel'), list: el.querySelector('.lu-list') };
+    el.innerHTML = '<button type="button" class="lu-bar" aria-expanded="false"><span class="lu-dot"></span><span class="lu-text"></span><span class="lu-more">▼</span></button><div class="lu-panel" hidden><p class="lu-legend"></p><p class="lu-count"></p><ol class="lu-list"></ol></div>';
+    ui = { bar: el.querySelector('.lu-bar'), dot: el.querySelector('.lu-dot'), text: el.querySelector('.lu-text'), more: el.querySelector('.lu-more'), panel: el.querySelector('.lu-panel'), list: el.querySelector('.lu-list'), count: el.querySelector('.lu-count') };
     el.querySelector('.lu-legend').textContent = LEGEND;
     lastListKey = '';
   }
@@ -65,18 +105,21 @@
     ui.more.textContent = open ? '▲' : '▼';
     ui.panel.hidden = !open;
     if (open) {
-      const last = jobs.slice(-10).reverse();
-      const key = last.map(j => j.id).join(',');
+      const last = jobs.slice().reverse(); // v2.5.352 every stored activity (newest first), not only the last 10
+      const key = last.length + ':' + (last[0]?.id || '');
       if (key !== lastListKey) {
         lastListKey = key;
-        ui.list.innerHTML = last.map(j => `<li class="lu-${esc(j.outcome)}"><span>${esc(new Date(t(j)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }))}</span> ${esc(label(j))}${j.details?.rows != null ? ` · ${esc(j.details.rows)} items` : ''}${j.outcome !== 'success' ? ` · <b>${esc(j.outcome)}</b>${j.error ? ': ' + esc(j.error) : ''}` : ''}</li>`).join('') || '<li>No background activity recorded yet for this realm.</li>';
+        if (ui.count) ui.count.textContent = `${last.length} activities (newest first)`;
+        ui.list.innerHTML = last.map(j => `<li class="lu-${esc(j.outcome)}"><span>${esc(new Date(t(j)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }))}</span> ${esc(label(j))}${detail(j)}${j.outcome !== 'success' ? ` · <b>${esc(j.outcome)}</b>${j.error ? ': ' + esc(j.error) : ''}` : ''}</li>`).join('') || '<li>No background activity recorded yet for this realm.</li>';
       }
     }
   }
   async function load(notify) {
     try {
       const r = await chrome.storage.local.get({ selectedRealm: null, activeRealmKey: null });
-      const n = Number(r.selectedRealm ?? String(r.activeRealmKey || '').replace('realm:', ''));
+      // game page: the realm this game tab is in (content.js), else the active realm
+      const tabRealm = GAME ? Number(window.__SCM_GAME_REALM__) : NaN;
+      const n = tabRealm === 0 || tabRealm === 1 ? tabRealm : GAME ? Number(String(r.activeRealmKey || '').replace('realm:', '')) : Number(r.selectedRealm ?? String(r.activeRealmKey || '').replace('realm:', ''));
       realm = n === 0 || n === 1 ? n : null;
       if (realm == null) { el.innerHTML = ''; ui = null; return; }
       const key = `scmBackgroundJobs:${realm}`;
@@ -91,13 +134,16 @@
       paint();
     } catch { /* storage unavailable: keep last view */ }
   }
-  el.addEventListener('click', e => { if (e.target.closest('.lu-bar')) { open = !open; paint(); } });
+  el.addEventListener('click', e => { if (e.target.closest('.lu-bar')) { open = !open; if (GAME) { try { localStorage.setItem('scmMonitorOpen', open ? '1' : '0'); } catch {} } paint(); if (GAME) document.getElementById('scmMonitor')?.__refit?.(); } });
   (globalThis.scmOnStorageChanged || (fn => chrome.storage.onChanged.addListener(fn)))((changes, area) => {
     if (area !== 'local') return;
     if (changes.selectedRealm || changes.activeRealmKey || (realm != null && changes[`scmBackgroundJobs:${realm}`])) load(true);
   });
-  setInterval(() => { if (!document.hidden) paint(); }, 15000);
+  // game page: the tab learns its realm a few seconds after load
+  setInterval(() => { if (GAME) { const tr = Number(window.__SCM_GAME_REALM__); if ((tr === 0 || tr === 1) && tr !== realm) { load(false); return; } } if (!document.hidden) paint(); }, GAME ? 3000 : 15000);
   if (globalThis.scmOnDashboardResume) globalThis.scmOnDashboardResume(() => load(true));
   load(false);
   globalThis.SCM_LIVE_UPDATES = { reload: load };
+  }
+  if (!GAME) init();
 })();

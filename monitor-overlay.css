@@ -1,0 +1,22 @@
+/* Sim Companies Manager v2.5.352 — Background updates monitor on the game page (live-updates.js). Scoped to #scmMonitor / #scmToast. */
+#scmMonitor{position:fixed;left:8px;top:70px;z-index:2147483000;display:flex;align-items:flex-start;gap:0;width:min(320px,calc(100vw - 16px));font:12px/1.35 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#e6edf3;filter:drop-shadow(0 4px 12px rgba(0,0,0,.45))}
+#scmMonitor .scm-monitor-grip{flex:0 0 26px;align-self:stretch;min-height:34px;display:flex;align-items:center;justify-content:center;background:#18222d;border:1px solid #2c3b4b;border-right:0;border-radius:10px 0 0 10px;color:#8f9eae;font-size:15px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+#scmMonitor .scm-monitor-grip:active{cursor:grabbing}
+#scmMonitor .scm-monitor-body{flex:1 1 auto;min-width:0}
+#scmMonitor .lu-bar{display:flex;align-items:center;gap:7px;width:100%;margin:0;text-align:left;background:#0d151e;border:1px solid #2c3b4b;border-radius:0 10px 10px 0;padding:6px 9px;color:#e6edf3;font:inherit;min-height:34px;cursor:pointer}
+#scmMonitor .lu-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+#scmMonitor .lu-text b{font-weight:700}
+#scmMonitor .lu-more{opacity:.6;font-size:10px}
+#scmMonitor .lu-dot{width:9px;height:9px;border-radius:50%;background:#5b6876;flex:0 0 auto}
+#scmMonitor .lu-dot.on{background:#35d07f}
+#scmMonitor .lu-bad{color:#ff6875}
+#scmMonitor .lu-panel{margin-top:4px;background:#0d151e;border:1px solid #2c3b4b;border-radius:10px;padding:6px}
+#scmMonitor .lu-panel[hidden]{display:none}
+#scmMonitor .lu-legend{margin:0 0 4px;font-size:10.5px;line-height:1.35;opacity:.7}
+#scmMonitor .lu-count{margin:0 0 3px;font-size:10.5px;color:#8f9eae}
+#scmMonitor .lu-list{margin:0;padding:0 0 0 20px;font-size:11px;line-height:1.45;max-height:min(50vh,320px);overflow:auto;overscroll-behavior:contain}
+#scmMonitor .lu-list span{opacity:.65;font-variant-numeric:tabular-nums}
+#scmMonitor .lu-list .lu-failure{color:#ff6875}#scmMonitor .lu-list .lu-skipped{opacity:.7}
+#scmMonitor.lu-flash .lu-bar{border-color:#35d07f}
+#scmToast.scm-game-toast{position:fixed;left:50%;bottom:18px;transform:translate(-50%,40px);opacity:0;background:#14532d;color:#e7fff1;border:1px solid #2f8f5b;border-radius:10px;padding:10px 14px;font:13px/1.3 system-ui,sans-serif;z-index:2147483001;transition:transform .25s,opacity .25s;max-width:calc(100vw - 32px);pointer-events:none}
+#scmToast.scm-game-toast.show{transform:translate(-50%,0);opacity:1}

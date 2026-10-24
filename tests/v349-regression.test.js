@@ -4,14 +4,14 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.351');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.352');
 const C = require('../tools-core.js');
 const fx = require('./fixtures/profit-calc-2026-10-24.json');
 // abundance kinds from constants: Minerals is made at 'M' (the user's Mine #1, never captured in the 2026-10-24 export)
 const kinds = new Set(Object.entries(fx.constants.resources).filter(([id]) => C.isAbundanceResource(id)).map(([, x]) => String(x.producedAt)));
 assert.deepEqual([...kinds], ['M']);
-const bg = read('background.js'), fn = bg.slice(bg.indexOf('async function abundanceBuildingIds(') /* 2.5.351 shared helper */, bg.indexOf("chrome.alarms.onAlarm.addListener(a=>{if(a?.name===GAME_CONSTANTS_ALARM)"));
-assert.ok(fn.includes('T?.isAbundanceResource?.(id)') && fn.includes('abKinds.has(String(b?.kind))'), 'every abundance building is fetched');
+const bg = read('background.js'), fn = bg.slice(bg.indexOf('let bundledAbundanceKindsMemo') /* 2.5.352 shared helpers */, bg.indexOf("chrome.alarms.onAlarm.addListener(a=>{if(a?.name===GAME_CONSTANTS_ALARM)"));
+assert.ok(fn.includes('T?.isAbundanceResource?.(id)') && fn.includes('if(k.has(String(b?.kind)))ids.add(String(b.id))') /* 2.5.352 */, 'every abundance building is fetched');
 assert.ok(!/await\s+(withStorageLock|storageLock)/.test(fn), 'no storage lock around the fetches');
 // loan: build time lowers the earnings over the term and can flip the verdict
 const base = { principal: 100000, ratePct: 1, ratePeriod: 'day', termDays: 14, fundedProfitPerHour: 45 };

@@ -1310,3 +1310,4 @@ html.scm-mobile .contract-table.saved-contract-table.mobile-cards:not(.contract-
 .gov-card>.gov-head.collapse-head{display:flex;align-items:center}
 .contract-card-head.collapse-head{padding-right:18px}
 .contract-card-head.collapse-head::after{position:absolute;top:2px;right:0;margin-left:0}
+.lu-count{margin:0 0 4px;font-size:11px;opacity:.7}

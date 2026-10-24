@@ -1,3 +1,15 @@
+2.5.352 — 2026-10-24 — Abundance without game constants; full activity monitor, also on the game page
+- Abundance (2.5.351 did not work on the phone): the list of mines / oil rigs / quarries came only from the game
+  constants the Manager downloads in the background. When that download fails, no mine was found, so nothing was
+  fetched (on game load or after Sync). Now the bundled game data (buildings.json/recipes.json: Mine, Oil Rig,
+  Quarry), buildings producing an abundance resource, and kinds already captured are used as well. Each run is
+  logged in the monitor with the result and, if relevant, "game constants missing".
+- Background updates monitor: the expanded list shows every stored activity (up to 300, newest first), not the
+  last 10, with a count. New lines for the Manager's own work: abundance, after-Sync extras, game constants,
+  your exchange listings, accounting statements, alerts sent, and data saved from the game (once a minute per kind).
+- Game page: the same monitor floats over the game. Tap to expand/collapse, drag by the ⠿ grip; position and
+  open state are remembered. The "Warehouse updated from the game" toast also shows on the game page.
+
 2.5.351 — 2026-10-24 — Abundance without Sync or opening the mine
 - Abundance was only fetched after a Sync (or when you opened the mine in the game). Now, whenever the game
   loads your buildings list (game start, after actions), the Manager asks the game for the abundance of each
