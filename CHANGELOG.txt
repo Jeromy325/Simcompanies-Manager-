@@ -1,3 +1,14 @@
+2.5.358 — 2026-10-24 — Every card expands / collapses; run-out & make or buy moved to the Warehouse
+- Tap a card's title to collapse it to its header; tap again to open. Your choice is remembered, also after the
+  page refreshes. Now on every tab: Overview, Accounting, Warehouse, Market, Production (Your Buildings,
+  Production Output, Required Inputs, Profit / h / level, Best product, Deficit & Surplus and each card inside,
+  Construction Materials), Contracts, Alerts (each group) and Diagnostic.
+- Warehouse: "Stock" and "Inputs: run-out & make or buy" are separate collapsible cards (the run-out card moved
+  here from Production). Production keeps "Best product" for the selected building.
+- Game page: Copy Left Resources, the saved-contract helper and the Sell helper get a − / + button that shrinks
+  the card to its header (remembered). Stock After Demand & Contracts, the monitor and Network capture already
+  collapse.
+
 2.5.357 — 2026-10-24 — Smart insights on the Production page: best product, input run-out, make or buy
 - New section under Profit / h / level, on the same basis as the game's Profit Calculator (reproduces your
   $151.04 / $422.05 / $474.45 screens). Uses data the Manager already has; no new game or SimcoTools requests.

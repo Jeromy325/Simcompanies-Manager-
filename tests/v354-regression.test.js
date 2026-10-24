@@ -3,7 +3,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.357');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.358');
 const lu = read('live-updates.js'), css = read('monitor-overlay.css'), cs = read('content.js');
 assert.ok(lu.includes('scm-monitor-min') && lu.includes('scm-monitor-hide') && lu.includes('scm-monitor-mini'), '− / × / dot');
 assert.ok(lu.includes("chrome.storage.local.set({ scmMonitorGameMode: m })") && lu.includes("c.scmMonitorGameMode"), 'mode shared with the Manager, applied live');

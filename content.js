@@ -1484,6 +1484,23 @@ let hookReady = false;
     (document.head||document.documentElement).appendChild(st);
   };
   const ensureCard=(id,cls)=>{let el=document.getElementById(id);if(el&&document.documentElement.contains(el))return el;el=document.createElement('section');el.id=id;el.className=cls;document.documentElement.appendChild(el);return el;};
+  // v2.5.358 every game-page card can be minimised to its header (− / +); remembered per card in page localStorage.
+  // (Stock After Demand & Contracts already collapses to ›, the monitor to a dot, Network capture to its bar.)
+  const MIN_KEY='scm-card-min-v1';
+  const MIN_CARDS={'scm-left-copy-card':'.scm-left-copy-head','scm-contract-helper-card':'.scm-ch-head','scm-sell-qty-card':'.scm-sq-head'};
+  const minRead=()=>{try{const v=JSON.parse(localStorage.getItem(MIN_KEY)||'{}');return v&&typeof v==='object'?v:{};}catch{return {};}};
+  const applyMin=card=>{
+    if(!card||!MIN_CARDS[card.id])return;
+    if(!document.getElementById('scm-min-style')){const st=document.createElement('style');st.id='scm-min-style';st.textContent='#scm-left-copy-card.scm-card-min>:not(.scm-left-copy-head),#scm-contract-helper-card.scm-card-min>:not(.scm-ch-head),#scm-sell-qty-card.scm-card-min>:not(.scm-sq-head){display:none!important}.scm-min-btn{background:#1b2633;color:#e7edf5;border:1px solid #2f4153;border-radius:6px;min-width:26px;height:24px;padding:0 6px;font:14px/1 system-ui,sans-serif;cursor:pointer;flex:0 0 auto;margin-left:auto}.scm-min-btn+button{margin-left:4px}.scm-card-min{max-height:none!important}';(document.head||document.documentElement).appendChild(st);}
+    const head=card.querySelector(':scope>'+MIN_CARDS[card.id]);if(!head)return;
+    let b=head.querySelector(':scope>[data-scm-min]');
+    if(!b){b=document.createElement('button');b.type='button';b.className='scm-min-btn';b.dataset.scmMin='1';const close=head.querySelector(':scope>button');if(close)head.insertBefore(b,close);else head.appendChild(b);}
+    const min=!!minRead()[card.id];card.classList.toggle('scm-card-min',min);b.textContent=min?'+':'−';b.setAttribute('aria-label',min?'Expand card':'Minimise card');
+  };
+  document.addEventListener('click',e=>{
+    const b=e.target.closest?.('[data-scm-min]');if(!b)return;const card=b.closest('#scm-left-copy-card,#scm-contract-helper-card,#scm-sell-qty-card');if(!card)return;
+    e.preventDefault();e.stopPropagation();const v=minRead();v[card.id]=!card.classList.contains('scm-card-min');try{localStorage.setItem(MIN_KEY,JSON.stringify(v));}catch{}applyMin(card);try{schedulePosition();}catch{}
+  },true);
   // v2.5.354 every overlay card can be dragged by its header (or the collapsed › button); its position is kept
   // per card in page localStorage (scmCardPos:<id>). Double-tap the header to put it back in its default place.
   const DRAG_CARDS=['scm-game-balance-card','scm-left-copy-card','scm-contract-helper-card'];
@@ -1585,6 +1602,7 @@ let hookReady = false;
     card.querySelectorAll('[data-left-copy-close]').forEach(btn=>btn.addEventListener('click',closeLeftCopy));
     card.querySelector('[data-left-copy-copy]')?.addEventListener('click',async()=>{const value=String(textEl?.value||'');try{await navigator.clipboard.writeText(value);const b=card.querySelector('[data-left-copy-copy]');if(b){const old=b.textContent;b.textContent='✓ Copied';setTimeout(()=>{if(b.isConnected)b.textContent=old;},1100);}}catch{}});
     build();
+    applyMin(card);
     schedulePosition();
   };
   const renderBalance=()=>{
@@ -1876,6 +1894,7 @@ let hookReady = false;
       if(modeEl)modeEl.onchange=()=>{S.contractQtyMode=String(modeEl.value||'saved');if(S.contractQtyMode!=='custom')S.contractCustomQty='';S.contractSignature='';S.contractCardSignature='';loadContractHelper();};
       const closeEl=card.querySelector('[data-contract-close]');
       if(closeEl)closeEl.onclick=()=>{S.contractDismissedKey=matchKey;S.contractSignature='';S.contractCardSignature='';card.remove();schedulePosition();};
+      applyMin(card);
       const customEl=card.querySelector('#scm-contract-custom-qty');
       if(customEl){customEl.oninput=()=>{S.contractCustomQty=customEl.value;S.contractSignature='';fillContractForm(c,desiredContractQty(c));};}
     }catch{existing?.remove();}
@@ -1914,9 +1933,10 @@ let hookReady = false;
     card.innerHTML=`<div class="scm-sq-head" data-sq-drag><span class="scm-sq-grip" aria-hidden="true">⠿</span><span class="scm-sq-title">${esc(title)}</span><button type="button" class="scm-sq-close" data-sq-close aria-label="Close sell helper">×</button></div><div class="scm-sq-btns">${btn('left','Left',q.left)}${btn('surplus','Surplus',q.surplus)}</div><div class="scm-sq-note">${esc(note)}</div>`;
     card.querySelectorAll('[data-sq-fill]').forEach(b=>{b.onclick=()=>{const cur=sellQuantities(warehousePageResource());const v=cur[b.dataset.sqFill];const input=sellAmountInput();if(v!=null&&input){setNativeValue(input,v);b.classList.add('scm-sq-done');setTimeout(()=>b.classList.remove('scm-sq-done'),700);}};});
     card.querySelector('[data-sq-close]').onclick=()=>{S.sellDismissedPath=location.pathname;removeSellCard();};
+    applyMin(card);
     const head=card.querySelector('[data-sq-drag]');
     head.onpointerdown=e=>{
-      if(e.target.closest('[data-sq-close]'))return;
+      if(e.target.closest('[data-sq-close],[data-scm-min]'))return;
       const r=card.getBoundingClientRect();const dx=e.clientX-r.left,dy=e.clientY-r.top;
       try{head.setPointerCapture(e.pointerId);}catch{}
       head.onpointermove=m=>{placeSellCard(card,m.clientX-dx,m.clientY-dy);};

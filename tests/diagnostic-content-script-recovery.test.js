@@ -5,7 +5,7 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const dashboard = fs.readFileSync(path.join(root, 'dashboard.js'), 'utf8');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
-assert.equal(manifest.version, '2.5.357');
+assert.equal(manifest.version, '2.5.358');
 assert.match(manifest.permissions.join(','), /scripting/, 'scripting permission supports recovery injection');
 assert.match(dashboard, /async function sendGameTabMessage\(tabId,message/);
 assert.match(dashboard, /chrome\.scripting\.executeScript\(\{target:\{tabId\},files:\['content\.js'\]\}\)/, 'fallback initializes isolated content script');

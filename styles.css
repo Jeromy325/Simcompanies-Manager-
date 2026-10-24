@@ -1322,3 +1322,9 @@ html.scm-mobile .contract-table.saved-contract-table.mobile-cards:not(.contract-
 .planner-insights .si-best{background:rgba(78,230,139,.07)}
 .planner-insights .si-tag{font-style:normal;font-size:10px;color:#5eb5ff;margin-left:3px}
 .planner-insights .si-good{color:#4ee68b}.planner-insights .si-warn{color:#e0b44c}.planner-insights .si-bad{color:#ff6b78}
+/* v2.5.358 auto-collapsible cards: heading text left, arrow right */
+.scm-auto-head.collapse-head{display:flex;align-items:center;gap:6px}
+.scm-auto-head.collapse-head::after{margin-left:auto}
+.scm-auto-section.is-collapsed>.planner-section-label{padding-bottom:8px}
+.panel>h3.collapse-head{display:flex;align-items:center}
+.panel>h3.collapse-head::after{margin-left:auto}

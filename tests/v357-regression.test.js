@@ -8,7 +8,7 @@ const path = require('path');
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
 const manifest = JSON.parse(read('manifest.json'));
-assert.equal(manifest.version, '2.5.357');
+assert.equal(manifest.version, '2.5.358');
 const C = require('../tools-core.js');
 const fx = require('./fixtures/profit-calc-2026-10-24.json');
 const full = require('./fixtures/game-constants-full-2026-10-24.json');
@@ -117,7 +117,7 @@ for (const c of [fx.constants, full]) {
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const names = { 1: 'Power', 2: 'Water', 14: 'Minerals', 16: 'Silicon', 17: 'Chemicals', 20: 'Processors', 21: 'Electronic components', 22: 'Batteries', 44: 'Sand' };
   const fn = new Function('globalThis', 'localStorage', 'chrome', 'money', 'num', 'escapeHtml', 'validRealmNumber', 'warehouseRows', 'warehouseAlertUnitCost', 'get', 'commitDashboardState', 'plannerMoney', 'plannerResourceNameById', 'plannerActiveProductionEvent', 'plannerAbundancePct',
-    dash.slice(start, end) + '\nreturn {renderPlannerInsights};');
+    dash.slice(start, end) + '\nreturn {renderPlannerInsights, plannerRunOutHtml};');
   const api = fn({ SCM_TOOLS_CORE: C }, localStorage, { runtime: { sendMessage: () => Promise.resolve({ ok: false }) } }, money, num, esc, v => (v === 0 || v === 1 ? Number(v) : null), () => [], () => null, async () => ({}), () => true, money,
     (r, id) => names[id] || `#${id}`, () => 0, () => null);
   const now = new Date().toISOString();
@@ -137,11 +137,10 @@ for (const c of [fx.constants, full]) {
   const el = { innerHTML: '' };
   const host = { __plannerProfitCtx: ctx, querySelector: sel => (sel === '#plannerInsights' ? el : null) };
   api.renderPlannerInsights(host);
-  const html = el.innerHTML;
-  assert.ok(/Best product for Electronics factory #1/.test(html), 'section 1 rendered');
+  const html = el.innerHTML + api.plannerRunOutHtml(ctx);
+  assert.ok(!/Inputs: run-out/.test(el.innerHTML) && !/Silicon<small>/.test(el.innerHTML), '2.5.358: run-out is not on the Production card');
   assert.ok(/Electronic components <em class="si-tag">current<\/em>[\s\S]*?\$474\.45/.test(html), 'current product row shows the card value $474.45');
   assert.ok(/already the best product/.test(html) || /Switching to <b>/.test(html), 'verdict line');
-  assert.ok(/Inputs: run-out &amp; make or buy/.test(html), 'section 2 rendered');
   const si = html.match(/Silicon<small>([^]*?)<\/small><\/div><div class="pp-value"><span class="(si-\w+)">([^<]+)<\/span>/);
   assert.ok(si, 'Silicon run-out row');
   assert.ok(/Stock [\d,]+ \(Q1\+\) · uses [\d,.]+\/h/.test(si[1]), 'stock and use shown');
@@ -150,22 +149,20 @@ for (const c of [fx.constants, full]) {
   // own a Silicon producer → make-or-buy appears
   const siKind = full.resources['16'].producedAt;
   ctx.owned = [...owned, { id: 9, name: 'Silicon maker', kind: siKind, level: 1, currentResourceId: null, raw: { id: 9 } }];
-  api.renderPlannerInsights(host);
-  const si2 = el.innerHTML.match(/Silicon<small>([^]*?)<\/small>/);
+  const si2 = api.plannerRunOutHtml(ctx).match(/Silicon<small>([^]*?)<\/small>/);
   assert.ok(/(Make|Buy)<\/span>: /.test(si2[1]) || /no market price captured|your cost unknown — no price for/.test(si2[1]), `make-or-buy line for Silicon: ${si2[1]}`);
   assert.ok(/your cost unknown — no price for Sand/.test(si2[1]), 'names the missing input (Sand)');
   // Sand priced → full verdict; own cost = Power (warehouse) × 3 + Sand × 2 + labour, as gameCalcProduct
   s.endpointData['/api/v3/market/1/44/'] = book(44, [{ price: 0.5, quality: 0 }]);
-  api.renderPlannerInsights(host);
-  const si3 = el.innerHTML.match(/Silicon<small>([^]*?)<\/small>/)[1];
+  const si3 = api.plannerRunOutHtml(ctx).match(/Silicon<small>([^]*?)<\/small>/)[1];
   const own = C.gameCalcProduct({ c: full, resourceId: 16, economyState: 1, bonusPct: 8, adminPct: fx.adminOverheadPctGameScreen, inputCostOf: id => (id === 44 ? 0.5 : inputCostOf(id)) }).sourcingCostPerUnit;
   const verdict = own <= 7 ? 'Make' : 'Buy';
   assert.ok(new RegExp(`${verdict}</span>: `).test(si3) && si3.includes(money(own)) && si3.includes('$7.00'), `make-or-buy ${verdict}: own ${own} vs market $7.00 → ${si3}`);
   // Production Time 48 h > Silicon's ~41 h of stock → buy quantity priced at the Q1+ listing
-  ctx.runHours = 48; api.renderPlannerInsights(host);
-  const si4 = el.innerHTML.match(/Silicon<small>([^]*?)<\/small>/)[1];
+  ctx.runHours = 48; const ro48 = api.plannerRunOutHtml(ctx);
+  const si4 = ro48.match(/Silicon<small>([^]*?)<\/small>/)[1];
   assert.ok(/ · buy [\d,]+ for 48 h ≈ \$[\d,.]+ \(\$7\.00 Q1\)/.test(si4), `buy line: ${si4}`);
-  assert.ok(/class="si-warn">41\.2 h</.test(el.innerHTML), 'under the Production Time → orange');
+  assert.ok(/class="si-warn">41\.2 h</.test(ro48), 'under the Production Time → orange');
   // no constants → message, no crash
   ctx.s = { ...s, gameConstants: null };
   api.renderPlannerInsights(host);
