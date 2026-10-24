@@ -1,3 +1,7 @@
+2.5.365 — 2026-10-24 — Production: no blank rows in Building Type
+- The game's constants list 10 building kinds with no name (research labs, one "Tree" producer); they showed as
+  blank rows. The picker now lists only named building types that produce something.
+
 2.5.364 — 2026-10-24 — Production: visible Output picker + readable building list
 - New "Output" dropdown beside "Building Type" in the selected building's panel, so the product can be picked
   after changing the building (the old tap-the-product-tile picker still works).

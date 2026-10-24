@@ -9,7 +9,8 @@ const H = require('./harness');
     endpointData: { '/api/v2/companies/me/buildings/': { status: 200, receivedAt: now, data: buildings } }, warehouseResources: [] };
   const ctx = await H.launch();
   await (await H.worker(ctx)).evaluate(() => new Promise(r => setTimeout(r, 2500))); // let onInstalled finish first
-  await H.seed(ctx, { store });
+  const gc = require('../fixtures/game-constants-full-2026-10-24.json');
+  await H.seed(ctx, { store, extra: { scmGameConstants: { ...gc, at: now } } });
   const sw = await H.worker(ctx); const id = new URL(sw.url()).host;
   const page = await ctx.newPage(); global.__p = page;
   page.on('pageerror', e => console.log('pageerror', e.message));
@@ -32,6 +33,8 @@ const H = require('./harness');
   H.check('Output dropdown visible at 360', vis, true, vis);
   const groups = await page.$$eval('#buildingKind optgroup', g => g.map(x => x.label));
   H.check('building types grouped by category', groups.length >= 8 && groups.includes('Automotive'), '≥8 incl Automotive', groups.join(','));
+  const blanks = await page.$$eval('#buildingKind option', o => o.filter(x => !x.textContent.trim()).length);
+  H.check('no blank building types', blanks === 0, 0, blanks);
   const optColor = await page.$eval('#buildingKind option:nth-child(1)', o => getComputedStyle(o).color);
   H.check('option text colour set', optColor === 'rgb(231, 237, 245)', 'rgb(231, 237, 245)', optColor);
   await page.selectOption('#buildingOutput', 'Truck'); await page.waitForTimeout(1200);

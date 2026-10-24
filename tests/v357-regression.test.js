@@ -8,7 +8,7 @@ const path = require('path');
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
 const manifest = JSON.parse(read('manifest.json'));
-assert.equal(manifest.version, '2.5.364');
+assert.equal(manifest.version, '2.5.365');
 const C = require('../tools-core.js');
 const fx = require('./fixtures/profit-calc-2026-10-24.json');
 const full = require('./fixtures/game-constants-full-2026-10-24.json');

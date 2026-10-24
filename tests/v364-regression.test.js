@@ -2,7 +2,7 @@
 const assert = require('assert'); const fs = require('fs'); const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const dash = read('dashboard.js'), css = read('styles.css');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.364');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.365');
 assert.ok(/<select id="buildingOutput"[^>]*>\$\{productOptions\}<\/select>/.test(dash), 'visible Output select uses the same product options');
 assert.ok(/\$\('#buildingOutput'\)\.onchange=\(\)=>onProductPick\(/.test(dash) && /\$\('#buildingProduct'\)\.onchange=\(\)=>onProductPick\(/.test(dash), 'both pickers share one handler');
 assert.ok(/<optgroup label=/.test(dash), 'building types grouped');
