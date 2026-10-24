@@ -3,10 +3,11 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.360');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.361');
 const lu = read('live-updates.js'), css = read('monitor-overlay.css'), cs = read('content.js');
-assert.ok(lu.includes('scm-monitor-min') && lu.includes('scm-monitor-hide') && lu.includes('scm-monitor-mini'), '− / × / dot');
-assert.ok(lu.includes("chrome.storage.local.set({ scmMonitorGameMode: m })") && lu.includes("c.scmMonitorGameMode"), 'mode shared with the Manager, applied live');
+// 2.5.361: × collapses to the dot (the − button is gone); the game page reads the mode with its 3 s poll (no storage listener)
+assert.ok(lu.includes('scm-monitor-hide') && lu.includes('scm-monitor-mini') && !lu.includes('scm-monitor-min"'), '× / dot');
+assert.ok(lu.includes("chrome.storage.local.set({ scmMonitorGameMode: m })") && lu.includes("__applyMode?.(got.scmMonitorGameMode)"), 'mode shared with the Manager, applied on the next poll');
 assert.ok(lu.includes('<option value="hidden">Hidden</option>') && lu.includes("(GAME ? '' : '<label class=\"lu-game-mode\">"), 'Manager panel can bring it back');
 assert.ok(lu.includes("!e.target.closest?.('#scmMonitor')"), 'tap outside closes the list');
 assert.ok(css.includes('#scmMonitor[hidden]{display:none!important}') && css.includes('#scmMonitor.is-mini .scm-monitor-mini{display:flex'));

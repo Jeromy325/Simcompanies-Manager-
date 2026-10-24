@@ -8,7 +8,7 @@ const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const C = require('../tools-core.js');
 require('../planner-core.js'); const P = globalThis.SCMPlannerCore;
 const manifest = JSON.parse(read('manifest.json'));
-assert.equal(manifest.version, '2.5.360');
+assert.equal(manifest.version, '2.5.361');
 const bg = read('background.js'), dash = read('dashboard.js'), hook = read('page-hook.js'), content = read('content.js');
 const fx = JSON.parse(read('tests/fixtures/game-constants-recipes-2026-10-23.json'));
 const gc = { core: fx.core, buildings: fx.buildings, resources: fx.resources, at: '2026-10-23T20:00:00Z' };
@@ -84,7 +84,8 @@ const pgSandbox = reply => {
     if (seg.includes(`{...(${m[1]}.realmStores||{})}`)) bad.push(bg.slice(0, m.index).split('\n').length);
   }
   assert.deepEqual(bad, [], `active-only state() copied into a realm-store write at lines ${bad.join(',')}`);
-  assert.ok(bg.includes('const latest=await state(writeRealm);') && bg.includes('const finalPersist=await state(selected);'));
+  // 2.5.361: the image cache no longer writes the realm store at all (saveResourceImages writes only scmResourceImages)
+  assert.ok(bg.includes('async function saveResourceImages(') && !/fetchAndCacheResourceImage[\s\S]{0,4000}withRealmWriteLock\(writeRealm/.test(bg) && bg.includes('const finalPersist=await state(selected);'));
 }
 
 // 2. Sync timeouts.

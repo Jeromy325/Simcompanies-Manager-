@@ -6,6 +6,11 @@ import {
   REALM_DEFINITIONS, validRealmNumber, realmDefinition, realmKeyFromRealm, realmStorageKey,
   realmDisplayNumber, realmDisplayName, realmContractPaths
 } from './realm-core.js';
+// v2.5.361 performance: the service worker no longer listens to chrome.storage.onChanged. Every listener receives a
+// full copy of each changed value, so the ~1 MB realm store was deserialized here on every write. The three memos that
+// listened (images, game constants, overlay snapshots) are only written by this worker, so its own writes clear them.
+const __scmOwnWriteHooks=globalThis.__scmOwnWriteHooks=[];
+{const __orig=chrome.storage.local.set.bind(chrome.storage.local);chrome.storage.local.set=(items,...rest)=>{if(items&&typeof items==='object')for(const h of __scmOwnWriteHooks){try{h(items);}catch{}}return __orig(items,...rest);};}
 const realmSyncSessions=new Map();
 let syncCaptureRealm=null;
 const realmWriteQueues=new Map();
@@ -435,7 +440,7 @@ async function resourceImagesStore(){
   resourceImagesMemo={cache:{...(raw?.cache||{})},meta:{...(raw?.meta||{})}};
   return resourceImagesMemo;
 }
-try{chrome.storage.onChanged.addListener((changes,area)=>{if(area==='local'&&changes[RESOURCE_IMAGES_KEY])resourceImagesMemo=null;});}catch{}
+globalThis.__scmOwnWriteHooks?.push(items=>{if(Object.prototype.hasOwnProperty.call(items,RESOURCE_IMAGES_KEY)){const v=items[RESOURCE_IMAGES_KEY];resourceImagesMemo=v&&typeof v==='object'?{cache:{...(v.cache||{})},meta:{...(v.meta||{})}}:null;}});
 async function routeResourceImagesOut(out){
   if(!out||typeof out!=='object')return out;
   let cache=null,meta=null;
@@ -1319,7 +1324,7 @@ function updateNotifyState(mut){const run=notifyStateQueue.then(async()=>{const 
 let notifyRecipesMemo=null;
 // v2.5.345 recipe inputs/transport come from the game's constants (scmGameConstants) when present.
 async function gameRecipesFromBundle(list){try{const c=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;return globalThis.SCM_TOOLS_CORE.recipesFromGameConstants(list,c);}catch{return Array.isArray(list)?list:[];}}
-try{chrome.storage.onChanged.addListener((changes,area)=>{if(area==='local'&&changes.scmGameConstants){notifyRecipesMemo=null;gameOverlayAssetsPromise=null;}});}catch{}
+globalThis.__scmOwnWriteHooks?.push(items=>{if(Object.prototype.hasOwnProperty.call(items,'scmGameConstants')){notifyRecipesMemo=null;gameOverlayAssetsPromise=null;}});
 async function notifyRecipes(){if(notifyRecipesMemo)return notifyRecipesMemo;try{const list=await gameRecipesFromBundle(await (await fetch(chrome.runtime.getURL('recipes.json'))).json());const byId=new Map(),names=new Map();for(const r of Array.isArray(list)?list:[]){byId.set(Number(r.id),r);names.set(Number(r.id),String(r.name||''));}notifyRecipesMemo={byId,names};}catch{notifyRecipesMemo={byId:new Map(),names:new Map()};}return notifyRecipesMemo;}
 async function notifyRealmStore(realm){return (await chrome.storage.local.get({[`scmRealmStore:${realm}`]:null}))[`scmRealmStore:${realm}`]||{};}
 // 5 + 6: after each SimcoTools current-price update.
@@ -2416,6 +2421,38 @@ async function saveEndpointUnlocked(url,method='GET',captureRealm=null,commit=tr
 }
 async function saveEndpoint(url,method='GET',captureRealm=null){
   return enqueueApiStorage(()=>saveEndpointUnlocked(url,method,captureRealm),captureRealm);
+}
+// v2.5.361 performance: every request the game makes (dozens per page) sent API_SEEN, and each one rewrote the whole
+// realm store (~1 MB) just to stamp "seen at" in the endpoint list, which also pushed that store to every open page.
+// Now seen endpoints are collected for 20 s and written once; an endpoint already listed and seen in the last 10 min is
+// not written again.
+const pendingEndpointSeen=new Map();let pendingEndpointSeenTimer=0;
+function queueEndpointSeen(url,method='GET',captureRealm=null){
+  const n=validRealmNumber(captureRealm);
+  if(n==null||!String(url||'').startsWith('/api/'))return saveEndpoint(url,method,captureRealm); // quarantine path unchanged
+  const m=String(method||'GET').toUpperCase();pendingEndpointSeen.set(`${n}|${m}|${url}`,{url,method:m,realm:n});
+  if(!pendingEndpointSeenTimer)pendingEndpointSeenTimer=setTimeout(()=>{pendingEndpointSeenTimer=0;flushEndpointSeen().catch(()=>{});},20000);
+  return Promise.resolve();
+}
+async function flushEndpointSeen(){
+  const byRealm=new Map();for(const v of pendingEndpointSeen.values()){if(!byRealm.has(v.realm))byRealm.set(v.realm,[]);byRealm.get(v.realm).push(v);}
+  pendingEndpointSeen.clear();
+  for(const [n,items] of byRealm){
+    await enqueueApiStorage(async()=>{
+      const s0=await state(n);const key=realmKeyFromRealm(n);
+      const list=Array.isArray(s0.realmStores?.[key]?.apiEndpoints)?s0.realmStores[key].apiEndpoints:[];
+      const fresh=items.filter(i=>{const e=list.find(x=>x.url===i.url&&String(x.method||'GET').toUpperCase()===i.method);return !e||Date.now()-Date.parse(e.seenAt||0)>10*60e3;});
+      if(!fresh.length)return {ok:true,skipped:true};
+      let base=s0,last=null;
+      for(const i of fresh){last=await saveEndpointUnlocked(i.url,i.method,n,false,base);if(last?.store)base={...base,realmStores:{...(base.realmStores||{}),[last.key]:last.store}};}
+      if(!last?.store)return {ok:false};
+      const patch={realmStores:{...(s0.realmStores||{}),[key]:last.store}};
+      const activeKey=s0.activeRealmKey||identityFromAuth(s0.authData);
+      if(!currentCaptureSyncSession()&&activeKey===key)patch.apiEndpoints=last.store.apiEndpoints;
+      await storageSet(patch);
+      return {ok:true,written:fresh.length};
+    },n);
+  }
 }
 function isResourceUrl(url){return /\/api\/v3\/resources\/(\d+)(?:\/|\?|$)/.test(String(url||''))}
 function resourceIdFromUrl(url){const m=String(url||'').match(/\/api\/v3\/resources\/(\d+)(?:\/|\?|$)/);return m?Number(m[1]):null}
@@ -4316,9 +4353,21 @@ async function migrateResourceImageCache(){
   const imgs=await resourceImagesStore();
   return {cache:{...imgs.cache,...(store.resourceImageCache||{}),...(store.resourceImageData||{})},meta:{...imgs.meta,...(store.resourceImageMeta||{})},key};
 }
-async function fetchAndCacheResourceImage(id,{forceValidate=false}={}){
+// v2.5.361 performance: images are written to their own key only (scmResourceImages). Each image used to rewrite the
+// ~1 MB realm store and the ~2 MB image key, and read the full state three times; the weekly validation (also 1 min
+// after every extension update) did that for ~150 images in a row, flooding every open page with storage events.
+async function saveResourceImages(cachePatch={},metaPatch={}){
+  if(!Object.keys(cachePatch).length&&!Object.keys(metaPatch).length)return;
+  return withRealmStorageCommit(async()=>{
+    const cur=await resourceImagesStore();
+    const next={cache:{...cur.cache,...cachePatch},meta:{...cur.meta,...metaPatch},updatedAt:new Date().toISOString()};
+    await rawStorageSet({[RESOURCE_IMAGES_KEY]:next});
+    resourceImagesMemo={cache:next.cache,meta:next.meta};
+  });
+}
+async function fetchAndCacheResourceImage(id,{forceValidate=false,batch=null}={}){
   const n=Number(id); if(!Number.isFinite(n)||n<=0) return {ok:false,error:'Invalid resource id'};
-  const {cache,meta,key}=await migrateResourceImageCache();
+  const {cache,meta,key}=batch?.base||await migrateResourceImageCache();
   if(!key) return {ok:false,error:'No active realm for resource image cache'};
   const sid=String(n), previous=meta[sid]||{};
   const now=Date.now();
@@ -4326,9 +4375,8 @@ async function fetchAndCacheResourceImage(id,{forceValidate=false}={}){
     return {ok:true,dataUrl:cache[sid],cached:true,validatedAt:previous.validatedAt,changed:false};
   }
   const manifest=await resourceImageManifest();
-  const stateNow=await state();
-  const store=stateNow.realmStores?.[key]||{};
-  const catalog=store.resourceCatalog||stateNow.resourceCatalog||{};
+  let catalog=batch?.catalog;
+  if(!catalog){const stateNow=await state();const store=stateNow.realmStores?.[key]||{};catalog=store.resourceCatalog||stateNow.resourceCatalog||{};}
   const catalogImage=catalog?.resourceImages?.[sid] || catalog?.constantsResources?.[sid]?.image || null;
   const filename=manifest?.resources?.[sid];
   const rawUrl=catalogImage || previous.url || (filename ? `${String(manifest.baseUrl||'https://www.simcompanies.com/static/images/resources/').replace(/\/$/,'')}/${filename}` : null);
@@ -4343,23 +4391,12 @@ async function fetchAndCacheResourceImage(id,{forceValidate=false}={}){
     const changed=Boolean(cache[sid]&&previous.sha256&&previous.sha256!==hash);
     const dataUrl=bytesToDataUrl(bytes,mime);
     let changedFinal=changed, validatedAt=new Date(now).toISOString();
-    const writeRealm=realmNumberFromKey(key);
-    if(writeRealm!=null){
-      await withRealmWriteLock(writeRealm,async()=>{
-        // v2.5.345 read THIS realm's store: state() holds only the active realm, so after a realm switch
-        // {...undefined} + image fields replaced the whole other-realm store (R2 wiped to {}; images are routed out).
-        const latest=await state(writeRealm); const stores={...(latest.realmStores||{})}; const latestStore={...(stores[key]||{})};
-        const latestCache={...(latestStore.resourceImageCache||{})}; const latestMeta={...(latestStore.resourceImageMeta||{})};
-        const latestPrevious=latestMeta[sid]||{};
-        changedFinal=Boolean(latestCache[sid]&&latestPrevious.sha256&&latestPrevious.sha256!==hash);
-        validatedAt=new Date().toISOString();
-        latestCache[sid]=dataUrl;
-        latestMeta[sid]={url,filename,sha256:hash,validatedAt,updatedAt:changedFinal||!latestPrevious.sha256?validatedAt:(latestPrevious.updatedAt||validatedAt),status:'verified'};
-        stores[key]={...latestStore,resourceImageCache:latestCache,resourceImageMeta:latestMeta};
-        const patch={realmStores:stores}; if(key===latest.activeRealmKey){patch.resourceImageCache=latestCache;patch.resourceImageMeta=latestMeta;}
-        await storageSet(patch);
-      });
-    }
+    changedFinal=Boolean(cache[sid]&&previous.sha256&&previous.sha256!==hash);
+    const sameImage=Boolean(cache[sid]&&previous.sha256===hash);
+    const metaNext={url,filename,sha256:hash,validatedAt,updatedAt:changedFinal||!previous.sha256?validatedAt:(previous.updatedAt||validatedAt),status:'verified'};
+    // unchanged image: only the small meta entry is updated (no 2 MB rewrite of the image data)
+    if(batch){if(!sameImage)batch.cache[sid]=dataUrl;batch.meta[sid]=metaNext;}
+    else await saveResourceImages(sameImage?{}:{[sid]:dataUrl},{[sid]:metaNext});
     return {ok:true,dataUrl,cached:false,changed:changedFinal,validatedAt,url};
   }catch(e){
     if(cache[sid]) return {ok:true,dataUrl:cache[sid],cached:true,stale:true,error:e?.message||String(e)};
@@ -4371,14 +4408,18 @@ async function syncAllResourceImages({forceValidate=false}={}){
   const manifest=await resourceImageManifest();
   const ids=Object.keys(manifest?.resources||{}).map(Number).filter(Number.isFinite);
   let updated=0,verified=0,failed=0;
+  // v2.5.361 one state read and ONE image write for the whole run (was one full read + two big writes per image).
+  const base=await migrateResourceImageCache();const s0=await state();const catalog=(base.key&&s0.realmStores?.[base.key]?.resourceCatalog)||s0.resourceCatalog||{};
+  const batch={base,catalog,cache:{},meta:{}};
   const queue=[...ids], workers=Array.from({length:4},async()=>{
     while(queue.length){
       const id=queue.shift();
-      const r=await fetchAndCacheResourceImage(id,{forceValidate});
+      const r=await fetchAndCacheResourceImage(id,{forceValidate,batch});
       if(r.ok){verified++;if(r.changed||!r.cached)updated++;}else failed++;
     }
   });
   await Promise.all(workers);
+  await saveResourceImages(batch.cache,batch.meta);
   const s=await state(); const key=s.activeRealmKey||identityFromAuth(s.authData); const realm=realmNumberFromKey(key); if(realm!=null){
     await withRealmWriteLock(realm,async()=>{
       const latest=await state(realm); const stores={...(latest.realmStores||{})}; const store={...(stores[key]||{})};
@@ -4616,7 +4657,8 @@ chrome.alarms.onAlarm.addListener(async a=>{
     // occur only in the staged market-sync pipeline.
     await chrome.alarms.clear(VWAP_WATCH_ALARM_NAME).catch(()=>{});
   }
-  if(a.name==='scm-resource-image-validation') syncAllResourceImages({forceValidate:true}).catch(()=>{});
+  // v2.5.361 the install/update handler re-creates this alarm 1 min after every update; re-validate at most once a week.
+  if(a.name==='scm-resource-image-validation') (async()=>{const r=await chrome.storage.local.get({scmResourceImagesValidatedAt:0});if(Date.now()-Number(r.scmResourceImagesValidatedAt||0)<6.5*24*3600e3)return;const res=await syncAllResourceImages({forceValidate:true});if(res?.ok)await rawStorageSet({scmResourceImagesValidatedAt:Date.now()});})().catch(()=>{});
 });
 function endpointCapturedAfter(s,target,sinceMs){
   const ep=s.endpointData||{};
@@ -5733,7 +5775,7 @@ const gameOverlayLastRefreshAt=new Map();
 // GAME_OVERLAY_REFRESH_MS otherwise. The last snapshot is served from memory instead of storage.
 const gameOverlayDirty=new Set();
 const gameOverlaySnapshotMemo=new Map();
-try{chrome.storage.onChanged.addListener((changes,area)=>{if(area!=='local')return;for(const k of Object.keys(changes)){const m=/^scmGameOverlaySnapshot:(\d+)$/.exec(k);if(m)gameOverlaySnapshotMemo.delete(Number(m[1]));}});}catch{}
+globalThis.__scmOwnWriteHooks?.push(items=>{for(const k of Object.keys(items)){const m=/^scmGameOverlaySnapshot:(\d+)$/.exec(k);if(m)gameOverlaySnapshotMemo.delete(Number(m[1]));}});
 const contractHelperCache=new Map();
 const gameOverlayNotifyTimers=new Map();
 const warehouseMutationRefreshTimers=new Map();
@@ -6529,7 +6571,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       send({ok:true,coveredBySyncCapture:true});
       return true;
     }
-    saveEndpoint(url,method,m.captureRealm).then(()=>send({ok:true}));
+    queueEndpointSeen(url,method,m.captureRealm).then(()=>send({ok:true,queued:true}));
     return true;
   }
   if(m?.type==='STOCK_MUTATION_COMPLETE'){

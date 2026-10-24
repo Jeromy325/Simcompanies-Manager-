@@ -1,3 +1,20 @@
+2.5.361 — 2026-10-24 — Monitor × collapses instead of hiding; much lighter on the phone
+- Game-page Background updates monitor: × now shrinks it to the small dot (tap the dot to open it again). It no
+  longer disappears. A monitor you hid with the old × comes back as the dot once. ("Hidden" can still be chosen in
+  the Manager's Background updates panel.) The separate − button is gone (× does that now).
+- Performance, measured on a fake game page with the CPU slowed 4× (phone-like): the extension's main-thread time on
+  the game page went from 4.1 s to 0.6 s per 30 s.
+  - The game-page monitor (added in 2.5.352) listened to every storage change: each Manager write (~1 MB) was copied
+    into the game tab. It now re-reads only its own small job list every 3 s.
+  - Contract-page detection read the whole page's visible text on every page change (forces a layout); now the URL
+    decides first and the text is read at most every 1.5 s.
+  - Product images: the weekly check also ran 1 minute after every update and saved ~150 images one by one (each
+    save rewrote ~3 MB). Now one save per check, at most once a week; unchanged images are not rewritten.
+  - Every game request rewrote the whole stored data just to note "endpoint seen"; these notes are now saved once
+    every 20 s (and skipped when seen in the last 10 min).
+  - The background worker no longer receives a copy of every storage write.
+  - Manager: product names/images and a planner lookup no longer scan all captured data for every row.
+
 2.5.360 — 2026-10-24 — Upgrade payback counts admin overhead and upgrade time
 - From the game's code, confirmed with your data (R2 ≈ 106 building levels; base overhead 1.6176 = 1 + 105/170):
   one more level adds 1/170 to the base admin overhead (less with your COO), paid on the wages of every producing

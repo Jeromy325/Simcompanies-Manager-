@@ -230,7 +230,30 @@ async function copyDiagnosticText(text,button){try{await navigator.clipboard.wri
 function pick(o,keys){for(const k of keys)if(o?.[k]!==undefined&&o?.[k]!==null)return o[k];return null}
 function flattenObjects(x,out=[]){if(!x)return out;if(Array.isArray(x)){for(const v of x)flattenObjects(v,out);return out}if(typeof x==='object'){out.push(x);for(const v of Object.values(x)){if(v&&typeof v==='object')flattenObjects(v,out)}}return out}
 const FALLBACK_RESOURCE_NAMES = {'-1':'Power',1:'Power',2:'Water',3:'Apples',4:'Oranges',5:'Grapes',6:'Grain',7:'Steak',8:'Sausages',9:'Eggs',10:'Crude oil',11:'Petrol',12:'Diesel',13:'Transport',14:'Minerals',15:'Bauxite',16:'Silicon',17:'Chemicals',18:'Aluminium',19:'Plastic',20:'Processors',21:'Electronic components',22:'Batteries',23:'Displays',24:'Smart phones',25:'Tablets',26:'Laptops',27:'Monitors',28:'Televisions',29:'Plant research',30:'Energy research',31:'Mining research',32:'Electronics research',33:'Breeding research',34:'Chemistry research',35:'Software',40:'Cotton',41:'Fabric',42:'Iron ore',43:'Steel',44:'Sand',45:'Glass',46:'Leather',47:'On-board computer',48:'Electric motor',49:'Luxury car interior',50:'Basic interior',51:'Car body',52:'Combustion engine',53:'Economy e-car',54:'Luxury e-car',55:'Economy car',56:'Luxury car',57:'Truck',58:'Automotive research',59:'Fashion research',60:'Underwear',61:'Gloves',62:'Dress',63:'Stiletto Heel',64:'Handbags',65:'Sneakers',66:'Seeds',67:'Xmas crackers',68:'Gold ore',69:'Golden bars',70:'Luxury watch',71:'Necklace',72:'Sugarcane',73:'Ethanol',74:'Methane',75:'Carbon fibers',76:'Carbon composite',77:'Fuselage',78:'Wing',79:'High grade e-comps',80:'Flight computer',81:'Cockpit',82:'Attitude control',83:'Rocket fuel',84:'Propellant tank',85:'Solid fuel booster',86:'Rocket engine',87:'Heat shield',88:'Ion drive',89:'Jet engine',90:'Sub-orbital 2nd stage',91:'Sub-orbital rocket',92:'Orbital booster',93:'Starship',94:'BFR',95:'Jumbo jet',96:'Luxury jet',97:'Single engine plane',98:'Quadcopter',99:'Satellite',100:'Aerospace research',101:'Reinforced concrete',102:'Bricks',103:'Cement',104:'Clay',105:'Limestone',106:'Wood',107:'Steel beams',108:'Planks',109:'Windows',110:'Tools',111:'Construction units',112:'Bulldozer',113:'Materials research',114:'Robots',115:'Cows',116:'Pigs',117:'Milk',118:'Coffee beans',119:'Coffee powder',120:'Vegetables',121:'Bread',122:'Cheese',123:'Apple pie',124:'Orange juice',125:'Apple cider',126:'Ginger beer',127:'Frozen pizza',128:'Pasta',129:'Hamburger',130:'Lasagna',131:'Meat balls',132:'Cocktails',133:'Flour',134:'Butter',135:'Sugar',136:'Cocoa',137:'Dough',138:'Sauce',139:'Fodder',140:'Chocolate',141:'Vegetable oil',142:'Salad',143:'Samosa',144:'Xmas ornament',145:'Recipes',146:'Pumpkin',147:'Jack o\'lantern',148:'Witch costume',149:'Pumpkin soup',150:'Tree',151:'Easter Bunny',152:'Ramadan sweets',153:'Chocolate icecream',154:'Apple icecream',155:'Cream egg'};
+// v2.5.361 performance: resourceInfo() ran this for every warehouse row / planner resource and, when an image was not in
+// the catalog, flattened the whole captured endpoint data (MBs) per resource. Both are now memoized per captured object.
+const __scmCatalogMemo=new WeakMap(),__scmImageIndexMemo=new WeakMap(),__scmFlatMemo=new WeakMap();
 function catalogEntries(s){
+  const cat=s?.resourceCatalog;if(cat&&typeof cat==='object'){const m=__scmCatalogMemo.get(cat);if(m)return m;const built=catalogEntriesBuild(s);__scmCatalogMemo.set(cat,built);return built;}
+  return catalogEntriesBuild(s);
+}
+// id → image found anywhere in the captured objects (buildings, game state, endpoint data); built once per object set.
+function scmCapturedImageIndex(s,sources){
+  const anchor=s?.endpointData&&typeof s.endpointData==='object'?s.endpointData:null;
+  const memo=anchor?__scmImageIndexMemo.get(anchor):null;
+  if(memo&&memo.b===s?.buildings&&memo.g===s?.gameState)return memo.index;
+  const index=new Map();
+  for(const o of flattenObjects(sources)){
+    if(!o||typeof o!=='object')continue;
+    const img=pick(o,['image','icon','iconUrl','imageUrl','picture','img']);
+    if(!img||!/(?:^|\/)images\/resources\//i.test(String(img)))continue;
+    const oid=pick(o,['kind','resourceId','productId','resource','product']);
+    if(oid!=null&&Number.isFinite(Number(oid))&&!index.has(Number(oid)))index.set(Number(oid),img);
+  }
+  if(anchor)__scmImageIndexMemo.set(anchor,{b:s?.buildings,g:s?.gameState,index});
+  return index;
+}
+function catalogEntriesBuild(s){
   const root=s.resourceCatalog?.constantsResources||{}; const out=new Map();
   const imageMap=s.resourceCatalog?.resourceImages||{}; const nameMap=s.resourceCatalog?.resourceNames||{};
   const add=(id,o)=>{if(id==null)return; const sid=String(id); const n=pick(o,['name','resourceName','displayName','title','label','enName','englishName'])||nameMap[sid]; const image=pick(o,['image','icon','iconUrl','imageUrl','picture','img'])||imageMap[sid]; if(n||image)out.set(sid,{name:n||FALLBACK_RESOURCE_NAMES[id]||`Resource #${id}`,image});};
@@ -277,14 +300,7 @@ function resourceInfo(x,s){
   }
   const name=c?.name||FALLBACK_RESOURCE_NAMES[id]||pick(x,['product','name','resourceName'])||`Resource #${id}`;
   if(!image && id!=null){
-    const nested=flattenObjects([s.buildings,s.gameState,s.endpointData]).find(o=>{
-      if(!o||typeof o!=='object')return false;
-      const img=pick(o,['image','icon','iconUrl','imageUrl','picture','img']);
-      if(!img||!/(?:^|\/)images\/resources\//i.test(String(img)))return false;
-      const oid=pick(o,['kind','resourceId','productId','resource','product']);
-      return oid!=null&&Number(oid)===Number(id);
-    });
-    image=nested?pick(nested,['image','icon','iconUrl','imageUrl','picture','img']):null;
+    image=scmCapturedImageIndex(s,[s.buildings,s.gameState,s.endpointData]).get(Number(id))||null;
   }
   const candidates=imageCandidates(image).filter(candidate=>!RESOURCE_IMAGE_404_FILENAMES.has(String(candidate).split("/").pop().split("?")[0]));
   const override=Number.isFinite(Number(id))?RESOURCE_IMAGE_FILE_OVERRIDES[String(Number(id))]:null;
@@ -1817,7 +1833,10 @@ function plannerRate(name,recipes,rates,s){
     const direct=Number(value);
     if(Number.isFinite(direct)&&direct>0)return {rate:direct,source:'normal-economy reference'};
   }
-  const objects=flattenObjects(s?.resourceCatalog||{}).concat(flattenObjects(s?.endpointData||{}));
+  // v2.5.361 flattened once per captured catalog/endpoint objects (was per call).
+  const fk=s?.endpointData&&typeof s.endpointData==='object'?s.endpointData:null;let fm=fk?__scmFlatMemo.get(fk):null;
+  if(!fm||fm.c!==s?.resourceCatalog){fm={c:s?.resourceCatalog,objects:flattenObjects(s?.resourceCatalog||{}).concat(flattenObjects(s?.endpointData||{}))};if(fk)__scmFlatMemo.set(fk,fm);}
+  const objects=fm.objects;
   for(const o of objects){
     if(!o||typeof o!=='object')continue;
     const n=pick(o,['name','resourceName','displayName','title','label']);

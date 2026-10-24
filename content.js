@@ -1290,7 +1290,15 @@ let hookReady = false;
   const text=el=>String(el?.innerText||el?.textContent||'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').trim();
   const parsePrice=t=>{const m=String(t||'').match(/\$\s*([0-9][0-9,]*(?:\.\d+)?)/);return m?Number(m[1].replace(/,/g,'')):null;};
   const parseQuantity=t=>{let m=String(t||'').match(/\b([0-9][0-9,]*)\s*@\s*\$/);if(m)return Number(m[1].replace(/,/g,''));m=String(t||'').match(/\b([0-9][0-9,]*)\b\s*@/);return m?Number(m[1].replace(/,/g,'')):null;};
+  // v2.5.361 performance: the visible page text (innerText forces a layout) is read at most once per 1.5 s per URL.
+  let incomingCheck={at:0,path:'',value:false};
   const isIncomingPage=()=>{
+    const path=String(location.pathname||''),now=Date.now();
+    if(incomingCheck.path===path&&now-incomingCheck.at<1500)return incomingCheck.value;
+    incomingCheck={at:now,path,value:isIncomingPageNow()};
+    return incomingCheck.value;
+  };
+  const isIncomingPageNow=()=>{
     const body=String(document.body?.innerText||'');
     // v2.5.319: no trailing word boundary. Our own badge text can sit right after the Accept label
     // ("Accept25.00% above market"), which made this check fail and wipe the badges (flicker).
@@ -1549,7 +1557,17 @@ let hookReady = false;
     if(S.positionRaf)return;
     S.positionRaf=requestAnimationFrame(()=>{S.positionRaf=0;try{position();}catch{}});
   };
-  const likelyContractPage=()=>/(?:contract)/i.test(String(location.pathname||''))||/(?:recipient|price\s+per\s+unit|please\s+enter\s+amount|select\s+company)/i.test(String(document.body?.innerText||''));
+  // v2.5.361 performance: this ran on every DOM mutation batch and read document.body.innerText (forces a full layout
+  // of the game page). Now: the URL decides at once; the visible page text is read at most once per 1.5 s per URL.
+  let contractTextCheck={at:0,path:'',value:false};
+  const likelyContractPage=()=>{
+    const path=String(location.pathname||'');
+    if(/contract/i.test(path))return true;
+    const now=Date.now();
+    if(contractTextCheck.path===path&&now-contractTextCheck.at<1500)return contractTextCheck.value;
+    contractTextCheck={at:now,path,value:/(?:recipient|price\s+per\s+unit|please\s+enter\s+amount|select\s+company)/i.test(String(document.body?.innerText||''))};
+    return contractTextCheck.value;
+  };
   const scheduleContractHelper=()=>{
     if(!likelyContractPage())return;
     if(S.helperTimer)clearTimeout(S.helperTimer);

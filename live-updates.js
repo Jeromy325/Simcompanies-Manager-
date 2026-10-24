@@ -14,9 +14,9 @@
   function gameHost() {
     const host = document.createElement('div');
     host.id = 'scmMonitor'; host.className = 'live-updates scm-monitor';
-    // v2.5.354 more ways to get it out of the way: − = small dot, × = hidden (bring it back from the Manager's
-    // Background updates panel); tapping outside closes the expanded list.
-    host.innerHTML = '<div class="scm-monitor-grip" title="Drag to move" aria-label="Drag to move">⠿</div><div class="scm-monitor-body"></div><div class="scm-monitor-ctrl"><button type="button" class="scm-monitor-min" aria-label="Shrink to a small dot" title="Shrink to a small dot">−</button><button type="button" class="scm-monitor-hide" aria-label="Hide on the game page" title="Hide (show again from the Manager: Background updates)">×</button></div><button type="button" class="scm-monitor-mini" aria-label="Show background updates"><span class="lu-dot"></span><b></b></button>';
+    // v2.5.361 × collapses the monitor to a small dot (tap the dot to bring the bar back). It no longer hides it: a hidden
+    // monitor could only be brought back from the Manager. Tapping outside closes the expanded list.
+    host.innerHTML = '<div class="scm-monitor-grip" title="Drag to move" aria-label="Drag to move">⠿</div><div class="scm-monitor-body"></div><div class="scm-monitor-ctrl"><button type="button" class="scm-monitor-hide" aria-label="Collapse to a small dot" title="Collapse to a small dot (tap the dot to open)">×</button></div><button type="button" class="scm-monitor-mini" aria-label="Show background updates"><span class="lu-dot"></span><b></b></button>';
     (document.body || document.documentElement).appendChild(host);
     const place = (x, y) => { const w = host.offsetWidth || 260, h = host.offsetHeight || 40; x = Math.max(0, Math.min(window.innerWidth - Math.min(w, window.innerWidth), x)); y = Math.max(0, Math.min(window.innerHeight - Math.min(h, window.innerHeight), y)); host.style.left = x + 'px'; host.style.top = y + 'px'; return { x, y }; };
     let pos = null; try { pos = JSON.parse(localStorage.getItem(POS_KEY) || 'null'); } catch {}
@@ -30,12 +30,18 @@
     window.addEventListener('resize', () => place(host.offsetLeft, host.offsetTop), { passive: true });
     host.__refit = () => requestAnimationFrame(() => place(host.offsetLeft, host.offsetTop)); // keep an expanded panel on screen
     const setMode = m => { try { chrome.storage.local.set({ scmMonitorGameMode: m }); } catch {} applyMode(m); };
-    const applyMode = m => { const mode = ['bar', 'mini', 'hidden'].includes(m) ? m : 'bar'; host.classList.toggle('is-mini', mode === 'mini'); host.hidden = mode === 'hidden'; host.__refit(); };
-    host.querySelector('.scm-monitor-min').addEventListener('click', e => { e.stopPropagation(); setMode('mini'); });
-    host.querySelector('.scm-monitor-hide').addEventListener('click', e => { e.stopPropagation(); setMode('hidden'); });
+    let curMode = '';
+    const applyMode = m => { const mode = ['bar', 'mini', 'hidden'].includes(m) ? m : 'bar'; if (mode === curMode) return; curMode = mode; host.classList.toggle('is-mini', mode === 'mini'); host.hidden = mode === 'hidden'; host.__refit(); };
+    host.querySelector('.scm-monitor-hide').addEventListener('click', e => { e.stopPropagation(); setMode('mini'); });
     host.querySelector('.scm-monitor-mini').addEventListener('click', () => setMode('bar'));
-    chrome.storage.local.get({ scmMonitorGameMode: 'bar' }).then(r => applyMode(r.scmMonitorGameMode)).catch(() => {});
-    chrome.storage.onChanged.addListener((c, area) => { if (area === 'local' && c.scmMonitorGameMode) applyMode(c.scmMonitorGameMode.newValue); });
+    // v2.5.361 a monitor hidden with the old × comes back as the small dot (once); "Hidden" chosen in the Manager still hides it.
+    chrome.storage.local.get({ scmMonitorGameMode: 'bar', scmMonitorHideMigrated: false }).then(r => {
+      if (r.scmMonitorGameMode === 'hidden' && !r.scmMonitorHideMigrated) { chrome.storage.local.set({ scmMonitorGameMode: 'mini', scmMonitorHideMigrated: true }).catch(() => {}); applyMode('mini'); }
+      else { if (!r.scmMonitorHideMigrated) chrome.storage.local.set({ scmMonitorHideMigrated: true }).catch(() => {}); applyMode(r.scmMonitorGameMode); }
+    }).catch(() => {});
+    // v2.5.361 performance: no chrome.storage.onChanged listener on the game page. Every storage write (the ~1 MB realm
+    // store) was copied into the game tab twice per write. The mode is read with the small poll in init() instead.
+    host.__applyMode = applyMode;
     return host.querySelector('.scm-monitor-body');
   }
   let el = GAME ? null : document.getElementById('liveUpdates');
@@ -76,7 +82,7 @@
   // v2.5.331 one-line legend shown above the job list.
   const LEGEND = 'Warehouse = last time the Manager re-read your warehouse from the game · last game action = last collect/buy/sell/contract it reacted to · prices = last SimcoTools price download (VWAP + current prices, about every 10 min). Green dot = warehouse refreshed in the last 15 min. "skipped" = nothing needed (data still fresh), not an error.';
   const label = j => LABEL[`${j.job}|${j.trigger}`] || LABEL[j.job] || String(j.job || 'job').replace(/-/g, ' ');
-  let realm = null, jobs = [], lastSeenId = null, toastTimer = 0, open = false;
+  let realm = null, jobs = [], lastSeenId = null, toastTimer = 0, open = false, lastPollSig = '';
   try { open = GAME && localStorage.getItem('scmMonitorOpen') === '1'; } catch {}
 
   function toast(text) {
@@ -137,7 +143,13 @@
       realm = n === 0 || n === 1 ? n : null;
       if (realm == null) { el.innerHTML = ''; ui = null; return; }
       const key = `scmBackgroundJobs:${realm}`;
-      const h = (await chrome.storage.local.get({ [key]: [] }))[key];
+      const got = await chrome.storage.local.get(GAME ? { [key]: [], scmMonitorGameMode: 'bar' } : { [key]: [] });
+      if (GAME) document.getElementById('scmMonitor')?.__applyMode?.(got.scmMonitorGameMode);
+      const h = got[key];
+      // v2.5.361 game page polls: skip the repaint when nothing changed
+      const sig = Array.isArray(h) && h.length ? `${h.length}:${h[h.length - 1]?.id}:${h[h.length - 1]?.finishedAt}` : '0';
+      if (GAME && notify === 'poll' && sig === lastPollSig) { paint(); return; }
+      lastPollSig = sig;
       jobs = Array.isArray(h) ? h.filter(j => j && typeof j === 'object') : [];
       const newest = lastOf(j => j.job === 'warehouse-refresh' && j.trigger === 'stock-mutation-or-forced' && j.outcome === 'success');
       if (notify && newest && newest.id !== lastSeenId && Date.now() - Date.parse(newest.finishedAt || 0) < 60e3) {
@@ -150,12 +162,14 @@
   }
   if (GAME) document.addEventListener('pointerdown', e => { if (open && !e.target.closest?.('#scmMonitor')) { open = false; try { localStorage.setItem('scmMonitorOpen', '0'); } catch {} paint(); document.getElementById('scmMonitor')?.__refit?.(); } }, true);
   el.addEventListener('click', e => { if (e.target.closest('.lu-bar')) { open = !open; if (GAME) { try { localStorage.setItem('scmMonitorOpen', open ? '1' : '0'); } catch {} } paint(); if (GAME) document.getElementById('scmMonitor')?.__refit?.(); } });
-  (globalThis.scmOnStorageChanged || (fn => chrome.storage.onChanged.addListener(fn)))((changes, area) => {
+  // Manager: storage listener (attached only while the Manager is visible). Game page: a small poll of this realm's
+  // job list instead (v2.5.361 performance, see gameHost).
+  if (!GAME) (globalThis.scmOnStorageChanged || (fn => chrome.storage.onChanged.addListener(fn)))((changes, area) => {
     if (area !== 'local') return;
     if (changes.selectedRealm || changes.activeRealmKey || (realm != null && changes[`scmBackgroundJobs:${realm}`])) load(true);
   });
-  // game page: the tab learns its realm a few seconds after load
-  setInterval(() => { if (GAME) { const tr = Number(window.__SCM_GAME_REALM__); if ((tr === 0 || tr === 1) && tr !== realm) { load(false); return; } } if (!document.hidden) paint(); }, GAME ? 3000 : 15000);
+  // game page: the tab learns its realm a few seconds after load; jobs and mode are re-read every 3 s while visible
+  setInterval(() => { if (GAME) { if (document.hidden) return; const tr = Number(window.__SCM_GAME_REALM__); if ((tr === 0 || tr === 1) && tr !== realm) { load(false); return; } load('poll'); return; } if (!document.hidden) paint(); }, GAME ? 3000 : 15000);
   if (globalThis.scmOnDashboardResume) globalThis.scmOnDashboardResume(() => load(true));
   load(false);
   globalThis.SCM_LIVE_UPDATES = { reload: load };
