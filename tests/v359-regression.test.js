@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.361');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.362');
 const C = require('../tools-core.js');
 const N = require('../notify-core.js');
 const fx = require('./fixtures/profit-calc-2026-10-24.json');
@@ -85,19 +85,23 @@ assert.equal(C.upgradePayback({ cost: null, gainPerHour: 5 }).reason, 'no-cost')
   assert.equal(C.contractVerdict({ price: 45, quantity: 10, exchangePrice: 42 }).verdict, 'dearer');
   assert.equal(C.contractVerdict({ price: 0 }), null);
   // the real badge code
-  const b1 = content.indexOf('  const badgeFor=record=>{'), b2 = content.indexOf('  const style=()=>{', b1);
+  // the real badge code (2.5.362: compact badge + details popup lines)
+  const b1 = content.indexOf('  const marketLabel=record=>'), b2 = content.indexOf('  const closePopup=()=>', b1);
   const pre = content.slice(content.indexOf('  const priceText=v=>'), content.indexOf('\n', content.indexOf('  const priceText=v=>')));
   const money = v => Number.isFinite(Number(v)) ? '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
-  const document = { createElement: () => ({ dataset: {}, className: '', textContent: '', title: '' }) };
-  const badgeFor = new Function('document', 'money', pre + '\n' + content.slice(b1, b2) + '\nreturn badgeFor;')(document, money);
-  const x = badgeFor({ price: 40, quantity: 100, quality: 2, marketPrice: 41, verdict: v });
+  const document = { createElement: () => ({ dataset: {}, className: '', textContent: '', title: '', setAttribute() {} }) };
+  const api = new Function('document', 'money', pre + '\n' + content.slice(b1, b2) + '\nreturn {badgeFor,detailLines};')(document, money);
+  const r1 = { price: 40, quantity: 100, quality: 2, marketPrice: 41, verdict: v };
+  const x = api.badgeFor(r1);
   assert.ok(x.className.endsWith(' cheap'), x.className);
-  assert.ok(/2\.44% cheaper than market price · saves \$2\.000\/u vs exchange \$42\.000 \(\$200\.00\) · your stock \$41\.640/.test(x.textContent), x.textContent);
-  const y = badgeFor({ price: 40, quantity: 100, quality: 2, marketPrice: 39, verdict: C.contractVerdict({ price: 40, quantity: 100, exchangePrice: 38 }) });
-  assert.ok(y.className.endsWith(' expensive') && /exchange \$38\.000 is \$2\.000\/u cheaper \(\$200\.00\)/.test(y.textContent), y.textContent);
-  const z = badgeFor({ price: 40, quantity: 1, marketPrice: 41 });
-  assert.equal(z.textContent, '2.44% cheaper than market price', 'no order book: as before');
-  assert.ok(/\.scm-contract-vwap-badge\{text-align:left!important/.test(content) && !/\.scm-contract-vwap-badge\{position:static[^`]*white-space:nowrap/.test(content), 'badge wraps on phones');
+  assert.equal(x.textContent, '▼ 2.44% below market price ⓘ');
+  const d1 = api.detailLines(r1).map(l => l.v).join(' · ');
+  assert.ok(/2\.44% cheaper than market price · saves \$2\.000\/u vs exchange \$42\.000 \(\$200\.00\) · \$41\.640\/u/.test(d1), d1);
+  const r2 = { price: 40, quantity: 100, quality: 2, marketPrice: 39, verdict: C.contractVerdict({ price: 40, quantity: 100, exchangePrice: 38 }) };
+  assert.ok(api.badgeFor(r2).className.endsWith(' expensive') && /exchange \$38\.000 is \$2\.000\/u cheaper \(\$200\.00\)/.test(api.detailLines(r2).map(l => l.v).join(' · ')));
+  const zz = api.badgeFor({ price: 40, quantity: 1, marketPrice: 41, marketPriceSource: 'realm-vwap' });
+  assert.equal(zz.textContent, '▼ 2.44% below VWAP ⓘ', 'VWAP fallback is labelled');
+  assert.ok(/\.scm-contract-vwap-badge\{text-align:left!important/.test(content) && !/\.scm-contract-vwap-badge\{position:static[^}]*white-space:nowrap/.test(content), 'badge wraps on phones');
   const h = bg.slice(bg.indexOf("if(m?.type==='GET_INCOMING_CONTRACT_VWAP_DATA')"), bg.indexOf("if(m?.type==='GET_CONTRACT_HELPER_DATA')"));
   assert.ok(/asked<3/.test(h) && /Number\(r\?\.quality\)>=c\.quality/.test(h) && /contractVerdict\(\{price:c\.price,quantity:c\.quantity,exchangePrice:c\.exchangePrice,stockCost:c\.stockCost\}\)/.test(h), 'handler wiring');
 }

@@ -1352,33 +1352,71 @@ let hookReady = false;
     candidates.sort((a,b)=>a.score-b.score);
     return candidates[0]||null;
   };
+  // v2.5.362 compact badge: only the % vs market price (VWAP when no market price is captured); tap it for the details popup.
+  const marketLabel=record=>record?.marketPriceSource==='realm-vwap'?'VWAP':'market price';
+  const detailLines=record=>{
+    const marketPrice=Number(record?.marketPrice),p=Number(record?.price),qty=Number(record?.quantity);
+    if(!Number.isFinite(marketPrice)||marketPrice<=0||!Number.isFinite(p)||p<=0)return [];
+    const pct=(p-marketPrice)/marketPrice*100,label=marketLabel(record);
+    const v=record?.verdict||null,ex=v&&Number(v.exchangePrice)>0?v:null;
+    const lines=[];
+    lines.push({k:'Contract',v:`${qty>0?qty.toLocaleString('en-US')+' @ ':''}${priceText(p)}${qty>0?` (${money(p*qty)})`:''}`});
+    lines.push({k:label==='VWAP'?'VWAP (no market price)':'Market price',v:priceText(marketPrice)});
+    lines.push({k:'Vs '+label,v:Math.abs(pct)<0.05?`At ${label}`:`${Math.abs(pct).toFixed(2)}% ${pct<0?'cheaper than':'above'} ${label}`,cls:pct< -0.0001?'cheap':pct>0.0001?'expensive':'flat'});
+    if(ex)lines.push({k:`Exchange Q${Number(record?.quality)||0}+`,v:ex.savesPerUnit>=0?`saves ${priceText(ex.savesPerUnit)}/u vs exchange ${priceText(ex.exchangePrice)} (${money(ex.savesTotal)})`:`exchange ${priceText(ex.exchangePrice)} is ${priceText(-ex.savesPerUnit)}/u cheaper (${money(-ex.savesTotal)})`,cls:ex.savesPerUnit>0.0000001?'cheap':ex.savesPerUnit< -0.0000001?'expensive':'flat'});
+    else lines.push({k:'Exchange',v:'order book not captured yet'});
+    if(v&&Number(v.stockCost)>0)lines.push({k:'Your stock',v:`${priceText(v.stockCost)}/u`});
+    return lines;
+  };
   const badgeFor=record=>{
     const marketPrice=Number(record?.marketPrice),p=Number(record?.price);
     if(!Number.isFinite(marketPrice)||marketPrice<=0||!Number.isFinite(p)||p<=0)return null;
-    const pct=(p-marketPrice)/marketPrice*100;
+    const pct=(p-marketPrice)/marketPrice*100,label=marketLabel(record);
     const badge=document.createElement('span');
-    // v2.5.359 #6 verdict vs the cheapest exchange listing at this quality or better (you buy: no exchange fee applies
-    // to a buyer) and vs your warehouse cost. Colour follows the exchange verdict when the order book is captured.
-    const v=record?.verdict||null;
-    const ex=v&&Number(v.exchangePrice)>0?v:null;
-    const cls=ex?(ex.savesPerUnit>0.0000001?'cheap':ex.savesPerUnit< -0.0000001?'expensive':'flat'):(pct< -0.0001?'cheap':pct>0.0001?'expensive':'flat');
+    const cls=pct< -0.0001?'cheap':pct>0.0001?'expensive':'flat';
     badge.className='scm-contract-vwap-badge '+cls;
-    const parts=[Math.abs(pct)<0.05?'At market price':`${Math.abs(pct).toFixed(2)}% ${pct<0?'cheaper than':'above'} market price`];
-    if(ex)parts.push(ex.savesPerUnit>=0?`saves ${priceText(ex.savesPerUnit)}/u vs exchange ${priceText(ex.exchangePrice)} (${money(ex.savesTotal)})`:`exchange ${priceText(ex.exchangePrice)} is ${priceText(-ex.savesPerUnit)}/u cheaper (${money(-ex.savesTotal)})`);
-    if(v&&Number(v.stockCost)>0)parts.push(`your stock ${priceText(v.stockCost)}`);
-    badge.textContent=parts.join(' · ');
-    badge.title=`Contract ${money(p)}/unit · Market price ${money(marketPrice)}/unit · ${pct>=0?'+':''}${pct.toFixed(2)}% vs market price${ex?` · cheapest exchange listing Q${Number(record.quality)}+ ${priceText(ex.exchangePrice)}`:''}${v&&Number(v.stockCost)>0?` · your warehouse cost ${priceText(v.stockCost)}`:''}`;
+    badge.textContent=Math.abs(pct)<0.05?`= ${label} ⓘ`:`${pct<0?'▼':'▲'} ${Math.abs(pct).toFixed(2)}% ${pct<0?'below':'above'} ${label} ⓘ`;
+    badge.title='Tap for details';
+    badge.setAttribute('role','button');
     badge.dataset.scmOwned='1';
+    badge._scmRecord=record;
     return badge;
   };
+  const closePopup=()=>document.getElementById('scm-contract-detail-pop')?.remove();
+  const openPopup=record=>{
+    closePopup();
+    const lines=detailLines(record);if(!lines.length)return;
+    const wrap=document.createElement('div');wrap.id='scm-contract-detail-pop';wrap.dataset.scmOwned='1';
+    const card=document.createElement('div');card.className='scm-cdp-card';
+    const head=document.createElement('div');head.className='scm-cdp-head';
+    const title=document.createElement('div');title.className='scm-cdp-title';title.textContent=String(record?.company||'Contract');
+    const x=document.createElement('button');x.type='button';x.className='scm-cdp-close';x.textContent='×';x.setAttribute('aria-label','Close');
+    head.append(title,x);card.appendChild(head);
+    for(const line of lines){
+      const row=document.createElement('div');row.className='scm-cdp-row'+(line.cls?' '+line.cls:'');
+      const k=document.createElement('span');k.className='scm-cdp-k';k.textContent=line.k;
+      const val=document.createElement('span');val.className='scm-cdp-v';val.textContent=line.v;
+      row.append(k,val);card.appendChild(row);
+    }
+    wrap.appendChild(card);(document.body||document.documentElement).appendChild(wrap);
+  };
+  // Capture phase on window: the game's own handlers on the contract card must not see the tap.
+  const onBadgeTap=e=>{
+    const pop=document.getElementById('scm-contract-detail-pop');
+    if(pop&&pop.contains(e.target)){if(e.target===pop||e.target.closest?.('.scm-cdp-close')){e.preventDefault();e.stopPropagation();closePopup();}return;}
+    const b=e.target?.closest?.('.scm-contract-vwap-badge');if(!b)return;
+    e.preventDefault();e.stopPropagation();e.stopImmediatePropagation?.();
+    openPopup(b._scmRecord);
+  };
+  window.addEventListener('click',onBadgeTap,true);
   const style=()=>{
     if(document.getElementById('scm-contract-vwap-inline-style'))return;
     const st=document.createElement('style');st.id='scm-contract-vwap-inline-style';
-    st.textContent=`.scm-contract-vwap-badge{position:static!important;display:inline-flex!important;vertical-align:middle!important;align-items:center!important;justify-content:center!important;box-sizing:border-box!important;width:auto!important;min-width:0!important;max-width:100%!important;height:auto!important;min-height:0!important;max-height:none!important;flex:0 0 auto!important;grid-area:auto!important;justify-self:auto!important;align-self:auto!important;margin:3px 0 3px 6px!important;padding:3px 6px!important;border-radius:5px!important;font:700 9px/1.15 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;white-space:normal!important;overflow-wrap:normal!important;text-align:center!important;box-shadow:0 1px 2px rgba(0,0,0,.22)!important;pointer-events:none!important}.scm-contract-vwap-badge.cheap{color:#bff8d8!important;background:rgba(20,100,60,.94)!important;border:1px solid rgba(78,230,139,.55)!important}.scm-contract-vwap-badge.expensive{color:#ffd2d6!important;background:rgba(120,20,25,.94)!important;border:1px solid rgba(255,90,100,.55)!important}.scm-contract-vwap-badge.flat{color:#e6edf5!important;background:rgba(10,23,34,.94)!important;border:1px solid rgba(120,145,170,.55)!important}@media(max-width:600px){.scm-contract-vwap-badge{font-size:8px!important;padding:3px 5px!important;margin-left:4px!important}}.scm-contract-vwap-badge{text-align:left!important;line-height:1.25!important}`;
+    st.textContent=`.scm-contract-vwap-badge{position:static!important;display:inline-flex!important;vertical-align:middle!important;align-items:center!important;justify-content:center!important;box-sizing:border-box!important;width:auto!important;min-width:0!important;max-width:100%!important;height:auto!important;min-height:0!important;max-height:none!important;flex:0 0 auto!important;grid-area:auto!important;justify-self:auto!important;align-self:auto!important;margin:3px 0 3px 6px!important;padding:3px 6px!important;border-radius:5px!important;font:700 9px/1.15 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;white-space:normal!important;overflow-wrap:normal!important;text-align:center!important;box-shadow:0 1px 2px rgba(0,0,0,.22)!important;pointer-events:auto!important;cursor:pointer!important}.scm-contract-vwap-badge.cheap{color:#bff8d8!important;background:rgba(20,100,60,.94)!important;border:1px solid rgba(78,230,139,.55)!important}.scm-contract-vwap-badge.expensive{color:#ffd2d6!important;background:rgba(120,20,25,.94)!important;border:1px solid rgba(255,90,100,.55)!important}.scm-contract-vwap-badge.flat{color:#e6edf5!important;background:rgba(10,23,34,.94)!important;border:1px solid rgba(120,145,170,.55)!important}@media(max-width:600px){.scm-contract-vwap-badge{font-size:8px!important;padding:3px 5px!important;margin-left:4px!important}}.scm-contract-vwap-badge{text-align:left!important;line-height:1.25!important}#scm-contract-detail-pop{position:fixed;inset:0;z-index:2147483600;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:12px;box-sizing:border-box}#scm-contract-detail-pop .scm-cdp-card{width:min(360px,100%);max-height:80vh;overflow:auto;box-sizing:border-box;background:rgba(10,15,21,.98);color:#e7edf5;border:1px solid #2a394b;border-radius:8px;padding:8px 10px;font:12px/1.35 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}#scm-contract-detail-pop .scm-cdp-head{display:flex;align-items:center;gap:6px;margin-bottom:4px}#scm-contract-detail-pop .scm-cdp-title{flex:1;min-width:0;font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#scm-contract-detail-pop .scm-cdp-close{flex:0 0 auto;width:32px;height:32px;border:1px solid #2a394b;border-radius:6px;background:#16202b;color:#e7edf5;font-size:18px;line-height:1;padding:0;cursor:pointer}#scm-contract-detail-pop .scm-cdp-row{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid #1e2b3a}#scm-contract-detail-pop .scm-cdp-k{color:#9fb0c3;flex:0 0 auto}#scm-contract-detail-pop .scm-cdp-v{text-align:right;min-width:0;overflow-wrap:anywhere}#scm-contract-detail-pop .cheap .scm-cdp-v{color:#7ee2a8}#scm-contract-detail-pop .expensive .scm-cdp-v{color:#ff8f98}`;
     (document.head||document.documentElement).appendChild(st);
   };
   let scheduled=0,inflight=null,lastSignature='',again=false,retryTimer=0,retryAttempt=0,pageMiss=0;
-  const clearStale=()=>document.querySelectorAll('.scm-contract-vwap-badge').forEach(x=>x.remove());
+  const clearStale=()=>{document.querySelectorAll('.scm-contract-vwap-badge').forEach(x=>x.remove());closePopup();};
   // v2.5.319: a failed/empty data fetch or a not-yet-rendered row used to wipe every badge and wait
   // for the next 5s poll. Keep the last good badges and retry with short backoff instead.
   const scheduleRetry=()=>{if(retryTimer)return;const d=[600,1500,3000,6000][Math.min(retryAttempt,3)];retryAttempt++;retryTimer=setTimeout(()=>{retryTimer=0;schedule();},d);};
@@ -1426,14 +1464,14 @@ let hookReady = false;
       // covers the seller and price (the 2.5.258 regression).
       const placement=anchor?.parentElement&&row.contains(anchor.parentElement)?anchor.parentElement:row;
       const fresh=badgeFor(record);
-      if(fresh){badge.className=fresh.className;badge.textContent=fresh.textContent;badge.title=fresh.title;}
+      if(fresh){badge.className=fresh.className;badge.textContent=fresh.textContent;badge.title=fresh.title;badge._scmRecord=record;}
       if(badge.parentElement!==placement)placement.appendChild(badge);
       badge.dataset.contractKey=key;
     }
     for(const badge of [...document.querySelectorAll('.scm-contract-vwap-badge')]){
       if(!badge.isConnected||!badge.closest('body')||!wanted.has(String(badge.dataset.contractKey||'')))badge.remove();
     }
-    lastSignature=`${data.realm}:${records.map(c=>`${c.id}:${c.kind}:${c.quality}:${c.quantity}:${c.price}:${c.marketPrice}:${c.exchangePrice}:${c.stockCost}`).join('|')}`;
+    lastSignature=`${data.realm}:${records.map(c=>`${c.id}:${c.kind}:${c.quality}:${c.quantity}:${c.price}:${c.marketPrice}:${c.exchangePrice}:${c.stockCost}:${c.marketPriceSource}`).join('|')}`;
     if(missing>0)scheduleRetry();else retryAttempt=0;
   };
   const schedule=()=>{if(scheduled)return;scheduled=setTimeout(()=>{scheduled=0;if(inflight){again=true;return;}inflight=process().catch(()=>{scheduleRetry();}).finally(()=>{inflight=null;if(again){again=false;schedule();}});},300);};

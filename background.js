@@ -6262,6 +6262,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
           const comparison=overlayIncomingContractMarketComparison(store,c,realm);
           c.marketPrice=comparison.marketPrice;
           c.savingsPct=comparison.savingsPct;
+          c.marketPriceSource=comparison.marketPriceSource;
           try{
             const ep=store.endpointData?.[`/api/v3/market/${realm}/${c.kind}/`],at=Date.parse(String(ep?.receivedAt||''));
             const book=Array.isArray(ep?.data)&&Number.isFinite(at)&&Date.now()-at<6*3600e3?ep.data:null;

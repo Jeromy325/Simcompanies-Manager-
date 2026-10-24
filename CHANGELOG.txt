@@ -1,3 +1,9 @@
+2.5.362 — 2026-10-24 — Incoming contracts: compact badge + details popup
+- Incoming-contract badge now shows only "▼/▲ x.xx% below/above market price" so it fits the contract card. When
+  no market price is captured it compares with the realm VWAP and says "VWAP". Badge colour follows that %.
+- Tap the badge for a popup with all details: contract qty @ price (total), market price/VWAP, % difference,
+  exchange Q+ saving (or "order book not captured yet") and your stock cost. Tap × or outside to close.
+
 2.5.361 — 2026-10-24 — Monitor × collapses instead of hiding; much lighter on the phone
 - Game-page Background updates monitor: × now shrinks it to the small dot (tap the dot to open it again). It no
   longer disappears. A monitor you hid with the old × comes back as the dot once. ("Hidden" can still be chosen in
