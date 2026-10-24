@@ -1330,6 +1330,9 @@ html.scm-mobile .contract-table.saved-contract-table.mobile-cards:not(.contract-
 .panel>h3.collapse-head::after{margin-left:auto}
 .planner-insights .si-phase b{color:#eef4f9;font-weight:700}
 /* v2.5.363 planner building-type test + reset */
-.planner-main-card .building-detail-controls label:has(#buildingKind),.planner-main-card .building-detail-controls .planner-reset-row{grid-column:1/-1}
+.planner-main-card .building-detail-controls .planner-kind-row,.planner-main-card .building-detail-controls .planner-reset-row{grid-column:1/-1}
 .planner-reset-row{display:flex;gap:6px;flex-wrap:wrap}.planner-reset-row:empty{display:none}.planner-reset-row button{padding:6px 10px;font-size:11px;border-radius:8px}
 .owned-building-test{display:block;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-sizing:border-box;margin:-4px 0 6px;padding:2px 6px;border-radius:4px;background:#3a2a0c;color:#f3c64b;font-size:10px;font-weight:700}
+/* v2.5.364 visible Output picker beside Building Type; readable native option lists on Android */
+.planner-kind-row{display:grid;grid-template-columns:1fr 1fr;gap:7px}.planner-kind-row label{margin:0;min-width:0}
+.planner-main-card select{color-scheme:dark}select option,select optgroup{color:#e7edf5;background-color:#0d151e}select optgroup{color:#d4ad36;font-style:normal;font-weight:700}

@@ -1,4 +1,4 @@
-// 2.5.363: Production planner "Building Type" test override (Power Plant → Car Factory → Truck) + Reset, 360 px.
+// 2.5.363/364: Production planner "Building Type" test override (Power Plant → Car Factory → Truck) + Reset, 360 px.
 const H = require('./harness');
 (async () => {
   const now = new Date().toISOString();
@@ -28,7 +28,13 @@ const H = require('./harness');
   const badge = await page.textContent('.owned-building-card[data-building-id="111"] .owned-building-test').catch(() => '');
   const cardOut = () => page.textContent('.owned-building-card[data-building-id="111"] .owned-building-output');
   H.check('card TEST badge', badge === 'TEST · was Power Plant', 'TEST · was Power Plant', badge);
-  await page.selectOption('#buildingProduct', 'Truck'); await page.waitForTimeout(1200);
+  const vis = await page.$eval('#buildingOutput', e => { const r = e.getBoundingClientRect(), cs = getComputedStyle(e); return r.width > 100 && r.height > 25 && cs.opacity === '1' && r.right <= 360; });
+  H.check('Output dropdown visible at 360', vis, true, vis);
+  const groups = await page.$$eval('#buildingKind optgroup', g => g.map(x => x.label));
+  H.check('building types grouped by category', groups.length >= 8 && groups.includes('Automotive'), '≥8 incl Automotive', groups.join(','));
+  const optColor = await page.$eval('#buildingKind option:nth-child(1)', o => getComputedStyle(o).color);
+  H.check('option text colour set', optColor === 'rgb(231, 237, 245)', 'rgb(231, 237, 245)', optColor);
+  await page.selectOption('#buildingOutput', 'Truck'); await page.waitForTimeout(1200);
   await page.selectOption('#buildingLevel', '5'); await page.waitForTimeout(1200);
   const out = await page.textContent('.planner-output-product strong');
   H.check('output = Truck', out === 'Truck', 'Truck', out);

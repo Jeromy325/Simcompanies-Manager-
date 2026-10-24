@@ -6,7 +6,7 @@ const root = path.join(__dirname, '..');
 const background = fs.readFileSync(path.join(root, 'background.js'), 'utf8');
 const dashboardHtml = fs.readFileSync(path.join(root, 'dashboard.html'), 'utf8');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
-assert.equal(manifest.version, '2.5.363');
+assert.equal(manifest.version, '2.5.364');
 const start = background.indexOf('async function runLiveMarketRefresh');
 const end = background.indexOf('async function runVwapSync', start);
 assert.ok(start >= 0 && end > start, 'market refresh function exists');

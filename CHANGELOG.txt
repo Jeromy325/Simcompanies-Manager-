@@ -1,3 +1,9 @@
+2.5.364 — 2026-10-24 — Production: visible Output picker + readable building list
+- New "Output" dropdown beside "Building Type" in the selected building's panel, so the product can be picked
+  after changing the building (the old tap-the-product-tile picker still works).
+- Building Type list grouped by category (Agriculture, Automotive, Energy…) to shorten the scroll.
+- Dropdown option text now has explicit colours and a dark colour scheme; on Android the list showed blank rows.
+
 2.5.363 — 2026-10-24 — Production: test a different building type + Reset
 - Production → selected building → new "Building Type" picker. Pick any building kind (e.g. Power Plant → Car
   Factory); its products, inputs, rates, level and quality then work like any other building. The card shows
