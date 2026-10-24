@@ -3,7 +3,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.362');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.363');
 const html = read('dashboard.html'), dash = read('dashboard.js');
 assert.ok(html.includes('Alert when the price drops to or below') && html.includes('Alert when the price rises to or above'));
 assert.ok(!/<option value="&lt;=">≤<\/option>/.test(html), 'no bare ≤ option');

@@ -485,10 +485,11 @@ function sanitizeProductionPlannerState(value,realm){
   const productOverrides={};for(const [k,v] of Object.entries(value.productOverrides&&typeof value.productOverrides==='object'?value.productOverrides:{})){const id=String(k).trim(),product=String(v||'').trim();if(/^\d+$/.test(id)&&product)productOverrides[id]=product;}
   const qualityByBuilding={};for(const [k,v] of Object.entries(value.qualityByBuilding&&typeof value.qualityByBuilding==='object'?value.qualityByBuilding:{})){const id=String(k).trim(),q=Math.max(0,Number(v)||0);if(/^\d+$/.test(id))qualityByBuilding[id]=q;}
   const planModes={};for(const [k,v] of Object.entries(value.planModes&&typeof value.planModes==='object'?value.planModes:{})){const id=String(k).trim(),mode=String(v||'').trim();if(/^\d+$/.test(id)&&mode)planModes[id]=mode;}
+  const kindOverrides={};for(const [k,v] of Object.entries(value.kindOverrides&&typeof value.kindOverrides==='object'?value.kindOverrides:{})){const id=String(k).trim(),kind=String(v||'').trim();if(/^\d+$/.test(id)&&/^[0-9A-Za-z]{1,3}$/.test(kind))kindOverrides[id]=kind;}
   const selected=value.selectedBuildingId!=null?String(value.selectedBuildingId).trim():'';
   const runHours=Math.min(48,Math.max(1,Number(value.runHours)||24));
   const discount=Math.min(10,Math.max(0,Number(value.discount)||0));
-  return {version:1,realm:n,selectedBuildingId:/^\d+$/.test(selected)?selected:null,planningLevels,productOverrides,qualityByBuilding,runHours,discount,planModes,updatedAt:String(value.updatedAt||new Date().toISOString())};
+  return {version:1,realm:n,selectedBuildingId:/^\d+$/.test(selected)?selected:null,planningLevels,productOverrides,qualityByBuilding,runHours,discount,planModes,kindOverrides,updatedAt:String(value.updatedAt||new Date().toISOString())};
 }
 function sanitizePhysicalRealmPayload(value,realm){
   const clean=sanitizeRealmStore(value&&typeof value==='object'?value:{},realm);

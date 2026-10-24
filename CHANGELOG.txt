@@ -1,3 +1,12 @@
+2.5.363 — 2026-10-24 — Production: test a different building type + Reset
+- Production → selected building → new "Building Type" picker. Pick any building kind (e.g. Power Plant → Car
+  Factory); its products, inputs, rates, level and quality then work like any other building. The card shows
+  "TEST · was <game building>". Test buildings never reuse the real building's history, busy batch, image or cost.
+- Saved per realm (planner state kindOverrides), survives reloads, and flows into the realm's frozen network
+  plan (deficits/surpluses) like other planner changes.
+- "Reset to game data" restores that building's type, output, planning level and quality from the game data;
+  "Reset all (n)" does it for every changed building.
+
 2.5.362 — 2026-10-24 — Incoming contracts: compact badge + details popup
 - Incoming-contract badge now shows only "▼/▲ x.xx% below/above market price" so it fits the contract card. When
   no market price is captured it compares with the realm VWAP and says "VWAP". Badge colour follows that %.

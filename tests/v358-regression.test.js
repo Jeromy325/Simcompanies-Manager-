@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.362');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.363');
 const html = read('dashboard.html'), dash = read('dashboard.js'), content = read('content.js'), css = read('styles.css');
 
 // Warehouse tab: Stock and the run-out card are collapsible cards.
