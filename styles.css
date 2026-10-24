@@ -1312,3 +1312,13 @@ html.scm-mobile .contract-table.saved-contract-table.mobile-cards:not(.contract-
 .contract-card-head.collapse-head::after{position:absolute;top:2px;right:0;margin-left:0}
 .lu-count{margin:0 0 4px;font-size:11px;opacity:.7}
 .lu-game-mode{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 4px;padding:5px 10px;font-size:11.5px;border:1px solid #243140;border-radius:10px}.lu-game-mode select{font-size:12px;padding:3px 6px;min-height:28px}
+
+/* v2.5.357 Smart insights (best product · run-out · make or buy) — reuses the profit card's stacked rows */
+.planner-insights .si-head{font-size:13px;font-weight:700;margin:8px 2px 4px;color:#eef4f9}
+.planner-insights .si-head span{font-size:10px;font-weight:600;color:#5eb5ff;margin-left:4px}
+.planner-insights .si-verdict{color:#eef4f9;font-size:12px;margin:2px 2px 4px}
+.planner-insights .pp-list{margin-top:4px}
+.planner-insights .pp-row{padding:6px 9px}
+.planner-insights .si-best{background:rgba(78,230,139,.07)}
+.planner-insights .si-tag{font-style:normal;font-size:10px;color:#5eb5ff;margin-left:3px}
+.planner-insights .si-good{color:#4ee68b}.planner-insights .si-warn{color:#e0b44c}.planner-insights .si-bad{color:#ff6b78}

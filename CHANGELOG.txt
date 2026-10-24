@@ -1,3 +1,15 @@
+2.5.357 — 2026-10-24 — Smart insights on the Production page: best product, input run-out, make or buy
+- New section under Profit / h / level, on the same basis as the game's Profit Calculator (reproduces your
+  $151.04 / $422.05 / $474.45 screens). Uses data the Manager already has; no new game or SimcoTools requests.
+- Best product for the selected building: every tradable product it can make, ranked by profit / h / level,
+  with "Switching to X earns $Y/h more". Sale = cheapest exchange listing (any quality), else VWAP; products
+  with no price yet are listed on one line.
+- Inputs: run-out & make or buy (all buildings): how long warehouse stock of each input lasts at your buildings'
+  current output (game formula, own abundance for mines), minus what your own buildings make. Orange = less than
+  the Production Time, red = under 6 h. Buy quantity covers the Production Time, priced at the cheapest listing at
+  the quality you need. If you own a building that can make the input: your cost (warehouse inputs + labour) vs
+  the market, with Make or Buy and the saving per unit.
+
 2.5.356 — 2026-10-24 — Game-page monitor: buttons no longer cover the data
 - Your screenshots: when expanded, the − × column stretched the full height and squeezed the list; the status line
   was cut off ("last game …"). Now: one header row (grip · status · − ×), the list below at full width, and the

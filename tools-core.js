@@ -617,6 +617,89 @@
     }
     return next;
   }
+  // v2.5.357 Smart insights (pure). One product on the game's Profit Calculator basis (the building card's headline):
+  //   L = game rate/level (abundance resources at 90 %, or abundancePct when given), labour = wage ÷ L × (1 + admin%),
+  //   inputs = constants producedFrom qty × inputCostOf(id), profit/h/level = (salePrice − sourcing) × L.
+  function gameCalcProduct({ c, resourceId, economyState, eventPct = 0, bonusPct = 0, adminPct = 0, robots = false, salePrice = null, inputCostOf, abundancePct = null } = {}) {
+    if (!gameConstantsOk(c)) return { ok: false, error: 'no game constants' };
+    const rid = Number(resourceId), r = c.resources[String(rid)];
+    if (!r) return { ok: false, error: 'unknown resource' };
+    const opts = { eventPct: Number(eventPct) || 0, bonusPct: Number(bonusPct) || 0 };
+    const L = abundancePct != null && isAbundanceResource(rid) ? gameRatePerLevel(c, rid, economyState, { ...opts, abundancePct }) : gameProfitCalcRatePerLevel(c, rid, economyState, opts);
+    const wage = gameWagePerLevel(c, r.producedAt, robots);
+    if (!pos(L) || wage == null || !(wage >= 0)) return { ok: false, error: 'no rate' };
+    const labourPerUnit = wage / L * (1 + Math.max(0, Number(adminPct) || 0) / 100);
+    const inputs = [], missing = []; let inputCost = 0;
+    for (const [id, q] of Object.entries(r.producedFrom && typeof r.producedFrom === 'object' ? r.producedFrom : {})) {
+      const qty = Number(q); if (!(qty > 0)) continue;
+      const raw = typeof inputCostOf === 'function' ? inputCostOf(Number(id)) : null;
+      const p = raw != null && raw !== '' && Number.isFinite(Number(raw)) ? Number(raw) : null;
+      if (p == null) missing.push(Number(id)); else inputCost += qty * p;
+      inputs.push({ id: Number(id), qty, unitCost: p });
+    }
+    const sale = Number(salePrice), hasSale = salePrice != null && salePrice !== '' && Number.isFinite(sale) && sale > 0;
+    const sourcing = inputCost + labourPerUnit, profitPerUnit = hasSale ? sale - sourcing : null;
+    return { ok: true, resourceId: rid, ratePerLevel: L, wagePerLevel: wage, labourPerUnit, inputCostPerUnit: inputCost, sourcingCostPerUnit: sourcing, inputs, missing, complete: missing.length === 0, salePrice: hasSale ? sale : null, profitPerUnit, profitPerHourPerLevel: profitPerUnit == null ? null : profitPerUnit * L };
+  }
+  // Idea 1: every tradable product a building kind can make, ranked by profit/h/level (game basis).
+  // priceOf(id) -> number | {price, quality, source} | null. Complete, priced products first; then incomplete; then unpriced.
+  function rankBuildingProducts({ c, buildingKind, economyState, bonusPct = 0, adminPct = 0, robots = false, eventPctOf, priceOf, inputCostOf } = {}) {
+    if (!gameConstantsOk(c) || buildingKind == null || buildingKind === '') return [];
+    const out = [];
+    for (const [id, r] of Object.entries(c.resources)) {
+      if (!r || String(r.producedAt) !== String(buildingKind) || r.isExchangeTradable === false) continue;
+      const rid = Number(id), sale = typeof priceOf === 'function' ? priceOf(rid) : null;
+      const salePrice = sale != null && typeof sale === 'object' ? sale.price : sale;
+      const res = gameCalcProduct({ c, resourceId: rid, economyState, eventPct: typeof eventPctOf === 'function' ? eventPctOf(rid) : 0, bonusPct, adminPct, robots, salePrice, inputCostOf });
+      if (res.ok) out.push({ ...res, sale: sale != null && typeof sale === 'object' ? sale : null });
+    }
+    const tier = x => (x.profitPerHourPerLevel == null ? 2 : x.complete ? 0 : 1);
+    return out.sort((a, b) => tier(a) - tier(b) || (b.profitPerHourPerLevel ?? 0) - (a.profitPerHourPerLevel ?? 0) || a.resourceId - b.resourceId);
+  }
+  // Idea 2: how long warehouse stock of each input lasts at the current production of all buildings.
+  //   buildings: [{id, name, kind, level, productId, quality}]   lots: warehouse lots {kind, quality, amount}
+  //   Stock counts lots at quality ≥ the lowest quality any consumer needs (production quality − 1, the game's rule).
+  //   Own production of the same resource is subtracted (net use). buyQty covers `hours` of net use.
+  function inputRunOut({ c, buildings, economyState, bonusPct = 0, eventPctOf, abundanceOf, lots, hours = 24 } = {}) {
+    if (!gameConstantsOk(c)) return [];
+    const use = new Map(), make = new Map();
+    for (const b of Array.isArray(buildings) ? buildings : []) {
+      const pid = Number(b && b.productId), res = pid > 0 ? c.resources[String(pid)] : null;
+      if (!res) continue;
+      let ab = null;
+      if (isAbundanceResource(pid)) { const v = typeof abundanceOf === 'function' ? abundanceOf(b, pid) : null; ab = v != null && Number.isFinite(Number(v)) ? Number(v) : GAME_PROFIT_CALC_ABUNDANCE_PCT; }
+      const L = gameRatePerLevel(c, pid, economyState, { eventPct: typeof eventPctOf === 'function' ? Number(eventPctOf(pid)) || 0 : 0, bonusPct: Number(bonusPct) || 0, abundancePct: ab });
+      if (!pos(L)) continue;
+      const rate = L * Math.max(1, Number(b.level) || 1);
+      make.set(pid, (make.get(pid) || 0) + rate);
+      const minQ = Math.max(0, (Number(b.quality) || 0) - 1);
+      for (const [id, q] of Object.entries(res.producedFrom && typeof res.producedFrom === 'object' ? res.producedFrom : {})) {
+        const qty = Number(q); if (!(qty > 0)) continue;
+        const e = use.get(Number(id)) || { id: Number(id), usePerHour: 0, minQuality: Infinity, users: [] };
+        e.usePerHour += qty * rate; e.minQuality = Math.min(e.minQuality, minQ);
+        if (b.name && !e.users.includes(String(b.name))) e.users.push(String(b.name));
+        use.set(Number(id), e);
+      }
+    }
+    const H = pos(hours) || 24, rows = [];
+    for (const e of use.values()) {
+      const minQuality = Number.isFinite(e.minQuality) ? e.minQuality : 0;
+      const stock = (Array.isArray(lots) ? lots : []).filter(l => l && Number(l.kind) === e.id && Number(l.quality) >= minQuality).reduce((a, l) => a + (Number(l.amount) || 0), 0);
+      const madePerHour = make.get(e.id) || 0, net = e.usePerHour - madePerHour;
+      const hoursLeft = net > 1e-9 ? stock / net : null;
+      rows.push({ ...e, minQuality, stock, madePerHour, netPerHour: net, hoursLeft, hours: H, buyQty: net > 1e-9 ? Math.max(0, Math.ceil(net * H - stock)) : 0 });
+    }
+    return rows.sort((a, b) => (a.hoursLeft == null) - (b.hoursLeft == null) || (a.hoursLeft ?? 0) - (b.hoursLeft ?? 0) || a.id - b.id);
+  }
+  // Idea 3: make or buy one input. ownCost = sourcing cost/unit if you made it (null = can't make it); marketPrice = cheapest
+  // listing at the needed quality. saves > 0 means making is cheaper by that much per unit.
+  function makeOrBuy(ownCost, marketPrice) {
+    const o = ownCost != null && Number.isFinite(Number(ownCost)) ? Number(ownCost) : null, m = pos(marketPrice);
+    if (o == null || !m) return { verdict: o == null ? 'cannot-make' : 'no-price', ownCost: o, marketPrice: m || null };
+    const saves = m - o;
+    return { verdict: saves >= 0 ? 'make' : 'buy', ownCost: o, marketPrice: m, savesPerUnit: Math.abs(saves), savesPct: Math.abs(saves) / m * 100 };
+  }
+
   // Exchange fee % from your own listings (/api/v2/companies/<id>/market-orders/): fees ÷ (quantity × price).
   function listingFeePct(orders) {
     const ok = (Array.isArray(orders) ? orders : []).filter(o => pos(o && o.fees) && pos(o.quantity) && pos(o.price));
@@ -626,7 +709,7 @@
   }
 
   const api = {
-    economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
+    economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
     cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
     seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,

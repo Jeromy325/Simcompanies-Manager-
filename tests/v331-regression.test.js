@@ -7,7 +7,7 @@ const vm = require('vm');
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
 const manifest = JSON.parse(read('manifest.json'));
-assert.equal(manifest.version, '2.5.356');
+assert.equal(manifest.version, '2.5.357');
 const C = require('../tools-core.js');
 
 // --- production cost history (pure core) ---
