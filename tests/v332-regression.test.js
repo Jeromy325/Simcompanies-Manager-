@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.354');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.355');
 const dash = read('dashboard.js'), bg = read('background.js');
 
 // run the real plannerMarketPrice against the user's exchange listing

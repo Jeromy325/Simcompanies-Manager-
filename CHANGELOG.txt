@@ -1,3 +1,8 @@
+2.5.355 — 2026-10-24 — Stock card opens at full width after being moved
+- Your screenshot: after dragging the collapsed › button, Stock After Demand & Contracts opened as a 28 px wide,
+  tall strip. 2.5.354 froze the card width at drag time. The width now follows the card's state (collapsed = the
+  small button, open = normal width), and a moved card that opens near the bottom shifts up to stay on screen.
+
 2.5.354 — 2026-10-24 — Monitor out of the way; every game overlay draggable
 - Background updates monitor on the game page: − shrinks it to a small dot (green = warehouse fresh, red number =
   failures in the last hour; tap to bring the bar back), × hides it. Tapping outside closes the expanded list.

@@ -1489,8 +1489,12 @@ let hookReady = false;
   const DRAG_CARDS=['scm-game-balance-card','scm-left-copy-card','scm-contract-helper-card'];
   const DRAG_HANDLES='.scm-go-head,.scm-go-collapsed .scm-go-toggle,.scm-left-copy-head,.scm-ch-head';
   const cardPos=id=>{try{const v=JSON.parse(localStorage.getItem('scmCardPos:'+id)||'null');return v&&Number.isFinite(v.x)&&Number.isFinite(v.y)?v:null;}catch{return null;}};
-  const placeCard=(el,x,y)=>{const w=Math.min(el.offsetWidth||300,window.innerWidth-6),h=el.offsetHeight||40;x=Math.max(0,Math.min(window.innerWidth-w,x));y=Math.max(0,Math.min(window.innerHeight-Math.min(h,40),y));el.style.left=`${Math.round(x)}px`;el.style.top=`${Math.round(y)}px`;return {x,y};};
-  const pinCard=(el,pos)=>{if(!el.dataset.scmMoved){const w=Math.min(el.getBoundingClientRect().width||300,window.innerWidth-6);el.style.width=`${Math.round(w)}px`;el.style.right='auto';el.dataset.scmMoved='1';}placeCard(el,pos.x,pos.y);};
+  // v2.5.355 the whole card stays on screen: an expanded card near the bottom opens upwards.
+  const placeCard=(el,x,y)=>{const w=Math.min(el.offsetWidth||300,window.innerWidth),h=Math.min(el.offsetHeight||40,window.innerHeight);x=Math.max(0,Math.min(window.innerWidth-w,x));y=Math.max(0,Math.min(window.innerHeight-h,y));el.style.left=`${Math.round(x)}px`;el.style.top=`${Math.round(y)}px`;return {x,y};};
+  // v2.5.355 width follows the card's state: the collapsed › keeps its own CSS size; an open card gets its normal
+  // width (screen − 10 px, as when it is not moved). 2.5.354 froze the width at drag time, so a card dragged while
+  // collapsed opened 28 px wide (user's screenshot 2026-10-24).
+  const pinCard=(el,pos)=>{const collapsed=el.classList.contains('scm-go-collapsed');el.style.width=collapsed?'':`${Math.max(0,Math.round(window.innerWidth-10))}px`;el.style.right='auto';el.dataset.scmMoved='1';placeCard(el,pos.x,pos.y);};
   const unpinCard=el=>{delete el.dataset.scmMoved;el.style.width='';el.style.right='';el.style.left='';};
   (()=>{
     let d=null,lastTap={id:'',t:0};
@@ -1504,7 +1508,7 @@ let hookReady = false;
       if(x.moved){try{localStorage.setItem('scmCardPos:'+x.id,JSON.stringify({x:x.card.offsetLeft,y:x.card.offsetTop}));}catch{}const stop=ev=>{ev.stopPropagation();ev.preventDefault();};document.addEventListener('click',stop,{capture:true,once:true});setTimeout(()=>document.removeEventListener('click',stop,true),400);return;}
       if(e?.target?.closest?.('button'))return;const now=Date.now();if(lastTap.id===x.id&&now-lastTap.t<350){try{localStorage.removeItem('scmCardPos:'+x.id);}catch{}unpinCard(x.card);schedulePosition();lastTap={id:'',t:0};}else lastTap={id:x.id,t:now};};
     document.addEventListener('pointerup',end,true);document.addEventListener('pointercancel',end,true);
-    window.addEventListener('resize',()=>{for(const id of DRAG_CARDS){const el=document.getElementById(id);if(el?.dataset.scmMoved)placeCard(el,el.offsetLeft,el.offsetTop);}},{passive:true});
+    window.addEventListener('resize',()=>{for(const id of DRAG_CARDS){const el=document.getElementById(id);if(el?.dataset.scmMoved)pinCard(el,{x:el.offsetLeft,y:el.offsetTop});}},{passive:true});
   })();
   const position=()=>{
     // cards you moved stay where you put them; the others stack under the game's header as before
