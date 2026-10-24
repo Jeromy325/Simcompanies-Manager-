@@ -1,3 +1,8 @@
+2.5.356 — 2026-10-24 — Game-page monitor: buttons no longer cover the data
+- Your screenshots: when expanded, the − × column stretched the full height and squeezed the list; the status line
+  was cut off ("last game …"). Now: one header row (grip · status · − ×), the list below at full width, and the
+  status wraps so all of it is visible. Up to 420 px wide (screen − 16 px on phones).
+
 2.5.355 — 2026-10-24 — Stock card opens at full width after being moved
 - Your screenshot: after dragging the collapsed › button, Stock After Demand & Contracts opened as a 28 px wide,
   tall strip. 2.5.354 froze the card width at drag time. The width now follows the card's state (collapsed = the

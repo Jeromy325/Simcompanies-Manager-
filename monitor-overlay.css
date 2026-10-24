@@ -35,3 +35,14 @@
 #scmMonitor .lu-text{white-space:nowrap}
 #scmMonitor .scm-monitor-ctrl{align-self:stretch;height:auto;min-height:34px}
 #scmMonitor .scm-monitor-ctrl button{height:auto;min-height:32px}
+/* v2.5.356 layout: one header row (grip · status · − ×) and the list below at full width, so the buttons never
+   cover the data; the status wraps instead of being cut off (user's screenshots 2026-10-24 10:28). */
+#scmMonitor{display:grid;grid-template-columns:26px minmax(0,1fr) auto;grid-template-rows:auto auto;align-items:stretch;width:min(420px,calc(100vw - 16px))}
+#scmMonitor .scm-monitor-body{display:contents}
+#scmMonitor .scm-monitor-grip{grid-column:1;grid-row:1;align-self:stretch}
+#scmMonitor .lu-bar{grid-column:2;grid-row:1;min-width:0;height:100%}
+#scmMonitor .lu-text{white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}
+#scmMonitor .scm-monitor-ctrl{grid-column:3;grid-row:1;align-self:stretch;height:auto}
+#scmMonitor .lu-panel{grid-column:1/-1;grid-row:2;margin-top:4px;min-width:0}
+#scmMonitor .scm-monitor-mini{grid-column:2;grid-row:1}
+#scmMonitor.is-mini{display:inline-grid;grid-template-columns:22px auto;width:auto}

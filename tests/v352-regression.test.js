@@ -7,7 +7,7 @@ const vm = require('vm');
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
 const manifest = JSON.parse(read('manifest.json'));
-assert.equal(manifest.version, '2.5.355');
+assert.equal(manifest.version, '2.5.356');
 const bg = read('background.js');
 
 (async () => {
