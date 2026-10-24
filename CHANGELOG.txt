@@ -1,3 +1,8 @@
+2.5.346 — 2026-10-23 — Compact saved-contract cards
+- Phone layout for Saved Contracts: product and total on the first line, then company · direction, qty · Q · price,
+  market · discount · Edit/Delete. The price no longer sits unlabelled on top of the total, and the buttons are
+  small and side by side (was: stacked in the middle column). Desktop table unchanged.
+
 2.5.345 — 2026-10-23 — Audit fixes: realm mix-up, slow Sync, overlay demand, game recipes
 - R2 overlay in R1 / data in the wrong realm: the game loads auth-data, buildings and warehouse in parallel and
   the realm isn't in the URL. Responses that arrived before auth-data were filed under the last-synced realm (R1
