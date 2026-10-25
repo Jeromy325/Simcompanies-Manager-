@@ -2954,6 +2954,80 @@ const ACCOUNTING_DAY_WALK_ALARM_PREFIX='scm-accounting-day-walk-r';
 const ACCOUNTING_DAY_WALK_DAYS=7;
 const ACCOUNTING_DAY_WALK_WAIT_MS=45000;
 const accountingDayWalkRunning=new Set();
+// v2.5.371 Daily scheduled Accounting walk (user setting scmAccountingWalkSchedule {enabled, offsetMin, realm}).
+// Runs offsetMin after the time the game last finished the daily statements (the captured current income
+// statement's `date`), so it follows the game's rollover (and daylight-saving changes) instead of a fixed clock.
+const ACCOUNTING_WALK_DAILY_ALARM='scm-accounting-walk-daily';
+const ACCOUNTING_WALK_RETRY_MS=15*60*1000;
+const ACCOUNTING_WALK_MAX_ATTEMPTS=4;
+const ACCOUNTING_WALK_DEFAULT_OFFSET_MIN=30;
+function accountingWalkOffset(v){const n=Math.round(Number(v));return Number.isFinite(n)?Math.min(240,Math.max(5,n)):ACCOUNTING_WALK_DEFAULT_OFFSET_MIN;}
+async function readAccountingWalkSchedule(){
+  const v=(await chrome.storage.local.get({scmAccountingWalkSchedule:null})).scmAccountingWalkSchedule;
+  return {enabled:false,offsetMin:ACCOUNTING_WALK_DEFAULT_OFFSET_MIN,realm:null,...(v&&typeof v==='object'?v:{})};
+}
+async function writeAccountingWalkSchedule(patch){
+  const cur=await readAccountingWalkSchedule();
+  const next={...cur,...patch,updatedAt:new Date().toISOString()};
+  await chrome.storage.local.set({scmAccountingWalkSchedule:next});
+  return next;
+}
+// End time of the last completed game day for this realm (current income statement `date`), or null.
+async function accountingStatementsReadyAt(realm){
+  const n=validRealmNumber(realm); if(n==null)return null;
+  const st=(await chrome.storage.local.get({[`scmRealmStore:${n}`]:null}))[`scmRealmStore:${n}`]||{};
+  let best=null;
+  for(const p of ['/api/v2/companies/me/income-statement/','/api/v2/companies/me/income-statement/day/0/']){
+    const it=st.endpointData?.[p]; if(!it||validRealmNumber(it.captureRealm)!==n)continue;
+    const t=Date.parse(String(it.data?.date||'').replace(' ','T')); if(Number.isFinite(t)&&(best==null||t>best))best=t;
+  }
+  return best;
+}
+function nextAccountingWalkAt(readyAtMs,offsetMin,now=Date.now()){
+  if(!Number.isFinite(readyAtMs))return null;
+  let t=readyAtMs+accountingWalkOffset(offsetMin)*60000;
+  while(t<=now)t+=86400000;
+  return t;
+}
+async function ensureAccountingWalkSchedule(reason='ensure'){
+  const sch=await readAccountingWalkSchedule();
+  if(!sch.enabled||validRealmNumber(sch.realm)==null){await chrome.alarms.clear(ACCOUNTING_WALK_DAILY_ALARM).catch(()=>{});if(sch.nextAt)await writeAccountingWalkSchedule({nextAt:null});return {ok:true,enabled:false,reason};}
+  // a pending retry keeps its own time
+  if(sch.retryAt&&Date.parse(sch.retryAt)>Date.now()){await chrome.alarms.create(ACCOUNTING_WALK_DAILY_ALARM,{when:Date.parse(sch.retryAt)});return {ok:true,enabled:true,nextAt:sch.retryAt,retry:true,reason};}
+  const ready=await accountingStatementsReadyAt(sch.realm);
+  const at=nextAccountingWalkAt(ready,sch.offsetMin);
+  if(at==null){await chrome.alarms.clear(ACCOUNTING_WALK_DAILY_ALARM).catch(()=>{});await writeAccountingWalkSchedule({nextAt:null,waitingFor:'statement-time'});return {ok:false,enabled:true,error:'Sync once so the Manager knows when the game finishes your statements.',reason};}
+  await chrome.alarms.create(ACCOUNTING_WALK_DAILY_ALARM,{when:at});
+  await writeAccountingWalkSchedule({nextAt:new Date(at).toISOString(),readyAt:new Date(ready).toISOString(),waitingFor:null});
+  return {ok:true,enabled:true,nextAt:new Date(at).toISOString(),reason};
+}
+async function runScheduledAccountingWalk(trigger='alarm'){
+  const sch=await readAccountingWalkSchedule();
+  const realm=validRealmNumber(sch.realm);
+  if((!sch.enabled&&trigger==='alarm')||realm==null)return {ok:false,skipped:true};
+  if(syncSessionForRealm(realm)||accountingDayWalkRunning.has(realm)){await chrome.alarms.create(ACCOUNTING_WALK_DAILY_ALARM,{when:Date.now()+60000});return {ok:false,busy:true};}
+  const before=await accountingStatementsReadyAt(realm);
+  const attempt=(Number(sch.attempt)||0)+1;
+  // Current statements + past finances through the game tab (same 7 Accounting requests as Sync), then the page walk.
+  const refresh=await refreshAccountingForRealm(realm,{force:true,reason:`scheduled-walk:${trigger}`}).catch(e=>({ok:false,error:e?.message||String(e)}));
+  const after=await accountingStatementsReadyAt(realm);
+  const expected=Number.isFinite(Date.parse(sch.nextAt||''))?Date.parse(sch.nextAt)-accountingWalkOffset(sch.offsetMin)*60000:null;
+  // The game has not finished today's statements yet (or no game tab): try again later, a few times.
+  const rolled=after!=null&&(before==null||after>before||(expected!=null&&after>=expected-2*3600000));
+  let walk=null;
+  if(refresh?.ok&&rolled||trigger==='manual')walk=await runAccountingDayWalk(realm,`scheduled:${trigger}`).catch(e=>({ok:false,error:e?.message||String(e)}));
+  const okRun=walk&&walk.ok&&walk.status!=='failed';
+  const result={at:new Date().toISOString(),trigger,attempt,refresh:refresh?.ok?'ok':(refresh?.error||'failed'),rolledOver:rolled,walk:walk?walk.status:null,captured:walk?.captured??null,error:okRun?null:(walk?.error||refresh?.error||(rolled?null:'Statements not updated yet'))};
+  if(!okRun&&trigger==='alarm'&&attempt<ACCOUNTING_WALK_MAX_ATTEMPTS){
+    const retryAt=new Date(Date.now()+ACCOUNTING_WALK_RETRY_MS).toISOString();
+    await writeAccountingWalkSchedule({attempt,retryAt,nextAt:retryAt,lastResult:result});
+    await chrome.alarms.create(ACCOUNTING_WALK_DAILY_ALARM,{when:Date.parse(retryAt)});
+    return {ok:false,retryAt,...result};
+  }
+  await writeAccountingWalkSchedule({attempt:0,retryAt:null,lastResult:result});
+  await ensureAccountingWalkSchedule('after-run');
+  return {ok:okRun,...result};
+}
 const ACCOUNTING_WEEK_REFRESH_RETRY_MS=30000;
 const accountingWeekRefreshPromises=new Map();
 const SYNC_STEP_YIELD_MS=350;
@@ -4504,7 +4578,7 @@ async function runCriticalDataGuard(reason='scheduled'){
   return {ok:true,reason,report};
 }
 
-const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX,ACCOUNTING_DAY_WALK_ALARM_PREFIX];
+const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX,ACCOUNTING_DAY_WALK_ALARM_PREFIX,ACCOUNTING_WALK_DAILY_ALARM];
 // v2.5.345 Chrome drops an extension's alarms when it is updated (and may on a browser restart), so the alarms that
 // carry your state are re-created from storage: building reminders (buildingAlarms) and batch-finished alerts
 // (from the stored buildings). Storage reads + alarm calls only, no network, no lock.
@@ -4550,6 +4624,7 @@ chrome.runtime.onInstalled.addListener(async()=>{
   await ensureVwapWatchAlarm('installed');
   await chrome.alarms.create('scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080});
   await restorePersistedAlarms('installed').catch(()=>{});
+  await ensureAccountingWalkSchedule('installed').catch(()=>{});
   syncAllResourceImages({forceValidate:false}).catch(()=>{});
   const installRealmState=await state();
   const installRealm=validRealmNumber(installRealmState.activeRealmKey?.replace(/^realm:/,'')??installRealmState.selectedRealm??installRealmState.authData?.authCompany?.realmId);
@@ -4559,6 +4634,7 @@ chrome.runtime.onInstalled.addListener(async()=>{
 chrome.runtime.onStartup.addListener(async()=>{
   await ensureLiveMarketRefreshAlarm('service-worker-startup');
   await restorePersistedAlarms('browser-startup').catch(()=>{});
+  await ensureAccountingWalkSchedule('browser-startup').catch(()=>{});
   await recoverInterruptedSyncJobs('service-worker-startup');
   await ensureVwapWatchAlarm('service-worker-startup');
   await ensureCriticalDataGuard('startup');
@@ -4630,6 +4706,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
     return;
   }
 
+  if(a?.name===ACCOUNTING_WALK_DAILY_ALARM){await runScheduledAccountingWalk('alarm').catch(()=>{});return;}
   const dayWalkMatch=String(a?.name||'').match(/^scm-accounting-day-walk-r([01])$/);
   if(dayWalkMatch){
     const realm=Number(dayWalkMatch[1]);
@@ -5562,6 +5639,7 @@ async function syncNow(requestedRealm=null){
       trace('accounting-week-ledger-scheduled',{realm:selected,...ledgerSchedule});
       const dayWalk=await scheduleAccountingDayWalk(selected,4000).catch(e=>({ok:false,error:e?.message||String(e)}));
       trace('accounting-day-walk-scheduled',{realm:selected,...dayWalk});
+      ensureAccountingWalkSchedule('after-sync').catch(()=>{});
     }
     if(requiredOk){
       // Final realm-local commit: the selected realm store is authoritative.
@@ -6162,6 +6240,8 @@ async function requestJavascriptDiagnostic(send){
 replayEvent('runtime-start',{buildVersion:BUILD_VERSION,activeRealmKey:null});
 
 chrome.runtime.onMessage.addListener((m,sender,send)=>{
+  if(m?.type==='SET_ACCOUNTING_WALK_SCHEDULE'){(async()=>{const realm=validRealmNumber(m.realm);const patch={enabled:Boolean(m.enabled),offsetMin:accountingWalkOffset(m.offsetMin),attempt:0,retryAt:null};if(realm!=null)patch.realm=realm;await writeAccountingWalkSchedule(patch);const r=await ensureAccountingWalkSchedule('user');return {...r,schedule:await readAccountingWalkSchedule()};})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
+  if(m?.type==='RUN_ACCOUNTING_WALK_NOW'){(async()=>{const realm=validRealmNumber(m.realm);if(realm!=null)await writeAccountingWalkSchedule({realm});return runScheduledAccountingWalk('manual');})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_MOBILE_NET_START'){scmMobileNetStart(Number(m.tabId)).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_MOBILE_NET_STOP'){scmMobileNetStop().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_NET3_START'){scmNetStart(Number(m.tabId)).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}

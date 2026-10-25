@@ -3,7 +3,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.370');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.371');
 const css = read('monitor-overlay.css'), tail = css.slice(css.indexOf('v2.5.356'));
 assert.ok(tail.includes('#scmMonitor .lu-panel{grid-column:1/-1;grid-row:2'), 'list spans the whole card, under the buttons');
 assert.ok(tail.includes('#scmMonitor .scm-monitor-ctrl{grid-column:3;grid-row:1'), '− × stay in the header row');

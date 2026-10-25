@@ -8,7 +8,7 @@ const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const C = require('../tools-core.js');
 require('../planner-core.js'); const P = globalThis.SCMPlannerCore;
 const manifest = JSON.parse(read('manifest.json'));
-assert.equal(manifest.version, '2.5.370');
+assert.equal(manifest.version, '2.5.371');
 const bg = read('background.js'), dash = read('dashboard.js'), hook = read('page-hook.js'), content = read('content.js');
 const fx = JSON.parse(read('tests/fixtures/game-constants-recipes-2026-10-23.json'));
 const gc = { core: fx.core, buildings: fx.buildings, resources: fx.resources, at: '2026-10-23T20:00:00Z' };
@@ -192,6 +192,6 @@ assert.ok(bg.includes('buildingName:b?.name?String(b.name):null') && dash.includ
     assert.equal(r.production.length, 1, 'batch alarms rescheduled from stored buildings');
     console.log('v345-regression alarms ok');
   }).catch(e => { console.error(e); process.exit(1); });
-  assert.ok(bg.includes("const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX,ACCOUNTING_DAY_WALK_ALARM_PREFIX];"));
+  assert.ok(bg.includes("const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX,ACCOUNTING_DAY_WALK_ALARM_PREFIX,ACCOUNTING_WALK_DAILY_ALARM];"));
 }
 console.log('v345-regression ok');

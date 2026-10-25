@@ -1659,6 +1659,48 @@ function accountingComparisonBase(a){
   if(p&&a?.sourceType!=='income-statement'&&p.cashIn!=null)return {...p,revenue:p.cashIn};
   return p;
 }
+// v2.5.371 Daily scheduled Accounting walk: on/off, minutes after the game finishes your statements, Run now.
+function accountingWalkScheduleHtml(sch,walk,realm){
+  const when=v=>{const d=new Date(v);return v&&Number.isFinite(d.getTime())?d.toLocaleString(undefined,{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'—';};
+  const time=v=>{const d=new Date(v);return v&&Number.isFinite(d.getTime())?d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}):'—';};
+  const on=Boolean(sch?.enabled), off=Number(sch?.offsetMin)||30, r=sch?.realm!=null?Number(sch.realm):realm;
+  const other=on&&r!=null&&realm!=null&&r!==realm;
+  const lr=sch?.lastResult;
+  const last=lr?`${escapeHtml(when(lr.at))} · ${lr.error?escapeHtml(lr.error):`${Number(lr.captured)||0}/7 days read`}${lr.attempt>1?` (try ${Number(lr.attempt)})`:''}`:'Not run yet';
+  const next=on?(sch?.nextAt?`${escapeHtml(when(sch.nextAt))}${sch?.retryAt?' (retry: statements not ready yet)':''}`:(sch?.waitingFor==='statement-time'?'Sync once first so the Manager knows when the game finishes your statements.':'—')):'Off';
+  return `<div class="acct-walk-settings">
+<label class="acct-walk-toggle"><input type="checkbox" id="acctWalkEnabled" ${on?'checked':''}> Run every day</label>
+<label class="acct-walk-offset">Minutes after the game finishes your statements <input type="number" id="acctWalkOffset" min="5" max="240" step="5" value="${off}" inputmode="numeric"></label>
+<div class="acct-walk-lines"><div><span>Statements last ready</span><strong>${escapeHtml(time(sch?.readyAt))}</strong></div><div><span>Next walk</span><strong>${next}</strong></div><div><span>Last walk</span><strong>${last}</strong></div>${other?`<div class="warn">Scheduled for ${escapeHtml(realmName(r))}.</div>`:''}</div>
+<div class="acct-walk-actions"><button id="acctWalkRunNow" type="button">Run now</button><span id="acctWalkMsg" class="muted">${escapeHtml(accountingWalkMsg)}</span></div>
+<p class="muted">Keep the Sim Companies tab open. At the set time the Manager refreshes Accounting through the game tab and taps Day 0–6. If the game has not finished your statements yet it tries again every 15 min (4 tries).</p></div>`;
+}
+async function renderAccountingWalkSchedule(s){
+  const el=document.querySelector('#accountingWalkSchedule'); if(!el)return;
+  if(el.contains(document.activeElement)&&document.activeElement?.id==='acctWalkOffset')return;
+  let sch=null; try{sch=(await chrome.storage.local.get({scmAccountingWalkSchedule:null})).scmAccountingWalkSchedule;}catch{}
+  const realm=Number.isFinite(Number(s?.viewRealm))?Number(s.viewRealm):null;
+  el.innerHTML=accountingWalkScheduleHtml(sch||{},null,realm);
+}
+function accountingWalkRealm(){const s=window.__scmState||{};const r=Number(s.viewRealm??s.selectedRealm);return Number.isFinite(r)?r:null;}
+let accountingWalkMsg='';
+function setAccountingWalkMsg(t){accountingWalkMsg=String(t||'');const m=document.querySelector('#acctWalkMsg');if(m)m.textContent=accountingWalkMsg;}
+async function saveAccountingWalkSchedule(){
+  const en=document.querySelector('#acctWalkEnabled'), of=document.querySelector('#acctWalkOffset');
+  if(!en||!of)return;
+  try{const r=await chrome.runtime.sendMessage({type:'SET_ACCOUNTING_WALK_SCHEDULE',enabled:en.checked,offsetMin:Number(of.value),realm:accountingWalkRealm()});setAccountingWalkMsg(r?.error||(en.checked?'Saved.':'Turned off.'));}
+  catch(e){setAccountingWalkMsg(e?.message||String(e));}
+  document.activeElement?.blur?.(); renderAccountingWalkSchedule(window.__scmState||{});
+}
+document.addEventListener('change',e=>{if(e.target?.id==='acctWalkEnabled'||e.target?.id==='acctWalkOffset')saveAccountingWalkSchedule();});
+document.addEventListener('click',async e=>{
+  if(e.target?.id!=='acctWalkRunNow')return;
+  e.target.disabled=true; setAccountingWalkMsg('Walking the game Accounting page…');
+  try{const r=await chrome.runtime.sendMessage({type:'RUN_ACCOUNTING_WALK_NOW',realm:accountingWalkRealm()});setAccountingWalkMsg(r?.error?r.error:`${Number(r?.captured)||0}/7 days read.`);}
+  catch(err){setAccountingWalkMsg(err?.message||String(err));}
+  finally{renderAccountingWalkSchedule(window.__scmState||{});}
+});
+scmOnStorageChanged((ch,area)=>{if(area==='local'&&ch.scmAccountingWalkSchedule)renderAccountingWalkSchedule(window.__scmState||{});});
 function accountingHistoryTable(history,walk=null){
   const rows=(Array.isArray(history)?history:[]).filter(r=>r.profit!=null||r.assets!=null).slice(-7).reverse();
   if(!rows.length)return '<p class="muted">No daily history captured yet. Open Accounting in the game once, then Sync.</p>';
@@ -3272,7 +3314,7 @@ function render(s){
    $('#accountingLiveStatus').textContent=latestTime
      ?`Last updated: ${new Date(latestTime).toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'})}`
      :'Waiting for latest financial response';
-} if($('#accountingOverview'))$('#accountingOverview').innerHTML=accountingOverview(accountingDisplay,accountingPeriodView==='current'?accountingComparisonBase(a):null); if($('#accountingHistory')){$('#accountingHistory').innerHTML=accountingHistoryTable(a.history,(viewStore||s)?.accountingDayWalkStatus||null);scmApplyCollapse($('#accountingHistory'));} if($('#accountingBalanceSummary'))$('#accountingBalanceSummary').innerHTML=`<div class="overview-stat-grid accounting-balance-summary"><div class="overview-stat-card"><span>Cash</span><strong>${money(a.cash)}</strong></div><div class="overview-stat-card"><span>Accounts Receivable</span><strong>${money(a.accountsReceivable)}</strong></div><div class="overview-stat-card"><span>Inventory</span><strong>${money(a.inventory)}</strong></div><div class="overview-stat-card"><span>Current Assets</span><strong>${money(a.currentAssets)}</strong></div><div class="overview-stat-card"><span>Accounts Payable</span><strong>${money(a.accountsPayable)}</strong></div><div class="overview-stat-card"><span>Bonds Payable</span><strong>${money(a.bondsPayable)}</strong></div><div class="overview-stat-card"><span>Current Liabilities</span><strong>${money(a.currentLiabilities)}</strong></div><div class="overview-stat-card"><span>Total Assets</span><strong>${money(a.assets)}</strong></div><div class="overview-stat-card"><span>Total Liabilities</span><strong>${money(a.liabilities)}</strong></div></div>`; if($('#accountingCashflowSummary'))$('#accountingCashflowSummary').innerHTML=accountingCashflowSummary(a.source?.cf); if($('#accountingIncomeStatement'))$('#accountingIncomeStatement').innerHTML=accountingIncomeStatement(a.source?.income); if($('#balanceDetails'))$('#balanceDetails').innerHTML=buildBalanceSections(a.source?.bs); if($('#accountingRatios'))$('#accountingRatios').innerHTML=accountingFinancialRatios(a.source?.income,a.source?.bs);
+} if($('#accountingOverview'))$('#accountingOverview').innerHTML=accountingOverview(accountingDisplay,accountingPeriodView==='current'?accountingComparisonBase(a):null); if($('#accountingHistory')){$('#accountingHistory').innerHTML=accountingHistoryTable(a.history,(viewStore||s)?.accountingDayWalkStatus||null);renderAccountingWalkSchedule(s);scmApplyCollapse($('#accountingHistory'));} if($('#accountingBalanceSummary'))$('#accountingBalanceSummary').innerHTML=`<div class="overview-stat-grid accounting-balance-summary"><div class="overview-stat-card"><span>Cash</span><strong>${money(a.cash)}</strong></div><div class="overview-stat-card"><span>Accounts Receivable</span><strong>${money(a.accountsReceivable)}</strong></div><div class="overview-stat-card"><span>Inventory</span><strong>${money(a.inventory)}</strong></div><div class="overview-stat-card"><span>Current Assets</span><strong>${money(a.currentAssets)}</strong></div><div class="overview-stat-card"><span>Accounts Payable</span><strong>${money(a.accountsPayable)}</strong></div><div class="overview-stat-card"><span>Bonds Payable</span><strong>${money(a.bondsPayable)}</strong></div><div class="overview-stat-card"><span>Current Liabilities</span><strong>${money(a.currentLiabilities)}</strong></div><div class="overview-stat-card"><span>Total Assets</span><strong>${money(a.assets)}</strong></div><div class="overview-stat-card"><span>Total Liabilities</span><strong>${money(a.liabilities)}</strong></div></div>`; if($('#accountingCashflowSummary'))$('#accountingCashflowSummary').innerHTML=accountingCashflowSummary(a.source?.cf); if($('#accountingIncomeStatement'))$('#accountingIncomeStatement').innerHTML=accountingIncomeStatement(a.source?.income); if($('#balanceDetails'))$('#balanceDetails').innerHTML=buildBalanceSections(a.source?.bs); if($('#accountingRatios'))$('#accountingRatios').innerHTML=accountingFinancialRatios(a.source?.income,a.source?.bs);
  renderWarehouseMarketTimestamp(s); try{renderWarehouseRunOut(s);}catch(e){console.error('Run-out render failed',e);} const inventoryRowsEl=$('#inventoryRows'); if(inventoryRowsEl) inventoryRowsEl.innerHTML=rows.length?rows.map(r=>{const marketPrice=cachedMarketPrice(s,r._id,r._quality);const margin=marketPrice!=null&&r._unitCost>0?(marketPrice-r._unitCost)/r._unitCost*100:null;const ri=resourceInfo(r,s);const imgs=ri.imageCandidates||[];const localImage=s.resourceImageCache?.[String(r._id)]||s.resourceImageData?.[String(r._id)]||null;if(!localImage) requestResourceImage(r._id);const srcs=localImage?[localImage,...imgs]:imgs;const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(JSON.stringify(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';const activeCost=activeProductionCostCells(s,r);return `<tr data-warehouse-key="${Number(r._id)}:${Number(r._quality)}"><td><div class="product-cell">${img}<span><strong>${resourceName(r,s)}</strong><small>#${r._id}</small></span></div>${warehouseHeadCost(r)}</td><td>${num(r._qty)}</td><td>${r._quality??'—'}</td><td>${r._unitCost==null?'—':money(r._unitCost)}</td><td>${activeCost.costHtml}</td><td>${activeCost.diffHtml}</td><td data-cell="prod-cost-history">${productionCostHistoryCell(s,r)}</td><td><span class="cell-stack">${marketPrice==null?'—':money(marketPrice)}<small class="market-source">${marketPrice==null?'Market price not captured':'Current market price'}</small></span></td><td class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td></tr>`}).join(''):'<tr><td colspan="9">No warehouse data captured.</td></tr>';
  if(activeTab==='overview'&&$('#cashflowDetails'))$('#cashflowDetails').innerHTML=buildCashflowSections(a.source?.cf,a.source?.recent); if(activeTab==='market'){ renderLiveMarketProduct(s); renderMarketHistory(s); renderMarketAlerts(s); } if(activeTab==='production') renderBuildingPlanner(s);
  renderVwapDiagnostics(s);

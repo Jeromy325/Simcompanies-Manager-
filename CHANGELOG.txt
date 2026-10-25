@@ -1,3 +1,12 @@
+2.5.371 — 2026-10-25 — Accounting: daily scheduled statement walk (on/off, adjustable)
+- New "Daily statement walk" panel on the Accounting tab: Run every day (on/off), minutes after the game finishes
+  your statements (5–240, default 30), statements last ready, next walk, last walk, Run now.
+- The time follows the game: it is taken from the captured statement time (8:21 PM on 10/24), so a later rollover
+  or the daylight-saving change on Nov 1 moves it automatically after the next Sync/walk.
+- At the set time: the 7 Accounting requests through the game tab (as in Sync), then the Day 0–6 page walk. If the
+  game has not finished the statements yet (or no game tab), it retries every 15 min, 4 tries, then waits a day.
+- Off by default. Survives updates/restarts (re-created from the setting).
+
 2.5.370 — 2026-10-25 — Accounting: Sync walks the game's Day 0–6 statements; Last 7 days
 - After a successful Sync, the Manager taps Accounting → Day → days 0–6 on the game tab (the game's own page, no
   direct API calls). A day counts only when the game's /income-statement/day/<n>/ response is captured for that
