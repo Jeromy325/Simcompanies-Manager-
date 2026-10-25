@@ -1106,7 +1106,10 @@ function scmAccountingSignature(store){
   const summarizeComputed=x=>x&&typeof x==='object'?{captureRealm:x.captureRealm??null,receivedAt:x.receivedAt??null,isComputed:x.data?.isComputed??null,date:x.data?.date??null,dateFrom:x.data?.dateFrom??null}:{value:x??null};
   const weekSummary=store?.accountingWeekSalesSummary&&typeof store.accountingWeekSalesSummary==='object'?{rangeStart:store.accountingWeekSalesSummary.rangeStart??null,rangeEnd:store.accountingWeekSalesSummary.rangeEnd??null,transactionCount:store.accountingWeekSalesSummary.transactionCount??0,updatedAt:store.accountingWeekSalesSummary.updatedAt??null}:{};
   const weekStatus=store?.accountingWeekLedgerStatus&&typeof store.accountingWeekLedgerStatus==='object'?{status:store.accountingWeekLedgerStatus.status??null,updatedAt:store.accountingWeekLedgerStatus.updatedAt??null,completedAt:store.accountingWeekLedgerStatus.completedAt??null,rows:store.accountingWeekLedgerStatus.rows??null,pages:store.accountingWeekLedgerStatus.pages??null}:{};
-  return JSON.stringify({entries,supplemental:supplementalSig,lastComputed:summarizeComputed(store?.accountingLastComputed),lastComputedIncome:summarizeComputed(store?.accountingLastComputedIncome),accountingWeekRevision:Number(store?.accountingWeekRevision)||0,weekSummary,weekStatus});
+  // 2.5.373: the day-walk status drives the Last 7 days note; without it a walk finishing after the tab rendered never showed.
+  const dw=store?.accountingDayWalkStatus&&typeof store.accountingDayWalkStatus==='object'?store.accountingDayWalkStatus:null;
+  const dayWalk=dw?{status:dw.status??null,updatedAt:dw.updatedAt??null,finishedAt:dw.finishedAt??null,captured:dw.captured??null}:{};
+  return JSON.stringify({entries,supplemental:supplementalSig,lastComputed:summarizeComputed(store?.accountingLastComputed),lastComputedIncome:summarizeComputed(store?.accountingLastComputedIncome),accountingWeekRevision:Number(store?.accountingWeekRevision)||0,weekSummary,weekStatus,dayWalk});
 }
 function realmSnapshotStore(s){
   const key=snapshotRealmKey(s);

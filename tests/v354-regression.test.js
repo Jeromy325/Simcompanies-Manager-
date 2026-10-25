@@ -3,7 +3,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.372');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.373');
 const lu = read('live-updates.js'), css = read('monitor-overlay.css'), cs = read('content.js');
 // 2.5.361: × collapses to the dot (the − button is gone); the game page reads the mode with its 3 s poll (no storage listener)
 assert.ok(lu.includes('scm-monitor-hide') && lu.includes('scm-monitor-mini') && !lu.includes('scm-monitor-min"'), '× / dot');
