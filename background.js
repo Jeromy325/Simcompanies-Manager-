@@ -227,7 +227,7 @@ const REALM_SCOPED_KEYS = Object.freeze([
   'accountingWeekSales','accountingWeekSalesSummary','accountingWeekRevision','vwapData','vwapWatch','vwapStatus',
   'realmQuarantine','productionEvents','productionRateSnapshots','productionPlans','frozenNetworkPlan',
   'productionRunHours','gameOverlaySnapshot','javascriptDiagnostic','javascriptDiagnosticHistory',
-  'buildingAlarms','productionEventMonitor','accountingWeekLedgerStatus','activeRealmIdentity','realmIsolationNote','vwapLegacyDiscarded',
+  'buildingAlarms','productionEventMonitor','accountingWeekLedgerStatus','accountingDayWalkStatus','activeRealmIdentity','realmIsolationNote','vwapLegacyDiscarded',
   'gameLocalStorageSnapshot','criticalDataBaseline'
 ]);
 
@@ -2043,6 +2043,7 @@ function defaultRealmValue(key){
   if(key==='marketQueueStatus') return {...DEFAULTS.marketQueueStatus};
   if(key==='buildingAlarms'||key==='productionEventMonitor'||key==='resourceImageCacheStatus') return {};
   if(key==='accountingWeekLedgerStatus') return null;
+  if(key==='accountingDayWalkStatus') return null;
   if(key==='accountingWeekRevision') return 0;
   if(key==='vwapLegacyDiscarded') return false;
   if(key==='productionRunHours') return 24;
@@ -2946,6 +2947,13 @@ const ACCOUNTING_SYNC_PATHS=[
 const ACCOUNTING_REFRESH_MAX_AGE_MS=5*60*1000;
 const ACCOUNTING_REFRESH_CONCURRENCY=4;
 const ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX='scm-accounting-week-refresh-r';
+// v2.5.370 After Sync, walk the game's Accounting page: Day → day buttons 0–6 (the game offers 0–13). Each tap counts
+// only when the game's own /income-statement/day/<n>/ response is captured for this realm. Buttons are found by the
+// page structure (period bar = <label> + 4 mode buttons + 14 day buttons), never by their text (dates are locale text).
+const ACCOUNTING_DAY_WALK_ALARM_PREFIX='scm-accounting-day-walk-r';
+const ACCOUNTING_DAY_WALK_DAYS=7;
+const ACCOUNTING_DAY_WALK_WAIT_MS=45000;
+const accountingDayWalkRunning=new Set();
 const ACCOUNTING_WEEK_REFRESH_RETRY_MS=30000;
 const accountingWeekRefreshPromises=new Map();
 const SYNC_STEP_YIELD_MS=350;
@@ -4496,7 +4504,7 @@ async function runCriticalDataGuard(reason='scheduled'){
   return {ok:true,reason,report};
 }
 
-const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX];
+const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX,ACCOUNTING_DAY_WALK_ALARM_PREFIX];
 // v2.5.345 Chrome drops an extension's alarms when it is updated (and may on a browser restart), so the alarms that
 // carry your state are re-created from storage: building reminders (buildingAlarms) and batch-finished alerts
 // (from the stored buildings). Storage reads + alarm calls only, no network, no lock.
@@ -4510,6 +4518,9 @@ async function restorePersistedAlarms(reason='restore'){
         const name=`scm-building-${n}-${bid}`;if(!(await chrome.alarms.get(name))){await chrome.alarms.create(name,{when});out.buildingReminders++;}
       }
       if(Array.isArray(st.buildings)&&st.buildings.length)out.production.push(await scheduleProductionFinishAlarms(n,st.buildings));
+      // v2.5.370 a scheduled / interrupted Accounting day walk survives an update or restart.
+      const walk=st.accountingDayWalkStatus;
+      if(walk&&(walk.status==='scheduled'||walk.status==='running')){const name=`${ACCOUNTING_DAY_WALK_ALARM_PREFIX}${n}`;if(!(await chrome.alarms.get(name))){await chrome.alarms.create(name,{when:Date.now()+15000});out.accountingDayWalk=(out.accountingDayWalk||0)+1;}}
     }catch(e){out.error=e?.message||String(e);}
   }
   return out;
@@ -4619,6 +4630,13 @@ chrome.alarms.onAlarm.addListener(async a=>{
     return;
   }
 
+  const dayWalkMatch=String(a?.name||'').match(/^scm-accounting-day-walk-r([01])$/);
+  if(dayWalkMatch){
+    const realm=Number(dayWalkMatch[1]);
+    if(syncSessionForRealm(realm)){await chrome.alarms.create(a.name,{when:Date.now()+5000}).catch(()=>{});return;}
+    await runAccountingDayWalk(realm,'after-sync').catch(()=>{});
+    return;
+  }
   const accountingWeekMatch=String(a?.name||'').match(/^scm-accounting-week-refresh-r([01])$/);
   if(accountingWeekMatch){
     const realm=Number(accountingWeekMatch[1]);
@@ -4836,6 +4854,96 @@ async function setAccountingWeekLedgerStatus(realm,status,error=null,extra={}){
     if(s.activeRealmKey===key)patch.accountingWeekLedgerStatus=value;
     await storageSet(patch);
   });
+}
+async function setAccountingDayWalkStatus(realm,value){
+  const n=validRealmNumber(realm); if(n==null)return;
+  const key=realmKeyFromRealm(n);
+  return withRealmWriteLock(n,async()=>{
+    const s=await state(n);
+    const stores={...(s.realmStores||{})};
+    const store={...(stores[key]||{})};
+    store.accountingDayWalkStatus={...value,updatedAt:new Date().toISOString()};
+    stores[key]=store;
+    await storageSet({realmStores:stores});
+  });
+}
+async function scheduleAccountingDayWalk(realm,delayMs=4000){
+  const n=validRealmNumber(realm); if(n==null)return {ok:false,error:'Invalid realm.'};
+  const name=`${ACCOUNTING_DAY_WALK_ALARM_PREFIX}${n}`;
+  await setAccountingDayWalkStatus(n,{status:'scheduled',scheduledAt:new Date().toISOString()});
+  await chrome.alarms.create(name,{when:Date.now()+Math.max(1000,Number(delayMs)||4000)});
+  return {ok:true,scheduled:true,realm:n};
+}
+// One step on the game's Accounting page. op: 'probe' | 'mode' (index 0 Current, 1 Day) | 'day' (index n).
+async function accountingPeriodStep(tabId,op,index=0){
+  const run=chrome.scripting.executeScript({target:{tabId},func:(op,index)=>{
+    const visible=el=>{const r=el.getBoundingClientRect();return r.width>0&&r.height>0;};
+    let bar=null;
+    for(const lab of document.querySelectorAll('label')){
+      const p=lab.parentElement; if(!p||p.firstElementChild!==lab)continue;
+      const kids=[...p.children], modes=kids[1]?[...kids[1].children].filter(x=>x.tagName==='BUTTON'):[];
+      if(modes.length!==4||!modes.every(visible))continue;
+      const days=kids[2]?[...kids[2].children].filter(x=>x.tagName==='BUTTON'):[];
+      bar={modes,days};break;
+    }
+    if(!bar)return {ok:false,found:false,url:location.pathname};
+    if(op==='probe')return {ok:true,found:true,dayButtons:bar.days.length,url:location.pathname};
+    const btn=op==='mode'?bar.modes[index]:bar.days[index];
+    if(!btn)return {ok:false,found:true,error:`No ${op} button ${index} (day buttons: ${bar.days.length}).`};
+    if(btn.disabled)return {ok:false,found:true,disabled:true};
+    btn.click();
+    return {ok:true,found:true,dayButtons:bar.days.length};
+  },args:[op,index]});
+  const timeout=new Promise(r=>setTimeout(()=>r(null),SYNC_CLICK_TIMEOUT_MS));
+  const res=await Promise.race([run,timeout]).catch(e=>[{result:{ok:false,error:e?.message||String(e)}}]);
+  return res?.[0]?.result||{ok:false,error:'Accounting page script did not return.'};
+}
+async function waitForAccountingDayCapture(realm,dayIndex,sinceMs,timeoutMs=ACCOUNTING_DAY_WALK_WAIT_MS){
+  const path=`/api/v2/companies/me/income-statement/day/${dayIndex}/`;
+  const key=realmKeyFromRealm(realm);
+  const deadline=Date.now()+timeoutMs;
+  while(Date.now()<deadline){
+    const item=(await state(realm)).realmStores?.[key]?.endpointData?.[path];
+    const t=Date.parse(item?.receivedAt||'');
+    if(item&&Number(item.status)===200&&item.data&&validRealmNumber(item.captureRealm)===realm&&Number.isFinite(t)&&t>=sinceMs)
+      return {ok:true,path,date:item.data.date||null,isComputed:item.data.isComputed===true};
+    await new Promise(r=>setTimeout(r,500));
+  }
+  return {ok:false,path,error:`No ${path} response within ${Math.round(timeoutMs/1000)} s.`};
+}
+async function runAccountingDayWalk(realm,reason='scheduled'){
+  const n=validRealmNumber(realm); if(n==null)return {ok:false,error:'Invalid realm.'};
+  if(accountingDayWalkRunning.has(n))return {ok:false,busy:true};
+  accountingDayWalkRunning.add(n);
+  const startedAt=new Date().toISOString(); const days=[];
+  const finish=async(status,error=null)=>{const v={status,error,reason,startedAt,finishedAt:new Date().toISOString(),days,captured:days.filter(d=>d.ok).length,wanted:ACCOUNTING_DAY_WALK_DAYS};await setAccountingDayWalkStatus(n,v).catch(()=>{});logActivity(n,'accounting-day-walk',status==='complete'?'success':status==='partial'?'partial':'failure',{rows:v.captured,wanted:v.wanted},error,Date.now(),reason);return {ok:status!=='failed',...v};};
+  try{
+    await setAccountingDayWalkStatus(n,{status:'running',reason,startedAt});
+    const tab=await simTab();
+    if(!tab?.id)return await finish('failed','Open Sim Companies in a browser tab.');
+    await waitForBridge(tab.id,10000);
+    let probe=await accountingPeriodStep(tab.id,'probe');
+    if(!probe.found){
+      const click=await executeGameClick(tab.id,{name:'Accounting',labels:['Accounting','Financials','Finance'],hrefHints:['/headquarters/accounting']}).catch(e=>({ok:false,error:e?.message||String(e)}));
+      for(let i=0;i<40&&!probe.found;i++){await new Promise(r=>setTimeout(r,500));probe=await accountingPeriodStep(tab.id,'probe');}
+      if(!probe.found)return await finish('failed',`Accounting period buttons not found (${click?.error||'page did not show them'}).`);
+    }
+    let since=Date.now();
+    const day=await accountingPeriodStep(tab.id,'mode',1);
+    if(!day.ok)return await finish('failed',day.error||'Could not tap Day.');
+    for(let i=0;i<20;i++){probe=await accountingPeriodStep(tab.id,'probe');if(probe.dayButtons>=ACCOUNTING_DAY_WALK_DAYS)break;await new Promise(r=>setTimeout(r,500));}
+    if(!(probe.dayButtons>=ACCOUNTING_DAY_WALK_DAYS))return await finish('failed',`Day buttons not shown (${probe.dayButtons||0}).`);
+    for(let d=0;d<ACCOUNTING_DAY_WALK_DAYS;d++){
+      // Tapping Day already loads day 0; later days need their own tap.
+      if(d>0){since=Date.now();const c=await accountingPeriodStep(tab.id,'day',d);if(!c.ok){days.push({day:d,ok:false,error:c.error||'tap failed'});continue;}}
+      const got=await waitForAccountingDayCapture(n,d,since);
+      days.push({day:d,ok:got.ok&&got.isComputed,date:got.date||null,error:got.ok?(got.isComputed?null:'not computed yet'):got.error});
+    }
+    await accountingPeriodStep(tab.id,'mode',0).catch(()=>{});
+    const ok=days.filter(x=>x.ok).length;
+    return await finish(ok===ACCOUNTING_DAY_WALK_DAYS?'complete':ok?'partial':'failed',ok===ACCOUNTING_DAY_WALK_DAYS?null:`${ACCOUNTING_DAY_WALK_DAYS-ok} day(s) not captured`);
+  }catch(e){return await finish(days.some(x=>x.ok)?'partial':'failed',e?.message||String(e));}
+  finally{accountingDayWalkRunning.delete(n);}
 }
 async function yieldSyncStep(ms=SYNC_STEP_YIELD_MS){
   const delay=Math.max(0,Number(ms)||0);
@@ -5452,6 +5560,8 @@ async function syncNow(requestedRealm=null){
       await setAccountingWeekLedgerStatus(selected,'scheduled',null,{reason:'core-sync',scheduledAt:new Date().toISOString()}).catch(()=>{});
       const ledgerSchedule=await scheduleAccountingWeekRefresh(selected,1500).catch(e=>({ok:false,error:e?.message||String(e),realm:selected}));
       trace('accounting-week-ledger-scheduled',{realm:selected,...ledgerSchedule});
+      const dayWalk=await scheduleAccountingDayWalk(selected,4000).catch(e=>({ok:false,error:e?.message||String(e)}));
+      trace('accounting-day-walk-scheduled',{realm:selected,...dayWalk});
     }
     if(requiredOk){
       // Final realm-local commit: the selected realm store is authoritative.

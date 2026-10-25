@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.369');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.370');
 const C = require('../tools-core.js');
 const N = require('../notify-core.js');
 
@@ -23,7 +23,7 @@ assert.ok(dash.includes('plannerRateForProduct(product,building,Number(building.
 assert.ok(dash.includes("diffStat(diffPerHour,`vs Level ${num(building.level)} / hr`)") && dash.includes('diffStat(diffPerHour*runHours,'), 'per hour and per run');
 
 // Last 8 days: collapsible day cards with the profit in the head
-const fnSrc = dash.slice(dash.indexOf('function accountingHistoryTable(history){'), dash.indexOf('function accountingOverview(a,previous){'));
+const fnSrc = dash.slice(dash.indexOf('function accountingHistoryTable(history,walk=null){'), dash.indexOf('function accountingOverview(a,previous){'));
 const ctx = { escapeHtml: x => String(x), money: v => '$' + Number(v).toFixed(2) };
 vm.createContext(ctx); vm.runInContext(fnSrc + ';this.f=accountingHistoryTable;', ctx);
 const out = ctx.f([{ t: '2026-10-22T00:00:00Z', profit: -12.5, sales: 10, assets: 5 }, { t: '2026-10-23T00:00:00Z', profit: 1234.5, sales: 2000, expenses: 765.5, cash: 1, inventory: 2, assets: 3, rank: 4567 }]);

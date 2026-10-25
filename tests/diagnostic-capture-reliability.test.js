@@ -9,7 +9,7 @@ const dashboard = fs.readFileSync(path.join(root, 'dashboard.js'), 'utf8');
 const background = fs.readFileSync(path.join(root, 'background.js'), 'utf8');
 const html = fs.readFileSync(path.join(root, 'dashboard.html'), 'utf8');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
-assert.equal(manifest.version, '2.5.369');
+assert.equal(manifest.version, '2.5.370');
 
 // DOM/runtime inspection must be performed in the page's MAIN world, correlated by ID,
 // and must include the page-owned React expando markers and useful visible-text evidence.

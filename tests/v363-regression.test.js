@@ -2,7 +2,7 @@
 const assert = require('assert'); const fs = require('fs'); const path = require('path'); const vm = require('vm');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const dash = read('dashboard.js'), bg = read('background.js');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.369');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.370');
 // background keeps only digit ids → short kind letters, per realm
 const san = bg.slice(bg.indexOf('function sanitizeProductionPlannerState'), bg.indexOf('\n}\n', bg.indexOf('function sanitizeProductionPlannerState')) + 3);
 const ctx = { validRealmNumber: r => Number.isFinite(Number(r)) ? Number(r) : null }; vm.createContext(ctx); vm.runInContext(san + '\nthis.san=sanitizeProductionPlannerState;', ctx);

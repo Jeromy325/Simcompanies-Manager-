@@ -1,3 +1,11 @@
+2.5.370 — 2026-10-25 — Accounting: Sync walks the game's Day 0–6 statements; Last 7 days
+- After a successful Sync, the Manager taps Accounting → Day → days 0–6 on the game tab (the game's own page, no
+  direct API calls). A day counts only when the game's /income-statement/day/<n>/ response is captured for that
+  realm. Buttons are found by the page layout, not their text. The game tab is returned to Current.
+- A day that fails keeps its older data; the history shows "Day statements: 6/7 read · missing day 5".
+- The alarm survives an update/restart (re-created from storage) and waits while a Sync of that realm runs.
+- "Last 8 days" → "Last 7 days".
+
 2.5.369 — 2026-10-25 — Accounting audit fixes
 - "Expenses" tile showed cash paid out ($3,907,158, cash-flow cashAllExpenses), not a game income-statement figure.
   It is now "Operating expenses" = the game's subtotal (construction + salaries + training + poaching + exchange
