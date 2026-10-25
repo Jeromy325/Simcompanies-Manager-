@@ -5,7 +5,7 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 const content = fs.readFileSync(path.join(root, 'content.js'), 'utf8');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
-assert.equal(manifest.version, '2.5.375');
+assert.equal(manifest.version, '2.5.376');
 const start = content.indexOf("st.id='scm-game-overlay-style'");
 const end = content.indexOf("(document.head||document.documentElement).appendChild(st)", start);
 assert.ok(start >= 0 && end > start, 'overlay stylesheet must exist');

@@ -1,3 +1,11 @@
+2.5.376 — 2026-10-25 — Executives: charts
+- Team impact: donut "Where your COO points come from" (each exec's COO skill × its weight, centre = effective COO)
+  and donut "Salaries per day".
+- Training planner: line chart of admin overhead as each exec with trainings left is trained (one line per exec).
+- If your COO leaves: line chart of admin overhead vs COO points (game formula, half value past 60, quarter past 80)
+  with Today / apprentice / no-replacement marked.
+- Colour follows the role on every chart; tap or hover shows the exact values. Inline SVG, no library.
+
 2.5.375 — 2026-10-25 — Executives: training planner works without captured trainings; clearer COO card
 - Training planner was all "—": the game data the Manager captures has no trainings count. New "Done" column: type
   each exec's count from the game's Board Room (saved on this device); Left, cost, skill, admin after and payback fill in.

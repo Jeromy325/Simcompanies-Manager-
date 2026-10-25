@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.375');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.376');
 const bg = read('background.js'), content = read('content.js'), hook = read('page-hook.js');
 
 const slice = (src, start, end) => { const a = src.indexOf(start); const b = src.indexOf(end, a + 1); assert.ok(a >= 0 && b > a, start); return src.slice(a, b); };

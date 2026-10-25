@@ -2450,6 +2450,54 @@ function plannerGameAdmin(s){
 // Salaries are $/day (confirmed by the user against the game's Salaries line); training cost and skill gain per session are user inputs (not from the game's API).
 const EXEC_PLAN_KEY='scmExecPlanner',EXEC_MAX_TRAININGS=20;
 function execPlanSettings(){try{const v=JSON.parse(localStorage.getItem(EXEC_PLAN_KEY)||'{}');return {cost:v.cost??10000,gain:v.gain??1.5,done:v.done&&typeof v.done==='object'?v.done:{}};}catch{return {cost:10000,gain:1.5,done:{}};}}
+// v2.5.376 Executives charts: inline SVG, no library. Colour follows the role (validated dark categorical slots 1–5
+// on the panel surface #121b25), one y-axis per chart, 2px lines, hover crosshair + tooltip, legend + direct labels.
+const EXEC_COLOR={o:'#3987e5',v:'#d95926',f:'#199e70',m:'#c98500',t:'#d55181'};
+const __execCharts=new Map();
+function execNiceTicks(lo,hi,n=4){const span=hi-lo||1,raw=span/n,mag=10**Math.floor(Math.log10(raw)),step=[1,2,2.5,5,10].map(m=>m*mag).find(x=>x>=raw)||raw;const a=Math.floor(lo/step)*step,b=Math.ceil(hi/step-1e-9)*step,out=[];for(let v=a;v<=b+step*1e-9;v+=step)out.push(+v.toFixed(10));return out;}
+function execLineChart(id,{series,xLabel,xFmt=v=>num(v),yFmt=v=>`${v.toFixed(1)}%`,markers=[]}){
+  const W=340,H=210,L=40,R=14,T=14,B=34,xs=series.flatMap(s=>s.points.map(p=>p[0])),ys=series.flatMap(s=>s.points.map(p=>p[1])).concat(markers.map(m=>m.y));
+  if(!xs.length)return '';
+  const x0=Math.min(...xs),x1=Math.max(...xs)||1,yt=execNiceTicks(Math.min(...ys),Math.max(...ys)),y0=yt[0],y1=yt[yt.length-1]>y0?yt[yt.length-1]:y0+1;
+  const X=v=>L+(v-x0)/((x1-x0)||1)*(W-L-R),Y=v=>T+(1-(v-y0)/(y1-y0))*(H-T-B);
+  const xt=execNiceTicks(x0,x1,5).filter(v=>v>=x0&&v<=x1);
+  const grid=yt.map(v=>`<line class="ec-grid" x1="${L}" x2="${W-R}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}"/><text class="ec-tick" x="${L-6}" y="${(Y(v)+3.5).toFixed(1)}" text-anchor="end">${escapeHtml(yFmt(v,true))}</text>`).join('')
+    +xt.map(v=>`<text class="ec-tick" x="${X(v).toFixed(1)}" y="${H-B+14}" text-anchor="middle">${escapeHtml(xFmt(v))}</text>`).join('');
+  const lines=series.map(s=>`<path class="ec-line" stroke="${s.color}" d="${s.points.map((p,i)=>`${i?'L':'M'}${X(p[0]).toFixed(1)} ${Y(p[1]).toFixed(1)}`).join('')}"/>`).join('');
+  const ends=series.length>1?series.map(s=>{const p=s.points[s.points.length-1];return `<circle class="ec-dot" cx="${X(p[0]).toFixed(1)}" cy="${Y(p[1]).toFixed(1)}" r="4" fill="${s.color}"/>`;}).join(''):'';
+  const mk=markers.map(m=>{const cx=X(m.x),right=cx<W*0.72;return `<circle class="ec-dot" cx="${cx.toFixed(1)}" cy="${Y(m.y).toFixed(1)}" r="4.5" fill="${m.color||'#e8edf3'}"/><text class="ec-mlabel" x="${(cx+(right?8:-8)).toFixed(1)}" y="${(Y(m.y)-6).toFixed(1)}" text-anchor="${right?'start':'end'}">${escapeHtml(m.label)}</text>`;}).join('');
+  __execCharts.set(id,{series,markers,x0,x1,L,R,W,H,T,B,X,Y,xFmt,yFmt,xLabel});
+  const legend=series.length>1?`<div class="ec-legend">${series.map(s=>`<span><i style="background:${s.color}"></i>${escapeHtml(s.name)}</span>`).join('')}</div>`:'';
+  return `${legend}<div class="ec-wrap" data-exec-chart="${id}"><svg class="ec-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(xLabel)}">${grid}<line class="ec-axis" x1="${L}" x2="${W-R}" y1="${H-B}" y2="${H-B}"/>${lines}${ends}${mk}<line class="ec-cross" x1="0" x2="0" y1="${T}" y2="${H-B}" visibility="hidden"/><text class="ec-xlabel" x="${(L+W-R)/2}" y="${H-4}" text-anchor="middle">${escapeHtml(xLabel)}</text><rect class="ec-hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}"/></svg><div class="ec-tip" hidden></div></div>`;
+}
+function execPieChart(id,{slices,fmt,center}){
+  const tot=slices.reduce((a,s)=>a+s.value,0);if(!(tot>0))return '';
+  const W=340,H=200,cx=100,cy=100,r=86,ri=52;let a=-Math.PI/2;
+  const pt=(rad,ang)=>`${(cx+rad*Math.cos(ang)).toFixed(2)} ${(cy+rad*Math.sin(ang)).toFixed(2)}`;
+  const arcs=slices.map((s,i)=>{const sw=s.value/tot*Math.PI*2,a1=a+sw,big=sw>Math.PI?1:0;const d=slices.length===1?`M${pt(r,a)}A${r} ${r} 0 1 1 ${pt(r,a+Math.PI*1.9999)}L${pt(ri,a+Math.PI*1.9999)}A${ri} ${ri} 0 1 0 ${pt(ri,a)}Z`:`M${pt(r,a)}A${r} ${r} 0 ${big} 1 ${pt(r,a1)}L${pt(ri,a1)}A${ri} ${ri} 0 ${big} 0 ${pt(ri,a)}Z`;a=a1;return `<path class="ec-wedge" data-i="${i}" d="${d}" fill="${s.color}"/>`;}).join('');
+  __execCharts.set(id,{pie:true,slices,tot,fmt});
+  const rows=slices.map((s,i)=>`<g class="ec-prow" data-i="${i}" transform="translate(206 ${(cy-slices.length*17+i*34+12).toFixed(0)})"><rect x="0" y="-9" width="10" height="10" rx="2" fill="${s.color}"/><text class="ec-plabel" x="16" y="0">${escapeHtml(s.name)}</text><text class="ec-pval" x="16" y="14">${escapeHtml(fmt(s.value))} · ${(s.value/tot*100).toFixed(0)}%</text></g>`).join('');
+  return `<div class="ec-wrap" data-exec-chart="${id}"><svg class="ec-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(center[1])}">${arcs}<text class="ec-center" x="${cx}" y="${cy+2}" text-anchor="middle">${escapeHtml(center[0])}</text><text class="ec-csub" x="${cx}" y="${cy+18}" text-anchor="middle">${escapeHtml(center[1])}</text>${rows}</svg><div class="ec-tip" hidden></div></div>`;
+}
+function wireExecCharts(root){
+  root.querySelectorAll('[data-exec-chart]').forEach(w=>{
+    const c=__execCharts.get(w.dataset.execChart),svg=w.querySelector('svg'),tip=w.querySelector('.ec-tip');if(!c||!svg)return;
+    const place=(e,html)=>{tip.innerHTML=html;tip.hidden=false;const b=w.getBoundingClientRect(),x=e.clientX-b.left,y=e.clientY-b.top;tip.style.left=`${Math.max(4,Math.min(b.width-tip.offsetWidth-4,x+12))}px`;tip.style.top=`${Math.max(0,y-tip.offsetHeight-10)}px`;};
+    const hide=()=>{tip.hidden=true;svg.querySelector('.ec-cross')?.setAttribute('visibility','hidden');svg.querySelectorAll('.ec-wedge').forEach(p=>p.classList.remove('dim'));};
+    svg.addEventListener('pointerleave',hide);
+    if(c.pie){svg.querySelectorAll('.ec-wedge,.ec-prow').forEach(p=>['pointermove','pointerdown'].forEach(ev=>p.addEventListener(ev,e=>{const i=+p.dataset.i,s=c.slices[i];svg.querySelectorAll('.ec-wedge').forEach(q=>q.classList.toggle('dim',+q.dataset.i!==i));place(e,`<b>${escapeHtml(s.name)}</b><br>${escapeHtml(c.fmt(s.value))} · ${(s.value/c.tot*100).toFixed(1)}%${s.note?`<br><small>${escapeHtml(s.note)}</small>`:''}`);})));return;}
+    const onMove=e=>{
+      const m=svg.getScreenCTM();if(!m)return;const px=(e.clientX-m.e)/m.a;if(px<c.L||px>c.W-c.R){hide();return;}
+      const xv=c.x0+(px-c.L)/(c.W-c.L-c.R)*((c.x1-c.x0)||1);
+      const allX=[...new Set(c.series.flatMap(s=>s.points.map(p=>p[0])))].sort((a,b)=>a-b);const nx=allX.reduce((b,v)=>Math.abs(v-xv)<Math.abs(b-xv)?v:b,allX[0]);
+      const cr=svg.querySelector('.ec-cross');cr.setAttribute('x1',c.X(nx));cr.setAttribute('x2',c.X(nx));cr.setAttribute('visibility','visible');
+      const rows=c.series.map(s=>{const p=s.points.find(q=>q[0]===nx);return p?`<div><i style="background:${s.color}"></i>${escapeHtml(s.name)} <b>${escapeHtml(c.yFmt(p[1]))}</b></div>`:'';}).join('');
+      const mk=c.markers.filter(q=>Math.abs(q.x-nx)<1e-9).map(q=>`<div><small>${escapeHtml(q.label)}</small></div>`).join('');
+      place(e,`<b>${escapeHtml(c.xFmt(nx))}</b> ${escapeHtml(c.xLabel)}${rows}${mk}`);
+    };
+    svg.addEventListener('pointermove',onMove);svg.addEventListener('pointerdown',onMove);
+  });
+}
 function renderBoardRoom(s){
   const el=$('#execBody'),C=globalThis.SCM_TOOLS_CORE;if(!el||!C?.executiveRoster)return;
   const ep=s?.endpointData||{},cfg=s?.gameConfig||{};
@@ -2492,9 +2540,21 @@ function renderBoardRoom(s){
   const cmp=(l,r,n)=>{const d=r&&ga&&labour>0?labour*(r.pct-ga.pct)/100:null;return row(l,r?pct(r.pct):'—',`${r?`admin overhead · effective COO ${num(r.coo)} pts`:''}${d!=null&&Math.abs(d)>=0.005?` · <span class="${d>0?'is-loss':'is-profit'}">${d>0?'+':'−'}${plannerMoney(Math.abs(d))} / day admin cost</span>`:''}${n?` · ${n}`:''}`);};
   const mn=escapeHtml(main?.name||'your COO');
   const appHtml=main?`<div class="pp-hint">What happens to admin overhead if ${mn} (COO ${num(main.skills.coo)}${main.age!=null?`, ${num(main.age)} y/o`:''}) retires or is fired. The apprentice is the back-up who can take over.</div><div class="pp-list">${cmp(`Today: ${mn} is COO`,ga,'')}${app?cmp(`${escapeHtml(app.name||'Apprentice')} takes over (COO ${num(app.skills.coo)})`,promote,'apprentice slot empty after'):row('Apprentice','—','no COO apprentice hired')}${cmp('No replacement',leave,'')}</div>`:'<div class="planner-profit-empty">No COO in the board room.</div>';
+  // Charts
+  const first=n=>String(n||'').split(' ')[0]||'—',acad=C.academyActiveSize(blds);
+  const w8={o:[1,'full skill'],v:[0.5,'½ skill (academy ≥ 5)'],f:[0.25,'¼ skill'],m:[0.25,'¼ skill'],t:[0.25,'¼ skill']};
+  const cooSlices=suite.filter(r=>r.status==='active'&&w8[r.position]&&(r.position!=='v'||acad>=5)&&r.skills.coo>0).map(r=>({name:`${first(r.name)} (${r.role.replace(' Apprentice',' App.')})`,value:r.skills.coo*w8[r.position][0],color:EXEC_COLOR[r.position],note:`COO ${num(r.skills.coo)} × ${w8[r.position][1]}`}));
+  const cooPie=ga&&cooSlices.length?`<h4 class="ec-title">Where your COO points come from</h4>${execPieChart('cooPie',{slices:cooSlices,fmt:v=>`${num(+v.toFixed(1))} pts`,center:[num(ga.coo),'COO pts']})}`:'';
+  const salSlices=suite.filter(r=>r.salary>0).map(r=>({name:`${first(r.name)} (${r.role.replace(' Apprentice',' App.')})`,value:r.salary,color:EXEC_COLOR[r.position]||'#91a0b2'}));
+  const salPie=salSlices.length?`<h4 class="ec-title">Salaries per day</h4>${execPieChart('salPie',{slices:salSlices,fmt:v=>plannerMoney(v).replace(/\.00$/,''),center:[`$${num(Math.round(salaries/1000))}k`,'per day']})}`:'';
+  const dim=r=>{let x=Math.floor(r);if(x>80)x=80+(x-80)/2;if(x>60)x=60+(x-60)/2;return Math.floor(x);};
+  const curve=ga?`<h4 class="ec-title">Admin overhead vs COO points</h4>${execLineChart('aoCurve',{xLabel:'COO points',series:[{name:'Admin overhead',color:EXEC_COLOR.o,points:Array.from({length:101},(_,i)=>[i,ga.basePct*(1-dim(i)/100)])}],markers:[promote&&{x:promote.coo,y:promote.pct,label:`${first(app?.name)} ${pct(promote.pct)}`,color:EXEC_COLOR.v},leave&&{x:leave.coo,y:leave.pct,label:`None ${pct(leave.pct)}`,color:'#91a0b2'},{x:ga.coo,y:ga.pct,label:`Today ${pct(ga.pct)}`,color:EXEC_COLOR.o}].filter(Boolean)})}<div class="pp-hint">Each COO point cuts ${(ga.basePct/100).toFixed(2)}% off admin. Past 60 points each point counts half, past 80 a quarter.</div>`:'';
+  const proj=ga?suite.filter(r=>r.trainings!=null&&r.trainings<EXEC_MAX_TRAININGS&&EXEC_COLOR[r.position]).map(r=>{const left=EXEC_MAX_TRAININGS-r.trainings;return {name:first(r.name),color:EXEC_COLOR[r.position],points:Array.from({length:left+1},(_,k)=>{const a=C.executiveAdminWhatIf({...args,edit:e=>(String(e.id)===String(r.id)&&e.currentWorkHistory?.position===r.position&&(e.skills={...e.skills,coo:(Number(e.skills?.coo)||0)+k*Number(st.gain||0)}),e)});return [k,a?a.pct:ga.pct];})};}):[];
+  const projHtml=ga?(proj.length?`<h4 class="ec-title">Admin overhead as each exec trains</h4>${execLineChart('trainProj',{xLabel:'Trainings from now',series:proj})}`:`<div class="pp-hint">${suite.some(r=>r.trainings==null)?'Type trainings in Done to see the projection chart.':'Everyone is at 20 trainings — nothing left to project.'}</div>`):'';
   const at=ep[exKey]?.receivedAt;
   el.innerHTML=`<div class="exec-grid">${roster.map(card).join('')}</div>${at?`<div class="pp-hint">Captured ${escapeHtml(new Date(at).toLocaleString())}</div>`:''}
-<div class="exec-panels"><div class="panel"><h3>Team impact</h3>${impact}</div><div class="panel"><h3>COO ROI / break-even</h3>${roiHtml}</div><div class="panel"><h3>Training planner</h3>${planHtml}</div><div class="panel"><h3>If your COO leaves</h3>${appHtml}</div></div>`;
+<div class="exec-panels"><div class="panel"><h3>Team impact</h3>${impact}${cooPie}${salPie}</div><div class="panel"><h3>COO ROI / break-even</h3>${roiHtml}</div><div class="panel"><h3>Training planner</h3>${planHtml}${projHtml}</div><div class="panel"><h3>If your COO leaves</h3>${appHtml}${curve}</div></div>`;
+  wireExecCharts(el);
   const save=(k,v)=>{const c=execPlanSettings();c[k]=v;try{localStorage.setItem(EXEC_PLAN_KEY,JSON.stringify(c));}catch{}renderBoardRoom(s);};
   el.querySelector('#execCost')?.addEventListener('change',e=>save('cost',e.target.value));
   el.querySelector('#execGain')?.addEventListener('change',e=>save('gain',e.target.value));
