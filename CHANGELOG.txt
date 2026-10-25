@@ -1,3 +1,9 @@
+2.5.375 — 2026-10-25 — Executives: training planner works without captured trainings; clearer COO card
+- Training planner was all "—": the game data the Manager captures has no trainings count. New "Done" column: type
+  each exec's count from the game's Board Room (saved on this device); Left, cost, skill, admin after and payback fill in.
+- "Apprentice vs main COO" renamed "If your COO leaves", with a one-line explanation. Rows: today / apprentice takes
+  over / no replacement, each showing extra admin cost per day in red.
+
 2.5.374 — 2026-10-25 — New Executives tab
 - Board room cards: role, name, age, trainings X/20, COO/CFO/CMO/CTO skill bars (own skill highlighted), salary, status
   (active / training / settling in / on strike), from the captured /executives/ data.
