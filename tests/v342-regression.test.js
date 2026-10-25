@@ -8,7 +8,7 @@ const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const C = require('../tools-core.js');
 const N = require('../notify-core.js');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.366');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.367');
 const fx = JSON.parse(read('tests/fixtures/game-constants-2026-10-23.json'));
 const c = { core: fx.core, buildings: fx.buildings, resources: fx.resources };
 assert.ok(C.gameConstantsOk(c));

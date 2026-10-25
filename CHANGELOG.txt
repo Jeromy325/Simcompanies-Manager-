@@ -1,3 +1,10 @@
+2.5.367 — 2026-10-24 — Production: every test building counts in the totals
+- Two buildings switched to a test type (e.g. both Power Plants → Mine L11 Bauxite): only the selected one counted;
+  the other fell back to its old game plan. A test building that is not selected now uses its planner
+  output/level/quality. With the user's export: Bauxite Q1 deficit 34,802.19 → 7,104.61 whichever mine is selected.
+- Fixed: the Production page's realm-plan save was always refused ("Frozen plan has no planned production output")
+  because its specs lacked outputRun. Planner changes now save to the realm plan.
+
 2.5.366 — 2026-10-24 — Production: Building Type list lines up
 - Building Type is a plain A–Z list again. The category groups made Yandex's phone picker indent rows unevenly.
 
