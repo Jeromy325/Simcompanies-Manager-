@@ -6,7 +6,7 @@
 - COO ROI: base labour/day (game wage × level × 24 h, producing buildings), admin saved/day vs salaries/day, verdict.
 - Training planner: trainings left, cost (input, default $10,000), skill gain (input, default 1.5), admin after, payback days.
 - Apprentice vs main COO: admin now / apprentice promoted / COO leaves, with $/day difference.
-- Not verified against the game: name/age/salary/trainings field names, salaries treated as $/day.
+- Salaries are per day (confirmed in game). Not verified: name/age/salary/trainings field names.
 
 2.5.373 — 2026-10-25 — Accounting: Last 7 days walk note no longer disappears
 - The "Day statements 0–6 read…" note under Last 7 days could vanish (about 1 in 8 opens): the dashboard's state
