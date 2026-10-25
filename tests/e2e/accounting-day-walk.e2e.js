@@ -47,6 +47,8 @@ bar.children[1].children[0].addEventListener('click',()=>{document.getElementByI
   const opex2 = d2.constructionCosts + d2.salariesCosts + d2.trainingCosts + d2.poachingCosts + d2.marketFees;
   const want2 = `Sales${fmt(d2.sales)}Operating expenses${fmt(opex2)}Net income${fmt(d2.netIncome)}`;
   H.check('Oct 22 row = game day/2 statement', failDay === 2 || (rows[2] || '').replace(/\s/g, '').includes(want2.replace(/\s/g, '')), want2, rows[2]);
+  // wait for the final note (not the "Reading…" running state) instead of relying on the fixed pauses above
+  await dash.waitForFunction(() => { const n = document.querySelector('.acct-walk-note'); return n && !/^Reading/.test(n.textContent.trim()); }, null, { timeout: 15000 }).catch(() => {});
   const note = await dash.textContent('.acct-walk-note').catch(() => '');
   H.check('walk note', failDay < 0 ? /Day statements 0–6 read/.test(note) : /6\/7.*missing day/.test(note), failDay < 0 ? 'Day statements 0–6 read' : '6/7 … missing day', note);
   const sw2 = await dash.evaluate(() => document.documentElement.scrollWidth); H.check('no horizontal scroll at 360px', sw2 <= 360, '≤360', sw2);
