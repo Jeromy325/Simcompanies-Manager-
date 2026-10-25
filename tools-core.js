@@ -774,8 +774,101 @@
     return f / v * 100;
   }
 
+  /* Game Accounting screens (GamePages bundle, read 2026-10-25): income statement, balance sheet,
+   * cash-flow statement and Financial Ratios. Lines, order, subtotals and ratio formulas copy the
+   * game's components; inputs are the raw /api/v2/companies/me/{income-statement,balance-sheet,
+   * cashflow-statement}/ fields. kind: head | sub (sub-heading) | line | subtotal | total. */
+  function gameFinancialStatements(income, bs, cf) {
+    const e = income && typeof income === 'object' ? income : {};
+    const b = bs && typeof bs === 'object' ? bs : {};
+    const c = cf && typeof cf === 'object' ? cf : {};
+    const v = (o, k) => num(o[k]);
+    const used = { income: new Set(['date', 'dateFrom', 'isComputed']), bs: new Set(['date']), cf: new Set(['date', 'dateFrom', 'isComputed']) };
+    const L = (src, set, key, label, indent = 0) => { set.add(key); return { kind: 'line', key, label, value: v(src, key), indent }; };
+    const H = (label, kind = 'head', indent = 0) => ({ kind, label, indent });
+    const T = (label, value, kind = 'subtotal') => ({ kind, label, value });
+    const iL = (k, l, i) => L(e, used.income, k, l, i), bL = (k, l, i) => L(b, used.bs, k, l, i), cL = (k, l, i) => L(c, used.cf, k, l, i);
+
+    const gross = v(e, 'sales') + v(e, 'cogs') + v(e, 'freightOut');
+    const opex = v(e, 'constructionCosts') + v(e, 'salariesCosts') + v(e, 'trainingCosts') + v(e, 'poachingCosts') + v(e, 'marketFees');
+    const other = v(e, 'gameIncome') + v(e, 'executiveRoyalties') + v(e, 'gainOnSale') + v(e, 'patentConversion') + v(e, 'accountingOverhead') + v(e, 'bondInterestIncome') + v(e, 'bondInterestExpense') + v(e, 'bondWriteoffs') + v(e, 'bondDefaults') + v(e, 'donations') + v(e, 'goDepositForfeitures');
+    const evaProfit = v(e, 'netIncome') - v(e, 'gameIncome') - v(e, 'patentConversion');
+    const capitalCharge = evaProfit - v(e, 'economicValueAdded');
+    const incomeLines = [
+      H('Gross profit'), iL('sales', 'Sales'), iL('cogs', 'Cost of goods sold'), iL('freightOut', 'Freight Out'), T('', gross),
+      H('Operating expenses'), iL('constructionCosts', 'Construction costs'), iL('marketFees', 'Exchange fees'), H('Executives costs', 'sub'),
+      iL('salariesCosts', 'Salaries', 1), iL('trainingCosts', 'Training', 1), iL('poachingCosts', 'Poaching', 1), T('', opex),
+      H('Other income (loss)'), iL('gameIncome', 'Game income'), iL('executiveRoyalties', 'Executive royalties'), iL('gainOnSale', 'Gain on sale'),
+      iL('patentConversion', 'Patent conversion'), iL('accountingOverhead', 'Accounting overhead'), iL('donations', 'Donations'),
+      iL('goDepositForfeitures', 'Government order deposit forfeitures'), H('Bonds', 'sub'), iL('bondInterestIncome', 'Interest income', 1),
+      iL('bondInterestExpense', 'Interest expense', 1), iL('bondWriteoffs', 'Write offs', 1), iL('bondDefaults', 'Defaults', 1), T('', other),
+      { ...iL('netIncome', 'Net income'), kind: 'total' }, iL('otherComprehensiveIncome', 'Other comprehensive income'),
+      T('Total comprehensive income', v(e, 'netIncome') + v(e, 'otherComprehensiveIncome'), 'total'),
+      H('EVA score'), T('Operating profit', evaProfit, 'line'), T('Capital charge', -capitalCharge, 'line'),
+      { ...iL('economicValueAdded', ''), kind: 'subtotal' }
+    ];
+
+    const totalAssets = ['cash', 'cashReservedForOrders', 'accountsReceivable', 'materials', 'research', 'workInProcess', 'finishedGoods', 'valuationAllowance', 'deposits', 'investmentInBonds', 'buildings', 'constructionInProgress', 'patents'].reduce((a, k) => a + v(b, k), 0);
+    const equity = v(b, 'contributedCapital') + v(b, 'retainedEarnings');
+    const balanceLines = [
+      H('Current assets'), bL('cash', 'Cash'), bL('cashReservedForOrders', 'Cash reserved for orders'), bL('accountsReceivable', 'Accounts receivable'),
+      H('Inventory', 'sub'), bL('materials', 'Materials', 1), bL('research', 'Research', 1), bL('workInProcess', 'Work in process', 1),
+      bL('finishedGoods', 'Finished goods', 1), bL('valuationAllowance', 'Valuation allowance', 1),
+      H('Non-current assets'), bL('deposits', 'Deposits'), bL('investmentInBonds', 'Investment in bonds'), bL('buildings', 'Buildings'),
+      bL('constructionInProgress', 'Construction in progress'), bL('patents', 'Patents'), T('Total assets', totalAssets, 'total'),
+      H('Liabilities'), bL('bondsPayable', 'Bonds Payable'), H('Equity'), bL('contributedCapital', 'Contributed Capital'), bL('retainedEarnings', 'Retained earnings'),
+      T('Total debt and equity', v(b, 'bondsPayable') + equity, 'total'), T('Company value', equity, 'total')
+    ];
+
+    const operating = ['fromRetail', 'fromCustomers', 'fromExchange', 'fromInterest', 'fromPoaching', 'fromRoyalties', 'fromEmployees', 'toGame', 'toSuppliers', 'toExchange', 'toEmployees', 'toExecutives', 'forInterest', 'forFees', 'forAccounting'].reduce((a, k) => a + v(c, k), 0);
+    const cashflowLines = [
+      H('Operating activities'), H('Cash receipts', 'sub'), cL('fromRetail', 'From retail', 1), cL('fromCustomers', 'From customers', 1), cL('fromExchange', 'From exchange', 1),
+      cL('fromInterest', 'From interest', 1), cL('fromPoaching', 'From poaching', 1), cL('fromRoyalties', 'From royalties', 1), cL('fromEmployees', 'From employees', 1),
+      H('Cash payments', 'sub'), cL('toSuppliers', 'To suppliers', 1), cL('toExchange', 'To exchange', 1), cL('toEmployees', 'To employees', 1), cL('toExecutives', 'To executives', 1),
+      cL('forInterest', 'For interest', 1), cL('forFees', 'For fees', 1), cL('forAccounting', 'For accounting', 1), cL('toGame', 'For PA quests', 1), T('', operating),
+      H('Investing activities'), cL('investmentInBonds', 'Investment in bonds'), cL('goDeposits', 'Deposits'),
+      H('Financing activities'), cL('bonds', 'Bonds'), cL('fromGame', 'From game'),
+      T('Total change in cash', v(c, 'cashAllIncome') + v(c, 'cashAllExpenses'), 'total')
+    ];
+    used.cf.add('cashAllIncome'); used.cf.add('cashAllExpenses'); used.income.add('economicValueAdded');
+
+    // Financial Ratios (game bfr component). Division results are not guarded, as in the game (0/0 → NaN, x/0 → ±Infinity).
+    const operatingIncome = v(e, 'sales') + v(e, 'cogs') + v(e, 'freightOut') + v(e, 'constructionCosts') + v(e, 'marketFees') + v(e, 'salariesCosts') + v(e, 'poachingCosts') + v(e, 'trainingCosts');
+    const emp = v(b, 'employees'); const adjEmployees = Math.floor(emp * 100 * (1 + (emp - 1) / 170));
+    const inventory = v(b, 'materials') + v(b, 'research') + v(b, 'workInProcess') + v(b, 'finishedGoods') + v(b, 'valuationAllowance');
+    const quick = v(b, 'cash') + v(b, 'accountsReceivable');
+    const R = (label, value, percent, formula) => ({ label, value, percent, formula });
+    const ratios = [
+      H('Profitability ratios'),
+      R('Gross Margin', gross / v(e, 'sales'), true, 'Gross Profit / Sales'),
+      R('Operating Margin', operatingIncome / v(e, 'sales'), true, 'Operating Income / Sales'),
+      R('Net Profit Margin', v(e, 'netIncome') / v(e, 'sales'), true, 'Net Income / Sales'),
+      R('Return on Quick Assets', v(e, 'netIncome') / quick, true, 'Net Income / (Cash + Receivable)'),
+      R('Return on Equity', v(e, 'netIncome') / equity, true, 'Net Income / Equity'),
+      R('Sales per Employee', v(e, 'sales') / adjEmployees, false, 'Sales / Employees'),
+      R('Income per Employee', v(e, 'netIncome') / adjEmployees, false, 'Net Income / Employees'),
+      H('Operating efficiency'),
+      R('Inventory Turnover', (Math.abs(v(e, 'cogs')) + v(e, 'freightOut')) / inventory, false, '(COGS + Freight Out) / Inventory'),
+      R('Assets Turnover', v(e, 'sales') / equity, false, 'Sales / Total Assets'),
+      R('Operating Assets Turnover', v(e, 'sales') / (inventory + quick + v(b, 'deposits')), false, 'Sales / (Current Assets + Deposits)'),
+      H('Liquidity ratios'),
+      R('Defensive Interval', quick / Math.abs(v(e, 'cashAllExpenses')), false, '(Cash + Receivable) / Daily Cash Expenditure'),
+      R('Interest Coverage', operatingIncome / -v(e, 'bondInterestExpense'), false, 'Operating Income / Interest Expense'),
+      R('Debt to Building Ratio', v(b, 'bondsPayable') / v(b, 'buildings'), true, 'Bonds Payable / Buildings')
+    ];
+    for (const r of ratios) if (r.kind) delete r.value;
+    used.income.add('cashAllExpenses'); used.bs.add('employees');
+    const extras = (src, set) => Object.entries(src).filter(([k, x]) => !set.has(k) && Number.isFinite(Number(x)) && typeof x !== 'boolean').map(([k, x]) => ({ kind: 'line', key: k, value: Number(x) }));
+    return {
+      income: incomeLines, balance: balanceLines, cashflow: cashflowLines, ratios,
+      ratiosAvailable: Object.keys(e).length > 0 && Object.keys(b).length > 0 && e.isComputed !== false,
+      adjustedEmployees: adjEmployees,
+      extra: { income: extras(e, used.income), bs: extras(b, used.bs), cf: extras(c, used.cf) }
+    };
+  }
+
   const api = {
-    economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, phaseProfits, phaseRateRatio, upgradePayback, adminIncreasePerLevel, upgradePaybackFull, sellPriceAdvice, contractVerdict, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
+    gameFinancialStatements, economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, phaseProfits, phaseRateRatio, upgradePayback, adminIncreasePerLevel, upgradePaybackFull, sellPriceAdvice, contractVerdict, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
     cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
     seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,

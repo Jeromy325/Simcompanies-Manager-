@@ -1,3 +1,11 @@
+2.5.368 — 2026-10-25 — Accounting: game's full statements + Financial Ratios
+- Income Statement, Balance Sheet Detail and Cash Flow were raw API field dumps (A–Z). They now follow the game's
+  screens line for line, with the game's subtotals: gross profit, operating expenses, other income, total
+  comprehensive income, EVA operating profit / capital charge, total assets, total debt and equity, company value,
+  operating cash, total change in cash, "For PA quests".
+- New Financial Ratios panel (13 ratios, game formulas from the GamePages bundle). Matches the user's 10/24 screen.
+- Any captured field the game layout does not show is listed under "Other captured fields".
+
 2.5.367 — 2026-10-24 — Production: every test building counts in the totals
 - Two buildings switched to a test type (e.g. both Power Plants → Mine L11 Bauxite): only the selected one counted;
   the other fell back to its old game plan. A test building that is not selected now uses its planner

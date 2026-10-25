@@ -580,8 +580,29 @@ function pickNumericDeep(obj, keys){
 }
 function renderStatementRows(rows){return rows.length?rows.map(([k,v])=>`<tr><td>${escapeHtml(k)}</td><td>${money(v)}</td></tr>`).join(''):'<tr><td colspan="2">No numeric fields captured yet.</td></tr>';}
 function statementTable(title,rows){return `<div class="statement-card"><h3>${escapeHtml(title)}</h3><div class="table-wrap"><table class="statement-table"><thead><tr><th>Item</th><th>Amount</th></tr></thead><tbody>${renderStatementRows(rows)}</tbody></table></div></div>`;}
+function gameStatementCard(title,lines,extra){
+  const rows=lines.map(l=>{
+    if(l.kind==='head')return `<tr class="stmt-head"><td colspan="2">${escapeHtml(l.label)}</td></tr>`;
+    if(l.kind==='sub')return `<tr class="stmt-sub"><td colspan="2">${escapeHtml(l.label)}</td></tr>`;
+    const cls=l.kind==='line'?(l.indent?'stmt-indent':''):`stmt-${l.kind}`;
+    return `<tr class="${cls}"><td>${escapeHtml(l.label||'')}</td><td>${money(l.value)}</td></tr>`;
+  }).join('');
+  const more=(extra||[]).length?statementTable('Other captured fields',extra.map(x=>[labelize(x.key),x.value])):'';
+  return `<div class="statement-grid"><div class="statement-card"><h3>${escapeHtml(title)}</h3><div class="table-wrap"><table class="statement-table game-statement"><colgroup><col><col class="stmt-val"></colgroup><tbody>${rows}</tbody></table></div></div>${more}</div>`;
+}
+function gameRatioValue(r){
+  if(!Number.isFinite(r.value))return Number.isNaN(r.value)?'—':(r.value<0?'-∞':'∞');
+  return r.percent?`${(r.value*100).toFixed(2)}%`:r.value.toFixed(3);
+}
+function accountingFinancialRatios(income,bs){
+  const g=SCM_TOOLS_CORE.gameFinancialStatements(income,bs,{});
+  if(!g.ratiosAvailable)return '<p class="muted">Ratios need a computed income statement and balance sheet. Open Accounting in the game and press Sync.</p>';
+  const rows=g.ratios.map(r=>r.kind?`<tr class="stmt-head"><td colspan="2">${escapeHtml(r.label)}</td></tr>`:`<tr><td>${escapeHtml(r.label)}<div class="muted stmt-formula">${escapeHtml(r.formula)}</div></td><td class="${r.value>=0?'ok':'warn'}">${gameRatioValue(r)}</td></tr>`).join('');
+  return `<div class="statement-grid"><div class="statement-card"><h3>Financial Ratios</h3><div class="table-wrap"><table class="statement-table game-statement"><colgroup><col><col class="stmt-val"></colgroup><tbody>${rows}</tbody></table></div></div></div>`;
+}
 function buildBalanceSections(bs){
   if(!bs||typeof bs!=='object')return '<p class="muted">No balance sheet response captured yet. Open Sim Companies HQ/Accounting and press Sync.</p>';
+  if(Object.keys(bs).length&&typeof SCM_TOOLS_CORE!=='undefined'){const g=SCM_TOOLS_CORE.gameFinancialStatements({},bs,{});return gameStatementCard('Balance Sheet',g.balance,g.extra.bs);}
   const used=new Set();
   const add=(keys,label)=>{const rows=[];for(const k of keys){if(bs[k]!==undefined){const n=numericValue(bs[k]);if(n!==null){rows.push([labelize(k),n]);used.add(k);}}}return rows;};
   const assets=add(['cash','accountsReceivable','materials','workInProcess','finishedGoods','research','deposits','investmentInBonds','buildings','patents','valuationAllowance','otherAssets'],'Assets');
@@ -3166,12 +3187,14 @@ function renderDiagnostics(s){
 function accountingCashflowSummary(cf){
   if(!cf||typeof cf!=='object')return '<p class="muted">No cash-flow response captured yet.</p>';
   const exclude=new Set(['data','transactions','transaction','items','entries','movements','operations','results','cashflow','cashFlow','history','records','isComputed']);
+  if(cf.isComputed!==false&&Object.keys(cf).length&&typeof SCM_TOOLS_CORE!=='undefined'){const g=SCM_TOOLS_CORE.gameFinancialStatements({},{},cf);return gameStatementCard('Cashflow Statement',g.cashflow,g.extra.cf);}
   const rows=financialEntries(cf,exclude);
   return rows.length?`<div class="statement-grid">${statementTable('Cash Flow Fields',rows.slice(0,40))}</div>`:'<p class="muted">The cash-flow endpoint was captured, but it did not expose numeric summary fields.</p>';
 }
 function accountingIncomeStatement(src){
   if(!src||typeof src!=='object')return '<p class="muted">No income statement response captured yet.</p>';
   const exclude=new Set(['data','rows','items','entries','transactions','results','isComputed']);
+  if(src.isComputed!==false&&Object.keys(src).length&&typeof SCM_TOOLS_CORE!=='undefined'){const g=SCM_TOOLS_CORE.gameFinancialStatements(src,{},{});return gameStatementCard('Income Statement',g.income,g.extra.income);}
   const rows=financialEntries(src,exclude);
   return rows.length?`<div class="statement-grid">${statementTable('Income Statement Fields',rows.slice(0,60))}</div>`:'<p class="muted">No readable income-statement summary fields were captured.</p>';
 }
@@ -3215,7 +3238,7 @@ function render(s){
    $('#accountingLiveStatus').textContent=latestTime
      ?`Last updated: ${new Date(latestTime).toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'})}`
      :'Waiting for latest financial response';
-} if($('#accountingOverview'))$('#accountingOverview').innerHTML=accountingOverview(accountingDisplay,accountingPeriodView==='current'?accountingComparisonBase(a):null); if($('#accountingHistory')){$('#accountingHistory').innerHTML=accountingHistoryTable(a.history);scmApplyCollapse($('#accountingHistory'));} if($('#accountingBalanceSummary'))$('#accountingBalanceSummary').innerHTML=`<div class="overview-stat-grid accounting-balance-summary"><div class="overview-stat-card"><span>Cash</span><strong>${money(a.cash)}</strong></div><div class="overview-stat-card"><span>Accounts Receivable</span><strong>${money(a.accountsReceivable)}</strong></div><div class="overview-stat-card"><span>Inventory</span><strong>${money(a.inventory)}</strong></div><div class="overview-stat-card"><span>Current Assets</span><strong>${money(a.currentAssets)}</strong></div><div class="overview-stat-card"><span>Accounts Payable</span><strong>${money(a.accountsPayable)}</strong></div><div class="overview-stat-card"><span>Bonds Payable</span><strong>${money(a.bondsPayable)}</strong></div><div class="overview-stat-card"><span>Current Liabilities</span><strong>${money(a.currentLiabilities)}</strong></div><div class="overview-stat-card"><span>Total Assets</span><strong>${money(a.assets)}</strong></div><div class="overview-stat-card"><span>Total Liabilities</span><strong>${money(a.liabilities)}</strong></div></div>`; if($('#accountingCashflowSummary'))$('#accountingCashflowSummary').innerHTML=accountingCashflowSummary(a.source?.cf); if($('#accountingIncomeStatement'))$('#accountingIncomeStatement').innerHTML=accountingIncomeStatement(a.source?.income); if($('#balanceDetails'))$('#balanceDetails').innerHTML=buildBalanceSections(a.source?.bs);
+} if($('#accountingOverview'))$('#accountingOverview').innerHTML=accountingOverview(accountingDisplay,accountingPeriodView==='current'?accountingComparisonBase(a):null); if($('#accountingHistory')){$('#accountingHistory').innerHTML=accountingHistoryTable(a.history);scmApplyCollapse($('#accountingHistory'));} if($('#accountingBalanceSummary'))$('#accountingBalanceSummary').innerHTML=`<div class="overview-stat-grid accounting-balance-summary"><div class="overview-stat-card"><span>Cash</span><strong>${money(a.cash)}</strong></div><div class="overview-stat-card"><span>Accounts Receivable</span><strong>${money(a.accountsReceivable)}</strong></div><div class="overview-stat-card"><span>Inventory</span><strong>${money(a.inventory)}</strong></div><div class="overview-stat-card"><span>Current Assets</span><strong>${money(a.currentAssets)}</strong></div><div class="overview-stat-card"><span>Accounts Payable</span><strong>${money(a.accountsPayable)}</strong></div><div class="overview-stat-card"><span>Bonds Payable</span><strong>${money(a.bondsPayable)}</strong></div><div class="overview-stat-card"><span>Current Liabilities</span><strong>${money(a.currentLiabilities)}</strong></div><div class="overview-stat-card"><span>Total Assets</span><strong>${money(a.assets)}</strong></div><div class="overview-stat-card"><span>Total Liabilities</span><strong>${money(a.liabilities)}</strong></div></div>`; if($('#accountingCashflowSummary'))$('#accountingCashflowSummary').innerHTML=accountingCashflowSummary(a.source?.cf); if($('#accountingIncomeStatement'))$('#accountingIncomeStatement').innerHTML=accountingIncomeStatement(a.source?.income); if($('#balanceDetails'))$('#balanceDetails').innerHTML=buildBalanceSections(a.source?.bs); if($('#accountingRatios'))$('#accountingRatios').innerHTML=accountingFinancialRatios(a.source?.income,a.source?.bs);
  renderWarehouseMarketTimestamp(s); try{renderWarehouseRunOut(s);}catch(e){console.error('Run-out render failed',e);} const inventoryRowsEl=$('#inventoryRows'); if(inventoryRowsEl) inventoryRowsEl.innerHTML=rows.length?rows.map(r=>{const marketPrice=cachedMarketPrice(s,r._id,r._quality);const margin=marketPrice!=null&&r._unitCost>0?(marketPrice-r._unitCost)/r._unitCost*100:null;const ri=resourceInfo(r,s);const imgs=ri.imageCandidates||[];const localImage=s.resourceImageCache?.[String(r._id)]||s.resourceImageData?.[String(r._id)]||null;if(!localImage) requestResourceImage(r._id);const srcs=localImage?[localImage,...imgs]:imgs;const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(JSON.stringify(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';const activeCost=activeProductionCostCells(s,r);return `<tr data-warehouse-key="${Number(r._id)}:${Number(r._quality)}"><td><div class="product-cell">${img}<span><strong>${resourceName(r,s)}</strong><small>#${r._id}</small></span></div>${warehouseHeadCost(r)}</td><td>${num(r._qty)}</td><td>${r._quality??'—'}</td><td>${r._unitCost==null?'—':money(r._unitCost)}</td><td>${activeCost.costHtml}</td><td>${activeCost.diffHtml}</td><td data-cell="prod-cost-history">${productionCostHistoryCell(s,r)}</td><td><span class="cell-stack">${marketPrice==null?'—':money(marketPrice)}<small class="market-source">${marketPrice==null?'Market price not captured':'Current market price'}</small></span></td><td class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td></tr>`}).join(''):'<tr><td colspan="9">No warehouse data captured.</td></tr>';
  if(activeTab==='overview'&&$('#cashflowDetails'))$('#cashflowDetails').innerHTML=buildCashflowSections(a.source?.cf,a.source?.recent); if(activeTab==='market'){ renderLiveMarketProduct(s); renderMarketHistory(s); renderMarketAlerts(s); } if(activeTab==='production') renderBuildingPlanner(s);
  renderVwapDiagnostics(s);
