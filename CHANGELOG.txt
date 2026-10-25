@@ -1,3 +1,16 @@
+2.5.369 — 2026-10-25 — Accounting audit fixes
+- "Expenses" tile showed cash paid out ($3,907,158, cash-flow cashAllExpenses), not a game income-statement figure.
+  It is now "Operating expenses" = the game's subtotal (construction + salaries + training + poaching + exchange
+  fees): -$236,958 on 10/24.
+- Revenue / Operating expenses / Profit now compare with the game's Day statement of the previous day when it is
+  captured (was "No earlier figure"). % change uses |previous| so a smaller expense shows +, not -.
+- Last 8 days: Sales, Operating expenses and Net income come from the game's Day statements when captured. The
+  ledger fallback is labelled "Cash paid out" / "Profit (EVA)" (what it really is).
+- Inventory includes Research (game Inventory group). Total Assets uses the game's balance-sheet sum and
+  Liabilities = Bonds payable, instead of the last past-finances row.
+- Fixed: the current balance sheet / income statement could be replaced by a /day/<n>/ capture opened later in
+  the game (lookup was not anchored). Day/week/month accounting captures are now realm-guarded too.
+
 2.5.368 — 2026-10-25 — Accounting: game's full statements + Financial Ratios
 - Income Statement, Balance Sheet Detail and Cash Flow were raw API field dumps (A–Z). They now follow the game's
   screens line for line, with the game's subtotals: gross profit, operating expenses, other income, total

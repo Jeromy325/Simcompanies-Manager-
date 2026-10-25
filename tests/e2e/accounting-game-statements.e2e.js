@@ -18,6 +18,17 @@ const H = require('./harness'); const fs = require('fs');
     [ra, 'Sales per Employee', '297.028'], [ra, 'Income per Employee', '27.065'], [ra, 'Inventory Turnover', '0.415'], [ra, 'Assets Turnover', '0.178'],
     [ra, 'Operating Assets Turnover', '0.364'], [ra, 'Defensive Interval', '0.819'], [ra, 'Interest Coverage', '-∞'], [ra, 'Debt to Building Ratio', '0.00%']];
   for (const [s, l, v] of want) { const got = await row(s, l); H.check(`${l}`, got === v, v, got); }
+  const tiles = await page.$$eval('#accountingOverview .finance-card', cs => cs.map(c => c.innerText.replace(/\s+/g, ' ').trim()));
+  const tile = l => tiles.find(x => x.startsWith(l + ' ')) || '';
+  H.check('Operating expenses tile = game (-236,958), was cash paid out 3,907,158', /^Operating expenses -\$236,958\.00/.test(tile('Operating expenses')), '-$236,958.00', tile('Operating expenses'));
+  if (process.env.SCM_HAS_DAY1) {
+    H.check('Revenue vs day/1 statement', /\+\$484,624\.00 \+11\.86%/.test(tile('Revenue')), '+$484,624.00 +11.86%', tile('Revenue'));
+    H.check('Opex vs day/1 statement, % on |base|', /\+\$64,207\.00 \+21\.32%/.test(tile('Operating expenses')), '+$64,207.00 +21.32%', tile('Operating expenses'));
+    const h = await page.$$eval('#accountingHistory .acct-day', ds => ds.map(d => d.textContent.replace(/\s+/g, ' ').trim()));
+    H.check('Oct 23 row from day statement', /Sales\$4,086,939\.00Operating expenses-\$301,165\.00Net income\$436,896\.00/.test(h[1] || ''), 'Sales 4,086,939 / Opex -301,165 / NI 436,896', h[1]);
+  }
+  H.check('Total Assets tile', /^Total Assets \$25,742,475\.00/.test(tile('Total Assets')), '$25,742,475.00', tile('Total Assets'));
+  H.check('Profit tile = net income', /^Profit \$416,561\.00 ↓ -\$20,335\.00 -4\.65%/.test(tile('Profit')), '$416,561.00 -$20,335.00 -4.65%', tile('Profit'));
   const t = await txt(inc); H.check('income subtotals 637,059 / -236,958 / 16,460', /\$637,059\.00/.test(t) && /-\$236,958\.00/.test(t) && /\$16,460\.00/.test(t), true, '');
   const sw2 = await page.evaluate(() => document.documentElement.scrollWidth); H.check('no horizontal scroll at 360px', sw2 <= 360, '≤360', sw2);
   const inline = await page.evaluate(() => [...document.querySelectorAll('*')].some(e => [...e.attributes].some(a => /^on[a-z]+$/.test(a.name) && a.name in e)));

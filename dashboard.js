@@ -685,13 +685,28 @@ function accountingDailyHistory(overview,detail,ledger=[],check={sales:true,expe
   }
   return days;
 }
+function gameOperatingExpenses(e){
+  // Game income statement "Operating expenses" subtotal (GamePages): construction + salaries + training + poaching + exchange fees.
+  if(!e||typeof e!=='object'||!('marketFees' in e||'salariesCosts' in e))return null;
+  const v=k=>Number(e[k])||0; return v('constructionCosts')+v('salariesCosts')+v('trainingCosts')+v('poachingCosts')+v('marketFees');
+}
+function accountingDayStatements(endpointData,realmMatches=()=>true){
+  const out=new Map();
+  for(const [k,item] of Object.entries(endpointData||{})){
+    if(!/\/api\/v2\/companies\/(?:me|\d+)\/income-statement\/day\/\d+\/?$/i.test(k))continue;
+    const e=item?.data; if(Number(item?.status)!==200||!e||e.isComputed!==true||!realmMatches(item))continue;
+    const t=Date.parse(String(e.date||'').replace(' ','T')); if(!Number.isFinite(t))continue;
+    out.set(Math.round(t/60000),{sales:Number(e.sales)||0,operatingExpenses:gameOperatingExpenses(e),netIncome:Number(e.netIncome)||0,dateFrom:e.dateFrom,date:e.date});
+  }
+  return out;
+}
 function accountingPreviousPeriod(history,periodEnd){
   const end=Date.parse(String(periodEnd||''));
   if(!Array.isArray(history)||!history.length)return null;
   const rows=Number.isFinite(end)?history.filter(r=>r.t<end-3600000):history.slice(0,-1);
   const r=rows[rows.length-1];
   if(!r)return null;
-  return {cash:r.cash??null,profit:r.profit??null,assets:r.assets??null,liabilities:r.liabilities??null,inventory:r.inventory??null,currentAssets:r.currentAssets??null,currentLiabilities:r.liabilities??null,revenue:r.sales??null,cashIn:r.cashIn??null,expenses:r.expenses??null,date:new Date(r.t).toISOString(),source:'game-history'};
+  return {cash:r.cash??null,profit:r.netIncome??r.profit??null,operatingExpenses:r.operatingExpenses??null,assets:r.assets??null,liabilities:r.liabilities??null,inventory:r.inventory??null,currentAssets:r.currentAssets??null,currentLiabilities:r.liabilities??null,revenue:r.sales??null,cashIn:r.statement?null:(r.cashIn??null),expenses:r.expenses??null,date:new Date(r.t).toISOString(),source:'game-history'};
 }
 function accounting(s, realmStore=null){
   const endpointData=(realmStore?.endpointData&&typeof realmStore.endpointData==='object')?realmStore.endpointData:(s.endpointData||{});
@@ -724,7 +739,7 @@ function accounting(s, realmStore=null){
     }
     return null;
   };
-  const bs=latest(/\/api\/v2\/companies\/(?:me|\d+)\/balance-sheet(?:\/\d+)?\/?/i)
+  const bs=latest(/\/api\/v2\/companies\/(?:me|\d+)\/balance-sheet\/?$/i)
     ?? latestSupplemental('/api/v2/companies/me/balance-sheet/');
   // Prefer the most recent COMPLETED aggregate period. At the daily rollover
   // Sim Companies can return an isComputed:false zero placeholder; that is not
@@ -739,7 +754,7 @@ function accounting(s, realmStore=null){
     ?? latest(/\/api\/(?:v2|v3)\/companies\/(?:me|\d+)(?:\/[^?]*)?(?:cashflow|cash-flow|financial)[^?]*(?:\/\d+)?\/?(?:\?.*)?$/i);
   const pf=latest(/\/api\/(?:v2\/companies\/(?:me|\d+)\/past-finances-overview|v3\/companies\/(?:me|\d+)\/past-finances)(?:\/\d+)?\/?/i);
   const income=latestComputed(/\/api\/v2\/companies\/(?:me|\d+)\/income-statement(?:\/\d+)?\/?$/i,'/api/v2/companies/me/income-statement/')
-    ?? latest(/\/api\/v2\/companies\/(?:me|\d+)\/(?:income-statement|profit-loss)(?:\/\d+)?\/?/i);
+    ?? latest(/\/api\/v2\/companies\/(?:me|\d+)\/(?:income-statement|profit-loss)\/?$/i);
 
   const norm=k=>String(k).toLowerCase().replace(/[^a-z0-9]/g,'');
   const numeric=v=>{
@@ -847,8 +862,11 @@ function accounting(s, realmStore=null){
     });
     return rows[0]||null;
   })();
-  const assets=get(bs,['assets','totalAssets']) ?? pickNumericDeep(bs,['assets','totalAssets']) ?? get(latestPastFinanceRow,['assets','totalAssets','total']);
-  const liabilities=get(bs,['liabilities','totalLiabilities']) ?? pickNumericDeep(bs,['liabilities','totalLiabilities']) ?? get(latestPastFinanceRow,['liabilities','totalLiabilities','liabilities']);
+  // v2.5.369: Total assets / liabilities as the game's balance sheet computes them (GamePages).
+  const gameBs=obj(bs)&&('cash' in bs||'buildings' in bs)&&typeof SCM_TOOLS_CORE!=='undefined'?SCM_TOOLS_CORE.gameFinancialStatements({},bs,{}):null;
+  const gameTotal=(g,label)=>{const r=g?.balance?.find(x=>x.label===label);return r?r.value:null;};
+  const assets=gameTotal(gameBs,'Total assets') ?? get(bs,['assets','totalAssets']) ?? pickNumericDeep(bs,['assets','totalAssets']) ?? get(latestPastFinanceRow,['assets','totalAssets','total']);
+  const liabilities=(gameBs?get(bs,['bondsPayable']):null) ?? get(bs,['liabilities','totalLiabilities']) ?? pickNumericDeep(bs,['liabilities','totalLiabilities']) ?? get(latestPastFinanceRow,['liabilities','totalLiabilities','liabilities']);
 
   // The balance sheet exposes the inventory components explicitly.
   // Inventory = materials + work in process + finished goods.
@@ -858,7 +876,8 @@ function accounting(s, realmStore=null){
     const wip=get(bs,['workInProcess'])||0;
     const finished=get(bs,['finishedGoods'])||0;
     const valuationAllowance=get(bs,['valuationAllowance','valuation_allowance'])||0;
-    if(materials||wip||finished||valuationAllowance||('materials' in bs)||('workInProcess' in bs)||('finishedGoods' in bs)||('valuationAllowance' in bs)) inventory=materials+wip+finished+valuationAllowance;
+    const research=get(bs,['research'])||0;
+    if(materials||wip||finished||valuationAllowance||('materials' in bs)||('workInProcess' in bs)||('finishedGoods' in bs)||('valuationAllowance' in bs)) inventory=materials+research+wip+finished+valuationAllowance;
   }
   if(inventory==null){
     const snapshotInventory=get(realmStore?.accountingSnapshots?.current,['inventory']) ?? get(s.accountingSnapshots?.current,['inventory']);
@@ -946,7 +965,14 @@ function accounting(s, realmStore=null){
   const history=accountingDailyHistory(
     latest(/\/api\/v2\/companies\/(?:me|\d+)\/past-finances-overview\/?$/i)??latestSupplemental('/api/v2/companies/me/past-finances-overview/'),
     latest(/\/api\/v3\/companies\/(?:me|\d+)\/past-finances\/?$/i)??latestSupplemental('/api/v3/companies/me/past-finances/'),[...ledger.values()],ledgerCheck);
-  return {cash,revenue:finalRevenue,expenses,profit:finalProfit,netMargin:finalMargin,assets,liabilities,inventory,accountsReceivable,accountsPayable:payable,bondsPayable,currentAssets,currentLiabilities,period,history,previousPeriod:accountingPreviousPeriod(history,period.date),ledgerCheck,source:{bs,cf,recent,pf,income},sourceType: income ? 'income-statement' : (cf ? (transactionRows.length?'cash-flow-transactions':'cash-flow-derived') : 'unavailable')};
+  // v2.5.369: the game's own per-day income statements (/income-statement/day/<n>/, captured when
+  // the game's Accounting page shows a Day period) give each completed day's exact Sales,
+  // Operating expenses and Net income. Matched to history rows by the statement's end date.
+  const dayIncome=accountingDayStatements(endpointData,realmMatches);
+  for(const r of history){const st=dayIncome.get(Math.round(r.t/60000));if(st){r.sales=st.sales;r.operatingExpenses=st.operatingExpenses;r.netIncome=st.netIncome;r.statement=true;}}
+  const operatingExpenses=gameOperatingExpenses(income);
+  const previousPeriod=accountingPreviousPeriod(history,period.date);
+  return {cash,revenue:finalRevenue,expenses,operatingExpenses,profit:finalProfit,netMargin:finalMargin,assets,liabilities,inventory,accountsReceivable,accountsPayable:payable,bondsPayable,currentAssets,currentLiabilities,period,history,previousPeriod,ledgerCheck,source:{bs,cf,recent,pf,income},sourceType: income ? 'income-statement' : (cf ? (transactionRows.length?'cash-flow-transactions':'cash-flow-derived') : 'unavailable')};
 }
 window.scmImageFallback=function(img){try{const c=JSON.parse(img.dataset.candidates||'[]');const i=Number(img.dataset.idx||0)+1;if(i<c.length){img.dataset.idx=String(i);img.src=c[i];return;}img.style.display='none';}catch{img.style.display='none';}};
 function recordHistory(s,rows){const history={...(s.history||{})},day=new Date().toISOString().slice(0,10);for(const r of rows){if(!Number.isFinite(r._id)||r._quality==null)continue;const st=marketStats(marketRows(s,r._id,r._quality),r._quality);if(st.vwap==null)continue;const key=`${r._id}:${r._quality}`;const arr=Array.isArray(history[key])?history[key].slice():[];const idx=arr.findIndex(x=>x.date===day);const item={date:day,vwap:st.vwap};if(idx>=0)arr[idx]=item;else arr.push(item);history[key]=arr}return history}
@@ -1641,15 +1667,15 @@ function accountingHistoryTable(history){
   const field=(label,v,cls=false)=>`<div class="acct-day-field"><span>${label}</span><strong class="${cls?tone(v):''}">${v==null?'—':money(v)}</strong></div>`;
   // v2.5.350 one collapsible card per day; collapsed shows the day and its profit (right).
   const key=r=>{const t=new Date(r.t);return Number.isFinite(t.getTime())?t.toISOString().slice(0,10):String(r.t);};
-  return `<div class="acct-day-list">${rows.map(r=>`<div class="acct-day" data-collapse="acctday:${escapeHtml(key(r))}" data-collapse-default="closed"><div class="acct-day-head" data-collapse-head><span>${escapeHtml(d(r.t))}</span><strong class="${tone(r.profit)}">${r.profit==null?'—':money(r.profit)}</strong></div><div class="acct-day-body">${field('Sales',r.sales)}${field('Expenses',r.expenses)}${field('Profit',r.profit,true)}${field('Cash',r.cash)}${field('Inventory',r.inventory)}${field('Total assets',r.assets)}<div class="acct-day-field"><span>Rank</span><strong>${r.rank==null?'—':'#'+Number(r.rank).toLocaleString()}</strong></div></div></div>`).join('')}</div><p class="muted">From the game's past-finances history (one row per completed day). Sales and expenses are summed from the captured cash-flow ledger; a dash means the ledger does not reach back that far or is missing entries (checked against today's statement).</p>`;
+  return `<div class="acct-day-list">${rows.map(r=>`<div class="acct-day" data-collapse="acctday:${escapeHtml(key(r))}" data-collapse-default="closed"><div class="acct-day-head" data-collapse-head><span>${escapeHtml(d(r.t))}</span><strong class="${tone(r.profit)}">${r.profit==null?'—':money(r.profit)}</strong></div><div class="acct-day-body">${field('Sales',r.sales)}${r.statement?field('Operating expenses',r.operatingExpenses,true):field('Cash paid out',r.expenses)}${field(r.statement?'Net income':'Profit (EVA)',r.statement?r.netIncome:r.profit,true)}${field('Cash',r.cash)}${field('Inventory',r.inventory)}${field('Total assets',r.assets)}<div class="acct-day-field"><span>Rank</span><strong>${r.rank==null?'—':'#'+Number(r.rank).toLocaleString()}</strong></div></div></div>`).join('')}</div><p class="muted">From the game's past-finances history (one row per completed day). Sales, Operating expenses and Net income come from the game's Day statements (open Accounting → Day → that day in the game to capture one). Without one, Sales and Cash paid out are summed from the cash-flow ledger only when it is complete; Profit (EVA) is the game's operating profit (net income − game income − patent conversion).</p>`;
 }
 function accountingOverview(a,previous){
-  const cards=[['Cash','cash',a.cash],['Revenue','revenue',a.revenue],['Expenses','expenses',a.expenses],['Profit','profit',a.profit],['Total Assets','assets',a.assets],['Liabilities','liabilities',a.liabilities],['Inventory','inventory',a.inventory],['Current Assets','currentAssets',a.currentAssets],['Current Liabilities','currentLiabilities',a.currentLiabilities]];
+  const cards=[['Cash','cash',a.cash],['Revenue','revenue',a.revenue],['Operating expenses','operatingExpenses',a.operatingExpenses],['Profit','profit',a.profit],['Total Assets','assets',a.assets],['Liabilities','liabilities',a.liabilities],['Inventory','inventory',a.inventory],['Current Assets','currentAssets',a.currentAssets],['Current Liabilities','currentLiabilities',a.currentLiabilities]];
   const changeInfo=(value,old)=>{
     const v=value==null||value===''?NaN:Number(value),p=old==null||old===''?NaN:Number(old);
     if(!Number.isFinite(v)) return `<div class="finance-change neutral-change"><span class="finance-change-arrow">—</span><div class="finance-change-values"><strong>—</strong><small>N/A</small></div></div>`;
     if(!Number.isFinite(p)) return `<div class="finance-change neutral-change"><span class="finance-change-arrow">·</span><div class="finance-change-values"><small>No earlier figure captured</small></div></div>`;
-    const delta=roundCurrencyUp(v-p), pct=p!==0?(delta/p)*100:null;
+    const delta=roundCurrencyUp(v-p), pct=p!==0?(delta/Math.abs(p))*100:null;
     if(delta===0) return `<div class="finance-change neutral-change"><span class="finance-change-arrow">—</span><div class="finance-change-values"><strong>$0</strong><small>0.00%</small></div></div>`;
     const up=delta>0;
     return `<div class="finance-change ${up?'change-up':'change-down'}"><span class="finance-change-arrow">${up?'↑':'↓'}</span><div class="finance-change-values"><strong>${delta>0?'+':''}${money(delta)}</strong><small>${pct==null?'N/A':`${pct>0?'+':''}${pct.toFixed(2)}%`}</small></div></div>`;

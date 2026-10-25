@@ -2289,7 +2289,7 @@ async function requestActiveGameRealm(reason='tab-activated'){
   }catch(e){return {ok:false,error:e?.message||String(e),reason};}
 }
 function useful(url){return USEFUL_PATTERNS.some(r=>r.test(url))}
-function isRealmSensitiveAccountingUrl(url){return /\/api\/(?:v2\/companies\/(?:me|\d+)\/(?:balance-sheet|cashflow(?:\/(?:recent|\d+))?|cashflow-statement(?:\/week\/\d+)?|income-statement|past-finances-overview|administration-overhead)|v3\/companies\/(?:me|\d+)\/past-finances)(?:\/\d+)?\/?(?:\?.*)?$/i.test(String(url||''));}
+function isRealmSensitiveAccountingUrl(url){return /\/api\/(?:v2\/companies\/(?:me|\d+)\/(?:balance-sheet|cashflow(?:\/(?:recent|\d+))?|cashflow-statement|income-statement|past-finances-overview|administration-overhead)|v3\/companies\/(?:me|\d+)\/past-finances)(?:\/(?:day|week|month)\/\d+)?(?:\/\d+)?\/?(?:\?.*)?$/i.test(String(url||''));}
 
 // API_SEEN and API_DATA can arrive almost simultaneously from the game page.
 // Serialize their storage transactions so one response cannot overwrite the
