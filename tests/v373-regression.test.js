@@ -1,4 +1,5 @@
-// 2.5.373: the Accounting tab re-renders when the day-walk status changes (the walk note was missing when the walk
+// 2.5.373: get() keeps accountingDayWalkStatus (its field whitelist dropped it, so every render from get() — e.g.
+// requestAccountingRefresh — wiped the Last 7 days walk note), and the Accounting tab re-renders when the day-walk status changes (the walk note was missing when the walk
 // finished after the tab had rendered, because scmAccountingSignature ignored accountingDayWalkStatus).
 const assert = require('assert'); const fs = require('fs'); const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
@@ -13,4 +14,6 @@ assert.notEqual(sig(base), sig(running), 'walk scheduled/running triggers a rend
 assert.notEqual(sig(running), sig(complete), 'walk complete triggers a render');
 assert.equal(sig(complete), sig({ ...complete }), 'unchanged status: no extra render');
 assert.equal(sig(base), sig({ ...base }));
+const emptyLine = dash.split('\n').find(l => l.includes('const empty={authData:null'));
+assert.ok(/\baccountingDayWalkStatus:null\b/.test(emptyLine || ''), 'get() whitelist keeps accountingDayWalkStatus');
 console.log('v373-regression: ok');

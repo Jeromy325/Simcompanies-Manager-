@@ -1,7 +1,7 @@
-2.5.373 — 2026-10-25 — Accounting: Last 7 days note shows when the walk finishes
-- The "Day statements 0–6 read…" note under Last 7 days now appears as soon as the walk finishes. Before, if the
-  Accounting tab was already drawn, the note stayed missing until a tab switch or reload (about 1 in 8 runs).
-  Display refresh only; Sync and captured data unchanged.
+2.5.373 — 2026-10-25 — Accounting: Last 7 days walk note no longer disappears
+- The "Day statements 0–6 read…" note under Last 7 days could vanish (about 1 in 8 opens): the dashboard's state
+  loader dropped the walk status, so the accounting refresh redrew the section without it. The loader now keeps it,
+  and the Accounting tab also redraws when the walk status changes. Display only; Sync and captured data unchanged.
 
 2.5.372 — 2026-10-25 — Accounting: walk card at the bottom, compact; no cards inside cards
 - Daily statement walk is now the last card on the Accounting tab, collapsed by default; its header shows the
