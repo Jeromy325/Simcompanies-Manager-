@@ -4,7 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.371');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.372');
 const bg = read('background.js');
 const i = bg.indexOf('const isB=/\\/api\\/v2\\/companies\\/me\\/buildings'), hook = bg.slice(i, bg.indexOf('}', bg.indexOf('refreshAbundanceIfStale(r,', i)) + 30);
 assert.ok(i > 0 && hook.includes('isA=/\\/api\\/v3\\/companies\\/auth-data\\//i'), 'auth-data triggers the check');

@@ -2,7 +2,7 @@
 const assert = require('assert'); const fs = require('fs'); const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const dash = read('dashboard.js');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.371');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.372');
 assert.ok(/activeSpecs:Array\.isArray\(core\.activeSpecs\)&&core\.activeSpecs\.length\?core\.activeSpecs\.map\(\(\{recipe,\.\.\.x\}\)=>x\):specs/.test(dash), 'network returns ledger specs (with outputRun) so SAVE_FROZEN_NETWORK_PLAN is accepted');
 assert.ok(/const testPlan=b\.testKind&&!selected\?\{product:/.test(dash), 'non-selected test buildings use planner output/level/quality');
 assert.ok(/\(b\.testKind\?null:plannerStoredProductionPlan\(s,b\)\)/.test(dash), 'test building never falls back to the real building plan');

@@ -1,3 +1,9 @@
+2.5.372 — 2026-10-25 — Accounting: walk card at the bottom, compact; no cards inside cards
+- Daily statement walk is now the last card on the Accounting tab, collapsed by default; its header shows the
+  status ("Off" / "On · 8:51 PM" / "On · retry …"). Compact layout: Run daily + minutes, Next / Last, Run now.
+- Income Statement, Balance Sheet Detail, Cash Flow and Financial Ratios show their table directly in their own
+  card (the extra inner card with the same title is gone). "Other captured fields" is a small sub-heading.
+
 2.5.371 — 2026-10-25 — Accounting: daily scheduled statement walk (on/off, adjustable)
 - New "Daily statement walk" panel on the Accounting tab: Run every day (on/off), minutes after the game finishes
   your statements (5–240, default 30), statements last ready, next walk, last walk, Run now.

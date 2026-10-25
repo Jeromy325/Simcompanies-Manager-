@@ -4,7 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.371');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.372');
 const C = require('../tools-core.js');
 const fx = require('./fixtures/profit-calc-2026-10-24.json');
 // abundance kinds from constants: Minerals is made at 'M' (the user's Mine #1, never captured in the 2026-10-24 export)

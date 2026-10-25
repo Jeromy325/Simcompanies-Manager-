@@ -587,8 +587,8 @@ function gameStatementCard(title,lines,extra){
     const cls=l.kind==='line'?(l.indent?'stmt-indent':''):`stmt-${l.kind}`;
     return `<tr class="${cls}"><td>${escapeHtml(l.label||'')}</td><td>${money(l.value)}</td></tr>`;
   }).join('');
-  const more=(extra||[]).length?statementTable('Other captured fields',extra.map(x=>[labelize(x.key),x.value])):'';
-  return `<div class="statement-grid"><div class="statement-card"><h3>${escapeHtml(title)}</h3><div class="table-wrap"><table class="statement-table game-statement"><colgroup><col><col class="stmt-val"></colgroup><tbody>${rows}</tbody></table></div></div>${more}</div>`;
+  const more=(extra||[]).length?`<h4 class="stmt-extra-head">Other captured fields</h4><div class="table-wrap"><table class="statement-table game-statement"><colgroup><col><col class="stmt-val"></colgroup><tbody>${extra.map(x=>`<tr><td>${escapeHtml(labelize(x.key))}</td><td>${money(x.value)}</td></tr>`).join('')}</tbody></table></div>`:'';
+  return `<div class="table-wrap"><table class="statement-table game-statement" aria-label="${escapeHtml(title)}"><colgroup><col><col class="stmt-val"></colgroup><tbody>${rows}</tbody></table></div>${more}`;
 }
 function gameRatioValue(r){
   if(!Number.isFinite(r.value))return Number.isNaN(r.value)?'—':(r.value<0?'-∞':'∞');
@@ -598,7 +598,7 @@ function accountingFinancialRatios(income,bs){
   const g=SCM_TOOLS_CORE.gameFinancialStatements(income,bs,{});
   if(!g.ratiosAvailable)return '<p class="muted">Ratios need a computed income statement and balance sheet. Open Accounting in the game and press Sync.</p>';
   const rows=g.ratios.map(r=>r.kind?`<tr class="stmt-head"><td colspan="2">${escapeHtml(r.label)}</td></tr>`:`<tr><td>${escapeHtml(r.label)}<div class="muted stmt-formula">${escapeHtml(r.formula)}</div></td><td class="${r.value>=0?'ok':'warn'}">${gameRatioValue(r)}</td></tr>`).join('');
-  return `<div class="statement-grid"><div class="statement-card"><h3>Financial Ratios</h3><div class="table-wrap"><table class="statement-table game-statement"><colgroup><col><col class="stmt-val"></colgroup><tbody>${rows}</tbody></table></div></div></div>`;
+  return `<div class="table-wrap"><table class="statement-table game-statement" aria-label="Financial Ratios"><colgroup><col><col class="stmt-val"></colgroup><tbody>${rows}</tbody></table></div>`;
 }
 function buildBalanceSections(bs){
   if(!bs||typeof bs!=='object')return '<p class="muted">No balance sheet response captured yet. Open Sim Companies HQ/Accounting and press Sync.</p>';
@@ -1660,20 +1660,30 @@ function accountingComparisonBase(a){
   return p;
 }
 // v2.5.371 Daily scheduled Accounting walk: on/off, minutes after the game finishes your statements, Run now.
+function accountingWalkTimes(sch){
+  const t=v=>{const d=new Date(v);return v&&Number.isFinite(d.getTime())?d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}):null;};
+  const dt=v=>{const d=new Date(v);return v&&Number.isFinite(d.getTime())?`${d.toLocaleDateString(undefined,{weekday:'short'})} ${t(v)}`:'—';};
+  return {t,dt};
+}
+function accountingWalkHeadText(sch){
+  const {t}=accountingWalkTimes(sch);
+  if(!sch?.enabled)return 'Off';
+  if(sch?.retryAt)return `On · retry ${t(sch.retryAt)||'—'}`;
+  if(sch?.nextAt)return `On · ${t(sch.nextAt)}`;
+  return 'On · Sync first';
+}
 function accountingWalkScheduleHtml(sch,walk,realm){
-  const when=v=>{const d=new Date(v);return v&&Number.isFinite(d.getTime())?d.toLocaleString(undefined,{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'—';};
-  const time=v=>{const d=new Date(v);return v&&Number.isFinite(d.getTime())?d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}):'—';};
+  const {dt}=accountingWalkTimes(sch);
   const on=Boolean(sch?.enabled), off=Number(sch?.offsetMin)||30, r=sch?.realm!=null?Number(sch.realm):realm;
-  const other=on&&r!=null&&realm!=null&&r!==realm;
   const lr=sch?.lastResult;
-  const last=lr?`${escapeHtml(when(lr.at))} · ${lr.error?escapeHtml(lr.error):`${Number(lr.captured)||0}/7 days read`}${lr.attempt>1?` (try ${Number(lr.attempt)})`:''}`:'Not run yet';
-  const next=on?(sch?.nextAt?`${escapeHtml(when(sch.nextAt))}${sch?.retryAt?' (retry: statements not ready yet)':''}`:(sch?.waitingFor==='statement-time'?'Sync once first so the Manager knows when the game finishes your statements.':'—')):'Off';
-  return `<div class="acct-walk-settings">
-<label class="acct-walk-toggle"><input type="checkbox" id="acctWalkEnabled" ${on?'checked':''}> Run every day</label>
-<label class="acct-walk-offset">Minutes after the game finishes your statements <input type="number" id="acctWalkOffset" min="5" max="240" step="5" value="${off}" inputmode="numeric"></label>
-<div class="acct-walk-lines"><div><span>Statements last ready</span><strong>${escapeHtml(time(sch?.readyAt))}</strong></div><div><span>Next walk</span><strong>${next}</strong></div><div><span>Last walk</span><strong>${last}</strong></div>${other?`<div class="warn">Scheduled for ${escapeHtml(realmName(r))}.</div>`:''}</div>
-<div class="acct-walk-actions"><button id="acctWalkRunNow" type="button">Run now</button><span id="acctWalkMsg" class="muted">${escapeHtml(accountingWalkMsg)}</span></div>
-<p class="muted">Keep the Sim Companies tab open. At the set time the Manager refreshes Accounting through the game tab and taps Day 0–6. If the game has not finished your statements yet it tries again every 15 min (4 tries).</p></div>`;
+  const last=lr?(lr.error?`<span class="warn">${Number(lr.captured)||0}/7 ✗</span>`:`<span class="ok">${Number(lr.captured)||0}/7 ✓</span>`):'—';
+  const next=on?(sch?.nextAt?escapeHtml(dt(sch.nextAt)):'Sync first'):'Off';
+  const other=on&&r!=null&&realm!=null&&r!==realm?` · ${escapeHtml(realmName(r))}`:'';
+  return `<div class="acct-walk">
+<div class="acct-walk-row"><label class="acct-walk-toggle"><input type="checkbox" id="acctWalkEnabled" ${on?'checked':''}> Run daily</label><label class="acct-walk-offset"><input type="number" id="acctWalkOffset" min="5" max="240" step="5" value="${off}" inputmode="numeric" aria-label="Minutes after the game finishes your statements"> min after</label></div>
+<div class="acct-walk-row acct-walk-info"><span>Next <strong>${next}</strong>${other}</span><span>Last <strong>${last}</strong></span></div>
+<div class="acct-walk-row"><button id="acctWalkRunNow" type="button">Run now</button><span id="acctWalkMsg" class="muted">${escapeHtml(accountingWalkMsg||(lr?.error?lr.error:''))}</span></div>
+</div>`;
 }
 async function renderAccountingWalkSchedule(s){
   const el=document.querySelector('#accountingWalkSchedule'); if(!el)return;
@@ -1681,6 +1691,7 @@ async function renderAccountingWalkSchedule(s){
   let sch=null; try{sch=(await chrome.storage.local.get({scmAccountingWalkSchedule:null})).scmAccountingWalkSchedule;}catch{}
   const realm=Number.isFinite(Number(s?.viewRealm))?Number(s.viewRealm):null;
   el.innerHTML=accountingWalkScheduleHtml(sch||{},null,realm);
+  const head=document.querySelector('#acctWalkHead'); if(head)head.textContent=accountingWalkHeadText(sch||{});
 }
 function accountingWalkRealm(){const s=window.__scmState||{};const r=Number(s.viewRealm??s.selectedRealm);return Number.isFinite(r)?r:null;}
 let accountingWalkMsg='';

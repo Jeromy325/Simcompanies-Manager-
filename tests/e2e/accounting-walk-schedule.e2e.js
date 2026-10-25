@@ -23,8 +23,16 @@ bar.children[1].children[0].addEventListener('click',()=>{document.getElementByI
   const alarm = () => sw.evaluate(async () => (await chrome.alarms.get('scm-accounting-walk-daily'))?.scheduledTime ?? null);
   const ready = Date.parse(fx['/api/v2/companies/me/income-statement/'].date);
   const nextFrom = (r, m) => { let t = r + m * 60000; while (t <= Date.now()) t += 86400000; return t; };
+  // layout: last card on the tab, collapsed by default, no card nested inside the Accounting cards
+  const layout = await dash.evaluate(() => { const ps = [...document.querySelectorAll('#accounting [data-collapse^="acct:"]')].filter(e => /^acct:[a-z-]+$/.test(e.dataset.collapse)); const w = document.querySelector('[data-collapse="acct:walk"]'); return { last: ps[ps.length - 1]?.dataset.collapse, collapsed: w.querySelector('#accountingWalkSchedule').offsetHeight === 0, head: document.querySelector('#acctWalkHead')?.textContent, nested: [...document.querySelectorAll('#accountingCashflowSummary .statement-card, #accountingIncomeStatement .statement-card, #balanceDetails .statement-card, #accountingRatios .statement-card')].length }; });
+  H.check('walk card is the last card', layout.last === 'acct:walk', 'acct:walk', layout.last);
+  H.check('walk card collapsed by default', layout.collapsed, true, layout.collapsed);
+  H.check('header shows Off', layout.head === 'Off', 'Off', layout.head);
+  H.check('no inner cards in statement sections', layout.nested === 0, 0, layout.nested);
+  await dash.evaluate(() => document.querySelector('[data-collapse="acct:walk"]').scrollIntoView());
+  await dash.tap('[data-collapse="acct:walk"] > [data-collapse-head]'); await dash.waitForTimeout(500);
+  await H.shot(dash, 'acct-walk-open-off');
   // 1. turn on (default 30 min)
-  await dash.evaluate(() => document.querySelector('#accountingWalkSchedule').scrollIntoView());
   await dash.tap('#acctWalkEnabled'); await dash.waitForTimeout(1500);
   let s = await sch(); let a = await alarm();
   H.check('enabled for R2', s?.enabled === true && s?.realm === 1, 'enabled realm 1', JSON.stringify({ e: s?.enabled, r: s?.realm }));
@@ -34,7 +42,8 @@ bar.children[1].children[0].addEventListener('click',()=>{document.getElementByI
   s = await sch(); a = await alarm();
   H.check('minutes 45 moves the walk', s?.offsetMin === 45 && a === nextFrom(ready, 45), new Date(nextFrom(ready, 45)).toISOString(), `${s?.offsetMin} ${a && new Date(a).toISOString()}`);
   const ui = await dash.textContent('#accountingWalkSchedule');
-  H.check('UI shows next walk', /Next walk/.test(ui) && !/Off$/.test(ui), 'Next walk …', ui.replace(/\s+/g, ' ').slice(0, 160));
+  H.check('UI shows next walk', /Next \w{3} \d/.test(ui.replace(/\s+/g, ' ')), 'Next <day> <time>', ui.replace(/\s+/g, ' ').slice(0, 160));
+  const head = await dash.textContent('#acctWalkHead'); H.check('header shows On · time', /^On · \d/.test(head), 'On · 9:06 PM', head);
   // 3. alarm fires before the game finished the next statements → retry in 15 min, no walk
   await game.bringToFront();
   await dash.evaluate(() => chrome.alarms.create('scm-accounting-walk-daily', { when: Date.now() + 300 }));
@@ -63,5 +72,6 @@ bar.children[1].children[0].addEventListener('click',()=>{document.getElementByI
   const inline = await dash.evaluate(() => [...document.querySelectorAll('*')].some(e => [...e.attributes].some(x => /^on[a-z]+$/.test(x.name) && x.name in e)));
   H.check('no inline handlers', !inline, false, inline);
   await dash.evaluate(() => document.querySelector('#accountingWalkSchedule').scrollIntoView()); await H.shot(dash, 'acct-walk-schedule');
+  const fits = await dash.evaluate(() => [...document.querySelectorAll('.acct-walk-row')].every(r => r.scrollWidth <= r.clientWidth + 1)); H.check('walk rows fit (no clipped text)', fits, true, fits);
   await ctx.close(); H.done();
 })();
