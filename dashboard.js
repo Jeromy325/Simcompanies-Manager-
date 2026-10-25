@@ -2446,6 +2446,56 @@ function plannerGameAdmin(s){
     return r?{...r,at:ep[exKey]?.receivedAt||null}:null;
   }catch{return null;}
 }
+// v2.5.374 Executives tab: roster cards, Team Impact (game admin formula), COO ROI, training planner, apprentice vs main.
+// Salaries are treated as $/day; training cost and skill gain per session are user inputs (not from the game's API).
+const EXEC_PLAN_KEY='scmExecPlanner',EXEC_MAX_TRAININGS=20;
+function execPlanSettings(){try{const v=JSON.parse(localStorage.getItem(EXEC_PLAN_KEY)||'{}');return {cost:v.cost??10000,gain:v.gain??1.5};}catch{return {cost:10000,gain:1.5};}}
+function renderBoardRoom(s){
+  const el=$('#execBody'),C=globalThis.SCM_TOOLS_CORE;if(!el||!C?.executiveRoster)return;
+  const ep=s?.endpointData||{},cfg=s?.gameConfig||{};
+  const exKey=Object.keys(ep).find(k=>/^\/api\/v3\/companies\/\d+\/executives\/$/.test(k));
+  const ex=exKey?ep[exKey]?.data?.executives:null;
+  if(!Array.isArray(ex)||!ex.length){el.innerHTML='<div class="planner-profit-empty">No executives captured yet. Open the Executives page in the game once, then come back.</div>';return;}
+  const trainS=cfg.executivesTimeToTrainS,settleS=cfg.executivesTimeToSettleInS,now=Date.now();
+  const base=Number(ep['/api/v2/companies/me/administration-overhead/']?.data);
+  const blds=buildingArrayFromState(s).map(b=>({kind:String(pick(b,['kind','buildingKind','type'])??''),level:Number(pick(b,['level','lvl','buildingLevel','size']))||1,size:b?.size,position:b?.position,purchasedRecently:b?.purchasedRecently,robotsSpecialization:Boolean(b?.robotsSpecialization),busy:b?.busy||null}));
+  const roster=C.executiveRoster(ex,{now,trainS,settleS}),suite=roster.filter(r=>!r.staff);
+  const args={base,executives:ex,buildings:blds,now,trainS,settleS};
+  const ga=C.effectiveAdminOverhead(args);
+  const labour=C.dailyBaseLabour(s?.gameConstants,blds);
+  const salaries=roster.reduce((a,r)=>a+(r.salary||0),0),salKnown=roster.some(r=>r.salary!=null);
+  const pct=v=>v==null||!Number.isFinite(v)?'—':`${(+v).toFixed(2)}%`;
+  const own={o:'coo',v:'coo',f:'cfo',x:'cfo',m:'cmo',y:'cmo',t:'cto',z:'cto'};
+  const bars=r=>['coo','cfo','cmo','cto'].map(k=>{const v=r.skills[k],w=Math.min(100,v/40*100);return `<div class="exec-skill${own[r.position]===k?' own':''}"><span>${k.toUpperCase()}</span><i style="width:${w.toFixed(1)}%"></i><b>${num(v)}</b></div>`;}).join('');
+  const card=r=>`<div class="exec-card${r.staff?' staff':''}"><div class="exec-head"><div><strong>${escapeHtml(r.role)}</strong> ${escapeHtml(r.name||'')}${r.age!=null?` <small>${num(r.age)} y/o</small>`:''}</div><small>${r.trainings!=null?`${num(r.trainings)}/${EXEC_MAX_TRAININGS} trainings`:'trainings —'}</small></div><div class="exec-skills">${bars(r)}</div><div class="exec-foot"><span>Salary ${r.salary!=null?plannerMoney(r.salary):'—'}</span><span class="exec-status ${r.status.replace(' ','-')}">${escapeHtml(r.status)}${r.trainingEndsAt?` · until ${escapeHtml(new Date(r.trainingEndsAt).toLocaleString())}`:''}</span></div></div>`;
+  const row=(l,v,n='',cls='')=>`<div class="pp-row ${cls}"><div class="pp-label">${l}${n?`<small>${n}</small>`:''}</div><div class="pp-value">${v}</div></div>`;
+  const skillOf=k=>{try{return C.executiveSkill(ex,k,{now,trainS,settleS,academyActive:C.academyActiveSize(blds)});}catch{return null;}};
+  const perDay=r=>labour>0&&r?labour*r.pct/100:null;
+  // Team Impact
+  const impact=`<div class="pp-list">${row('Administration overhead',ga?`${pct(ga.basePct)} <span class="is-profit">−${(+ga.reductionPct).toFixed(2)}%</span> = ${pct(ga.pct)}`:'—',ga?`effective COO ${num(ga.coo)} pts: COO full, COO apprentice ½ (academy ≥ 5), other C-suite ¼; base ${pct(ga.basePct)} × ${num(ga.coo)}%`:(!(base>=1)?'admin base not captured — open the game once':'game timing config not captured — reload the game page'))}${['cfo','cmo','cto'].map(k=>row(`Effective ${k.toUpperCase()} skill`,num(skillOf(k)),'same weighting as COO')).join('')}${row('Salaries',salKnown?plannerMoney(salaries):'—',salKnown?`${roster.filter(r=>r.salary!=null).length} people`:'salary field not in captured data')}</div>`;
+  // COO ROI
+  const roi=ga?C.executiveRoi({dailyLabour:labour,reductionPct:ga.reductionPct,salariesPerDay:salKnown?salaries:null}):null;
+  const roiHtml=roi?`<div class="pp-stats"><div class="pp-stat is-profit"><strong>${plannerMoney(roi.savedPerDay)}</strong><span>Admin saved / day</span></div><div class="pp-stat"><strong>${plannerMoney(roi.salariesPerDay)}</strong><span>Salaries / day</span></div><div class="pp-stat ${roi.netPerDay==null?'':roi.netPerDay>=0?'is-profit':'is-loss'}"><strong>${plannerMoney(roi.netPerDay)}</strong><span>Net / day</span></div></div><div class="pp-list">${row('Base labour / day',plannerMoney(labour),'game wage × level × 24 h, producing buildings, before admin')}${row('Admin cost / day now',plannerMoney(perDay(ga)),`${pct(ga.pct)} of base labour`)}${row('Admin cost / day without executives',plannerMoney(labour*ga.basePct/100),pct(ga.basePct))}${row('Verdict',roi.paysForItself==null?'—':roi.paysForItself?'<span class="is-profit">Pays for itself</span>':'<span class="is-loss">Costs more than it saves</span>','salaries treated as $/day')}</div>`:`<div class="planner-profit-empty">${labour>0?'Admin overhead not available yet.':'Game constants or producing buildings not captured yet — Sync first.'}</div>`;
+  // Training planner
+  const st=execPlanSettings();
+  const plan=suite.map(r=>{const left=r.trainings!=null?Math.max(0,EXEC_MAX_TRAININGS-r.trainings):null;const add=left!=null?left*Number(st.gain||0):null;
+    const after=add!=null&&ga?C.executiveAdminWhatIf({...args,edit:e=>(String(e.id)===String(r.id)&&e.currentWorkHistory?.position===r.position?(e.skills={...e.skills,coo:(Number(e.skills?.coo)||0)+add},e):e)}):null;
+    const gain=after&&labour>0?labour*(ga.pct-after.pct)/100:null,cost=left!=null?left*Number(st.cost||0):null;
+    return `<tr><td>${escapeHtml(r.role)}<small>${escapeHtml(r.name||'')}</small></td><td>${left==null?'—':num(left)}</td><td>${cost==null?'—':plannerMoney(cost)}</td><td>${add==null?'—':`+${num(+add.toFixed(1))} → ${num(+(r.skills[own[r.position]]+add).toFixed(1))}`}</td><td>${after?pct(after.pct):'—'}</td><td>${gain==null?'—':plannerMoney(gain)}</td><td>${gain>0&&cost>0?`${num(+(cost/gain).toFixed(1))} d`:left===0?'maxed':'—'}</td></tr>`;}).join('');
+  const planHtml=`<div class="planner-profit-controls"><label>Cost / training $<input id="execCost" type="number" step="any" inputmode="decimal" value="${escapeHtml(st.cost)}"></label><label>Skill gain / training<input id="execGain" type="number" step="any" inputmode="decimal" value="${escapeHtml(st.gain)}"></label></div><div class="pp-hint">Training time ${Number(trainS)>0?`${num(+(trainS/3600).toFixed(1))} h (game)`:'— (open the game)'} · max ${EXEC_MAX_TRAININGS} trainings · gain is added to own skill; admin effect assumes it lands on COO.</div><div class="table-wrap"><table class="exec-plan"><thead><tr><th>Exec</th><th>Left</th><th>Cost</th><th>Skill</th><th>Admin after</th><th>Saved / day</th><th>Payback</th></tr></thead><tbody>${plan}</tbody></table></div>`;
+  // Apprentice vs main
+  const main=roster.find(r=>r.position==='o'),app=roster.find(r=>r.position==='v');
+  const leave=ga&&main?C.executiveAdminWhatIf({...args,edit:e=>e.currentWorkHistory?.position==='o'?null:e}):null;
+  const promote=ga&&main&&app?C.executiveAdminWhatIf({...args,edit:e=>{const p=e.currentWorkHistory?.position;if(p==='o')return null;if(p==='v'){e.currentWorkHistory={...e.currentWorkHistory,position:'o',accelerated:true};}return e;}}):null;
+  const cmp=(l,r,n)=>row(l,r?pct(r.pct):'—',r&&ga?`COO ${num(r.coo)} pts · ${labour>0?`${(r.pct-ga.pct)>=0?'+':''}${plannerMoney(labour*(r.pct-ga.pct)/100)} / day`:''}${n?` · ${n}`:''}`:n);
+  const appHtml=main?`<div class="pp-list">${cmp(`Now: ${escapeHtml(main.name||'COO')} (COO ${num(main.skills.coo)})`,ga,'')}${app?cmp(`${escapeHtml(app.name||'Apprentice')} promoted (COO ${num(app.skills.coo)})`,promote,'apprentice slot empty after'):row('Apprentice','—','no COO apprentice hired')}${cmp('COO leaves, nobody promoted',leave,'')}</div>`:'<div class="planner-profit-empty">No COO in the board room.</div>';
+  const at=ep[exKey]?.receivedAt;
+  el.innerHTML=`<div class="exec-grid">${roster.map(card).join('')}</div>${at?`<div class="pp-hint">Captured ${escapeHtml(new Date(at).toLocaleString())}</div>`:''}
+<div class="exec-panels"><div class="panel"><h3>Team impact</h3>${impact}</div><div class="panel"><h3>COO ROI / break-even</h3>${roiHtml}</div><div class="panel"><h3>Training planner</h3>${planHtml}</div><div class="panel"><h3>Apprentice vs main COO</h3>${appHtml}</div></div>`;
+  const save=(k,v)=>{const c=execPlanSettings();c[k]=v;try{localStorage.setItem(EXEC_PLAN_KEY,JSON.stringify(c));}catch{}renderBoardRoom(s);};
+  el.querySelector('#execCost')?.addEventListener('change',e=>save('cost',e.target.value));
+  el.querySelector('#execGain')?.addEventListener('change',e=>save('gain',e.target.value));
+}
 function renderPlannerProfit(host){
   const ctx=host.__plannerProfitCtx,el=host.querySelector('#plannerProfit'),C=globalThis.SCM_TOOLS_CORE;
   if(!ctx||!el||!C)return;
@@ -3333,7 +3383,7 @@ function render(s){
  if(activeTab==='overview'&&$('#cashflowDetails'))$('#cashflowDetails').innerHTML=buildCashflowSections(a.source?.cf,a.source?.recent); if(activeTab==='market'){ renderLiveMarketProduct(s); renderMarketHistory(s); renderMarketAlerts(s); } if(activeTab==='production') renderBuildingPlanner(s);
  renderVwapDiagnostics(s);
  const rawEl=$('#raw'); if(rawEl) rawEl.textContent=JSON.stringify({auth:s.authData,warehouseCount:rows.length,accounting:a,marketEndpointCount:Object.keys(s.endpointData||{}).filter(k=>/\/market\//.test(k)).length,marketCacheResources:Object.keys(s.marketCache||{}).length,marketDebug:s.marketDebug||{}},null,2).slice(0,30000);
- if(activeTab==='tools'){try{globalThis.SCM_TOOLS_UI?.render(s,catalogEntries(s));}catch(e){console.error('Tools tab render failed',e);}} if(activeTab==='contracts') { populateContractProducts(s); renderContracts(s); } if(activeTab==='diagnostic'){ renderApiList(s); renderDiagnostics(s); }
+ if(activeTab==='executives'){try{renderBoardRoom(s);}catch(e){console.error('Executives tab render failed',e);}} if(activeTab==='tools'){try{globalThis.SCM_TOOLS_UI?.render(s,catalogEntries(s));}catch(e){console.error('Tools tab render failed',e);}} if(activeTab==='contracts') { populateContractProducts(s); renderContracts(s); } if(activeTab==='diagnostic'){ renderApiList(s); renderDiagnostics(s); }
   requestAnimationFrame(()=>{ if(Math.abs(window.scrollX-__scrollX)>0 || Math.abs(window.scrollY-__scrollY)>0) window.scrollTo(__scrollX,__scrollY); });
 }
 function deepCompanyName(v, seen=new Set()){
@@ -3972,7 +4022,8 @@ function dashboardChangeAffectsTab(changes,tab){
     warehouse:['warehouseResources','warehouseCostDetails','contracts','savedContracts','contractEvents','vwapData','vwapStatus','liveMarketData','liveMarketPriceData'],
     market:['warehouseResources','warehouseCostDetails','vwapData','vwapStatus','liveMarketData','liveMarketPriceData'],
     production:['buildings','warehouseResources','productionEvents','productionRateSnapshots','productionPlans','frozenNetworkPlan','productionRunHours','vwapData','vwapStatus','liveMarketData','liveMarketPriceData'],
-    tools:['warehouseResources','vwapData','liveMarketPriceData','history']
+    tools:['warehouseResources','vwapData','liveMarketPriceData','history'],
+    executives:['endpointData','buildings']
   };
   const physicalFields=physicalFieldsByTab[tab];
   if(physicalFields){
@@ -4000,6 +4051,7 @@ function dashboardChangeAffectsTab(changes,tab){
   if(tab==='production')return ['buildings','warehouseResources','productionEvents','productionRateSnapshots','productionPlans','frozenNetworkPlan','productionRunHours','vwapData','vwapStatus','liveMarketData','liveMarketPriceData'].some(has);
   if(tab==='contracts')return ['contracts','savedContracts','contractEvents','endpointData','warehouseResources'].some(has);
   if(tab==='tools')return ['warehouseResources','vwapData','liveMarketPriceData','history'].some(has);
+  if(tab==='executives')return ['endpointData','buildings','scmGameConfig','scmGameConstants'].some(has);
   
   if(tab==='diagnostic')return ['syncStatus','syncError','lastSync','fullSyncJob','fullSyncProgress','endpointData','apiEndpoints','realmQuarantine','productionEvents','productionRateSnapshots','productionPlans','frozenNetworkPlan','gameOverlaySnapshot','warehouseResources','vwapData'].some(has);
   return false;

@@ -1,7 +1,7 @@
 // 2.5.372: walk card moved to the bottom, collapsed, compact; no card nested inside the Accounting statement cards.
 const assert = require('assert'); const fs = require('fs'); const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.373');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.374');
 const html = read('dashboard.html'), dash = read('dashboard.js');
 const keys = [...html.matchAll(/data-collapse="(acct:[a-z-]+)"/g)].map(m => m[1]);
 assert.equal(keys[keys.length - 1], 'acct:walk', keys.join(','));

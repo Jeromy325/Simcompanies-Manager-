@@ -514,6 +514,50 @@
     return { factor: eff, pct: (eff - 1) * 100, basePct: (b - 1) * 100, reductionPct: (b - 1) * coo, coo };
   }
 
+  // v2.5.374 Executives tab. Roster rows from captured /executives/ data. Name/age/salary/trainings field names are
+  // read from the first key present (not verified against the game bundle); missing → null, shown as —.
+  const EXEC_ROLE = { o: 'COO', f: 'CFO', m: 'CMO', t: 'CTO', v: 'COO Apprentice', x: 'CFO Apprentice', y: 'CMO Apprentice', z: 'CTO Apprentice' };
+  const EXEC_ORDER = ['o', 'v', 'f', 'x', 'm', 'y', 't', 'z'];
+  const firstKey = (o, keys) => { for (const k of keys) if (o && o[k] != null && o[k] !== '') return o[k]; return null; };
+  function executiveRoster(executives, { now = Date.now(), trainS, settleS } = {}) {
+    return (Array.isArray(executives) ? executives : []).filter(e => e && e.currentWorkHistory).map(e => {
+      const p = String(e.currentWorkHistory.position || ''), sk = e.skills || {};
+      const born = firstKey(e, ['dateOfBirth', 'birthDate', 'born']);
+      const ageRaw = firstKey(e, ['age']), age = ageRaw != null ? Number(ageRaw) : born && Date.parse(born) ? Math.floor((now - Date.parse(born)) / 31557600000) : null;
+      const tr = firstKey(e, ['trainingsCount', 'trainingCount', 'timesTrained', 'trainings', 'nrTrainings']);
+      const trainings = Array.isArray(tr) ? tr.length : tr != null && Number.isFinite(Number(tr)) ? Number(tr) : null;
+      const salary = firstKey(e, ['salary', 'wage', 'dailySalary']);
+      const t = e.currentTraining, ts = t && !t.accelerated && Date.parse(t.datetime), start = Date.parse(e.currentWorkHistory.start);
+      const status = e.strikeUntil && Date.parse(e.strikeUntil) > now ? 'on strike'
+        : pos(trainS) && ts && ts > now - trainS * 1000 ? 'training'
+        : pos(settleS) && EXEC_ROLE[p] && now - start < settleS * 1000 && !e.currentWorkHistory.accelerated && !e.isCandidate ? 'settling in' : 'active';
+      return { id: e.id ?? null, position: p, role: EXEC_ROLE[p] || (EXEC_STAFF.includes(p) ? 'Staff' : p || '—'), staff: EXEC_STAFF.includes(p),
+        name: firstKey(e, ['name', 'fullName']), age: Number.isFinite(age) ? age : null, salary: salary != null && Number.isFinite(Number(salary)) ? Number(salary) : null,
+        trainings, status, trainingEndsAt: ts && pos(trainS) ? new Date(ts + trainS * 1000).toISOString() : null,
+        skills: { coo: num(sk.coo), cfo: num(sk.cfo), cmo: num(sk.cmo), cto: num(sk.cto) } };
+    }).sort((a, b) => (EXEC_ORDER.indexOf(a.position) + 1 || 99) - (EXEC_ORDER.indexOf(b.position) + 1 || 99));
+  }
+  // Base labour $/day: game wage/h/level × level × 24 over producing buildings (before admin overhead).
+  function dailyBaseLabour(c, buildings) {
+    if (!gameConstantsOk(c)) return null;
+    return (Array.isArray(buildings) ? buildings : []).filter(b => b && b.busy && b.busy.resource).reduce((a, b) => {
+      const w = gameWagePerLevel(c, String(b.kind || ''), Boolean(b.robotsSpecialization));
+      return a + (Number(w) || 0) * Math.max(1, Number(b.level ?? b.size) || 1) * 24;
+    }, 0);
+  }
+  // What-if admin: same game formula with executives changed (skills added, positions moved or removed).
+  function executiveAdminWhatIf({ base, executives, buildings, now = Date.now(), trainS, settleS, edit } = {}) {
+    const list = (Array.isArray(executives) ? executives : []).map(e => edit ? edit(JSON.parse(JSON.stringify(e))) : e).filter(Boolean);
+    return effectiveAdminOverhead({ base, executives: list, buildings, now, trainS, settleS });
+  }
+  // COO ROI: admin saved per day by the executives' COO reduction vs their salaries per day.
+  function executiveRoi({ dailyLabour, reductionPct, salariesPerDay } = {}) {
+    const L = Number(dailyLabour), r = Number(reductionPct);
+    if (!(L > 0) || !Number.isFinite(r)) return null;
+    const saved = L * r / 100, sal = Number(salariesPerDay);
+    return { savedPerDay: saved, salariesPerDay: Number.isFinite(sal) ? sal : null, netPerDay: Number.isFinite(sal) ? saved - sal : null, paysForItself: Number.isFinite(sal) ? saved >= sal : null };
+  }
+
   // v2.5.342 game constants (/api/v2/constants/core|buildings|resources/, public). Game code (tSe/eSe):
   //   base/level = producedPerHourRaw × (AVERAGE_SALARY / SALARY_MID[economyState])^building.salaryModifier
   //   rate/level = base × abundance%/100 (abundance resources only) × (1 + event/100) ÷ (1 − bonus/100)
@@ -868,7 +912,7 @@
   }
 
   const api = {
-    gameFinancialStatements, economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, phaseProfits, phaseRateRatio, upgradePayback, adminIncreasePerLevel, upgradePaybackFull, sellPriceAdvice, contractVerdict, effectiveAdminOverhead, executiveSkill, academyActiveSize, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
+    gameFinancialStatements, economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, phaseProfits, phaseRateRatio, upgradePayback, adminIncreasePerLevel, upgradePaybackFull, sellPriceAdvice, contractVerdict, effectiveAdminOverhead, executiveSkill, academyActiveSize, executiveRoster, dailyBaseLabour, executiveAdminWhatIf, executiveRoi, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
     cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
     seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,

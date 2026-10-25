@@ -1341,3 +1341,20 @@ html.scm-mobile .contract-table.saved-contract-table.mobile-cards:not(.contract-
 .table-wrap table.statement-table.game-statement{table-layout:fixed!important;width:100%!important;min-width:0!important}.table-wrap table.game-statement td:first-child{width:auto!important;min-width:0!important;max-width:none!important}
 
 .acct-walk{display:grid;gap:8px}.acct-walk-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:13px}.acct-walk label{display:flex;align-items:center;gap:6px;white-space:nowrap}.acct-walk-toggle input{width:20px;height:20px;margin:0}.acct-walk-offset input{width:64px;min-height:34px;text-align:center}.acct-walk-info{font-size:12px;color:var(--muted)}.acct-walk-info strong{color:#dce6ef;font-weight:600}.acct-walk .ok{color:#5fd38d}.acct-walk .warn{color:#ffa94d}.acct-walk-row button{min-height:34px}.acct-walk-row #acctWalkMsg{flex:1;text-align:right;font-size:12px;min-width:0;overflow-wrap:anywhere}.acct-walk-head{font-size:11px;font-weight:500;color:var(--muted);margin-left:6px}.stmt-extra-head{margin:12px 0 4px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#9fb3c6}
+/* v2.5.374 Executives tab */
+.exec-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+.exec-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}
+.exec-card.staff{opacity:.75}
+.exec-head{display:flex;justify-content:space-between;gap:8px;align-items:baseline;flex-wrap:wrap}
+.exec-head small{color:var(--muted)}
+.exec-skills{margin:8px 0;display:grid;gap:4px}
+.exec-skill{display:grid;grid-template-columns:38px 1fr 28px;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+.exec-skill i{display:block;height:8px;border-radius:4px;background:#3f7a3a;min-width:2px}
+.exec-skill b{text-align:right;color:#e8edf3}
+.exec-skill.own i{background:#6fbf5a}.exec-skill.own span,.exec-skill.own b{color:#9fe08a}
+.exec-foot{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.exec-status.training,.exec-status.settling-in{color:#f0c060}.exec-status.on-strike{color:#ff6b6b}
+.exec-panels{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-top:12px}
+.exec-panels .panel{min-width:0}
+.exec-plan td small{display:block;color:var(--muted)}
+@media (max-width:420px){.exec-grid,.exec-panels{grid-template-columns:1fr}}

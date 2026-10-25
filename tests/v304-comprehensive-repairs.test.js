@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const root=path.resolve(__dirname,'..');const dash=fs.readFileSync(path.join(root,'dashboard.js'),'utf8');const html=fs.readFileSync(path.join(root,'dashboard.html'),'utf8');const bg=fs.readFileSync(path.join(root,'background.js'),'utf8');const r1=fs.readFileSync(path.join(root,'realm-r1.js'),'utf8');const r2=fs.readFileSync(path.join(root,'realm-r2.js'),'utf8');
-assert.doesNotMatch(html,/data-tab="executives"|id="executives"/i,'Executive tab and page are removed');
+// v2.5.374 a new Executives tab (renderBoardRoom) replaces the removed one; the old code and background sync stay removed.
 assert.doesNotMatch(dash,/executiveArraysFromState|normalizeExecutive|executiveEligibilityAudit|executiveTeamImpact|renderExecutives|scmExecutiveSignature/i,'Executive mapping, calculations, render and state signature are removed');
 assert.doesNotMatch(bg,/realmExecutivePaths|scheduleExecutiveRefreshes|refreshExecutivesScheduled|name:'Executives'|executiveFetchPending|executiveFetchError|scm-executives-/i,'Executive API mapping, sync targets, refreshes and alarms are removed');
 assert.doesNotMatch(r1+r2,/executivePaths|\/executives\//i,'Realm-specific Executive endpoint maps are removed');

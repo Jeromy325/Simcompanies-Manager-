@@ -1,3 +1,13 @@
+2.5.374 — 2026-10-25 — New Executives tab
+- Board room cards: role, name, age, trainings X/20, COO/CFO/CMO/CTO skill bars (own skill highlighted), salary, status
+  (active / training / settling in / on strike), from the captured /executives/ data.
+- Team impact: admin overhead as the game shows it (base − base × effective COO%, e.g. 62.35% −31.80% = 30.55%),
+  effective CFO/CMO/CTO skill, total salaries.
+- COO ROI: base labour/day (game wage × level × 24 h, producing buildings), admin saved/day vs salaries/day, verdict.
+- Training planner: trainings left, cost (input, default $10,000), skill gain (input, default 1.5), admin after, payback days.
+- Apprentice vs main COO: admin now / apprentice promoted / COO leaves, with $/day difference.
+- Not verified against the game: name/age/salary/trainings field names, salaries treated as $/day.
+
 2.5.373 — 2026-10-25 — Accounting: Last 7 days walk note no longer disappears
 - The "Day statements 0–6 read…" note under Last 7 days could vanish (about 1 in 8 opens): the dashboard's state
   loader dropped the walk status, so the accounting refresh redrew the section without it. The loader now keeps it,

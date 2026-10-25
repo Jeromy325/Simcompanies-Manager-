@@ -1,7 +1,7 @@
 // 2.5.369: Accounting audit fixes. Fixture = user's R2 capture 2026-10-25 (day/0, day/1 statements, past finances).
 const assert = require('assert'); const fs = require('fs'); const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.373');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.374');
 const dash = read('dashboard.js'), bg = read('background.js');
 const fnSrc = name => { const i = dash.indexOf(`function ${name}(`); assert.ok(i >= 0, name); let d = 0, j = dash.indexOf('){', i) + 1; for (let k = j; k < dash.length; k++) { if (dash[k] === '{') d++; else if (dash[k] === '}' && --d === 0) return dash.slice(i, k + 1); } };
 const fx = JSON.parse(read('tests/fixtures/r2-accounting-days-2026-10-25.json'));
