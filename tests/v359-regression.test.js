@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.386');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.387');
 const C = require('../tools-core.js');
 const N = require('../notify-core.js');
 const fx = require('./fixtures/profit-calc-2026-10-24.json');

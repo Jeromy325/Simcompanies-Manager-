@@ -1,3 +1,14 @@
+2.5.387 — 2026-10-26 — Analyze: ledger archive, gap detection, sales at every quality
+- Sales no longer vanish between syncs. The game's "recent" ledger holds only the newest 30 rows and each capture
+  replaced the last one, so sales that rolled off before a full sync never reached Analyze (Chemicals "Recent sales:
+  None"). Every captured cash-flow page is now kept per realm (scmLedgerArchive:<realm>, 35 days, sale and fee rows
+  only), seeded once from the pages already stored.
+- Coverage now counts holes inside the ledger, not only how far back it reaches: Data shows "N gaps (hours)" and
+  Known gaps lists when they were. Holes form when more than 30 ledger rows pass between two captures.
+- Product page "Recent sales" lists every quality of that product (tagged Q1, Q2 …) when more than one was sold.
+- Day income statements read "Complete" at 7 or more days instead of "14 of 7".
+- Not recovered: rows that rolled off before this build. The older week sales list never stored quality.
+
 2.5.386 — 2026-10-26 — Analyze: "Profit realization" label
 - The badge "61% of calculator" now reads "Profit realization: 61%" (what you earned per unit as a share of the
   calculator's profit per unit) on Margins cards and product pages.

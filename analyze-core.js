@@ -27,9 +27,10 @@
 
   /* ------------------------------------------------------------ ledger */
   const LEDGER_RX = /\/api\/v2\/companies\/me\/cashflow\/(?:recent|\d+)\/?$/;
-  // Every captured cash-flow page (recent + cursor pages), deduped by row id, newest first.
-  function ledgerRows(endpointData) {
+  // Every captured cash-flow page (recent + cursor pages) plus the archive's rows, deduped by row id, newest first.
+  function ledgerRows(endpointData, archive) {
     const out = new Map();
+    for (const r of Object.values((archive && archive.rows) || {})) if (r && typeof r === 'object' && ms(r.datetime) != null) out.set(String(r.id != null ? r.id : `${r.datetime}|${r.descriptionKey}|${r.money}`), r);
     for (const [k, v] of Object.entries(endpointData || {})) {
       if (!LEDGER_RX.test(k)) continue;
       const d = v && v.data, list = Array.isArray(d && d.data) ? d.data : Array.isArray(d) ? d : [];
@@ -64,6 +65,61 @@
     }
     return out.sort((a, b) => b.t - a.t);
   }
+  /* ------------------------------------------------------------ ledger archive */
+  // cashflow/recent holds only the newest 30 rows and every capture replaces it, so sales that roll off it between full
+  // syncs were lost to Analyze. The archive (one per realm, scmLedgerArchive:<realm>) keeps the sale rows of every
+  // captured page plus the time span each page proves complete: recent = oldest row → capture time; a cursor page
+  // /cashflow/<id>/ = its oldest row → the time of row <id> (the oldest row of the page before it, kept in anchors).
+  const ARCHIVE_DAYS = 35;
+  const PAGE_RX = /\/api\/v2\/companies\/me\/cashflow\/(recent|\d+)\/?$/;
+  const saleKey = dk => /^(?:marketfilled|fees)-\d+$/.test(dk) || /^cs-\d+/.test(dk);
+  const DETAIL_KEYS = ['resource', 'quality', 'amount', 'price', 'profit', 'buyer'];
+  function slimRow(r) {
+    const d = (r && r.details) || {}, details = {};
+    for (const k of DETAIL_KEYS) if (d[k] !== undefined) details[k] = d[k];
+    return { id: r.id, datetime: r.datetime, category: r.category, descriptionKey: r.descriptionKey, money: r.money, details };
+  }
+  function mergeSpans(spans) {
+    const s = (Array.isArray(spans) ? spans : []).filter(x => Array.isArray(x) && Number.isFinite(x[0]) && Number.isFinite(x[1]) && x[1] >= x[0]).map(x => [x[0], x[1]]).sort((a, b) => a[0] - b[0]);
+    const out = [];
+    for (const x of s) { const l = out[out.length - 1]; if (l && x[0] <= l[1] + 1000) l[1] = Math.max(l[1], x[1]); else out.push(x); }
+    return out;
+  }
+  // One captured page → { rows (sale rows only), span, anchor } or null.
+  function pageCapture(url, list, receivedAt, anchors) {
+    const m = String(url || '').match(PAGE_RX); if (!m || !Array.isArray(list) || !list.length) return null;
+    const dated = list.filter(r => r && typeof r === 'object' && ms(r.datetime) != null);
+    if (!dated.length) return null;
+    let oldest = dated[0]; for (const r of dated) if (ms(r.datetime) < ms(oldest.datetime)) oldest = r;
+    const lo = ms(oldest.datetime), newest = Math.max(...dated.map(r => ms(r.datetime)));
+    const hi = m[1] === 'recent' ? Math.max(newest, ms(receivedAt) ?? newest) : Math.max(newest, num(anchors && anchors[m[1]]) ?? newest);
+    return { rows: dated.filter(r => saleKey(String(r.descriptionKey || ''))).map(slimRow), span: [lo, hi], anchor: oldest.id != null ? [String(oldest.id), lo] : null };
+  }
+  // Pure merge of one page into an archive. Drops anything older than ARCHIVE_DAYS before `now`.
+  function archiveMerge(archive, url, list, receivedAt, now = Date.now()) {
+    const a = archive && typeof archive === 'object' ? archive : {};
+    const rows = { ...(a.rows || {}) }, anchors = { ...(a.anchors || {}) };
+    const p = pageCapture(url, list, receivedAt, anchors);
+    let spans = Array.isArray(a.spans) ? a.spans : [];
+    if (p) {
+      for (const r of p.rows) rows[String(r.id != null ? r.id : `${r.datetime}|${r.descriptionKey}|${r.money}`)] = r;
+      if (p.anchor) anchors[p.anchor[0]] = p.anchor[1];
+      spans = [...spans, p.span];
+    }
+    const cut = now - ARCHIVE_DAYS * DAY;
+    for (const [k, r] of Object.entries(rows)) if (!(ms(r && r.datetime) >= cut)) delete rows[k];
+    for (const [k, t] of Object.entries(anchors)) if (!(Number(t) >= cut)) delete anchors[k];
+    spans = mergeSpans(spans.map(x => [Math.max(x[0], cut), x[1]]));
+    return { v: 1, rows, anchors, spans, added: p ? p.rows.length : 0 };
+  }
+  // Spans proven by the pages still in endpointData (same rules, anchors from those pages).
+  function pageSpans(endpointData) {
+    const pages = Object.entries(endpointData || {}).filter(([k]) => PAGE_RX.test(k)).map(([k, v]) => [k, v && v.data, v && v.receivedAt]);
+    const anchors = {};
+    for (const [, d] of pages) { const p = pageCapture('/api/v2/companies/me/cashflow/recent/', Array.isArray(d && d.data) ? d.data : d, null, null); if (p && p.anchor) anchors[p.anchor[0]] = p.anchor[1]; }
+    return mergeSpans(pages.map(([k, d, at]) => pageCapture(k, Array.isArray(d && d.data) ? d.data : d, at, anchors)).filter(Boolean).map(p => p.span));
+  }
+
   // Fee rate = Σ paired fees ÷ Σ paired sale value (sales ≥ $1,000 so integer rounding of small fees cannot skew it).
   function feeRate(sales) {
     const p = (Array.isArray(sales) ? sales : []).filter(s => s.channel === 'exchange' && s.fee != null && s.gross >= 1000);
@@ -252,11 +308,19 @@
     const rank = { bad: 0, warn: 1, good: 2 };
     return out.sort((a, b) => rank[a.tone] - rank[b.tone] || b.w - a.w);
   }
-  function ledgerCoverage(rows, days, now) {
+  // With spans (time proven complete by captured pages): coverage = covered time ÷ window up to the last capture, and
+  // gaps = holes between spans inside the window (≥ 1 minute). Without spans: oldest row → now, as before.
+  function ledgerCoverage(rows, days, now, spans) {
     const list = Array.isArray(rows) ? rows : [];
-    if (!list.length) return { rows: 0, oldest: null, newest: null, coverage: 0, spanDays: 0 };
+    if (!list.length) return { rows: 0, oldest: null, newest: null, coverage: 0, spanDays: 0, gaps: [], gapMs: 0, lastCapture: null };
     const ts = list.map(r => ms(r.datetime)), oldest = Math.min(...ts), newest = Math.max(...ts), start = now - days * DAY;
-    return { rows: list.length, oldest, newest, spanDays: (newest - oldest) / DAY, coverage: oldest <= start ? 1 : Math.max(0, Math.min(1, (now - oldest) / (now - start))) };
+    const sp = mergeSpans(spans);
+    if (!sp.length) return { rows: list.length, oldest, newest, spanDays: (newest - oldest) / DAY, coverage: oldest <= start ? 1 : Math.max(0, Math.min(1, (now - oldest) / (now - start))), gaps: [], gapMs: 0, lastCapture: null };
+    const end = Math.min(now, Math.max(...sp.map(x => x[1]))), inW = sp.map(([a, b]) => [Math.max(a, start), Math.min(b, end)]).filter(([a, b]) => b > a);
+    const covered = inW.reduce((s, [a, b]) => s + b - a, 0), gaps = [];
+    for (let i = 1; i < inW.length; i++) if (inW[i][0] - inW[i - 1][1] >= 60000) gaps.push([inW[i - 1][1], inW[i][0]]);
+    const reach = inW.length ? inW[0][0] : end;
+    return { rows: list.length, oldest, newest, spanDays: (end - reach) / DAY, coverage: end > start ? Math.max(0, Math.min(1, covered / (end - start))) : 0, gaps, gapMs: gaps.reduce((s, [a, b]) => s + b - a, 0), reach, lastCapture: end };
   }
 
   /* ------------------------------------------------------------ chart (build 2.5.382 Accounting sparkline style) */
@@ -286,7 +350,7 @@
   }
   const rangeStats = pts => { const v = (pts || []).map(p => p[1]); return v.length ? { lo: Math.min(...v), hi: Math.max(...v), change: v.length > 1 && v[0] ? (v[v.length - 1] - v[0]) / Math.abs(v[0]) : null } : null; };
 
-  const api = { DAY, keyOf, realmEndpoints, realmCostHistory, ledgerRows, salesFromLedger, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
+  const api = { DAY, keyOf, realmEndpoints, realmCostHistory, ledgerRows, salesFromLedger, ARCHIVE_DAYS, archiveMerge, pageSpans, mergeSpans, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
   root.SCM_ANALYZE_CORE = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

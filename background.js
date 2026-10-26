@@ -2,6 +2,7 @@ import './diagnostic-core.js';
 import './planner-core.js';
 import './tools-core.js';
 import './notify-core.js';
+import './analyze-core.js';
 import {
   REALM_DEFINITIONS, validRealmNumber, realmDefinition, realmKeyFromRealm, realmStorageKey,
   realmDisplayNumber, realmDisplayName, realmContractPaths
@@ -1307,6 +1308,39 @@ function queueProductionCostHistory(realm,entries,opts={}){
   productionCostQueues.set(n,run.catch(()=>{}));
   return run.catch(()=>({ok:false}));
 }
+// 2.5.387 Analyze ledger archive: sale rows of every captured cash-flow page + the time each page proves complete.
+function ledgerArchiveKey(realm){return `scmLedgerArchive:${Number(realm)}`;}
+const ledgerArchiveQueues=new Map();
+function queueLedgerArchive(realm,pages){
+  const n=validRealmNumber(realm);const list=(Array.isArray(pages)?pages:[]).filter(p=>p&&Array.isArray(p.rows)&&p.rows.length);
+  if(n==null||!list.length)return Promise.resolve({ok:false});
+  const key=ledgerArchiveKey(n);
+  const run=(ledgerArchiveQueues.get(n)||Promise.resolve()).then(async()=>{
+    let a=(await chrome.storage.local.get({[key]:null}))[key];
+    for(const p of list)a=globalThis.SCM_ANALYZE_CORE.archiveMerge(a,p.url,p.rows,p.receivedAt);
+    const {added,...out}=a;await rawStorageSet({[key]:out});
+    return {ok:true,rows:Object.keys(out.rows).length,spans:out.spans.length};
+  });
+  ledgerArchiveQueues.set(n,run.catch(()=>{}));
+  return run.catch(()=>({ok:false}));
+}
+// One-time seed from the cash-flow pages already in each realm store (stamped with that realm).
+async function seedLedgerArchiveOnce(){
+  const FLAG='scmLedgerArchiveSeededV1';
+  const got=await chrome.storage.local.get({[FLAG]:false,'scmRealmStore:0':null,'scmRealmStore:1':null});
+  if(got[FLAG])return {ok:true,skipped:true};
+  for(const n of [0,1]){
+    const ep=got[`scmRealmStore:${n}`]?.endpointData||{};
+    const pages=Object.entries(ep).filter(([k,v])=>/\/api\/v2\/companies\/me\/cashflow\/(?:recent|\d+)\/?$/.test(k)&&validRealmNumber(v?.captureRealm)===n&&Array.isArray(v?.data?.data))
+      .map(([k,v])=>({url:k,rows:v.data.data,receivedAt:v.receivedAt}))
+      // Recent first so its oldest row anchors the first cursor page, then cursor pages newest → oldest.
+      .sort((a,b)=>(/recent/.test(b.url)-/recent/.test(a.url))||(Number(b.url.match(/\/(\d+)\/?$/)?.[1])||0)-(Number(a.url.match(/\/(\d+)\/?$/)?.[1])||0));
+    if(pages.length)await queueLedgerArchive(n,pages);
+  }
+  await rawStorageSet({[FLAG]:true});
+  return {ok:true};
+}
+setTimeout(()=>{seedLedgerArchiveOnce().catch(()=>{});},5000);
 // One-time seed from data already captured before 2.5.331 (current buildings + stored building histories).
 async function seedProductionCostHistoryOnce(){
   const FLAG='scmProductionCostHistorySeededV1';
@@ -3368,6 +3402,7 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
     if(endpointResult?.store?.apiEndpoints)realmPatch.apiEndpoints=endpointResult.store.apiEndpoints;
     await storageSetRealmPatch(targetRealm,realmPatch,onTiming);
     if(overlayRelevant) scheduleGameOverlayRefreshNotification(targetRealm);
+    if(/\/api\/v2\/companies\/me\/cashflow\/(?:recent|\d+)\/?$/i.test(String(url||''))&&incomingStatus>=200&&incomingStatus<300&&Array.isArray(data?.data)) queueLedgerArchive(targetRealm,[{url:String(url).replace(/[?#].*$/,''),rows:data.data,receivedAt:endpointData[url]?.receivedAt}]).catch(()=>{});
   }
 }
 async function saveData(url,data,status=200,method='GET',captureRealm=null,onTiming=null,durableOptions=null){

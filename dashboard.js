@@ -211,6 +211,8 @@ async function get(attempt=0){
   try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);if(r!=null){const k=`scmBackgroundJobs:${r}`;const h=(await chrome.storage.local.get({[k]:null}))[k];if(Array.isArray(h)){result.backgroundJobHistory=h;if(viewKey&&result.realmStores?.[viewKey])result.realmStores[viewKey]={...result.realmStores[viewKey],backgroundJobHistory:h};}}}catch{}
   // v2.5.331 production cost history (one entry per production run) lives in its own key.
   try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);if(r!=null){const k=`scmProductionCostHistory:${r}`;const h=(await chrome.storage.local.get({[k]:[]}))[k];result.productionCostHistory=Array.isArray(h)?h:[];}}catch{}
+  // v2.5.387 Analyze ledger archive (sale rows of every captured cash-flow page) lives in its own key.
+  try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);if(r!=null){const k=`scmLedgerArchive:${r}`;const a=(await chrome.storage.local.get({[k]:null}))[k];result.ledgerArchive=a&&typeof a==='object'?a:null;}}catch{}
   // v2.5.342 game constants (public API) and your exchange listings.
   try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);const g=await chrome.storage.local.get({scmGameConstants:null,[`scmMarketOrders:${r}`]:null});result.gameConstants=g.scmGameConstants||null;result.marketOrders=g[`scmMarketOrders:${r}`]||null;}catch{}
   // v2.5.341 game page config (executive timing) for the admin-overhead calculation.
@@ -4622,6 +4624,8 @@ function openProductionCostHistory(s,key){
 }
 document.addEventListener('click',e=>{const b=e.target?.closest?.('[data-pch]');if(!b)return;e.preventDefault();try{openProductionCostHistory(__scmState||{},b.dataset.pch);}catch(err){console.debug('production cost history',err);}});
 try{scmOnStorageChanged((changes,area)=>{if(area!=='local'||!__scmState)return;const r=validRealmNumber(__scmState.viewRealm??__scmState.selectedRealm);const c=r!=null?changes[`scmProductionCostHistory:${r}`]:null;if(!c)return;__scmState.productionCostHistory=Array.isArray(c.newValue)?c.newValue:[];if(activeTab==='warehouse'){try{patchWarehouseCells(__scmState);}catch{}}});}catch{}
+// v2.5.387 a new ledger page in the archive recomputes Analyze while it is open (the archive is realm-keyed).
+try{scmOnStorageChanged((changes,area)=>{if(area!=='local'||!__scmState)return;const r=validRealmNumber(__scmState.viewRealm??__scmState.selectedRealm);const c=r!=null?changes[`scmLedgerArchive:${r}`]:null;if(!c)return;__scmState.ledgerArchive=c.newValue&&typeof c.newValue==='object'?c.newValue:null;if(activeTab==='analyze'){try{globalThis.SCM_ANALYZE_UI?.render(__scmState,analyzeContext(__scmState));}catch{}}});}catch{}
 function patchWarehouseCells(state){
   renderWarehouseMarketTimestamp(state);
   const body=$('#inventoryRows'); if(!body)return;

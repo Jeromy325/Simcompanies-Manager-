@@ -6,7 +6,7 @@ const root = path.join(__dirname, '..');
 const dashboard = fs.readFileSync(path.join(root, 'dashboard.js'), 'utf8');
 const html = fs.readFileSync(path.join(root, 'dashboard.html'), 'utf8');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
-assert.equal(manifest.version, '2.5.386');
+assert.equal(manifest.version, '2.5.387');
 assert.match(dashboard, /function plannerHistoryAuditExport\(\)/, 'per-building audit can be exported');
 assert.match(dashboard, /matchedCurrentCycle/, 'audit records whether current history matched');
 assert.match(dashboard, /historyRequestStatus/, 'audit records history request status');
