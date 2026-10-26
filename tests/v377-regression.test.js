@@ -7,7 +7,7 @@ const path = require('path');
 const vm = require('vm');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const dash = read('dashboard.js'), bg = read('background.js');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.378');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.379');
 function fn(src, name) {
   const start = src.indexOf(`function ${name}(`); assert.notEqual(start, -1, name);
   let depth = 0, q = null;

@@ -2,7 +2,7 @@
 // Fixture = user's R2 capture 2026-10-24/25; expected values = the game's Accounting screen.
 const assert = require('assert'); const fs = require('fs'); const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.378');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.379');
 const T = require('../tools-core.js');
 const fx = JSON.parse(read('tests/fixtures/r2-accounting-2026-10-24.json'));
 const g = T.gameFinancialStatements(fx['income-statement'], fx['balance-sheet'], fx['cashflow-statement']);

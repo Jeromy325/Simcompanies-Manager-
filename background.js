@@ -4455,6 +4455,16 @@ async function saveResourceImages(cachePatch={},metaPatch={}){
     resourceImagesMemo={cache:next.cache,meta:next.meta};
   });
 }
+// v2.5.379 the game's own image path per resource (market ticker: {kind,image}). The bundled manifest only guesses
+// file names; 31 of 151 guesses were wrong (e.g. smartphones.png vs the game's smart-phones.png) and never loaded.
+function capturedResourceImages(store){
+  const out={};
+  for(const [url,entry] of Object.entries(store?.endpointData||{})){
+    if(!/^\/api\/v3\/market-ticker\/\d+\/?$/.test(url)||!Array.isArray(entry?.data))continue;
+    for(const x of entry.data){const k=Number(x?.kind);if(Number.isInteger(k)&&k>0&&typeof x?.image==='string'&&/^images\/resources\/[^/]+$/.test(x.image))out[String(k)]=x.image;}
+  }
+  return out;
+}
 async function fetchAndCacheResourceImage(id,{forceValidate=false,batch=null}={}){
   const n=Number(id); if(!Number.isFinite(n)||n<=0) return {ok:false,error:'Invalid resource id'};
   const {cache,meta,key}=batch?.base||await migrateResourceImageCache();
@@ -4465,11 +4475,11 @@ async function fetchAndCacheResourceImage(id,{forceValidate=false,batch=null}={}
     return {ok:true,dataUrl:cache[sid],cached:true,validatedAt:previous.validatedAt,changed:false};
   }
   const manifest=await resourceImageManifest();
-  let catalog=batch?.catalog;
-  if(!catalog){const stateNow=await state();const store=stateNow.realmStores?.[key]||{};catalog=store.resourceCatalog||stateNow.resourceCatalog||{};}
+  let catalog=batch?.catalog, captured=batch?.captured;
+  if(!catalog||!captured){const stateNow=await state();const store=stateNow.realmStores?.[key]||{};catalog=catalog||store.resourceCatalog||stateNow.resourceCatalog||{};captured=captured||capturedResourceImages(store);}
   const catalogImage=catalog?.resourceImages?.[sid] || catalog?.constantsResources?.[sid]?.image || null;
   const filename=manifest?.resources?.[sid];
-  const rawUrl=catalogImage || previous.url || (filename ? `${String(manifest.baseUrl||'https://www.simcompanies.com/static/images/resources/').replace(/\/$/,'')}/${filename}` : null);
+  const rawUrl=catalogImage || captured?.[sid] || previous.url || (filename ? `${String(manifest.baseUrl||'https://www.simcompanies.com/static/images/resources/').replace(/\/$/,'')}/${filename}` : null);
   if(!rawUrl) return cache[sid]?{ok:true,dataUrl:cache[sid],cached:true,changed:false}:{ok:false,error:'No resource image source is known.'};
   const url=/^https?:\/\//i.test(String(rawUrl))?String(rawUrl):`https://www.simcompanies.com/static/${String(rawUrl).replace(/^\/+/, '')}`;
   try{
@@ -4500,7 +4510,7 @@ async function syncAllResourceImages({forceValidate=false}={}){
   let updated=0,verified=0,failed=0;
   // v2.5.361 one state read and ONE image write for the whole run (was one full read + two big writes per image).
   const base=await migrateResourceImageCache();const s0=await state();const catalog=(base.key&&s0.realmStores?.[base.key]?.resourceCatalog)||s0.resourceCatalog||{};
-  const batch={base,catalog,cache:{},meta:{}};
+  const batch={base,catalog,captured:capturedResourceImages(base.key&&s0.realmStores?.[base.key]),cache:{},meta:{}};
   const queue=[...ids], workers=Array.from({length:4},async()=>{
     while(queue.length){
       const id=queue.shift();

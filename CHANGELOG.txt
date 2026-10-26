@@ -1,3 +1,10 @@
+2.5.379 — 2026-10-26 — Product images: 31 images that never loaded now load
+- "Product images checked · partial: 31 resource image(s) failed to validate": the bundled image list guessed 31 wrong
+  file names (e.g. smartphones.png; the game uses smart-phones.png), so those products never got a picture.
+- The Manager now uses the game's own image path from the market ticker it already captures, then the bundled list.
+- 26 names corrected in the bundled list from that game data. 5 aerospace items (ids 90, 94–97) are not in the ticker
+  and may still show as failed until the game provides their image path.
+
 2.5.378 — 2026-10-26 — Sync: no more "API storage queue drain timed out after 20 seconds"
 - The drain waited for the realm write queue to go fully idle. While the game tab keeps sending traffic, each passive
   capture rewrites the realm store (R2: 5.9 MB, 438 endpoints), so the queue never went idle within 20 s and Sync failed.
