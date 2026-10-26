@@ -149,7 +149,7 @@
   }
   function marginCard(r, m) {
     const k = r.pctOfCalc == null ? null : r.pctOfCalc < 0.75 ? 'bad' : r.pctOfCalc < 0.95 ? 'warn' : 'good';
-    const badge = r.calc != null && r.calc < 0 && r.price != null && r.avg > r.price ? pill(`Price fell ${pct((r.avg - r.price) / r.avg, 0)}`, 'bad') : k ? pill(`${pct(r.pctOfCalc, 0)} of calculator`, k) : '';
+    const badge = r.calc != null && r.calc < 0 && r.price != null && r.avg > r.price ? pill(`Price fell ${pct((r.avg - r.price) / r.avg, 0)}`, 'bad') : k ? pill(`Profit realization: ${pct(r.pctOfCalc, 0)}`, k) : '';
     const parts = [];
     if (r.priceDiff != null) parts.push(`you sold ${money(Math.abs(r.priceDiff))} ${r.priceDiff >= 0 ? 'under' : 'above'} today's price`);
     if (r.feePU != null) parts.push(`paid ${money(r.feePU)} in fee`);
@@ -269,7 +269,7 @@
     const earnedOf = s => { const c = st?.unitCost ?? s.ledgerCost; const fee = s.fee != null ? s.fee : (m.rate != null && s.channel === 'exchange' ? s.gross * m.rate : 0); return c != null ? s.gross - fee - c * s.amount : null; };
     const rs = sec('pd-sales', 'Recent sales', `${sales.slice(0, 5).map(s => { const e = earnedOf(s); return row(`${when(s.t)} · ${units(s.amount)} × ${money(s.price)}`, smoney(e), `an-row-txt ${tone(e)}`); }).join('') || small(`No sales in the last ${S.days} days.`)}<button type="button" class="an-link" data-an-sales="${key}">All ${esc(nameOf(rid))} sales ›</button>`);
     const rt = route && route.contracts.length ? sec('pd-route', 'Contract vs exchange', `${row(`Exchange (${money(route.price)} less ${feeLbl(m)})`, money(route.exNet))}${row('Contract average', money(route.contractAvg))}${row('Difference', `${smoney(route.diff)} (${spct(route.diffPct)})`, `an-total14 ${tone(route.diff)}`)}${link('routes', 'All routes')}`) : `<div class="an-h2 an-h2-static">Contract vs exchange</div>${dash(`No outgoing contracts for this product in the last ${S.days} days, so there is nothing to compare. ${link('routes', 'All routes')}`)}`;
-    return `${detailHead(label(rid, q), S.back, k ? pill(`${pct(mg.pctOfCalc, 0)} of calculator`, k) : '')}${priceCard}${per}${cost}${lot}${wh}${rs}${rt}`;
+    return `${detailHead(label(rid, q), S.back, k ? pill(`Profit realization: ${pct(mg.pctOfCalc, 0)}`, k) : '')}${priceCard}${per}${cost}${lot}${wh}${rs}${rt}`;
   }
   function sources(m) {
     const s = S.s || {}, ep = m.ep, gc = s.gameConstants, pl = priceLog();

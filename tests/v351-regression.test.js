@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.385');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.386');
 const bg = read('background.js');
 // stale filter: missing, no abundance object, older than 1 h → fetch; fresh → skip
 const src = bg.slice(bg.indexOf('const ABUNDANCE_AUTO_MAX_AGE_MS'), bg.indexOf('async function refreshAbundanceIfStale('));

@@ -1,3 +1,7 @@
+2.5.386 — 2026-10-26 — Analyze: "Profit realization" label
+- The badge "61% of calculator" now reads "Profit realization: 61%" (what you earned per unit as a share of the
+  calculator's profit per unit) on Margins cards and product pages.
+
 2.5.385 — 2026-10-26 — Analyze reads one realm only
 - Analyze now uses only data captured in the realm you are viewing. A capture stamped with the other realm, or with
   no realm, is left out (ledger, day statements, past finances, balance sheet). No realm known = no data.
