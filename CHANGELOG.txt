@@ -1,3 +1,14 @@
+2.5.389 — 2026-10-26 — Sync no longer stalls on a large store
+- R2 Sync sat 88 s before reading the warehouse (export 2026-10-26). The cause was storage, not the game: the R2 store
+  had grown to 7.6 MB, 5.1 MB of it 307 ledger pages kept twice, and every save rewrites the whole store.
+- Ledger pages (/cashflow/<id>/) are now kept in the store only while recent (last 8 days, 60 at most) and no longer
+  copied into accountingCapture. Their sales rows stay in the ledger archive (Analyze unchanged). Existing stores are
+  shrunk once on update, archive first: R2 7.0 MB -> 2.9 MB on the user's export.
+- Sync's own writes (game session, realm activation, final commit) go ahead of queued game captures and time out
+  instead of hanging. One fewer full store read per save.
+- The Accounting day walk stops as soon as a Sync starts and runs again after it (it walked over Sync and ended 0/7).
+- A failed Sync retries itself once, a minute later.
+
 2.5.388 — 2026-10-26 — Daily Accounting walk catches up the ledger
 - On days without a Sync only the newest 30 ledger rows were captured (the walk's cashflow/recent request), so most
   of a day's sales never reached Analyze. The scheduled daily walk now also reads the ledger pages back from that

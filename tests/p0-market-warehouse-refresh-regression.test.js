@@ -24,5 +24,5 @@ assert.match(background,/const existing=warehouseOverlayRefreshRuns\.get\(n\);if
   'concurrent stock-mutation and overlay refresh triggers reuse the same request');
 assert.match(background,/result\?\.ok&&result\?\.refreshed\)scheduleGameOverlayRefreshNotification\(n,\d+\)/,
   'successful stock mutation refresh notifies the game overlay after commit');
-assert.equal(manifest.version, '2.5.388','package version is bumped for the P0 repair');
+assert.equal(manifest.version, '2.5.389','package version is bumped for the P0 repair');
 console.log('p0-market-warehouse-refresh-regression: 10 assertions passed');

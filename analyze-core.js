@@ -112,6 +112,25 @@
     spans = mergeSpans(spans.map(x => [Math.max(x[0], cut), x[1]]));
     return { v: 1, rows, anchors, spans, added: p ? p.rows.length : 0 };
   }
+  // 2.5.389 Ledger pages (/cashflow/<id>/) in a realm store: keep only those with a row from the last keepDays,
+  // newest maxPages at most. Their sale rows live on in the ledger archive; the store copy is rewritten on every
+  // save, and 307 kept pages (5.1 MB of a 7.6 MB R2 store) made each Sync write take seconds. /recent/ always stays.
+  const LEDGER_PAGE_KEEP_DAYS = 8, LEDGER_PAGE_KEEP_MAX = 60;
+  function pruneLedgerPages(map, now = Date.now(), keepDays = LEDGER_PAGE_KEEP_DAYS, maxPages = LEDGER_PAGE_KEEP_MAX) {
+    const src = map && typeof map === 'object' ? map : {};
+    const cut = now - keepDays * DAY, pages = [];
+    for (const [k, v] of Object.entries(src)) {
+      const m = k.match(PAGE_RX); if (!m || m[1] === 'recent') continue;
+      const d = v && v.data, list = Array.isArray(d && d.data) ? d.data : Array.isArray(d) ? d : [];
+      let newest = null; for (const r of list) { const t = ms(r && r.datetime); if (t != null && (newest == null || t > newest)) newest = t; }
+      pages.push([k, newest == null ? ms(v && v.receivedAt) : newest]);
+    }
+    pages.sort((a, b) => (b[1] || 0) - (a[1] || 0));
+    const drop = pages.filter(([, t], i) => i >= maxPages || !(t >= cut)).map(([k]) => k);
+    if (!drop.length) return { map: src, dropped: 0 };
+    const out = { ...src }; for (const k of drop) delete out[k];
+    return { map: out, dropped: drop.length };
+  }
   // Daily-walk ledger catch-up plan: the newest span holds the latest captures; walk back from its oldest row (the
   // anchor at its start) until a page reaches the span before it. One span = no hole = nothing to fetch (null).
   function catchUpPlan(archive) {
@@ -358,7 +377,7 @@
   }
   const rangeStats = pts => { const v = (pts || []).map(p => p[1]); return v.length ? { lo: Math.min(...v), hi: Math.max(...v), change: v.length > 1 && v[0] ? (v[v.length - 1] - v[0]) / Math.abs(v[0]) : null } : null; };
 
-  const api = { DAY, keyOf, realmEndpoints, realmCostHistory, ledgerRows, salesFromLedger, ARCHIVE_DAYS, archiveMerge, catchUpPlan, pageSpans, mergeSpans, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
+  const api = { DAY, keyOf, realmEndpoints, realmCostHistory, ledgerRows, salesFromLedger, ARCHIVE_DAYS, archiveMerge, pruneLedgerPages, catchUpPlan, pageSpans, mergeSpans, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
   root.SCM_ANALYZE_CORE = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

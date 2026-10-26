@@ -26,6 +26,10 @@ function resumeSyncDeferredWork(){
   for(const fn of jobs){try{Promise.resolve(fn()).catch(()=>{});}catch{}}
   return jobs.length;
 }
+// v2.5.389 A failed Sync retries itself once, a minute later, so the user does not have to notice and re-sync.
+const SYNC_AUTO_RETRY_ALARM_PREFIX='scm-sync-retry-r';
+const SYNC_AUTO_RETRY_DELAY_MS=60000;
+const syncAutoRetryRuns=new Set();
 const realmWriteQueues=new Map();
 const frozenRateEnsurePromises=new Map();
 function withRealmWriteLock(realm,task){
@@ -1345,6 +1349,36 @@ async function catchUpLedgerArchive(realm,reason='daily-walk'){
   }
   return {ok:true,pages,caughtUp:!cursor||oldest<=plan.stopAt,capped:pages>=LEDGER_CATCHUP_MAX_PAGES&&oldest>plan.stopAt};
 }
+// v2.5.389 Ledger cursor pages are kept in the realm store only while recent (see SCM_ANALYZE_CORE.pruneLedgerPages);
+// their rows live in scmLedgerArchive. accountingCapture keeps /recent/ only.
+const LEDGER_CURSOR_PAGE_RX=/\/api\/v2\/companies\/me\/cashflow\/\d+\/?$/i;
+function pruneStoredLedgerPages(map){const f=globalThis.SCM_ANALYZE_CORE?.pruneLedgerPages;return f?f(map).map:map;}
+function withoutLedgerCursorPages(map){
+  const src=map&&typeof map==='object'?map:{};
+  if(!Object.keys(src).some(k=>LEDGER_CURSOR_PAGE_RX.test(k)))return src;
+  return Object.fromEntries(Object.entries(src).filter(([k])=>!LEDGER_CURSOR_PAGE_RX.test(k)));
+}
+// One-time shrink of stores that grew before 2.5.389: archive every stored ledger page first, then drop the old copies.
+async function compactLedgerPagesOnce(){
+  const FLAG='scmLedgerPagesCompactedV1';
+  if(coreSyncActive()){deferUntilSyncEnds('ledger-pages-compact',()=>{compactLedgerPagesOnce().catch(()=>{});});return {ok:false,deferred:true};}
+  if((await chrome.storage.local.get({[FLAG]:false}))[FLAG])return {ok:true,skipped:true};
+  const out={};
+  for(const n of [0,1]){
+    out[n]=await enqueueApiStorage(async()=>{
+      const s=await state(n);const store=s.realmStores?.[realmKeyFromRealm(n)]||{};
+      const ep=store.endpointData||{},ac=store.accountingCapture||{};
+      const pages=Object.entries({...ac,...ep}).filter(([k,v])=>LEDGER_CURSOR_PAGE_RX.test(k)&&validRealmNumber(v?.captureRealm)===n&&Array.isArray(v?.data?.data)).map(([k,v])=>({url:k,rows:v.data.data,receivedAt:v.receivedAt}));
+      if(pages.length){const a=await queueLedgerArchive(n,pages);if(!a?.ok)throw new Error('Ledger archive write failed.');}
+      const nextEp=pruneStoredLedgerPages(ep),nextAc=withoutLedgerCursorPages(ac);
+      if(nextEp===ep&&nextAc===ac)return {pages:pages.length,dropped:0};
+      await storageSetRealmPatch(n,{endpointData:nextEp,accountingCapture:nextAc});
+      return {pages:pages.length,dropped:Object.keys(ep).length-Object.keys(nextEp).length+Object.keys(ac).length-Object.keys(nextAc).length};
+    },n,{priority:true});
+  }
+  await rawStorageSet({[FLAG]:true});
+  return {ok:true,...out};
+}
 // One-time seed from the cash-flow pages already in each realm store (stamped with that realm).
 async function seedLedgerArchiveOnce(){
   const FLAG='scmLedgerArchiveSeededV1';
@@ -1361,7 +1395,7 @@ async function seedLedgerArchiveOnce(){
   await rawStorageSet({[FLAG]:true});
   return {ok:true};
 }
-setTimeout(()=>{seedLedgerArchiveOnce().catch(()=>{});},5000);
+setTimeout(()=>{seedLedgerArchiveOnce().catch(()=>{}).then(()=>compactLedgerPagesOnce()).catch(()=>{});},5000);
 // One-time seed from data already captured before 2.5.331 (current buildings + stored building histories).
 async function seedProductionCostHistoryOnce(){
   const FLAG='scmProductionCostHistorySeededV1';
@@ -2140,8 +2174,8 @@ async function activateRealmByRealmUnlocked(realm, authData=null){
   return currentKey!==nextKey;
 }
 
-async function activateRealmByRealm(realm, authData=null){
-  return enqueueApiStorage(()=>activateRealmByRealmUnlocked(realm,authData),validRealmNumber(realm));
+async function activateRealmByRealm(realm, authData=null, options={}){
+  return enqueueApiStorage(()=>activateRealmByRealmUnlocked(realm,authData),validRealmNumber(realm),{priority:Boolean(options?.priority)});
 }
 
 // Game-initiated realm detection must never wait on the shared API/storage
@@ -3251,7 +3285,9 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   }
   const targetRealm=captureSession?.realm??responseRealm??capturedRealm??companyRealm??buildingRealm??explicitUrlRealm??switchHint??realmNumberFromKey(before.activeRealmKey||identityFromAuth(before.authData));
   const targetKey=targetRealm!=null?realmKeyFromRealm(targetRealm):null;
-  const endpointResult=await saveEndpointUnlocked(url,method,targetRealm,false,targetRealm!=null?await state(targetRealm):before);
+  // v2.5.389 one read of the target realm store serves both the endpoint list and the patch (each read was a full store).
+  const targetState=targetRealm!=null?await state(targetRealm):before;
+  const endpointResult=await saveEndpointUnlocked(url,method,targetRealm,false,targetState);
 
   // Auth responses are stored strictly under the realm proven by the response.
   // They never switch the user's selected/active realm automatically.
@@ -3261,7 +3297,6 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   // If a background capture targets the non-active realm, read ONLY that
   // realm's physical store. The active Manager view must never become a cache
   // source for another realm.
-  const targetState=targetRealm!=null?await state(targetRealm):s2;
   const workingBase=(isActiveTarget?{...s2}:{...DEFAULTS,...targetState});
   if(endpointResult?.store?.apiEndpoints)workingBase.apiEndpoints=endpointResult.store.apiEndpoints;
   const working=sanitizeRealmStore(workingBase,targetRealm);
@@ -3302,12 +3337,14 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
     (preserveSuccessful||preserveCompletedStatement
       ?{...preservedEntry,lastAttempt:{status:incomingStatus,receivedAt:new Date().toISOString(),captureRealm:targetRealm}}
       :{status,data,receivedAt:new Date().toISOString(),captureRealm:targetRealm})};
-  const patch={endpointData};
-  if(isRealmSensitiveAccountingUrl(url) && incomingStatus>=200 && incomingStatus<300 && data!=null){
-    patch.accountingCapture={
+  // v2.5.389 ledger cursor pages: endpointData keeps only recent ones; accountingCapture never keeps them (rows are archived).
+  const ledgerCursorPage=LEDGER_CURSOR_PAGE_RX.test(String(url||''));
+  const patch={endpointData:ledgerCursorPage?pruneStoredLedgerPages(endpointData):endpointData};
+  if(isRealmSensitiveAccountingUrl(url) && !ledgerCursorPage && incomingStatus>=200 && incomingStatus<300 && data!=null){
+    patch.accountingCapture=withoutLedgerCursorPages({
       ...(working.accountingCapture||{}),
       [url]:endpointData[url]
-    };
+    });
   }
   if(/\/api\/v2\/companies\/me\/cashflow\/recent\//i.test(url)){
     const selling={...(working.sellingHistory||{})};
@@ -3447,7 +3484,7 @@ async function saveData(url,data,status=200,method='GET',captureRealm=null,onTim
       // Keep the per-endpoint read-back inside the same serialized API queue
       // slot as the write. Otherwise a later same-URL capture can race the
       // verifier and make a correct write look wrong (or validate stale data).
-      if(durableOptions&&typeof durableOptions==='object'){
+      if(durableOptions&&typeof durableOptions==='object'&&!durableOptions.priorityOnly){
         const verifyRealm=validRealmNumber(durableOptions.realm??captureRealm);
         const verifyStartedAt=Number(durableOptions.startedAtMs)||enqueuedAt;
         durableVerification=await verifyDurableEndpointWrite(
@@ -4811,6 +4848,15 @@ chrome.alarms.onAlarm.addListener(async a=>{
     return;
   }
 
+  const syncRetryMatch=String(a?.name||'').match(/^scm-sync-retry-r([01])$/);
+  if(syncRetryMatch){
+    const realm=Number(syncRetryMatch[1]);
+    if(coreSyncActive()){await chrome.alarms.create(a.name,{when:Date.now()+30000}).catch(()=>{});return;}
+    syncAutoRetryRuns.add(realm);
+    await syncNow(realm).catch(()=>{});
+    syncAutoRetryRuns.delete(realm);
+    return;
+  }
   if(a?.name===ACCOUNTING_WALK_DAILY_ALARM){await runScheduledAccountingWalk('alarm').catch(()=>{});return;}
   const dayWalkMatch=String(a?.name||'').match(/^scm-accounting-day-walk-r([01])$/);
   if(dayWalkMatch){
@@ -5080,11 +5126,15 @@ async function accountingPeriodStep(tabId,op,index=0){
   const res=await Promise.race([run,timeout]).catch(e=>[{result:{ok:false,error:e?.message||String(e)}}]);
   return res?.[0]?.result||{ok:false,error:'Accounting page script did not return.'};
 }
+// v2.5.389 The day walk drives the game page and floods the storage queue; it stops as soon as a Sync starts and
+// re-runs after it (it used to keep walking over the Sync and end 0/7).
+class AccountingWalkYield extends Error{constructor(){super('Sync started; the Accounting walk will run again after it.');}}
 async function waitForAccountingDayCapture(realm,dayIndex,sinceMs,timeoutMs=ACCOUNTING_DAY_WALK_WAIT_MS){
   const path=`/api/v2/companies/me/income-statement/day/${dayIndex}/`;
   const key=realmKeyFromRealm(realm);
   const deadline=Date.now()+timeoutMs;
   while(Date.now()<deadline){
+    if(coreSyncActive())throw new AccountingWalkYield();
     const item=(await state(realm)).realmStores?.[key]?.endpointData?.[path];
     const t=Date.parse(item?.receivedAt||'');
     if(item&&Number(item.status)===200&&item.data&&validRealmNumber(item.captureRealm)===realm&&Number.isFinite(t)&&t>=sinceMs)
@@ -5098,7 +5148,7 @@ async function runAccountingDayWalk(realm,reason='scheduled'){
   if(accountingDayWalkRunning.has(n))return {ok:false,busy:true};
   accountingDayWalkRunning.add(n);
   const startedAt=new Date().toISOString(); const days=[];
-  const finish=async(status,error=null)=>{const v={status,error,reason,startedAt,finishedAt:new Date().toISOString(),days,captured:days.filter(d=>d.ok).length,wanted:ACCOUNTING_DAY_WALK_DAYS};await setAccountingDayWalkStatus(n,v).catch(()=>{});logActivity(n,'accounting-day-walk',status==='complete'?'success':status==='partial'?'partial':'failure',{rows:v.captured,wanted:v.wanted},error,Date.now(),reason);return {ok:status!=='failed',...v};};
+  const finish=async(status,error=null)=>{const v={status,error,reason,startedAt,finishedAt:new Date().toISOString(),days,captured:days.filter(d=>d.ok).length,wanted:ACCOUNTING_DAY_WALK_DAYS};await setAccountingDayWalkStatus(n,v).catch(()=>{});logActivity(n,'accounting-day-walk',status==='complete'?'success':status==='partial'?'partial':status==='deferred'?'skipped':'failure',{rows:v.captured,wanted:v.wanted},error,Date.now(),reason);return {ok:status!=='failed',...v};};
   try{
     await setAccountingDayWalkStatus(n,{status:'running',reason,startedAt});
     const tab=await simTab();
@@ -5116,6 +5166,7 @@ async function runAccountingDayWalk(realm,reason='scheduled'){
     for(let i=0;i<20;i++){probe=await accountingPeriodStep(tab.id,'probe');if(probe.dayButtons>=ACCOUNTING_DAY_WALK_DAYS)break;await new Promise(r=>setTimeout(r,500));}
     if(!(probe.dayButtons>=ACCOUNTING_DAY_WALK_DAYS))return await finish('failed',`Day buttons not shown (${probe.dayButtons||0}).`);
     for(let d=0;d<ACCOUNTING_DAY_WALK_DAYS;d++){
+      if(coreSyncActive())throw new AccountingWalkYield();
       // Tapping Day already loads day 0; later days need their own tap.
       if(d>0){since=Date.now();const c=await accountingPeriodStep(tab.id,'day',d);if(!c.ok){days.push({day:d,ok:false,error:c.error||'tap failed'});continue;}}
       const got=await waitForAccountingDayCapture(n,d,since);
@@ -5124,7 +5175,13 @@ async function runAccountingDayWalk(realm,reason='scheduled'){
     await accountingPeriodStep(tab.id,'mode',0).catch(()=>{});
     const ok=days.filter(x=>x.ok).length;
     return await finish(ok===ACCOUNTING_DAY_WALK_DAYS?'complete':ok?'partial':'failed',ok===ACCOUNTING_DAY_WALK_DAYS?null:`${ACCOUNTING_DAY_WALK_DAYS-ok} day(s) not captured`);
-  }catch(e){return await finish(days.some(x=>x.ok)?'partial':'failed',e?.message||String(e));}
+  }catch(e){
+    if(e instanceof AccountingWalkYield){
+      deferUntilSyncEnds(`accounting-day-walk:${n}`,()=>{scheduleAccountingDayWalk(n,4000).catch(()=>{});});
+      return await finish('deferred',e.message);
+    }
+    return await finish(days.some(x=>x.ok)?'partial':'failed',e?.message||String(e));
+  }
   finally{accountingDayWalkRunning.delete(n);}
 }
 async function yieldSyncStep(ms=SYNC_STEP_YIELD_MS){
@@ -5208,6 +5265,7 @@ async function syncNow(requestedRealm=null){
     realmSyncSessions.set(selected,session);
     syncCaptureRealm=selected;
     ownsSyncSession=true;
+    chrome.alarms.clear(`${SYNC_AUTO_RETRY_ALARM_PREFIX}${selected}`).catch(()=>{});
     const trace=(type,payload={})=>syncTrace.push({at:Date.now(),type,...payload});
     let lastTracePersistAt=0;
     const persistTrace=async(force=false)=>{
@@ -5277,8 +5335,9 @@ async function syncNow(requestedRealm=null){
     // v2.5.339 the explicit auth-data GET bypasses saveData, so record the economy phase from it here
     // (storage only; seeded from the previously stored auth-data).
     try{const es=await state(selected);const ek=realmKeyFromRealm(selected);await recordEconomyState(selected,es?.realmStores?.[ek]?.endpointData?.['/api/v3/companies/auth-data/']||null,authBoundary.data);trace('economy-state-recorded',{realm:selected,economyState:Number(authBoundary.data?.temporals?.economyState)});}catch{}
-    await saveData('/api/v3/companies/auth-data/',authBoundary.data,authBoundary.status,'GET',selected);
-    await activateRealmByRealm(selected,authBoundary.data?.authCompany?authBoundary.data:null);
+    // v2.5.389 Sync's own writes go ahead of queued passive game captures (they waited 88 s behind them) and are bounded.
+    await withSyncTimeout(saveData('/api/v3/companies/auth-data/',authBoundary.data,authBoundary.status,'GET',selected,null,{priorityOnly:true}),SYNC_PERSIST_VERIFY_TIMEOUT_MS,'Save game session');
+    await withSyncTimeout(activateRealmByRealm(selected,authBoundary.data?.authCompany?authBoundary.data:null,{priority:true}),SYNC_PERSIST_VERIFY_TIMEOUT_MS,'Activate realm');
     const activated=await state();
     const activatedKey=activated.activeRealmKey||identityFromAuth(activated.authData);
     if(activatedKey!==realmKeyFromRealm(selected)) throw new Error(`Manager could not activate ${realmDisplayNumber(selected)||'the selected realm'} before sync.`);
@@ -5736,7 +5795,7 @@ async function syncNow(requestedRealm=null){
       const finalStores={...(finalPersist.realmStores||{})};
       finalStores[key]={...(finalStores[key]||{}),syncStatus:finalStatus,syncError:finalSyncError,lastSync:finishedAt,fullSyncJob:null};
       await storageSet({activeRealmKey:key,selectedRealm:selected,syncStatus:finalStatus,syncError:finalSyncError,lastSync:finishedAt,fullSyncJob:null,realmStores:finalStores});
-    },selected),8000,'Final Sync commit');
+    },selected,{priority:true}),8000,'Final Sync commit');
     if(requiredOk) await persistCriticalDataBaseline(selected,'sync-complete').catch(()=>{});
     trace('sync-core-persisted',{realm:selected,finalStatus,finishedAt});
     syncCoreSucceeded=requiredOk;
@@ -5864,6 +5923,13 @@ async function syncNow(requestedRealm=null){
     if(syncCoreSucceeded && selected!=null){
       const scheduled=await schedulePostSyncMarketRefresh(selected,'sync-complete').catch(e=>({ok:false,error:e?.message||String(e)}));
       try{await recordBackgroundJobEvent(selected,{job:'post-sync-market-refresh-scheduled',trigger:'sync-complete',startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),durationMs:0,outcome:scheduled?.ok?'success':'failure',error:scheduled?.error||null,details:scheduled||{}});}catch{}
+    }
+    if(ownsSyncSession && selected!=null){
+      const wasAutoRetry=syncAutoRetryRuns.delete(selected);
+      if(!syncCoreSucceeded && !wasAutoRetry){
+        await chrome.alarms.create(`${SYNC_AUTO_RETRY_ALARM_PREFIX}${selected}`,{when:Date.now()+SYNC_AUTO_RETRY_DELAY_MS}).catch(()=>{});
+        logActivity(selected,'sync-auto-retry-scheduled','success',{delayMs:SYNC_AUTO_RETRY_DELAY_MS},null,Date.now(),'sync-failed');
+      }
     }
     if(ownsSyncSession)resumeSyncDeferredWork();
   }
