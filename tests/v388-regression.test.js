@@ -3,7 +3,7 @@
 // before it. One stretch = no hole = 0 pages. Sync itself is unchanged.
 const assert = require('assert'), fs = require('fs'), path = require('path');
 const A = require('../analyze-core.js');
-assert.equal(require('../manifest.json').version, '2.5.388');
+assert.ok(require('../manifest.json').version >= '2.5.388');
 const now = Date.now(), H = 36e5, R = '/api/v2/companies/me/cashflow/recent/';
 const fill = (id, t) => ({ id, datetime: new Date(t).toISOString(), category: 'm', descriptionKey: 'marketfilled-17', money: 1, details: { resource: 17, quality: 3, amount: 1, price: 1 } });
 const pageAt = (t0, ids) => ids.map((id, i) => fill(id, t0 - i * 6e5));

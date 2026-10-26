@@ -8,7 +8,7 @@ const background = fs.readFileSync(path.join(root, 'background.js'), 'utf8');
 const dashboard = fs.readFileSync(path.join(root, 'dashboard.js'), 'utf8');
 const content = fs.readFileSync(path.join(root, 'content.js'), 'utf8');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
-assert.equal(manifest.version, '2.5.388');
+assert.equal(manifest.version, '2.5.389');
 // R2 trace regression: terminal sync state must be reconciled after the async
 // post-sync tail so late progress writes cannot leave the durable realm stale.
 assert.match(background, /Final realm status reconciliation/);

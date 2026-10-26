@@ -1,3 +1,13 @@
+2.5.389 — 2026-10-26 — Analyze: retail sales
+- Retail sales (Sales of Jack o'lantern, Witch costume …, ledger rows retail-<resource>) were skipped, so those
+  products showed no sales. On the R2 ledger that was 67 rows and $127,692 in 7 days; Analyze now matches the game's
+  account-history CSV row for row (Jack o'lantern 44 rows, 1,967 units, $93,883; Witch costume 23 rows, 537 units,
+  $33,809).
+- Units = money ÷ price; cost = the game's COGS per unit; quality = the sold stock's average rounded to the nearest
+  quality (0.59 → Q1). Retail shows on All sales and product pages tagged "retail"; it stays out of exchange
+  margins, fees and contract-vs-exchange routes.
+- The ledger archive keeps retail rows and re-reads the stored pages once to add them.
+
 2.5.388 — 2026-10-26 — Daily Accounting walk catches up the ledger
 - On days without a Sync only the newest 30 ledger rows were captured (the walk's cashflow/recent request), so most
   of a day's sales never reached Analyze. The scheduled daily walk now also reads the ledger pages back from that

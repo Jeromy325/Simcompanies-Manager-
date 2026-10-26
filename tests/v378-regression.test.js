@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const src = fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8');
-assert.equal(JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'manifest.json'), 'utf8')).version, '2.5.388');
+assert.equal(JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'manifest.json'), 'utf8')).version, '2.5.389');
 function fn(name) {
   const start = src.indexOf(`function ${name}(`); assert.notEqual(start, -1, name);
   const s = src.lastIndexOf('async ', start) === start - 6 ? start - 6 : start;

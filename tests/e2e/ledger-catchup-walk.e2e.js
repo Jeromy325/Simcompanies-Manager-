@@ -13,7 +13,7 @@ const A = require('../../analyze-core.js');
   const desc = [...rows].reverse(), page = list => ({ data: list.slice(0, 30) });
   const old = desc.slice(150), oldPage = { data: old }; // pretend one earlier capture proved this stretch
   const { added, ...arc } = A.archiveMerge(null, '/api/v2/companies/me/cashflow/recent/', old, new Date(Date.parse(old[0].datetime) + 1000).toISOString(), now);
-  exp['scmLedgerArchive:1'] = arc; exp.scmLedgerArchiveSeededV1 = true;
+  exp['scmLedgerArchive:1'] = arc; exp.scmLedgerArchiveSeededV2 = true;
   const ctx = await H.launch(); const sw = await H.worker(ctx);
   await require('./mock-export').seedExport(sw, exp);
   const api = {}; for (const [k, v] of Object.entries(fx)) if (!/\/day\/\d+\/$/.test(k) && !/cashflow\/(recent|\d+)\/$/.test(k)) api[k] = v;

@@ -27,7 +27,7 @@ assert.ok(A.company(r2) && A.company(r1) === null, 'R1 has no R2 past finances')
 // 2. Money out is a purchase, never a sale (exchange or contract).
 const buys = [{ ...waterRow, id: 1, money: -500 }, { id: 2, datetime: '2026-10-25T09:00:00Z', category: 't', descriptionKey: 'cs-2-Seller', money: -400, details: { resource: 2, quality: 0, amount: 800, price: 0.5 } }];
 assert.equal(A.salesFromLedger(buys).length, 0, 'purchases are not sales');
-assert.equal(A.salesFromLedger(A.ledgerRows(r2)).length, 10, 'all 10 R2 sales still counted');
+assert.equal(A.salesFromLedger(A.ledgerRows(r2)).filter(s => s.channel !== 'retail').length, 10, 'all 10 R2 exchange + contract sales still counted'); // + 5 retail since 2.5.389
 
 // 3. Production runs only from this realm's buildings; no building list = no runs.
 const pch = [{ b: 11, id: 52, q: 2, c: 57.5, t: '2026-10-20T00:00:00Z' }, { b: 22, id: 2, q: 0, c: 0.4, t: '2026-10-21T00:00:00Z' }];

@@ -11,7 +11,7 @@ const H = require('./harness'); const A = require('../../analyze-core.js');
   for (const k of Object.keys(store.endpointData)) if (/\/cashflow\/(recent|\d+)\/$/.test(k)) delete store.endpointData[k];
   store.endpointData[RECENT] = { status: 200, data: { data: recentAt(now) }, receivedAt: new Date(now).toISOString(), captureRealm: 1 };
   const { added, ...arc } = A.archiveMerge(null, RECENT, recentAt(t1), new Date(t1).toISOString(), now);
-  storage['scmLedgerArchive:1'] = arc; storage.scmLedgerArchiveSeededV1 = true;
+  storage['scmLedgerArchive:1'] = arc; storage.scmLedgerArchiveSeededV2 = true;
   store.warehouseResources = [{ id: 1, kind: 17, quality: 1, amount: 50, blocked: false, datetime: new Date(now).toISOString(), materials: [], cost: { workers: 350 } }];
 
   const ctx = await H.launch(); const sw = await H.worker(ctx);

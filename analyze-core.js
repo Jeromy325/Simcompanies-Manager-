@@ -41,7 +41,9 @@
     }
     return [...out.values()].sort((a, b) => ms(b.datetime) - ms(a.datetime));
   }
-  // Exchange fills ('marketfilled-<resource>', category m) and contract sales ('cs-<resource>-<buyer>').
+  // Exchange fills ('marketfilled-<resource>', category m), contract sales ('cs-<resource>-<buyer>') and retail sales
+  // ('retail-<resource>', category s: no resource/amount in details; amount = money ÷ price, cost = unit_cogs, quality =
+  // the sold stock's average, e.g. 0.586 → keyed at the nearest whole quality, the average kept as qAvg).
   // Each exchange fill is paired with the 'fees-<resource>' row written at the same moment (≤ 5 s apart).
   // Money in only (money > 0): a row where money goes out is a purchase, never a sale.
   function salesFromLedger(rows) {
@@ -50,11 +52,18 @@
     const used = new Set(), out = [];
     for (const r of list) {
       const dk = String(r && r.descriptionKey || ''), d = (r && r.details) || {};
-      const exchange = r && r.category === 'm' && /^marketfilled-\d+$/.test(dk), contract = /^cs-\d+/.test(dk);
-      if ((!exchange && !contract) || !pos(r.money)) continue;
-      const rid = num(d.resource), q = num(d.quality), amount = num(d.amount), price = num(d.price), t = ms(r.datetime);
+      const exchange = r && r.category === 'm' && /^marketfilled-\d+$/.test(dk), contract = /^cs-\d+/.test(dk), retail = r && r.category === 's' && /^retail-\d+$/.test(dk);
+      if ((!exchange && !contract && !retail) || !pos(r.money)) continue;
+      const price = num(d.price), t = ms(r.datetime), qRaw = num(d.quality);
+      const rid = retail ? num(dk.slice(7)) : num(d.resource), q = retail && qRaw != null ? Math.round(qRaw) : qRaw;
+      const amount = retail ? (pos(price) ? Math.round(Number(r.money) / price) : null) : num(d.amount);
       if (!pos(rid) || q == null || !pos(amount) || !pos(price) || t == null) continue;
       const gross = Number(r.money);
+      if (retail) {
+        const cogs = num(d.unit_cogs);
+        out.push({ id: String(r.id), t, rid, q, qAvg: qRaw, amount, price, gross, fee: null, ledgerProfit: cogs != null ? gross - cogs * amount : null, ledgerCost: cogs, channel: 'retail', buyer: String(d.building_name || '') });
+        continue;
+      }
       let fee = null;
       if (exchange) {
         const f = fees.find(x => !used.has(x) && x.descriptionKey === `fees-${rid}` && Math.abs(ms(x.datetime) - t) <= 5000);
@@ -72,8 +81,8 @@
   // /cashflow/<id>/ = its oldest row → the time of row <id> (the oldest row of the page before it, kept in anchors).
   const ARCHIVE_DAYS = 35;
   const PAGE_RX = /\/api\/v2\/companies\/me\/cashflow\/(recent|\d+)\/?$/;
-  const saleKey = dk => /^(?:marketfilled|fees)-\d+$/.test(dk) || /^cs-\d+/.test(dk);
-  const DETAIL_KEYS = ['resource', 'quality', 'amount', 'price', 'profit', 'buyer'];
+  const saleKey = dk => /^(?:marketfilled|fees|retail)-\d+$/.test(dk) || /^cs-\d+/.test(dk);
+  const DETAIL_KEYS = ['resource', 'quality', 'amount', 'price', 'profit', 'buyer', 'unit_cogs', 'building_name'];
   function slimRow(r) {
     const d = (r && r.details) || {}, details = {};
     for (const k of DETAIL_KEYS) if (d[k] !== undefined) details[k] = d[k];
@@ -258,7 +267,7 @@
     const g = new Map();
     for (const s of Array.isArray(sales) ? sales : []) {
       const k = keyOf(s.rid, s.q), x = g.get(k) || { key: k, rid: s.rid, q: s.q, contracts: [], cUnits: 0, cGross: 0, exUnits: 0 };
-      if (s.channel === 'contract') { x.contracts.push(s); x.cUnits += s.amount; x.cGross += s.gross; } else x.exUnits += s.amount;
+      if (s.channel === 'contract') { x.contracts.push(s); x.cUnits += s.amount; x.cGross += s.gross; } else if (s.channel === 'exchange') x.exUnits += s.amount; else continue;
       g.set(k, x);
     }
     return [...g.values()].map(x => {

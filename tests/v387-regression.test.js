@@ -80,6 +80,6 @@ assert.equal(S.model.allSales.length, 0);
 const bg = fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8'), dash = fs.readFileSync(path.join(__dirname, '..', 'dashboard.js'), 'utf8');
 assert.ok(bg.includes("import './analyze-core.js';"));
 assert.ok(/queueLedgerArchive\(targetRealm,\[\{url:/.test(bg), 'capture hook');
-assert.ok(bg.includes('scmLedgerArchiveSeededV1') && /validRealmNumber\(v\?\.captureRealm\)===n/.test(bg), 'seed only from this realm\'s stamped pages');
+assert.ok(bg.includes('scmLedgerArchiveSeededV2') && /validRealmNumber\(v\?\.captureRealm\)===n/.test(bg), 'seed only from this realm\'s stamped pages');
 assert.ok(dash.includes('`scmLedgerArchive:${r}`'), 'dashboard loads the viewed realm\'s archive');
 console.log('v387-regression: all assertions passed');

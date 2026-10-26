@@ -1347,7 +1347,7 @@ async function catchUpLedgerArchive(realm,reason='daily-walk'){
 }
 // One-time seed from the cash-flow pages already in each realm store (stamped with that realm).
 async function seedLedgerArchiveOnce(){
-  const FLAG='scmLedgerArchiveSeededV1';
+  const FLAG='scmLedgerArchiveSeededV2'; // V2 (2.5.389): re-seed so retail rows from stored pages join the archive
   const got=await chrome.storage.local.get({[FLAG]:false,'scmRealmStore:0':null,'scmRealmStore:1':null});
   if(got[FLAG])return {ok:true,skipped:true};
   for(const n of [0,1]){
