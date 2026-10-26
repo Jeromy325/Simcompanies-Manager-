@@ -3,7 +3,7 @@
 // R2 CSVs: day statements end ~01:20 UTC (10-26T01:20:11, 10-25T01:21:31 …).
 const assert = require('assert'), fs = require('fs'), path = require('path');
 const A = require('../analyze-core.js');
-assert.equal(require('../manifest.json').version, '2.5.392');
+assert.ok(require('../manifest.json').version >= '2.5.392');
 const day = (date, fees) => ({ date, isComputed: true, marketFees: -fees, sales: 1 });
 // 20 days kept by date; the live store holds only /day/0/../day/13/ (the newest 14).
 const hist = { 'income-statement': {} }, ep = {};

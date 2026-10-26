@@ -307,7 +307,8 @@
       ['Cost split over time.', 'Production history keeps the total cost per run, so the inputs / labour split is today\'s lot.', true]
     ].map(([a, b, warn]) => `<div class="an-gapitem"><i class="an-dot ${warn ? 'an-dot-warn' : 'an-dot-good'}"></i><div><b>${a}</b> <span>${esc(b)}</span></div></div>`).join('');
     const set = `${sw('auto', S.auto, 'Compute when the tab opens', 'No background work')}${hr}${sw('keep', S.keep, 'Keep the last result for 10 minutes', 'Opens instantly on revisit')}${hr}${sw('min', S.minUnits > 0, 'Ignore lots under 5 units', 'Hides tiny leftovers on Stock')}${hr}<div class="an-setblk"><div>Look-back window</div>${daySeg()}</div>`;
-    return `${detailHead('Data and settings')}${sec('dt-src', 'What Analyze reads', sources(m))}${sec('dt-gaps', 'Known gaps', gaps)}${sec('dt-set', 'Settings', set)}<button type="button" class="an-btn" data-an-recalc>Recalculate now</button><p class="an-center">Last calculated ${when(S.at)} · took ${S.took < 1000 ? `${S.took.toFixed(0)} ms` : `${(S.took / 1000).toFixed(1)} s`} · 0 network calls</p><button type="button" class="an-link an-link-c" data-an-go="empty">Preview the first-run screen ›</button>`;
+    const imp = `<div class="an-setblk"><div>Add history from the game's CSV downloads</div><small class="an-muted">Accounting → csv: account history (ledger), income statement, cash-flow statement, balance sheet. Several files at once. Goes into ${esc(S.ctx?.realm === 0 ? 'R1' : S.ctx?.realm === 1 ? 'R2' : 'this realm')}; days and rows already captured are kept as they are.</small><label class="an-btn an-file">Import CSV files<input type="file" accept=".csv,text/csv" multiple data-an-import hidden></label><p class="an-center" id="anImportMsg">${esc(S.importMsg || '')}</p></div>`;
+    return `${detailHead('Data and settings')}${sec('dt-src', 'What Analyze reads', sources(m))}${sec('dt-imp', 'Import', imp)}${sec('dt-gaps', 'Known gaps', gaps)}${sec('dt-set', 'Settings', set)}<button type="button" class="an-btn" data-an-recalc>Recalculate now</button><p class="an-center">Last calculated ${when(S.at)} · took ${S.took < 1000 ? `${S.took.toFixed(0)} ms` : `${(S.took / 1000).toFixed(1)} s`} · 0 network calls</p><button type="button" class="an-link an-link-c" data-an-go="empty">Preview the first-run screen ›</button>`;
   }
   function pageEmpty(m) {
     const ledgerDays = m.coverage.spanDays, items = [
@@ -331,10 +332,31 @@
     if (!root.dataset.ready) {
       root.dataset.ready = '1';
       root.addEventListener('click', onClick);
+      root.addEventListener('change', e => { if (e.target?.matches?.('[data-an-import]')) importFiles(e.target.files).finally(() => { e.target.value = ''; }); });
       root.addEventListener('toggle', e => { const d = e.target; if (!d?.matches?.('[data-an-card]')) return; const id = d.dataset.anCard; if (d.open) S.closed.delete(id); else S.closed.add(id); store.set('closed', [...S.closed].slice(-200)); }, true);
       document.querySelectorAll('nav .tab').forEach(b => b.addEventListener('click', () => { if (b.dataset.tab !== 'analyze') S.left = true; }));
     }
     return root;
+  }
+  // 2.5.393 CSV import: parse here, store in the background (realm-keyed queues). Imported data never replaces captures.
+  async function importFiles(files) {
+    const realm = S.ctx?.realm, list = [...(files || [])];
+    const msg = t => { S.importMsg = t; const el = $('#anImportMsg'); if (el) el.textContent = t; };
+    if (!Number.isInteger(realm)) return msg('Pick a realm first.');
+    if (!list.length) return;
+    const names = new Map(); for (let id = 1; id <= 400; id++) { let n = null; try { n = S.ctx?.nameOf?.(id); } catch { /* none */ } if (n && !/^(#|Resource #)/.test(n)) names.set(String(n).toLowerCase(), id); }
+    const out = [];
+    for (const f of list) {
+      let r; try { r = A.csvImport(await f.text(), { nameToId: n => names.get(String(n).toLowerCase()) }); } catch (e) { r = { type: null, error: e?.message || String(e) }; }
+      if (r.type === 'statement') {
+        const res = await Promise.resolve(S.ctx?.importCsv?.({ type: 'IMPORT_CSV_STATEMENTS', realm, field: r.field, items: r.items })).catch(e => ({ ok: false, error: e?.message }));
+        out.push(res?.ok ? `${f.name}: ${res.added} new day${res.added === 1 ? '' : 's'} of ${r.items.length}` : `${f.name}: ${res?.error || 'not saved'}`);
+      } else if (r.type === 'ledger') {
+        const res = await Promise.resolve(S.ctx?.importCsv?.({ type: 'IMPORT_CSV_LEDGER', realm, rows: r.rows })).catch(e => ({ ok: false, error: e?.message }));
+        out.push(res?.ok ? `${f.name}: ${units(res.added)} new ledger rows of ${units(r.rows.length)}${r.skipped?.other ? ` (${r.skipped.other} cancellation fees skipped)` : ''}` : `${f.name}: ${res?.error || 'not saved'}`);
+      } else out.push(`${f.name}: ${r.error}`);
+    }
+    msg(out.join(' · '));
   }
   function go(page) { if (page !== 'product' && page !== 'empty') { S.back = page; store.set('page', page); } S.page = page; S.salesShow = 20; paint(true); $('#analyze')?.scrollIntoView?.({ block: 'start' }); }
   function onClick(e) {

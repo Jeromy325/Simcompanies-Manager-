@@ -1507,6 +1507,8 @@ body.acct-pop-open{overflow:hidden}
 .an-gapbox.an-good{color:#52c98b}.an-gapbox.an-bad{color:#f07167}
 .an-pill{display:inline-block;flex:none;font-size:12px;font-weight:700;color:#12161c;border-radius:999px;padding:4px 10px;white-space:nowrap}
 .an-pill-bad{background:#f07167}.an-pill-warn{background:#e8b04a}.an-pill-good{background:#52c98b}
+.an-file{display:flex;align-items:center;justify-content:center;cursor:pointer;margin-top:10px}
+.an-file input{display:none!important}
 .an-pill-info{background:#3a4556;color:#e8ecf1}
 .an-tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .an-tile{display:flex;flex-direction:column;align-items:flex-start;text-align:left;background:#1a2029;border:1px solid #262d38;border-radius:12px;padding:12px!important;color:#e8ecf1;min-width:0}

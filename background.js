@@ -1385,13 +1385,13 @@ async function compactLedgerPagesOnce(){
 const STATEMENT_DAY_RX=/\/api\/v2\/companies\/me\/(income-statement|cashflow-statement|balance-sheet)\/day\/\d+\/?$/;
 function statementHistoryKey(realm){return `scmStatementHistory:${Number(realm)}`;}
 const statementHistoryQueues=new Map();
-function queueStatementHistory(realm,items){
+function queueStatementHistory(realm,items,{keep=false}={}){
   const n=validRealmNumber(realm);const list=(Array.isArray(items)?items:[]).filter(x=>x&&x.kind&&x.data&&x.data.isComputed===true&&Number.isFinite(Date.parse(String(x.data.date||''))));
   if(n==null||!list.length)return Promise.resolve({ok:false});
   const key=statementHistoryKey(n);
   const run=(statementHistoryQueues.get(n)||Promise.resolve()).then(async()=>{
     const h=(await chrome.storage.local.get({[key]:null}))[key]||{};let added=0;
-    for(const {kind,data} of list){const d=new Date(Date.parse(String(data.date))).toISOString();h[kind]=h[kind]||{};if(!h[kind][d])added++;h[kind][d]=data;}
+    for(const {kind,data} of list){const d=new Date(Date.parse(String(data.date))).toISOString();h[kind]=h[kind]||{};if(h[kind][d]&&keep)continue;if(!h[kind][d])added++;h[kind][d]=data;}
     await rawStorageSet({[key]:h});return {ok:true,added};
   });
   statementHistoryQueues.set(n,run.catch(()=>{}));
@@ -6449,6 +6449,11 @@ replayEvent('runtime-start',{buildVersion:BUILD_VERSION,activeRealmKey:null});
 
 chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='SET_ACCOUNTING_WALK_SCHEDULE'){(async()=>{const realm=validRealmNumber(m.realm);const patch={enabled:Boolean(m.enabled),offsetMin:accountingWalkOffset(m.offsetMin),attempt:0,retryAt:null};if(realm!=null)patch.realm=realm;await writeAccountingWalkSchedule(patch);const r=await ensureAccountingWalkSchedule('user');return {...r,schedule:await readAccountingWalkSchedule()};})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
+  // 2.5.393 CSV import from Analyze → Data: statements by date and ledger rows; captured data always wins.
+  if(m?.type==='IMPORT_CSV_STATEMENTS'){(async()=>{const realm=validRealmNumber(m.realm);if(realm==null)return {ok:false,error:'Pick a realm first.'};if(!/^(income-statement|cashflow-statement|balance-sheet)$/.test(String(m.field||'')))return {ok:false,error:'Unknown statement.'};return queueStatementHistory(realm,(Array.isArray(m.items)?m.items:[]).map(data=>({kind:m.field,data})),{keep:true});})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
+  if(m?.type==='IMPORT_CSV_LEDGER'){(async()=>{const n=validRealmNumber(m.realm);if(n==null)return {ok:false,error:'Pick a realm first.'};const key=ledgerArchiveKey(n);
+    const run=(ledgerArchiveQueues.get(n)||Promise.resolve()).then(async()=>{const a=(await chrome.storage.local.get({[key]:null}))[key];const {added,...out}=globalThis.SCM_ANALYZE_CORE.archiveImport(a,m.rows);await rawStorageSet({[key]:out});return {ok:true,added};});
+    ledgerArchiveQueues.set(n,run.catch(()=>{}));return run;})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='RUN_ACCOUNTING_WALK_NOW'){(async()=>{const realm=validRealmNumber(m.realm);if(realm!=null)await writeAccountingWalkSchedule({realm});return runScheduledAccountingWalk('manual');})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_MOBILE_NET_START'){scmMobileNetStart(Number(m.tabId)).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_MOBILE_NET_STOP'){scmMobileNetStop().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}

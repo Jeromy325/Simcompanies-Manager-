@@ -1,0 +1,41 @@
+id,Timestamp,Category,Money,Description,Details
+3104294243,2026-10-26T21:27:55.111786+00:00,sales,2125,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 57750, ""building_name"": ""Halloween market""}"
+3104264346,2026-10-26T21:02:34.975689+00:00,fees,-2990,Market fees selling Car body,{}
+3104264345,2026-10-26T21:02:34.972557+00:00,market,74740,Car body market order filled,"{""version"": 1, ""resource"": 51, ""amount"": 101, ""quality"": 2, ""price"": 740.0, ""buyer"": ""AirBit"", ""profit"": 6138}"
+3104251842,2026-10-26T20:51:12.737674+00:00,sales,3388,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 59875, ""building_name"": ""Halloween market""}"
+3104198737,2026-10-26T20:05:54.796876+00:00,fees,-770,Market fees selling Car body,{}
+3104198736,2026-10-26T20:05:54.794263+00:00,market,19240,Car body market order filled,"{""version"": 1, ""resource"": 51, ""amount"": 26, ""quality"": 2, ""price"": 740.0, ""buyer"": ""AirBit"", ""profit"": 1579}"
+3104182102,2026-10-26T19:52:51.413353+00:00,sales,1438,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 63263, ""building_name"": ""Halloween market""}"
+3104156304,2026-10-26T19:27:56.333329+00:00,sales,2826,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 64701, ""building_name"": ""Halloween market""}"
+3104102876,2026-10-26T18:39:07.841597+00:00,sales,1000,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 67527, ""building_name"": ""Halloween market""}"
+3104085885,2026-10-26T18:21:53.948956+00:00,sales,4411,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 68527, ""building_name"": ""Halloween market""}"
+3104009775,2026-10-26T17:07:52.979650+00:00,sales,1703,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 72938, ""building_name"": ""Halloween market""}"
+3103975681,2026-10-26T16:37:11.597398+00:00,sales,1775,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 74641, ""building_name"": ""Halloween market""}"
+3103940556,2026-10-26T16:05:40.123739+00:00,sales,1038,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 76416, ""building_name"": ""Halloween market""}"
+3103919884,2026-10-26T15:47:46.365410+00:00,sales,1145,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 77454, ""building_name"": ""Halloween market""}"
+3103913911,2026-10-26T15:41:51.983024+00:00,fees,-232,Market fees selling Steel,{}
+3103913910,2026-10-26T15:41:51.980340+00:00,market,5788,Steel market order filled,"{""version"": 1, ""resource"": 43, ""amount"": 499, ""quality"": 2, ""price"": 11.6, ""buyer"": ""Baugrube"", ""profit"": 433}"
+3103910472,2026-10-26T15:38:53.646259+00:00,fees,-3670,Market fees selling Car body,{}
+3103910471,2026-10-26T15:38:53.642425+00:00,market,91760,Car body market order filled,"{""version"": 1, ""resource"": 51, ""amount"": 124, ""quality"": 2, ""price"": 740.0, ""buyer"": ""Salaris Motor Group"", ""profit"": 7537}"
+3103909901,2026-10-26T15:38:22.233282+00:00,fees,-5181,Market fees selling Car body,{}
+3103909900,2026-10-26T15:38:22.229474+00:00,market,129500,Car body market order filled,"{""version"": 1, ""resource"": 51, ""amount"": 175, ""quality"": 2, ""price"": 740.0, ""buyer"": ""Salaris Motor Group"", ""profit"": 10635}"
+3103898810,2026-10-26T15:28:22.793577+00:00,production,-56877,Production of Minerals,"{""version"": 1, ""price"": 8.155788551737043, ""quality"": 2, ""amount"": 19875, ""building_name"": ""Mine #1 - Minerals ""}"
+3103898309,2026-10-26T15:28:00.421159+00:00,sales,5587,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 78599, ""building_name"": ""Halloween market""}"
+3103867885,2026-10-26T15:02:36.380994+00:00,construction,0,Building expansion finished,"{""version"": 1, ""building"": ""M"", ""level"": 10, ""building_name"": ""Mine #1 - Minerals ""}"
+3103789504,2026-10-26T13:51:32.539514+00:00,sales,3128,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 84186, ""building_name"": ""Halloween market""}"
+3103734751,2026-10-26T13:02:52.384983+00:00,fees,-229,Market fees selling Bricks,{}
+3103734750,2026-10-26T13:02:52.381416+00:00,market,5738,Bricks market order filled,"{""version"": 1, ""resource"": 102, ""amount"": 2207, ""quality"": 3, ""price"": 2.6, ""buyer"": ""dinomarkets"", ""profit"": 874}"
+3103734632,2026-10-26T13:02:49.073508+00:00,fees,-11,Market fees selling Bricks,{}
+3103734631,2026-10-26T13:02:49.070683+00:00,market,260,Bricks market order filled,"{""version"": 1, ""resource"": 102, ""amount"": 100, ""quality"": 3, ""price"": 2.6, ""buyer"": ""Ndionefamily"", ""profit"": 38}"
+3103734284,2026-10-26T13:02:35.308364+00:00,fees,-41,Market fees selling Bricks,{}
+3103734283,2026-10-26T13:02:35.305580+00:00,market,1008,Bricks market order filled,"{""version"": 1, ""resource"": 102, ""amount"": 388, ""quality"": 3, ""price"": 2.6, ""buyer"": ""total mayhem"", ""profit"": 152}"
+3103728223,2026-10-26T12:57:33.184832+00:00,sales,625,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 87314, ""building_name"": ""Halloween market""}"
+3103721285,2026-10-26T12:51:03.109071+00:00,sales,1013,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 87939, ""building_name"": ""Halloween market""}"
+3103698393,2026-10-26T12:29:16.801803+00:00,sales,6233,Sales of Jack o'lantern,"{""version"": 1, ""building"": ""t"", ""quality"": 0.0, ""price"": 47.7, ""unit_cogs"": 35.750102249488755, ""remaining"": 88952, ""building_name"": ""Halloween market""}"
+3103693671,2026-10-26T12:23:30.866972+00:00,fees,-39,Market fees selling Planks,{}
+3103693670,2026-10-26T12:23:30.863656+00:00,market,979,Planks market order filled,"{""version"": 1, ""resource"": 108, ""amount"": 102, ""quality"": 3, ""price"": 9.6, ""buyer"": ""Section 9"", ""profit"": 93}"
+3103693665,2026-10-26T12:23:30.814696+00:00,fees,-74,Market fees selling Planks,{}
+3103693663,2026-10-26T12:23:30.812362+00:00,market,1843,Planks market order filled,"{""version"": 1, ""resource"": 108, ""amount"": 192, ""quality"": 3, ""price"": 9.6, ""buyer"": ""Solana HQ"", ""profit"": 175}"
+3103693501,2026-10-26T12:23:22.038775+00:00,fees,-189,Market fees selling Planks,{}
+3103693500,2026-10-26T12:23:22.036779+00:00,market,4704,Planks market order filled,"{""version"": 1, ""resource"": 108, ""amount"": 490, ""quality"": 3, ""price"": 9.6, ""buyer"": ""Section 9"", ""profit"": 447}"
+3103685851,2026-10-26T12:16:24.065732+00:00,contract,103679,Electronic components contract signed by Chemi Kitties,"{""version"": 1, ""resource"": 21, ""amount"": 1961, ""quality"": 2, ""price"": 52.87, ""profit"": 18489}"

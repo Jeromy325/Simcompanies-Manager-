@@ -74,6 +74,69 @@
     }
     return out.sort((a, b) => b.t - a.t);
   }
+  /* ------------------------------------------------------------ CSV import (2.5.393) */
+  // The game's Accounting CSV downloads → the same shapes the manager captures. Column → field maps are checked against
+  // the user's R2 CSVs and captured day statements (14 days, every non-zero column one-to-one); all-zero columns by name.
+  const CSV_STATEMENTS = {
+    'income-statement': { Sales: 'sales', COGS: 'cogs', 'Freight Out': 'freightOut', Construction: 'constructionCosts', 'Exchange Fees': 'marketFees', Salaries: 'salariesCosts', Training: 'trainingCosts', Poaching: 'poachingCosts', 'Achievements Referrals PA': 'gameIncome', 'Patent Conversion': 'patentConversion', 'Bond Defaults': 'bondDefaults', 'Bond Writeoffs': 'bondWriteoffs', 'Accounting Overhead': 'accountingOverhead', 'Bond Interest Expense': 'bondInterestExpense', 'Bond Interest Income': 'bondInterestIncome', Donations: 'donations', 'Government Order Deposit Forfeitures': 'goDepositForfeitures', 'Other Comprehensive Income': 'otherComprehensiveIncome', NetIncome: 'netIncome' },
+    'cashflow-statement': { 'All income': 'cashAllIncome', 'All expenses': 'cashAllExpenses', 'From retail': 'fromRetail', 'From customers': 'fromCustomers', 'From exchange': 'fromExchange', 'From interest': 'fromInterest', 'From poaching': 'fromPoaching', 'To suppliers': 'toSuppliers', 'To exchange': 'toExchange', 'To employees': 'toEmployees', 'To executives': 'toExecutives', 'For interest': 'forInterest', 'For fees': 'forFees', 'For accounting': 'forAccounting', 'Investment in bonds': 'investmentInBonds', 'Government order deposits': 'goDeposits', Bonds: 'bonds', 'Game income': 'gameIncome' },
+    'balance-sheet': { Cash: 'cash', 'Accounts Receivable': 'accountsReceivable', 'Inventory - materials': 'materials', 'Inventory - research': 'research', 'Inventory - work in process': 'workInProcess', 'Inventory - finished goods': 'finishedGoods', 'Inventory - valuation allowance': 'valuationAllowance', Deposits: 'deposits', 'Investment in bonds': 'investmentInBonds', Buildings: 'buildings', 'Construction in progress': 'constructionInProgress', Patents: 'patents', Liabilities: 'bondsPayable', 'Contributed Capital': 'contributedCapital', 'Retained Earnings': 'retainedEarnings' }
+  };
+  const CSV_LEDGER_CAT = { market: 'm', fees: 'f', contract: 't', sales: 's' };
+  function parseCsv(text) {
+    const rows = []; let row = [], f = '', q = false; const t = String(text || '').replace(/^﻿/, '');
+    for (let i = 0; i < t.length; i++) {
+      const c = t[i];
+      if (q) { if (c === '"') { if (t[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; }
+      else if (c === '"') q = true; else if (c === ',') { row.push(f); f = ''; }
+      else if (c === '\n' || c === '\r') { if (c === '\r' && t[i + 1] === '\n') i++; row.push(f); f = ''; if (row.some(x => x !== '')) rows.push(row); row = []; }
+      else f += c;
+    }
+    row.push(f); if (row.some(x => x !== '')) rows.push(row);
+    const [head, ...body] = rows; return head ? body.map(r => Object.fromEntries(head.map((h, i) => [h.trim(), r[i] ?? '']))) : [];
+  }
+  // → { type: 'statement', field, items: [data] } | { type: 'ledger', rows } | { type: null, error }.
+  // nameToId(name) resolves "Market fees selling Car body" / "Sales of Jack o'lantern" (those rows carry no resource id).
+  function csvImport(text, { nameToId } = {}) {
+    const rows = parseCsv(text); if (!rows.length) return { type: null, error: 'Empty file.' };
+    const cols = Object.keys(rows[0]);
+    for (const [field, map] of Object.entries(CSV_STATEMENTS)) {
+      const known = Object.keys(map), hit = known.filter(c => cols.includes(c)).length;
+      if (!cols.includes('Timestamp') || hit < known.length - 2) continue;
+      const items = rows.map(r => { const t = ms(r.Timestamp); if (t == null) return null; const d = { date: r.Timestamp, isComputed: true, imported: 'csv' }; for (const [c, k] of Object.entries(map)) if (c in r && r[c] !== '') d[k] = Number(r[c]); return d; }).filter(Boolean);
+      return { type: 'statement', field, items };
+    }
+    if (['id', 'Timestamp', 'Category', 'Money', 'Description', 'Details'].every(c => cols.includes(c))) {
+      const idOf = n => { try { return typeof nameToId === 'function' ? num(nameToId(String(n || '').trim())) : null; } catch { return null; } };
+      const out = [], skipped = { other: 0 };
+      for (const r of rows) {
+        const cat = CSV_LEDGER_CAT[r.Category], t = ms(r.Timestamp); if (!cat || t == null) continue;
+        let details = {}; try { details = JSON.parse(r.Details || '{}') || {}; } catch { details = {}; }
+        const desc = String(r.Description || ''); let dk = null;
+        if (cat === 'm') { const rid = num(details.resource); if (pos(rid)) dk = `marketfilled-${rid}`; }
+        else if (cat === 't') { const rid = num(details.resource), m = desc.match(/ contract signed by (.+)$/); if (pos(rid)) dk = `cs-${rid}-${m ? m[1] : ''}`; }
+        else if (cat === 'f') { const m = desc.match(/^Market fees selling (.+)$/), rid = m && idOf(m[1]); if (pos(rid)) dk = `fees-${rid}`; else skipped.other++; }
+        else if (cat === 's') { const m = desc.match(/^Sales of (.+)$/), rid = m && idOf(m[1]); if (pos(rid)) dk = `retail-${rid}`; else skipped.other++; }
+        if (!dk) continue;
+        out.push({ id: num(r.id) ?? r.id, datetime: r.Timestamp, category: cat, descriptionKey: dk, money: Number(r.Money), details });
+      }
+      return { type: 'ledger', rows: out, skipped };
+    }
+    return { type: null, error: 'Not a Sim Companies account history, income statement, cash-flow statement or balance sheet CSV.' };
+  }
+  // Imported ledger rows join the archive; a captured row with the same id always wins. The game's account history is
+  // the full ledger, so its time range counts as covered.
+  function archiveImport(archive, list, now = Date.now()) {
+    const a = archive && typeof archive === 'object' ? archive : {}, rows = { ...(a.rows || {}) }, cut = now - ARCHIVE_DAYS * DAY;
+    let added = 0; const ts = [];
+    for (const r of Array.isArray(list) ? list : []) {
+      const t = ms(r && r.datetime); if (t == null || t < cut || !saleKey(String(r.descriptionKey || ''))) continue;
+      ts.push(t); const k = String(r.id); if (!rows[k]) { rows[k] = slimRow(r); added++; }
+    }
+    const spans = ts.length ? mergeSpans([...(a.spans || []), [Math.min(...ts), Math.max(...ts)]]) : mergeSpans(a.spans);
+    return { v: 1, rows, anchors: { ...(a.anchors || {}) }, spans, added };
+  }
+
   /* ------------------------------------------------------------ ledger archive */
   // cashflow/recent holds only the newest 30 rows and every capture replaces it, so sales that roll off it between full
   // syncs were lost to Analyze. The archive (one per realm, scmLedgerArchive:<realm>) keeps the sale rows of every
@@ -399,7 +462,7 @@
   }
   const rangeStats = pts => { const v = (pts || []).map(p => p[1]); return v.length ? { lo: Math.min(...v), hi: Math.max(...v), change: v.length > 1 && v[0] ? (v[v.length - 1] - v[0]) / Math.abs(v[0]) : null } : null; };
 
-  const api = { DAY, keyOf, realmEndpoints, realmCostHistory, ledgerRows, salesFromLedger, ARCHIVE_DAYS, archiveMerge, pruneLedgerPages, catchUpPlan, pageSpans, mergeSpans, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, earnedBy, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
+  const api = { DAY, keyOf, realmEndpoints, realmCostHistory, ledgerRows, salesFromLedger, ARCHIVE_DAYS, archiveMerge, archiveImport, csvImport, parseCsv, CSV_STATEMENTS, pruneLedgerPages, catchUpPlan, pageSpans, mergeSpans, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, earnedBy, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
   root.SCM_ANALYZE_CORE = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

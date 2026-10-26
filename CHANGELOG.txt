@@ -1,3 +1,12 @@
+2.5.393 — 2026-10-26 — Import the game's CSV downloads
+- Analyze → Data → Import: pick the game's Accounting CSVs (account history, income statement, cash-flow statement,
+  balance sheet; several at once) to give the manager history before any Sync or walk. Statements are kept by date
+  (scmStatementHistory), ledger sales/fees/contracts/retail rows go into the ledger archive (35 days).
+- Checked on the R2 downloads of 2026-10-26: every imported value equals what the manager captured (484 of 484
+  sales identical; 728 statement values, 0 mismatches). 30 days of each statement and 2,058 ledger rows imported.
+- Captured data always wins; importing the same file again adds nothing. Order-cancellation fees are skipped.
+  The realm is the one you are viewing (CSV files carry none).
+
 2.5.392 — 2026-10-26 — Statement history kept by date
 - The game numbers day statements by age (day 0 = the last finished day, up to day 13) and moves them every rollover
   (~01:20 UTC), so the store only ever held the latest 14 days. Every finished income, cash-flow and balance-sheet

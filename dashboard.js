@@ -2961,6 +2961,8 @@ function analyzeContext(s){
   const maker=id=>owned.find(b=>Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId)===Number(id))||null;
   return {realm,lots,buildingIds:owned.map(b=>Number(b?.id)).filter(id=>id>0),companyName:s?.authData?.authCompany?.company||'',
     nameOf:id=>resourceName({_id:Number(id),kind:Number(id)},s),
+    // 2.5.393 CSV import: the background stores it (realm-keyed queues; captured data wins).
+    importCsv:msg=>chrome.runtime.sendMessage(msg),
     priceOf:(id,q)=>{const p=plannerMarketPrice(s,map,id,q,'sell');return p&&Number(p.price)>0?{price:Number(p.price),source:p.source||''}:null;},
     calcOf:(id,q,salePrice)=>{
       if(!d?.ok)return {ok:false,reason:d?.reason||'Calculator not available.'};
@@ -4625,6 +4627,8 @@ function openProductionCostHistory(s,key){
 }
 document.addEventListener('click',e=>{const b=e.target?.closest?.('[data-pch]');if(!b)return;e.preventDefault();try{openProductionCostHistory(__scmState||{},b.dataset.pch);}catch(err){console.debug('production cost history',err);}});
 try{scmOnStorageChanged((changes,area)=>{if(area!=='local'||!__scmState)return;const r=validRealmNumber(__scmState.viewRealm??__scmState.selectedRealm);const c=r!=null?changes[`scmProductionCostHistory:${r}`]:null;if(!c)return;__scmState.productionCostHistory=Array.isArray(c.newValue)?c.newValue:[];if(activeTab==='warehouse'){try{patchWarehouseCells(__scmState);}catch{}}});}catch{}
+// v2.5.393 statement history (CSV import, new day statements) recomputes Analyze too.
+try{scmOnStorageChanged((changes,area)=>{if(area!=='local'||!__scmState)return;const r=validRealmNumber(__scmState.viewRealm??__scmState.selectedRealm);const c=r!=null?changes[`scmStatementHistory:${r}`]:null;if(!c)return;__scmState.statementHistory=c.newValue&&typeof c.newValue==='object'?c.newValue:null;if(activeTab==='analyze'){try{globalThis.SCM_ANALYZE_UI?.render(__scmState,analyzeContext(__scmState));}catch{}}});}catch{}
 // v2.5.387 a new ledger page in the archive recomputes Analyze while it is open (the archive is realm-keyed).
 try{scmOnStorageChanged((changes,area)=>{if(area!=='local'||!__scmState)return;const r=validRealmNumber(__scmState.viewRealm??__scmState.selectedRealm);const c=r!=null?changes[`scmLedgerArchive:${r}`]:null;if(!c)return;__scmState.ledgerArchive=c.newValue&&typeof c.newValue==='object'?c.newValue:null;if(activeTab==='analyze'){try{globalThis.SCM_ANALYZE_UI?.render(__scmState,analyzeContext(__scmState));}catch{}}});}catch{}
 function patchWarehouseCells(state){
