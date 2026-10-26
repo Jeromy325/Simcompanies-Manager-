@@ -218,33 +218,43 @@
     const profit = Number(salePrice) - cost;
     return { cost, profit, profitPerHourPerLevel: pos(ratePerLevel) ? profit * Number(ratePerLevel) : null };
   }
-  // Per product + quality, exchange sales only:
-  //   earned/unit = avg sold − cost/unit − avg sold × fee rate; gap = calculator − earned = (price now − avg sold) + fee + (cost − calculator cost).
+  // Per product + quality + channel (2.5.391: contract and retail too, each its own row):
+  //   exchange earned/unit = avg sold − cost/unit − avg sold × fee rate; gap = calculator − earned = (price now − avg sold) + fee + (cost − calculator cost).
+  //   contract earned/unit = avg sold − cost/unit (no fee: the ledger has none for contracts; transport not included).
+  //   retail   earned/unit = avg sold − the game's COGS per unit (unit_cogs on each retail row).
+  // Calculator and gap only for exchange rows (the calculator prices at today's exchange price).
+  const CHANNEL_ORDER = { exchange: 0, contract: 1, retail: 2 };
   function margins(sales, { costOf, priceOf, calcOf, rate = null } = {}) {
     const g = new Map();
     for (const s of Array.isArray(sales) ? sales : []) {
-      if (s.channel !== 'exchange') continue;
-      const k = keyOf(s.rid, s.q), x = g.get(k) || { key: k, rid: s.rid, q: s.q, units: 0, gross: 0, n: 0, fees: 0, ledgerCostSum: 0, ledgerUnits: 0 };
+      if (!(s.channel in CHANNEL_ORDER)) continue;
+      const k = keyOf(s.rid, s.q), id = `${k}|${s.channel}`, x = g.get(id) || { id, key: k, rid: s.rid, q: s.q, channel: s.channel, units: 0, gross: 0, n: 0, fees: 0, ledgerCostSum: 0, ledgerUnits: 0 };
       x.units += s.amount; x.gross += s.gross; x.n++; if (s.fee != null) x.fees += s.fee;
       if (s.ledgerCost != null) { x.ledgerCostSum += s.ledgerCost * s.amount; x.ledgerUnits += s.amount; }
-      g.set(k, x);
+      g.set(id, x);
     }
     const rows = [];
     for (const x of g.values()) {
-      const avg = x.gross / x.units, ledgerCost = x.ledgerUnits ? x.ledgerCostSum / x.ledgerUnits : null;
-      const w = typeof costOf === 'function' ? costOf(x.rid, x.q) : null;
+      const ex = x.channel === 'exchange', avg = x.gross / x.units, ledgerCost = x.ledgerUnits ? x.ledgerCostSum / x.ledgerUnits : null;
+      const w = x.channel !== 'retail' && typeof costOf === 'function' ? costOf(x.rid, x.q) : null;
       const cost = w != null ? w : ledgerCost, costSource = w != null ? 'warehouse' : ledgerCost != null ? 'ledger' : null;
-      const feePU = rate != null ? avg * rate : null;
+      const feePU = ex ? (rate != null ? avg * rate : null) : 0;
       const earned = cost != null && feePU != null ? avg - cost - feePU : null;
       const p = typeof priceOf === 'function' ? priceOf(x.rid, x.q) : null, price = p && pos(p.price) ? Number(p.price) : null;
-      const c = typeof calcOf === 'function' && price != null ? calcOf(x.rid, x.q, price) : null;
+      const c = ex && typeof calcOf === 'function' && price != null ? calcOf(x.rid, x.q, price) : null;
       const calc = c && c.ok && c.complete && c.profitPerUnit != null ? c.profitPerUnit : null;
       const calcCost = c && c.ok && c.complete ? c.sourcingCostPerUnit : null;
       const gap = calc != null && earned != null ? calc - earned : null;
       rows.push({ ...x, avg, cost, costSource, ledgerCost, feePU, earned, total: earned != null ? earned * x.units : null, price, priceSource: p && p.source || null, calc, calcCost, calcResult: c,
-        gap, priceDiff: price != null ? price - avg : null, costDiff: calcCost != null && cost != null ? cost - calcCost : null, pctOfCalc: calc != null && calc > 0 && earned != null ? earned / calc : null });
+        gap, priceDiff: ex && price != null ? price - avg : null, costDiff: calcCost != null && cost != null ? cost - calcCost : null, pctOfCalc: calc != null && calc > 0 && earned != null ? earned / calc : null });
     }
-    return rows.sort((a, b) => (b.gap ?? -Infinity) - (a.gap ?? -Infinity));
+    return rows.sort((a, b) => CHANNEL_ORDER[a.channel] - CHANNEL_ORDER[b.channel] || (b.gap ?? -Infinity) - (a.gap ?? -Infinity) || (b.total ?? -Infinity) - (a.total ?? -Infinity));
+  }
+  // Earned by channel from margin rows.
+  function earnedBy(rows) {
+    const out = { exchange: 0, contract: 0, retail: 0, total: 0 };
+    for (const r of Array.isArray(rows) ? rows : []) if (r.total != null && r.channel in out) { out[r.channel] += r.total; out.total += r.total; }
+    return out;
   }
 
   /* ------------------------------------------------------------ costs */
@@ -386,7 +396,7 @@
   }
   const rangeStats = pts => { const v = (pts || []).map(p => p[1]); return v.length ? { lo: Math.min(...v), hi: Math.max(...v), change: v.length > 1 && v[0] ? (v[v.length - 1] - v[0]) / Math.abs(v[0]) : null } : null; };
 
-  const api = { DAY, keyOf, realmEndpoints, realmCostHistory, ledgerRows, salesFromLedger, ARCHIVE_DAYS, archiveMerge, pruneLedgerPages, catchUpPlan, pageSpans, mergeSpans, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
+  const api = { DAY, keyOf, realmEndpoints, realmCostHistory, ledgerRows, salesFromLedger, ARCHIVE_DAYS, archiveMerge, pruneLedgerPages, catchUpPlan, pageSpans, mergeSpans, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, earnedBy, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
   root.SCM_ANALYZE_CORE = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

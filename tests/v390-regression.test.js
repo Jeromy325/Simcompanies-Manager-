@@ -3,7 +3,7 @@
 // details {building, building_name, price, quality (average, e.g. 0.5856), unit_cogs, remaining}; no resource/amount.
 const assert = require('assert'), fs = require('fs'), path = require('path');
 const A = require('../analyze-core.js');
-assert.equal(require('../manifest.json').version, '2.5.390');
+assert.ok(require('../manifest.json').version >= '2.5.390');
 const fx = require('./fixtures/r2-accounting-day-walk-2026-10-25.json'), ep = {};
 for (const [k, v] of Object.entries(fx)) ep[k] = { data: v };
 const sales = A.salesFromLedger(A.ledgerRows(ep)), retail = sales.filter(s => s.channel === 'retail');
@@ -17,7 +17,7 @@ assert.equal(retail.reduce((a, s) => a + s.gross, 0), 14241, 'all $14,241 of fix
 // Exchange and contract figures unchanged; retail never enters margins, fees, fee rate or routes.
 assert.equal(sales.filter(s => s.channel === 'exchange').length, 9); assert.equal(sales.filter(s => s.channel === 'contract').length, 1);
 assert.equal(A.feeRate(sales).pairs, 7);
-assert.ok(!A.margins(sales, {}).some(r => r.rid === 148), 'margins exchange only');
+assert.ok(!A.margins(sales, {}).some(r => r.rid === 148 && r.channel === 'exchange'), 'retail never an exchange margin row'); // retail has its own row since 2.5.391
 assert.ok(!A.feesSummary(sales, 0.04).products.some(r => r.rid === 148));
 assert.ok(!A.routes(sales, {}).some(r => r.rid === 148), 'routes contract vs exchange only');
 // A retail row with no price is skipped, and money out is never a sale.

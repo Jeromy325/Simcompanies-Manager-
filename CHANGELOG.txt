@@ -1,3 +1,12 @@
+2.5.391 — 2026-10-26 — Analyze: Earned counts contracts and retail
+- "Earned from sales" and Margins counted exchange sales only. Contract and retail sales now count too, each as its
+  own card per product: contract earned = price − cost per unit (warehouse lot, else the game's cost at sale), no
+  exchange fee, transport not included; retail earned = price − the game's COGS. On the R2 ledger (7 days) Earned
+  goes from $1,045,879 (exchange) to $2,573,022: contracts $1,488,317, retail $38,825.
+- Margins shows the split (Exchange · Contracts · Retail). Product pages add a line per contract / retail channel
+  under "Per unit sold". The calculator comparison stays on exchange cards. Fees "% of what you earned" uses
+  exchange earnings.
+
 2.5.390 — 2026-10-26 — Analyze: retail sales
 - Retail sales (Sales of Jack o'lantern, Witch costume …, ledger rows retail-<resource>) were skipped, so those
   products showed no sales. On the R2 ledger that was 67 rows and $127,692 in 7 days; Analyze now matches the game's
