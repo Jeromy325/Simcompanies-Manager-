@@ -3,9 +3,9 @@
 const H = require('./harness'); const fs = require('fs'); const path = require('path');
 (async () => {
   const fx = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'r2-accounting-day-walk-2026-10-25.json'), 'utf8'));
-  const exp = JSON.parse(fs.readFileSync(process.env.SCM_STORAGE_EXPORT, 'utf8')).storage;
+  const { storage: exp, mock } = require('./mock-export').loadExport({ days: false }); // real export via SCM_STORAGE_EXPORT, else mock
   const ctx = await H.launch(); const sw = await H.worker(ctx);
-  await sw.evaluate(async s => { await chrome.storage.local.clear(); await chrome.storage.local.set(s); }, exp);
+  await require('./mock-export').seedExport(sw, exp);
   const api = {}; for (const [k, v] of Object.entries(fx)) if (!/\/day\/\d+\/$/.test(k)) api[k] = v;
   const html = `<div class="bar"><label>Period</label><div><button>Current</button><button id="dayMode">Day</button><button>Week</button><button>Month</button></div></div><p id="shown">current</p>
 <script>(function(){const bar=document.querySelector('.bar');const load=n=>{['income-statement','cashflow-statement','balance-sheet'].forEach(k=>fetch('/api/v2/companies/me/'+k+'/day/'+n+'/'));document.getElementById('shown').textContent='day '+n;};

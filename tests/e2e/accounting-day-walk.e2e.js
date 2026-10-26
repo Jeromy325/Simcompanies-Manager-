@@ -1,14 +1,14 @@
 // 2.5.370: after Sync the Manager walks the game's Accounting page (Day → days 0–6) and captures each day's
 // statements; Last 7 days shows them. Fake game page reproduces the game's period-bar structure (label + 4 mode
 // buttons + 14 day buttons, GamePages Bfr) with the user's real day/0–6 responses. Seeded with the storage export
-// in SCM_STORAGE_EXPORT. FAIL_DAY=<n> makes that day's tap do nothing (partial walk).
+// in SCM_STORAGE_EXPORT, or the mock built from tests/fixtures without one. FAIL_DAY=<n> makes that day's tap do nothing (partial walk).
 const H = require('./harness'); const fs = require('fs'); const path = require('path');
 (async () => {
   const fx = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'r2-accounting-day-walk-2026-10-25.json'), 'utf8'));
   const failDay = process.env.FAIL_DAY != null ? Number(process.env.FAIL_DAY) : -1;
-  const exp = JSON.parse(fs.readFileSync(process.env.SCM_STORAGE_EXPORT, 'utf8')).storage;
+  const { storage: exp, mock } = require('./mock-export').loadExport({ days: false }); // real export via SCM_STORAGE_EXPORT, else mock
   const ctx = await H.launch(); const sw = await H.worker(ctx);
-  await sw.evaluate(async s => { await chrome.storage.local.clear(); await chrome.storage.local.set(s); }, exp);
+  await require('./mock-export').seedExport(sw, exp);
   const api = {}; for (const [k, v] of Object.entries(fx)) if (/\/day\/\d+\/$/.test(k)) api[k] = v;
   const html = `<div id="acc"><div class="bar"><label>Period</label><div><button>Current</button><button id="dayMode">Day</button><button>Week</button><button>Month</button></div></div><p id="shown">current</p></div>
 <script>(function(){const bar=document.querySelector('.bar');const load=n=>{['income-statement','cashflow-statement','balance-sheet'].forEach(k=>fetch('/api/v2/companies/me/'+k+'/day/'+n+'/'));document.getElementById('shown').textContent='day '+n;};

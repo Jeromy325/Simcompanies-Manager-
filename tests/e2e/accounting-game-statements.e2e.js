@@ -1,10 +1,10 @@
 // 2.5.368: Accounting tab shows the game's income statement / balance sheet / cash flow / ratios. Seeded with the
-// user's real storage export (path in SCM_STORAGE_EXPORT), 360 px.
+// user's real storage export (path in SCM_STORAGE_EXPORT) or, without one, the mock built from tests/fixtures. 360 px.
 const H = require('./harness'); const fs = require('fs');
 (async () => {
-  const exp = JSON.parse(fs.readFileSync(process.env.SCM_STORAGE_EXPORT, 'utf8')).storage;
+  const { storage: exp, mock } = require('./mock-export').loadExport({ days: true }); // real export via SCM_STORAGE_EXPORT, else mock
   const ctx = await H.launch(); const sw = await H.worker(ctx);
-  await sw.evaluate(async s => { await chrome.storage.local.clear(); await chrome.storage.local.set(s); }, exp);
+  await require('./mock-export').seedExport(sw, exp);
   const id = new URL(sw.url()).host; const page = await ctx.newPage();
   const errs = []; page.on('pageerror', e => errs.push(e.message));
   await page.goto(`chrome-extension://${id}/dashboard.html`); await page.waitForTimeout(2500);
@@ -22,7 +22,7 @@ const H = require('./harness'); const fs = require('fs');
   const tiles = await page.$$eval('#accountingOverview .acct-row-txt', cs => cs.map(c => c.innerText.replace(/\s+/g, ' ').trim()));
   const tile = l => tiles.find(x => x.startsWith(l + ' ')) || '';
   H.check('Operating expenses tile = game (236,958 cost), was cash paid out 3,907,158', /^Operating expenses \$236,958\.00/.test(tile('Operating expenses')), '$236,958.00', tile('Operating expenses'));
-  if (process.env.SCM_HAS_DAY1) {
+  if (process.env.SCM_HAS_DAY1 || mock) {
     H.check('Sales vs day/1 statement', /↑ \+\$484\.62K · \+11\.9%/.test(tile('Sales')), '↑ +$484.62K · +11.9%', tile('Sales'));
     H.check('Opex vs day/1 statement (cost down = ↓), % on |base|', /↓ -\$64\.21K · -21\.3%/.test(tile('Operating expenses')), '↓ -$64.21K · -21.3%', tile('Operating expenses'));
     const h = await page.$$eval('#accountingHistory .acct-day', ds => ds.map(d => d.textContent.replace(/\s+/g, ' ').trim()));
