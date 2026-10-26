@@ -281,13 +281,16 @@
     return { gross, paid, rate: rate != null ? rate : (gross > 0 && !unpaired ? paid / gross : null), unpaired, products };
   }
   // Day statements: /income-statement/day/<n>/ → [{t, fees, sales}] oldest first (company totals, unaffected by missing ledger pages).
-  function dayStatements(endpointData, field) {
-    const out = [];
+  // history (2.5.392) = scmStatementHistory:<realm>: the same statements kept by date, so days past /day/13/ stay.
+  function dayStatements(endpointData, field, history) {
+    const out = [], seen = new Set();
+    for (const d of Object.values((history && history[field]) || {})) { const t = ms(d && d.date); if (t != null && d.isComputed !== false && !seen.has(t)) { seen.add(t); out.push({ t, day: null, data: d }); } }
     for (const [k, v] of Object.entries(endpointData || {})) {
       const m = k.match(/\/api\/v2\/companies\/me\/(income-statement|cashflow-statement|balance-sheet)\/day\/(\d+)\/?$/);
       if (!m || m[1] !== field) continue;
       const d = v && v.data, t = ms(d && d.date); if (t == null) continue;
-      out.push({ t, day: Number(m[2]), data: d });
+      const i = seen.has(t) ? out.findIndex(x => x.t === t) : -1;
+      if (i >= 0) out[i] = { t, day: Number(m[2]), data: d }; else { seen.add(t); out.push({ t, day: Number(m[2]), data: d }); }
     }
     return out.sort((a, b) => a.t - b.t);
   }

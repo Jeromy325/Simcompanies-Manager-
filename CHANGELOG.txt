@@ -1,3 +1,10 @@
+2.5.392 — 2026-10-26 — Statement history kept by date
+- The game numbers day statements by age (day 0 = the last finished day, up to day 13) and moves them every rollover
+  (~01:20 UTC), so the store only ever held the latest 14 days. Every finished income, cash-flow and balance-sheet
+  day statement the manager captures (daily walk, Sync, browsing) is now also kept by its date in
+  scmStatementHistory:<realm>, about 1 KB a day, never pruned. No new requests. The 14 days already stored are copied
+  in once. Analyze Fees and Data read the history.
+
 2.5.391 — 2026-10-26 — Analyze: Earned counts contracts and retail
 - "Earned from sales" and Margins counted exchange sales only. Contract and retail sales now count too, each as its
   own card per product: contract earned = price − cost per unit (warehouse lot, else the game's cost at sale), no

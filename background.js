@@ -1379,6 +1379,37 @@ async function compactLedgerPagesOnce(){
   await rawStorageSet({[FLAG]:true});
   return {ok:true,...out};
 }
+// 2.5.392 Statement history: the game numbers day statements by age (/day/0/ = last finished day), so the store only
+// ever held the latest 14. Every computed day statement is also kept by its own date in scmStatementHistory:<realm>
+// ({ 'income-statement': { '<date>': data }, 'cashflow-statement': …, 'balance-sheet': … }), ~1 KB a day, never pruned.
+const STATEMENT_DAY_RX=/\/api\/v2\/companies\/me\/(income-statement|cashflow-statement|balance-sheet)\/day\/\d+\/?$/;
+function statementHistoryKey(realm){return `scmStatementHistory:${Number(realm)}`;}
+const statementHistoryQueues=new Map();
+function queueStatementHistory(realm,items){
+  const n=validRealmNumber(realm);const list=(Array.isArray(items)?items:[]).filter(x=>x&&x.kind&&x.data&&x.data.isComputed===true&&Number.isFinite(Date.parse(String(x.data.date||''))));
+  if(n==null||!list.length)return Promise.resolve({ok:false});
+  const key=statementHistoryKey(n);
+  const run=(statementHistoryQueues.get(n)||Promise.resolve()).then(async()=>{
+    const h=(await chrome.storage.local.get({[key]:null}))[key]||{};let added=0;
+    for(const {kind,data} of list){const d=new Date(Date.parse(String(data.date))).toISOString();h[kind]=h[kind]||{};if(!h[kind][d])added++;h[kind][d]=data;}
+    await rawStorageSet({[key]:h});return {ok:true,added};
+  });
+  statementHistoryQueues.set(n,run.catch(()=>{}));
+  return run.catch(()=>({ok:false}));
+}
+async function seedStatementHistoryOnce(){
+  const FLAG='scmStatementHistorySeededV1';
+  const got=await chrome.storage.local.get({[FLAG]:false,'scmRealmStore:0':null,'scmRealmStore:1':null});
+  if(got[FLAG])return {ok:true,skipped:true};
+  for(const n of [0,1]){
+    const ep=got[`scmRealmStore:${n}`]?.endpointData||{};
+    const items=Object.entries(ep).map(([k,v])=>[k.match(STATEMENT_DAY_RX),v]).filter(([m,v])=>m&&validRealmNumber(v?.captureRealm)===n).map(([m,v])=>({kind:m[1],data:v.data}));
+    if(items.length)await queueStatementHistory(n,items);
+  }
+  await rawStorageSet({[FLAG]:true});
+  return {ok:true};
+}
+setTimeout(()=>{seedStatementHistoryOnce().catch(()=>{});},6000);
 // One-time seed from the cash-flow pages already in each realm store (stamped with that realm).
 async function seedLedgerArchiveOnce(){
   const FLAG='scmLedgerArchiveSeededV2'; // V2 (2.5.390): re-seed so retail rows from stored pages join the archive
@@ -3462,6 +3493,7 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
     if(endpointResult?.store?.apiEndpoints)realmPatch.apiEndpoints=endpointResult.store.apiEndpoints;
     await storageSetRealmPatch(targetRealm,realmPatch,onTiming);
     if(overlayRelevant) scheduleGameOverlayRefreshNotification(targetRealm);
+    {const sm=String(url||'').replace(/[?#].*$/,'').match(STATEMENT_DAY_RX);if(sm&&incomingStatus>=200&&incomingStatus<300&&data&&typeof data==='object')queueStatementHistory(targetRealm,[{kind:sm[1],data}]).catch(()=>{});}
     if(/\/api\/v2\/companies\/me\/cashflow\/(?:recent|\d+)\/?$/i.test(String(url||''))&&incomingStatus>=200&&incomingStatus<300&&Array.isArray(data?.data)) queueLedgerArchive(targetRealm,[{url:String(url).replace(/[?#].*$/,''),rows:data.data,receivedAt:endpointData[url]?.receivedAt}]).catch(()=>{});
   }
 }

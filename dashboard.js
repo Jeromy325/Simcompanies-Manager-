@@ -211,6 +211,7 @@ async function get(attempt=0){
   try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);if(r!=null){const k=`scmBackgroundJobs:${r}`;const h=(await chrome.storage.local.get({[k]:null}))[k];if(Array.isArray(h)){result.backgroundJobHistory=h;if(viewKey&&result.realmStores?.[viewKey])result.realmStores[viewKey]={...result.realmStores[viewKey],backgroundJobHistory:h};}}}catch{}
   // v2.5.331 production cost history (one entry per production run) lives in its own key.
   try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);if(r!=null){const k=`scmProductionCostHistory:${r}`;const h=(await chrome.storage.local.get({[k]:[]}))[k];result.productionCostHistory=Array.isArray(h)?h:[];}}catch{}
+  try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);if(r!=null){const k=`scmStatementHistory:${r}`;const h=(await chrome.storage.local.get({[k]:null}))[k];result.statementHistory=h&&typeof h==='object'?h:null;}}catch{}
   // v2.5.387 Analyze ledger archive (sale rows of every captured cash-flow page) lives in its own key.
   try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);if(r!=null){const k=`scmLedgerArchive:${r}`;const a=(await chrome.storage.local.get({[k]:null}))[k];result.ledgerArchive=a&&typeof a==='object'?a:null;}}catch{}
   // v2.5.342 game constants (public API) and your exchange listings.

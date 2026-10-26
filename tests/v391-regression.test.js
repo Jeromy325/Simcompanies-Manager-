@@ -2,7 +2,7 @@
 // $11.0M of contract revenue (mostly Bulldozer) and retail sales were outside "Earned from sales".
 const assert = require('assert'), fs = require('fs'), path = require('path');
 const A = require('../analyze-core.js');
-assert.equal(require('../manifest.json').version, '2.5.391');
+assert.ok(require('../manifest.json').version >= '2.5.391');
 const close = (a, b, e = 1e-9, m = '') => assert.ok(Math.abs(a - b) <= e, `${m} expected ${b} got ${a}`);
 const sales = [
   { channel: 'exchange', rid: 112, q: 3, amount: 10, gross: 22000, fee: 880, ledgerCost: 1800 },

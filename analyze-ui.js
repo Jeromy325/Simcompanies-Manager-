@@ -39,7 +39,7 @@
   function dataSig(s) {
     const ep = s?.endpointData || {};
     const ledger = Object.keys(ep).filter(k => /\/cashflow\/(?:recent|\d+)\/?$/.test(k)).map(k => ep[k]?.receivedAt || '').join(',');
-    return [S.ctx?.realm, S.days, S.minUnits, s?.lastSync, ledger, (s?.warehouseResources || []).length, JSON.stringify((s?.warehouseResources || []).map(l => [l?.id, l?.amount])).length, s?.vwapData?.updatedAt, s?.liveMarketPriceData?.updatedAt, (s?.productionCostHistory || []).length, ep['/api/v3/companies/me/past-finances/']?.receivedAt, ep['/api/v2/companies/me/balance-sheet/']?.receivedAt, Object.keys(s?.ledgerArchive?.rows || {}).length, JSON.stringify(s?.ledgerArchive?.spans || [])].join('|');
+    return [S.ctx?.realm, S.days, S.minUnits, s?.lastSync, ledger, (s?.warehouseResources || []).length, JSON.stringify((s?.warehouseResources || []).map(l => [l?.id, l?.amount])).length, s?.vwapData?.updatedAt, s?.liveMarketPriceData?.updatedAt, (s?.productionCostHistory || []).length, ep['/api/v3/companies/me/past-finances/']?.receivedAt, ep['/api/v2/companies/me/balance-sheet/']?.receivedAt, Object.keys(s?.ledgerArchive?.rows || {}).length, Object.keys(s?.statementHistory?.['income-statement'] || {}).length, JSON.stringify(s?.ledgerArchive?.spans || [])].join('|');
   }
   function compute(force, revisit = false) {
     const s = S.s, ctx = S.ctx || {}, sig = dataSig(s), realm = Number.isInteger(ctx.realm) ? ctx.realm : null;
@@ -66,7 +66,7 @@
     for (const m of margins) if (!keys.has(m.key) && A.costSeries(pch, m.rid, m.q, S.days, now).pts.length) keys.set(m.key, [m.rid, m.q]);
     const costRows = [...keys.values()].map(([rid, q]) => ({ key: A.keyOf(rid, q), rid, q, ...A.costSeries(pch, rid, q, S.days, now), split: A.costSplit(lots, rid, q) })).sort((a, b) => (b.change ?? -Infinity) - (a.change ?? -Infinity));
     const fees = A.feesSummary(sales, rate);
-    const feeDays = A.dayStatements(ep, 'income-statement').map(d => ({ t: d.t, fee: -Number(d.data.marketFees) || 0, sales: Number(d.data.sales) || 0 }));
+    const feeDays = A.dayStatements(ep, 'income-statement', realm != null ? S.s?.statementHistory : null).map(d => ({ t: d.t, fee: -Number(d.data.marketFees) || 0, sales: Number(d.data.sales) || 0 }));
     const routes = A.routes(sales, { priceOf, rate });
     const company = A.company(ep, now), cash = A.cash(ep);
     const findings = A.findings({ stockRows: stock.rows, marginRows: margins, costRows, routeRows: routes });
@@ -286,12 +286,12 @@
   }
   function sources(m) {
     const s = S.s || {}, ep = m.ep, gc = s.gameConstants, pl = priceLog();
-    const days = A.dayStatements(ep, 'income-statement').length, pf = A.pastFinances(ep).length, log = pl?.series ? Object.keys(pl.series).length : 0;
+    const days = A.dayStatements(ep, 'income-statement', m.realm != null ? s.statementHistory : null).length, pf = A.pastFinances(ep).length, log = pl?.series ? Object.keys(pl.series).length : 0;
     const prods = new Set(m.lots.map(l => `${l.kind}:${l.quality}`)).size;
     return [
       ['Warehouse lots', `${prods} products · ${m.lots.length} lots${s.lastSync ? ` · sync ${when(Date.parse(s.lastSync))}` : ''}`, m.lots.length > 0, m.lots.length ? 'Complete' : 'Missing'],
       ['Cash-flow ledger', `${units(m.coverage.rows)} rows · ${m.coverage.spanDays.toFixed(1)} of ${S.days} days${m.coverage.gaps.length ? ` · ${m.coverage.gaps.length} gap${m.coverage.gaps.length === 1 ? '' : 's'} (${hrs(m.coverage.gapMs)})` : ''}`, m.coverage.coverage >= 0.995, `${pct(m.coverage.coverage, 0)} coverage`],
-      ['Day income statements', days ? `Day 0 to ${days - 1} captured` : 'None captured', days >= 7, days >= 7 ? 'Complete' : `${days} of 7 days`],
+      ['Day income statements', days ? `${days} days stored${days > 14 ? ' (kept by date)' : ''}` : 'None captured', days >= 7, days >= 7 ? 'Complete' : `${days} of 7 days`],
       ['Past finances', `${pf} daily rows`, pf > 1, pf ? 'Complete' : 'Missing'],
       ['Production cost history', `${units(m.pch.length)} runs`, m.pch.length > 0, m.pch.length ? 'Complete' : 'None yet'],
       ['Price log', `${log} products · VWAP and live prices`, log > 0, log ? 'Complete' : 'None yet'],
