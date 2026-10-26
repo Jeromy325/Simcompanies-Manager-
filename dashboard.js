@@ -706,9 +706,31 @@ function accountingDayStatements(endpointData,realmMatches=()=>true){
     if(!/\/api\/v2\/companies\/(?:me|\d+)\/income-statement\/day\/\d+\/?$/i.test(k))continue;
     const e=item?.data; if(Number(item?.status)!==200||!e||e.isComputed!==true||!realmMatches(item))continue;
     const t=Date.parse(String(e.date||'').replace(' ','T')); if(!Number.isFinite(t))continue;
-    out.set(Math.round(t/60000),{sales:Number(e.sales)||0,operatingExpenses:gameOperatingExpenses(e),netIncome:Number(e.netIncome)||0,dateFrom:e.dateFrom,date:e.date});
+    out.set(Math.round(t/60000),accountingStatementDay(e));
   }
   return out;
+}
+function accountingStatementDay(e){
+  // v2.5.382 one completed game day of the income statement, as the Accounting overview cards read it.
+  // Executives cost = salaries + training + poaching (game Operating expenses lines).
+  const v=k=>Number(e?.[k])||0;
+  return {sales:v('sales'),cogs:v('cogs'),freightOut:v('freightOut'),marketFees:v('marketFees'),executives:v('salariesCosts')+v('trainingCosts')+v('poachingCosts'),operatingExpenses:gameOperatingExpenses(e),netIncome:v('netIncome'),dateFrom:e?.dateFrom,date:e?.date};
+}
+function accountingDayCashflows(endpointData,realmMatches=()=>true){
+  // v2.5.382 /cashflow-statement/day/<n>/ (read by the Accounting walk): Total change in cash per completed day.
+  const out=new Map();
+  for(const [k,item] of Object.entries(endpointData||{})){
+    if(!/\/api\/v2\/companies\/(?:me|\d+)\/cashflow-statement\/day\/\d+\/?$/i.test(k))continue;
+    const e=item?.data; if(Number(item?.status)!==200||!e||e.isComputed!==true||!realmMatches(item))continue;
+    const t=Date.parse(String(e.date||'').replace(' ','T')); if(!Number.isFinite(t))continue;
+    out.set(Math.round(t/60000),accountingCashChange(e));
+  }
+  return out;
+}
+function accountingCashChange(e){
+  // Game cash-flow statement "Total change in cash" = all cash in + all cash out (cashAllExpenses is negative).
+  if(!e||typeof e!=='object'||e.cashAllIncome==null||e.cashAllExpenses==null)return null;
+  const n=Number(e.cashAllIncome)+Number(e.cashAllExpenses);return Number.isFinite(n)?n:null;
 }
 function accountingPreviousPeriod(history,periodEnd){
   const end=Date.parse(String(periodEnd||''));
@@ -716,7 +738,7 @@ function accountingPreviousPeriod(history,periodEnd){
   const rows=Number.isFinite(end)?history.filter(r=>r.t<end-3600000):history.slice(0,-1);
   const r=rows[rows.length-1];
   if(!r)return null;
-  return {cash:r.cash??null,profit:r.netIncome??r.profit??null,operatingExpenses:r.operatingExpenses??null,assets:r.assets??null,liabilities:r.liabilities??null,inventory:r.inventory??null,currentAssets:r.currentAssets??null,currentLiabilities:r.liabilities??null,revenue:r.sales??null,cashIn:r.statement?null:(r.cashIn??null),expenses:r.expenses??null,date:new Date(r.t).toISOString(),source:'game-history'};
+  return {cash:r.cash??null,cashChange:r.cashChange??null,sales:r.sales??null,netIncome:r.netIncome??r.profit??null,cogs:r.cogs??null,freightOut:r.freightOut??null,marketFees:r.marketFees??null,executives:r.executives??null,profit:r.netIncome??r.profit??null,operatingExpenses:r.operatingExpenses??null,assets:r.assets??null,liabilities:r.liabilities??null,inventory:r.inventory??null,currentAssets:r.currentAssets??null,currentLiabilities:r.liabilities??null,revenue:r.sales??null,cashIn:r.statement?null:(r.cashIn??null),expenses:r.expenses??null,date:new Date(r.t).toISOString(),source:'game-history'};
 }
 function accounting(s, realmStore=null){
   const endpointData=(realmStore?.endpointData&&typeof realmStore.endpointData==='object')?realmStore.endpointData:(s.endpointData||{});
@@ -730,10 +752,14 @@ function accounting(s, realmStore=null){
   };
   const supplemental=realmStore?.accountingCapture||{};
   const latestSupplemental=(path)=>{const item=supplemental[path];return item&&realmMatches(item)?item.data??null:null;};
+  // v2.5.382: the latest finished game day = the computed statement with the newest end date, from this realm only.
+  // The current statement and the Accounting walk's day/0 are the same day; whichever was read last is newer.
+  // (Sorting by receipt time let an older day, or the other realm's statement, set the period.)
+  const statementEnd=x=>{const t=Date.parse(String(x?.data?.date||'').replace(' ','T'));return Number.isFinite(t)?t:0;};
   const latestComputed=(rx,path)=>{
     const candidates=eps.filter(k=>rx.test(k)&&Number(endpointData[k]?.status)===200&&endpointData[k]?.data!=null)
-      .map(k=>endpointData[k]).filter(x=>x?.data?.isComputed===true)
-      .sort((a,b)=>new Date(b.receivedAt||0)-new Date(a.receivedAt||0));
+      .map(k=>endpointData[k]).filter(x=>x?.data?.isComputed===true&&realmMatches(x))
+      .sort((a,b)=>statementEnd(b)-statementEnd(a)||new Date(b.receivedAt||0)-new Date(a.receivedAt||0));
     if(candidates.length)return candidates[0].data;
     const direct=latestSupplemental(path);
     if(direct?.isComputed===true)return direct;
@@ -754,7 +780,7 @@ function accounting(s, realmStore=null){
   // Prefer the most recent COMPLETED aggregate period. At the daily rollover
   // Sim Companies can return an isComputed:false zero placeholder; that is not
   // an accounting period and must never replace the previous completed data.
-  const cf=latestComputed(/\/api\/v2\/companies\/(?:me|\d+)\/cashflow-statement(?:\/\d+)?\/?$/i,'/api/v2/companies/me/cashflow-statement/')
+  const cf=latestComputed(/\/api\/v2\/companies\/(?:me|\d+)\/cashflow-statement(?:\/day\/0|\/\d+)?\/?$/i,'/api/v2/companies/me/cashflow-statement/')
     ?? latest(/\/api\/v2\/companies\/(?:me|\d+)\/cashflow-statement(?:\/\d+)?\/?$/i)
     ?? latest(/\/api\/v2\/companies\/(?:me|\d+)\/cashflow(?:\/recent)?(?:\/\d+)?\/?$/i);
   // Prefer the dedicated recent cash-flow ledger. Other financial endpoints can
@@ -763,7 +789,7 @@ function accounting(s, realmStore=null){
   const recent=latest(/\/api\/v2\/companies\/(?:me|\d+)\/cashflow\/recent\/?$/i)
     ?? latest(/\/api\/(?:v2|v3)\/companies\/(?:me|\d+)(?:\/[^?]*)?(?:cashflow|cash-flow|financial)[^?]*(?:\/\d+)?\/?(?:\?.*)?$/i);
   const pf=latest(/\/api\/(?:v2\/companies\/(?:me|\d+)\/past-finances-overview|v3\/companies\/(?:me|\d+)\/past-finances)(?:\/\d+)?\/?/i);
-  const income=latestComputed(/\/api\/v2\/companies\/(?:me|\d+)\/income-statement(?:\/\d+)?\/?$/i,'/api/v2/companies/me/income-statement/')
+  const income=latestComputed(/\/api\/v2\/companies\/(?:me|\d+)\/income-statement(?:\/day\/0|\/\d+)?\/?$/i,'/api/v2/companies/me/income-statement/')
     ?? latest(/\/api\/v2\/companies\/(?:me|\d+)\/(?:income-statement|profit-loss)\/?$/i);
 
   const norm=k=>String(k).toLowerCase().replace(/[^a-z0-9]/g,'');
@@ -956,7 +982,9 @@ function accounting(s, realmStore=null){
   const derivedPayable=accountsPayable==null&&liabilities!=null&&bondsPayable!=null?Math.max(0,Math.abs(liabilities)-Math.abs(bondsPayable)):null;
   const payable=accountsPayable??derivedPayable;
   const currentLiabilities=payable==null?null:Math.abs(payable);
-  const period={dateFrom:cfObj.dateFrom||transactionDateFrom,date:cfObj.date||transactionDateTo};
+  // Statement period = the latest finished game day: the newer of the cash-flow and income statements' periods.
+  const incomeObj=obj(income)||{};const stmtObj=Date.parse(String(incomeObj.date||''))>Date.parse(String(cfObj.date||''))?incomeObj:cfObj;
+  const period={dateFrom:stmtObj.dateFrom||cfObj.dateFrom||transactionDateFrom,date:stmtObj.date||cfObj.date||transactionDateTo};
   // Every cash-flow ledger page captured (/cashflow/<id>/ and /cashflow/recent/). Summing
   // its money per game day reproduces the statement's cashAllIncome / cashAllExpenses exactly.
   const ledger=new Map();
@@ -979,14 +1007,20 @@ function accounting(s, realmStore=null){
   // the game's Accounting page shows a Day period) give each completed day's exact Sales,
   // Operating expenses and Net income. Matched to history rows by the statement's end date.
   const dayIncome=accountingDayStatements(endpointData,realmMatches);
-  for(const r of history){const st=dayIncome.get(Math.round(r.t/60000));if(st){r.sales=st.sales;r.operatingExpenses=st.operatingExpenses;r.netIncome=st.netIncome;r.statement=true;}}
+  const dayCash=accountingDayCashflows(endpointData,realmMatches);
+  // v2.5.382 the current (latest finished day) statements are that day's figures even before the walk reads day/0.
+  const dayMinute=e=>{const t=Date.parse(String(e?.date||'').replace(' ','T'));return Number.isFinite(t)?Math.round(t/60000):null;};
+  if(obj(income)?.isComputed===true&&dayMinute(income)!=null&&!dayIncome.has(dayMinute(income)))dayIncome.set(dayMinute(income),accountingStatementDay(income));
+  if(cfObj.isComputed===true&&dayMinute(cfObj)!=null&&!dayCash.has(dayMinute(cfObj)))dayCash.set(dayMinute(cfObj),accountingCashChange(cfObj));
+  for(const r of history){const m=Math.round(r.t/60000);const st=dayIncome.get(m);if(st){r.sales=st.sales;r.cogs=st.cogs;r.freightOut=st.freightOut;r.marketFees=st.marketFees;r.executives=st.executives;r.operatingExpenses=st.operatingExpenses;r.netIncome=st.netIncome;r.statement=true;}const cc=dayCash.get(m);if(cc!=null)r.cashChange=cc;}
   // v2.5.377: Current Liabilities per completed day = the Day balance sheet's accounts payable, or (as for the
   // card) that day's total liabilities minus its bonds payable. Matched to history rows by the sheet's date.
   const daySheets=accountingDayBalanceSheets(endpointData,realmMatches);
   for(const r of history){const bsd=daySheets.get(Math.round(r.t/60000));if(!bsd)continue;const cl=bsd.accountsPayable!=null?Math.abs(bsd.accountsPayable):(r.liabilities!=null&&bsd.bondsPayable!=null?Math.max(0,Math.abs(r.liabilities)-Math.abs(bsd.bondsPayable)):null);if(cl!=null)r.currentLiabilities=cl;}
   const operatingExpenses=gameOperatingExpenses(income);
+  const statementNow=obj(income)&&'sales' in income?accountingStatementDay(income):null;
   const previousPeriod=accountingPreviousPeriod(history,period.date);
-  return {cash,revenue:finalRevenue,expenses,operatingExpenses,profit:finalProfit,netMargin:finalMargin,assets,liabilities,inventory,accountsReceivable,accountsPayable:payable,bondsPayable,currentAssets,currentLiabilities,period,history,previousPeriod,ledgerCheck,source:{bs,cf,recent,pf,income},sourceType: income ? 'income-statement' : (cf ? (transactionRows.length?'cash-flow-transactions':'cash-flow-derived') : 'unavailable')};
+  return {cash,revenue:finalRevenue,expenses,operatingExpenses,cogs:statementNow?.cogs??null,freightOut:statementNow?.freightOut??null,marketFees:statementNow?.marketFees??null,executives:statementNow?.executives??null,cashChange:accountingCashChange(cfObj),profit:finalProfit,netMargin:finalMargin,assets,liabilities,inventory,accountsReceivable,accountsPayable:payable,bondsPayable,currentAssets,currentLiabilities,period,history,previousPeriod,ledgerCheck,source:{bs,cf,recent,pf,income},sourceType: income ? 'income-statement' : (cf ? (transactionRows.length?'cash-flow-transactions':'cash-flow-derived') : 'unavailable')};
 }
 window.scmImageFallback=function(img){try{const c=JSON.parse(img.dataset.candidates||'[]');const i=Number(img.dataset.idx||0)+1;if(i<c.length){img.dataset.idx=String(i);img.src=c[i];return;}img.style.display='none';}catch{img.style.display='none';}};
 function recordHistory(s,rows){const history={...(s.history||{})},day=new Date().toISOString().slice(0,10);for(const r of rows){if(!Number.isFinite(r._id)||r._quality==null)continue;const st=marketStats(marketRows(s,r._id,r._quality),r._quality);if(st.vwap==null)continue;const key=`${r._id}:${r._quality}`;const arr=Array.isArray(history[key])?history[key].slice():[];const idx=arr.findIndex(x=>x.date===day);const item={date:day,vwap:st.vwap};if(idx>=0)arr[idx]=item;else arr.push(item);history[key]=arr}return history}
@@ -1673,7 +1707,7 @@ function accountingComparisonBase(a){
   // "last value this dashboard saw" baseline could equal the current figures (or be
   // empty) and produced fake +100% / $0 changes, so it is no longer used here.
   const p=a?.previousPeriod||null;
-  if(p&&a?.sourceType!=='income-statement'&&p.cashIn!=null)return {...p,revenue:p.cashIn};
+  if(p&&a?.sourceType!=='income-statement'&&p.cashIn!=null)return {...p,revenue:p.cashIn,sales:p.cashIn};
   return p;
 }
 // v2.5.371 Daily scheduled Accounting walk: on/off, minutes after the game finishes your statements, Run now.
@@ -1748,38 +1782,56 @@ function accountingDayWalkNote(w){
   return `<p class="muted acct-walk-note ${w.status==='complete'?'':'warn'}">${txt}</p>`;
 }
 function accountingOverview(a,previous){
-  const cards=[['Cash','cash',a.cash],['Revenue','revenue',a.revenue],['Operating expenses','operatingExpenses',a.operatingExpenses],['Profit','profit',a.profit],['Total Assets','assets',a.assets],['Liabilities','liabilities',a.liabilities],['Inventory','inventory',a.inventory],['Current Assets','currentAssets',a.currentAssets],['Current Liabilities','currentLiabilities',a.currentLiabilities]];
-  const changeInfo=(value,old)=>{
-    const v=value==null||value===''?NaN:Number(value),p=old==null||old===''?NaN:Number(old);
-    if(!Number.isFinite(v)) return `<div class="finance-change neutral-change"><span class="finance-change-arrow">—</span><div class="finance-change-values"><strong>—</strong><small>N/A</small></div></div>`;
-    if(!Number.isFinite(p)) return `<div class="finance-change neutral-change"><span class="finance-change-arrow">·</span><div class="finance-change-values"><small>No earlier figure captured</small></div></div>`;
-    const delta=roundCurrencyUp(v-p), pct=p!==0?(delta/Math.abs(p))*100:null;
-    if(delta===0) return `<div class="finance-change neutral-change"><span class="finance-change-arrow">—</span><div class="finance-change-values"><strong>$0</strong><small>0.00%</small></div></div>`;
-    const up=delta>0;
-    return `<div class="finance-change ${up?'change-up':'change-down'}"><span class="finance-change-arrow">${up?'↑':'↓'}</span><div class="finance-change-values"><strong>${delta>0?'+':''}${money(delta)}</strong><small>${pct==null?'N/A':`${pct>0?'+':''}${pct.toFixed(2)}%`}</small></div></div>`;
+  // v2.5.382 Accounting overview: one row per figure, grouped Cash / Income / Expenses. Every row is the latest
+  // finished game day (the current statements) against the day before it. Expenses show as positive costs, so a
+  // cost going up is red and a cost going down is green. The statement date is shown in the page header only.
+  const groups=[['Cash',[['Cash','cash',a.cash],['Total change in cash','cashChange',a.cashChange]]],['Income',[['Sales','sales',a.revenue],['Net income','netIncome',a.profit]]],
+    ['Expenses',[['Cost of goods sold','cogs',a.cogs],['Freight out','freightOut',a.freightOut],['Exchange fees','marketFees',a.marketFees],['Executives cost','executives',a.executives],['Operating expenses','operatingExpenses',a.operatingExpenses]]]];
+  acctCardNow={};
+  const row=([label,key,value])=>{
+    const v=acctSigned(key,value),p=acctSigned(key,previous?.[key]);acctCardNow[key]={label,value:v,prev:p};
+    return `<div class="acct-row" data-acct-card="${key}"><div class="acct-row-txt" data-acct-part="${key}"><span class="acct-row-label">${escapeHtml(label)}</span><strong class="acct-row-val">${v==null?'—':money(v)}</strong>${acctChangeHtml(key,v,p)}</div><div class="acct-chart acct-row-chart" data-acct-chart="${key}"></div><button type="button" class="acct-chart-open" data-acct-open="${key}" aria-expanded="false" aria-label="Open ${escapeHtml(label)} chart">${ACCT_CHART_ICON}</button></div>`;
   };
-  const basis=previous?.date?`<p class="muted finance-basis">Changes compare with the day ending ${escapeHtml(new Date(previous.date).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}))} (game history).</p>`:'';
-  // v2.5.377: each card carries data-acct-part blocks so a background refresh patches only the blocks whose
-  // numbers changed (scmPatchParts) and the chart area (data-acct-chart) is left to renderAccountingCharts.
-  return `<div data-acct-part="basis">${basis}</div><div class="acct-chart-bar"><div class="acct-range" role="group" aria-label="Chart range">${ACCT_CHART_RANGES.map(n=>`<button type="button" class="acct-range-btn" data-acct-range="${n}" aria-pressed="${n===acctChartRange}">${n}D</button>`).join('')}</div></div><div class="acct-chart-pending" data-acct-pending hidden><span></span><button type="button" class="acct-chart-apply" data-acct-apply>Update charts</button></div><div class="finance-card-grid">${cards.map(([label,key,value])=>`<div class="finance-card acct-chart-card" data-acct-card="${key}"><button type="button" class="acct-chart-open" data-acct-open="${key}" aria-expanded="false" aria-label="Open ${escapeHtml(label)} chart">${ACCT_CHART_ICON}</button><span class="finance-label">${escapeHtml(label)}</span><div data-acct-part="${key}"><div class="finance-value">${value==null?'—':money(value)}</div>${changeInfo(value,previous?.[key])}</div><div class="acct-chart" data-acct-chart="${key}"></div></div>`).join('')}</div><div class="acct-chart-sheet" data-acct-sheet hidden></div>`;
+  // each row carries a data-acct-part block so a background refresh patches only the rows whose numbers changed
+  // (scmPatchParts); the chart area (data-acct-chart) is left to renderAccountingCharts.
+  return `<div class="acct-chart-bar">${acctRangeButtons()}</div><div class="acct-chart-pending" data-acct-pending hidden><span></span><button type="button" class="acct-chart-apply" data-acct-apply>Update charts</button></div>${groups.map(([title,rows])=>`<div class="acct-group"><div class="acct-group-head">${escapeHtml(title)}</div>${rows.map(row).join('')}</div>`).join('')}`;
+}
+function acctNum(v){if(v==null||v==='')return null;const n=Number(v);return Number.isFinite(n)?n:null;}
+// Expenses are stored as the game shows them (negative); cards and charts show them as positive costs.
+function acctSigned(key,v){const n=acctNum(v);return n==null?null:(ACCT_COST_KEYS.has(key)&&n!==0?-n:n);}
+// good = green: a rise for cash / income, a fall for an expense.
+function acctChangeClass(key,d){return !d?'acct-flat':((ACCT_COST_KEYS.has(key)?d<0:d>0)?'change-up':'change-down');}
+function acctChangeHtml(key,v,p){
+  if(v==null)return '<span class="acct-row-chg acct-flat">—</span>';
+  if(p==null)return '<span class="acct-row-chg acct-flat">No earlier figure captured</span>';
+  const delta=roundCurrencyUp(v-p),pct=p!==0?(delta/Math.abs(p))*100:null;
+  return `<span class="acct-row-chg ${acctChangeClass(key,delta)}">${delta>0?'↑':delta<0?'↓':'—'} ${delta>0?'+':''}${escapeHtml(acctCompact(delta))} · ${pct==null?'N/A':`${pct>0?'+':''}${pct.toFixed(1)}%`}</span>`;
+}
+function acctRangeButtons(){return `<div class="acct-range" role="group" aria-label="Chart range">${ACCT_CHART_RANGES.map(n=>`<button type="button" class="acct-range-btn" data-acct-range="${n}" aria-pressed="${n===acctChartRange}">${n}D</button>`).join('')}</div>`;}
+function accountingStatementPeriodText(period){
+  // Game format, e.g. "8:21 PM 10/24 to 8:20 PM 10/25".
+  const f=v=>{const d=new Date(v);return v&&Number.isFinite(d.getTime())?`${d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'})} ${d.toLocaleDateString(undefined,{month:'numeric',day:'numeric'})}`:null;};
+  const a=f(period?.dateFrom),b=f(period?.date);
+  return a&&b?`${a} to ${b}`:(b||'');
 }
 
 // v2.5.377 Accounting card charts: up to 90 days per card, straight trend line + 7-day average, one 7D/30D/90D
 // range for every card, tap readout (date, value, change from the day before). Gaps are joined.
 // Background refreshes never rebuild the cards: values are patched in place, and while a chart is being touched
 // or its full view is open, new chart data waits behind an "Update charts" button.
+// v2.5.382 the full view is a popout over the page (✕, tap outside or Esc closes it).
 const ACCT_CHART_RANGES=[7,30,90];
 const ACCT_CHART_DAY=86400000;
 const ACCT_SERIES_KEEP_DAYS=120;
 const ACCT_CHART_ICON='<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 11h10M2 8l3-3 2 2 4-5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-// Card key -> daily history field. Revenue / Operating expenses / Profit come from the game's Day statements
-// (Profit = Net income); Current Liabilities from the game's Day balance sheets. Older days come from
+// Card key -> daily history field. Cash = the game's 90-day history (cash & receivables). The statement figures come
+// from the game's Day statements (income / cash-flow) and build up day by day: older days come from
 // accountingDailySeries, which keeps what Manager has already read (nothing extra is requested).
-const ACCT_CHART_FIELDS={cash:'cash',revenue:'sales',operatingExpenses:'operatingExpenses',profit:'netIncome',assets:'assets',liabilities:'liabilities',inventory:'inventory',currentAssets:'currentAssets',currentLiabilities:'currentLiabilities'};
-const ACCT_CHART_TITLES={cash:'Cash & receivables',profit:'Net income'};
-// A rising line is bad news for these cards (Operating expenses is stored negative, so rising is good).
-const ACCT_CHART_RISING_BAD=new Set(['liabilities','currentLiabilities']);
-let acctChartRange=90, acctChartOpenKey=null, acctChartTouching=false, acctChartPending=null, acctChartPendingCount=0, acctChartDrawn=null;
+const ACCT_CHART_FIELDS={cash:'cash',cashChange:'cashChange',sales:'sales',netIncome:'netIncome',cogs:'cogs',freightOut:'freightOut',marketFees:'marketFees',executives:'executives',operatingExpenses:'operatingExpenses'};
+const ACCT_CHART_TITLES={cash:'Cash & receivables'};
+// Expense cards: shown as positive costs, so a rising line is bad news.
+const ACCT_COST_KEYS=new Set(['cogs','freightOut','marketFees','executives','operatingExpenses']);
+let acctChartRange=90, acctChartOpenKey=null, acctChartTouching=false, acctChartPending=null, acctChartPendingCount=0, acctChartDrawn=null, acctCardNow={};
 function acctDayKey(t){const d=new Date(t);return Number.isFinite(d.getTime())?d.toISOString().slice(0,10):null;}
 function accountingDailySeriesMerge(oldSeries,history){
   // Saves each completed day's statement / balance-sheet figures by the day's end date, newest 120 days.
@@ -1787,8 +1839,8 @@ function accountingDailySeriesMerge(oldSeries,history){
   for(const r of Array.isArray(history)?history:[]){
     const k=acctDayKey(r?.t);if(!k)continue;const cur={...(days[k]||{})};
     const put=(f,v)=>{if(v!=null&&v!==''&&Number.isFinite(Number(v)))cur[f]=Number(v);};
-    if(r.statement){put('sales',r.sales);put('operatingExpenses',r.operatingExpenses);put('netIncome',r.netIncome);}
-    put('currentLiabilities',r.currentLiabilities);
+    if(r.statement){put('sales',r.sales);put('operatingExpenses',r.operatingExpenses);put('netIncome',r.netIncome);put('cogs',r.cogs);put('freightOut',r.freightOut);put('marketFees',r.marketFees);put('executives',r.executives);}
+    put('cashChange',r.cashChange);put('currentLiabilities',r.currentLiabilities);
     if(Object.keys(cur).length)days[k]=cur;
   }
   const keep=Object.keys(days).sort().slice(-ACCT_SERIES_KEEP_DAYS);
@@ -1811,7 +1863,7 @@ function accountingChartPoints(history,series,key,range){
   const saved=series?.days||{};const byDay=new Map();
   for(const r of Array.isArray(history)?history:[]){const k=acctDayKey(r?.t);if(k)byDay.set(k,{t:r.t,v:r[field]});}
   for(const [k,row] of Object.entries(saved)){const cur=byDay.get(k);if(cur){if(cur.v==null)cur.v=row?.[field];}else byDay.set(k,{t:Date.parse(k+'T00:00:00Z'),v:row?.[field],saved:true});}
-  const pts=[...byDay.values()].filter(p=>p.v!=null&&Number.isFinite(Number(p.v))&&Number.isFinite(p.t)).map(p=>[p.t,Number(p.v)]).sort((x,y)=>x[0]-y[0]);
+  const pts=[...byDay.values()].filter(p=>p.v!=null&&Number.isFinite(Number(p.v))&&Number.isFinite(p.t)).map(p=>[p.t,acctSigned(key,p.v)]).sort((x,y)=>x[0]-y[0]);
   if(!pts.length)return pts;
   const end=pts[pts.length-1][0],from=end-(range-1)*ACCT_CHART_DAY-ACCT_CHART_DAY/2;
   return pts.filter(p=>p[0]>=from);
@@ -1827,7 +1879,7 @@ function accountingChartAverage(pts,days=7){
   return pts.map(([t])=>{const w=pts.filter(([u])=>u<=t&&u>t-days*ACCT_CHART_DAY);return [t,w.reduce((s,[,v])=>s+v,0)/w.length];});
 }
 function acctCompact(v){const n=Number(v);return Number.isFinite(n)?n.toLocaleString(undefined,{style:'currency',currency:'USD',notation:'compact',maximumFractionDigits:2}):'—';}
-function acctTone(key,m){if(!m)return 'flat';const up=m>0;return (ACCT_CHART_RISING_BAD.has(key)?!up:up)?'good':'bad';}
+function acctTone(key,m){if(!m)return 'flat';const up=m>0;return (ACCT_COST_KEYS.has(key)?!up:up)?'good':'bad';}
 function accountingSparkline(key,pts){
   if(!pts.length)return '<div class="acct-chart-empty">No daily history yet</div>';
   const W=160,H=64,P=4,t0=pts[0][0],t1=pts[pts.length-1][0];
@@ -1841,15 +1893,25 @@ function accountingSparkline(key,pts){
   const trend=tr?`<line class="acct-trend" x1="${X(t0).toFixed(1)}" y1="${Y(tr.at(t0)).toFixed(1)}" x2="${X(t1).toFixed(1)}" y2="${Y(tr.at(t1)).toFixed(1)}"/>`:'';
   return `<svg class="acct-spark acct-${tone}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(key)} trend" data-acct-spark="${escapeHtml(key)}">${area}<path class="acct-line" d="${line}"/>${avg}${trend}<circle class="acct-dot" cx="${X(e[0]).toFixed(1)}" cy="${Y(e[1]).toFixed(1)}" r="2.4"/><line class="acct-cross" x1="0" x2="0" y1="0" y2="${H}"/></svg>`;
 }
-function accountingChartFooter(key,pts,range){
+function accountingChartFooter(key,pts){
   const tr=accountingChartTrend(pts),tone=acctTone(key,tr?.m);
-  const have=pts.length?Math.round((pts[pts.length-1][0]-pts[0][0])/ACCT_CHART_DAY)+1:0;
-  const collecting=range>have?`<div class="acct-collect">Collecting · ${have} of ${range} days</div>`:'';
-  return `<div class="acct-trend-row"><span>${range}D trend</span><span class="acct-${tone}">${tr?`${tr.m>=0?'+':''}${acctCompact(tr.m)}/day`:'needs 2 days'}</span></div>${collecting}`;
+  return `<span class="acct-row-trend acct-${tone}">${tr?`${tr.m>=0?'+':''}${acctCompact(tr.m)}/day`:'needs 2 days'}</span>`;
+}
+function acctChartDays(pts){return pts.length?Math.round((pts[pts.length-1][0]-pts[0][0])/ACCT_CHART_DAY)+1:0;}
+function accountingChartPop(key,pts,range){
+  // Popout: name, "N of R days collected" while history is still building, value + change, range, full chart.
+  const c=acctCardNow[key]||{},label=ACCT_CHART_TITLES[key]||c.label||key,have=acctChartDays(pts);
+  return `<div class="acct-pop" role="dialog" aria-modal="true" aria-label="${escapeHtml(label)} chart"><div class="acct-pop-head"><div><strong>${escapeHtml(label)}</strong>${have<range?`<small>${have} of ${range} days collected</small>`:''}</div><button type="button" class="acct-pop-x" data-acct-close aria-label="Close">✕</button></div><div class="acct-pop-val"><b>${c.value==null?'—':money(c.value)}</b>${acctChangeHtml(key,c.value,c.prev)}</div><div class="acct-chart-bar">${acctRangeButtons()}</div>${accountingChartSheet(key,label,pts,range)}<p class="acct-pop-foot">Tap outside, ✕ or Esc to close</p></div>`;
+}
+function acctPopEl(){
+  // Lives on <body> so it covers the whole page whatever the card's position.
+  let el=document.getElementById('acctChartPop');
+  if(!el){el=document.createElement('div');el.id='acctChartPop';el.className='acct-pop-backdrop';el.hidden=true;document.body.appendChild(el);}
+  return el;
 }
 function accountingChartSheet(key,label,pts,range){
   const W=340,H=170,L=50,R=8,T=8,B=20;
-  if(!pts.length)return `<div class="acct-sheet-head"><strong>${escapeHtml(label)}</strong><button type="button" class="acct-sheet-close" data-acct-close>Close</button></div><p class="muted">No daily history yet.</p>`;
+  if(!pts.length)return '<p class="muted">No daily history yet.</p>';
   const t0=pts[0][0],t1=pts[pts.length-1][0];let lo=Math.min(...pts.map(p=>p[1])),hi=Math.max(...pts.map(p=>p[1]));if(lo===hi){lo-=1;hi+=1;}const pad=(hi-lo)*.08;lo-=pad;hi+=pad;
   const X=t=>t1===t0?(L+W-R)/2:L+(t-t0)*(W-L-R)/(t1-t0),Y=v=>T+(hi-v)*(H-T-B)/(hi-lo);
   const tr=accountingChartTrend(pts),tone=acctTone(key,tr?.m);
@@ -1861,8 +1923,7 @@ function accountingChartSheet(key,label,pts,range){
   const body=pts.length>1?`<path class="acct-area" d="${line}L${X(t1).toFixed(1)},${Y(lo).toFixed(1)}L${X(t0).toFixed(1)},${Y(lo).toFixed(1)}Z"/><path class="acct-line" d="${line}"/>`:`<circle class="acct-dot" cx="${X(t0).toFixed(1)}" cy="${Y(pts[0][1]).toFixed(1)}" r="3"/>`;
   const avg=pts.length>2?`<path class="acct-avg" d="${path(accountingChartAverage(pts))}"/>`:'';
   const trend=tr?`<line class="acct-trend" x1="${X(t0).toFixed(1)}" y1="${Y(tr.at(t0)).toFixed(1)}" x2="${X(t1).toFixed(1)}" y2="${Y(tr.at(t1)).toFixed(1)}"/>`:'';
-  const have=Math.round((t1-t0)/ACCT_CHART_DAY)+1;
-  return `<div class="acct-sheet-head"><strong>${escapeHtml(label)} · ${have} day${have===1?'':'s'}</strong><button type="button" class="acct-sheet-close" data-acct-close>Close</button></div><svg class="acct-big acct-${tone}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(label)} chart">${grid}${body}${avg}${trend}${ticks}</svg><div class="acct-legend"><span><i class="acct-key-line"></i>Daily value</span><span><i class="acct-key-avg"></i>7-day average</span><span><i class="acct-key-trend"></i>Trend</span></div><div class="acct-stats"><div><span>High</span><b>${escapeHtml(acctCompact(Math.max(...vals)))}</b></div><div><span>Low</span><b>${escapeHtml(acctCompact(Math.min(...vals)))}</b></div><div><span>Trend change</span><b class="acct-${tone}">${change==null?'—':`${change>=0?'+':''}${escapeHtml(acctCompact(change))}`}</b></div></div>`;
+  return `<svg class="acct-big acct-${tone}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(label)} chart">${grid}${body}${avg}${trend}${ticks}</svg><div class="acct-legend"><span><i class="acct-key-line"></i>Daily value</span><span><i class="acct-key-avg"></i>7-day average</span><span><i class="acct-key-trend"></i>Trend</span></div><div class="acct-stats"><div><span>High</span><b>${escapeHtml(acctCompact(Math.max(...vals)))}</b></div><div><span>Low</span><b>${escapeHtml(acctCompact(Math.min(...vals)))}</b></div><div><span>Trend change</span><b class="acct-${tone}">${change==null?'—':`${change>=0?'+':''}${escapeHtml(acctCompact(change))}`}</b></div></div>`;
 }
 function scmPatchParts(root,html){
   // Excel-style refresh: rebuild only when the card layout itself changed; otherwise replace just the
@@ -1896,24 +1957,28 @@ function renderAccountingOverview(root,a,previous,history,series){
 function accountingChartSignature(data){return JSON.stringify(Object.keys(ACCT_CHART_FIELDS).map(k=>accountingChartPoints(data.history,data.series,k,acctChartRange)));}
 function accountingChartPendingBar(root){
   const bar=root?.querySelector('[data-acct-pending]');if(!bar)return;
-  const n=acctChartPending?acctChartPendingCount:0;bar.hidden=!n;
+  // v2.5.382 no bar while the popout is open: closing it applies the update, and the bar would shift the rows behind it.
+  const n=acctChartPending&&!acctChartOpenKey?acctChartPendingCount:0;bar.hidden=!n;
   if(n)bar.querySelector('span').textContent=`${n} update${n===1?'':'s'} waiting while you look`;
 }
 function renderAccountingCharts(root,data){
   if(!root||!data)return;
   const sig=accountingChartSignature(data);
-  const labels=Object.fromEntries([...root.querySelectorAll('[data-acct-card]')].map(c=>[c.dataset.acctCard,c.querySelector('.finance-label')?.textContent||c.dataset.acctCard]));
   for(const key of Object.keys(ACCT_CHART_FIELDS)){
     const box=root.querySelector(`[data-acct-chart="${key}"]`);if(!box)continue;
     const pts=accountingChartPoints(data.history,data.series,key,acctChartRange);
-    const html=accountingSparkline(key,pts)+accountingChartFooter(key,pts,acctChartRange);
+    const html=accountingSparkline(key,pts)+accountingChartFooter(key,pts);
     if(box.__scmHtml!==html){box.innerHTML=html;box.__scmHtml=html;}
     box.__acctPts=pts;
   }
   acctChartDrawn={sig,data,hasData:/\d/.test(sig)};acctChartPending=null;acctChartPendingCount=0;accountingChartPendingBar(root);
-  const sheet=root.querySelector('[data-acct-sheet]');
   root.querySelectorAll('[data-acct-open]').forEach(b=>b.setAttribute('aria-expanded',String(b.dataset.acctOpen===acctChartOpenKey)));
-  if(sheet){if(acctChartOpenKey&&labels[acctChartOpenKey]){const k=acctChartOpenKey;sheet.innerHTML=accountingChartSheet(k,ACCT_CHART_TITLES[k]||labels[k],accountingChartPoints(data.history,data.series,k,acctChartRange),acctChartRange);sheet.hidden=false;}else{sheet.hidden=true;sheet.innerHTML='';}}
+  const pop=acctPopEl(),wasOpen=!pop.hidden,focusRange=pop.contains(document.activeElement)?document.activeElement?.dataset?.acctRange:null;
+  if(acctChartOpenKey&&root.querySelector(`[data-acct-card="${CSS.escape(acctChartOpenKey)}"]`)){
+    const k=acctChartOpenKey;pop.innerHTML=accountingChartPop(k,accountingChartPoints(data.history,data.series,k,acctChartRange),acctChartRange);pop.hidden=false;document.body.classList.add('acct-pop-open');
+    if(!wasOpen)pop.querySelector('[data-acct-close]')?.focus({preventScroll:true});
+    else if(focusRange)pop.querySelector(`[data-acct-range="${CSS.escape(focusRange)}"]`)?.focus({preventScroll:true});
+  }else if(wasOpen||pop.innerHTML){pop.hidden=true;pop.innerHTML='';document.body.classList.remove('acct-pop-open');}
 }
 function accountingChartFlush(){
   if(acctChartTouching||acctChartOpenKey||!acctChartPending)return;
@@ -1929,8 +1994,9 @@ function accountingChartTip(svg,clientX){
   let tip=box.querySelector('.acct-tip');if(!tip){tip=document.createElement('div');tip.className='acct-tip';box.appendChild(tip);}
   const d=prev==null?null:roundCurrencyUp(v-prev),pct=prev?d/Math.abs(prev)*100:null;
   const date=new Date(t).toLocaleDateString(undefined,{month:'short',day:'numeric'});
-  tip.innerHTML=`<span>${escapeHtml(date)}</span><b>${escapeHtml(money(roundCurrencyUp(v)))}</b>${d==null?'<span class="acct-flat">First day</span>':`<span class="${d>0?'change-up':d<0?'change-down':'acct-flat'}">${d>0?'+':''}${escapeHtml(money(d))}${pct==null?'':` (${pct>0?'+':''}${pct.toFixed(2)}%)`}</span>`}`;
-  const left=x/160*r.width;tip.style.left=Math.max(0,Math.min(r.width-tip.offsetWidth,left-tip.offsetWidth/2))+'px';
+  tip.innerHTML=`<span>${escapeHtml(date)}</span><b>${escapeHtml(money(roundCurrencyUp(v)))}</b>${d==null?'<span class="acct-flat">First day</span>':`<span class="${acctChangeClass(box.dataset.acctChart,d)}">${d>0?'+':''}${escapeHtml(money(d))}${pct==null?'':` (${pct>0?'+':''}${pct.toFixed(2)}%)`}</span>`}`;
+  // A readout wider than the row chart opens to the left, over the row's text, never off the screen.
+  const left=x/160*r.width,max=r.width-tip.offsetWidth;tip.style.left=(max<0?max:Math.max(0,Math.min(max,left-tip.offsetWidth/2)))+'px';
 }
 function accountingChartTipEnd(svg){
   const box=svg?.closest?.('[data-acct-chart]');box?.querySelector('.acct-tip')?.remove();svg?.querySelector?.('.acct-cross')?.classList.remove('on');
@@ -1940,14 +2006,21 @@ document.addEventListener('pointermove',e=>{const svg=e.target?.closest?.('[data
 document.addEventListener('pointerdown',e=>{const svg=e.target?.closest?.('[data-acct-spark]');if(!svg)return;acctChartTouching=true;accountingChartTip(svg,e.clientX);});
 document.addEventListener('pointerout',e=>{const svg=e.target?.closest?.('[data-acct-spark]');if(svg&&!svg.contains(e.relatedTarget))accountingChartTipEnd(svg);});
 document.addEventListener('pointerup',e=>{if(e.pointerType==='mouse')return;const svg=e.target?.closest?.('[data-acct-spark]');if(svg)setTimeout(()=>accountingChartTipEnd(svg),1500);});
+function accountingChartClose(){
+  if(!acctChartOpenKey)return;const k=acctChartOpenKey;acctChartOpenKey=null;
+  const root=document.getElementById('accountingOverview');renderAccountingCharts(root,acctChartPending||acctChartDrawn?.data);
+  root?.querySelector(`[data-acct-open="${CSS.escape(k)}"]`)?.focus({preventScroll:true});
+}
 document.addEventListener('click',e=>{
-  const root=document.getElementById('accountingOverview');if(!root||!root.contains(e.target))return;
+  const root=document.getElementById('accountingOverview'),pop=document.getElementById('acctChartPop');
+  const inPop=!!pop&&!pop.hidden&&pop.contains(e.target);if(!root||!(root.contains(e.target)||inPop))return;
   const range=e.target.closest('[data-acct-range]'),open=e.target.closest('[data-acct-open]'),close=e.target.closest('[data-acct-close]'),apply=e.target.closest('[data-acct-apply]');
-  if(range){acctChartRange=Number(range.dataset.acctRange)||90;root.querySelectorAll('[data-acct-range]').forEach(b=>b.setAttribute('aria-pressed',String(b===range)));renderAccountingCharts(root,acctChartPending||acctChartDrawn?.data);}
-  else if(open){acctChartOpenKey=acctChartOpenKey===open.dataset.acctOpen?null:open.dataset.acctOpen;renderAccountingCharts(root,acctChartPending||acctChartDrawn?.data);}
-  else if(close){acctChartOpenKey=null;renderAccountingCharts(root,acctChartPending||acctChartDrawn?.data);}
+  if(range){acctChartRange=Number(range.dataset.acctRange)||90;document.querySelectorAll('[data-acct-range]').forEach(b=>b.setAttribute('aria-pressed',String(Number(b.dataset.acctRange)===acctChartRange)));renderAccountingCharts(root,acctChartPending||acctChartDrawn?.data);}
+  else if(open){acctChartOpenKey=open.dataset.acctOpen;renderAccountingCharts(root,acctChartPending||acctChartDrawn?.data);}
+  else if(close||e.target===pop){accountingChartClose();}
   else if(apply){renderAccountingCharts(root,acctChartPending||acctChartDrawn?.data);}
 });
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&acctChartOpenKey){e.preventDefault();accountingChartClose();}});
 
 function renderFullSyncDiagnostics(s){
   // Diagnostic rendering must never be able to break the main dashboard render.
@@ -3632,7 +3705,7 @@ function render(s){
 <div class="overview-section overview-operations-card"><div class="overview-section-head"><div><h3>Operations</h3><span>Company activity at a glance</span></div></div><div class="overview-stat-grid"><div class="overview-stat-card"><span>Buildings</span><strong>${buildingCount||'—'}</strong></div><div class="overview-stat-card"><span>Warehouse Lines</span><strong>${rows.length||'—'}</strong></div><div class="overview-stat-card"><span>Warehouse Qty</span><strong>${warehouseQty?num(warehouseQty):'—'}</strong></div><div class="overview-stat-card"><span>VWAP Values</span><strong>${vwapCount?num(vwapCount):'—'}</strong></div></div></div>
 <div class="overview-section"><div class="overview-section-head"><div><h3>Contracts</h3><span>Current active and saved value</span></div></div><div class="overview-stat-grid overview-stat-grid-compact"><div class="overview-stat-card"><span>Incoming</span><strong>${money(incomingGross)}</strong><small>${contractRows.filter(c=>c.direction==='Incoming').length} active</small></div><div class="overview-stat-card"><span>Outgoing</span><strong>${money(outgoingGross)}</strong><small>${contractRows.filter(c=>c.direction==='Outgoing').length} active</small></div><div class="overview-stat-card"><span>Saved</span><strong>${money(savedGross)}</strong><small>${savedRows.length} saved</small></div></div></div>
 <div class="overview-resource-ranking-stack"><div class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Net Profit Resources</h3><span>Captured selling profit · ${escapeHtml(overviewRange)}</span></div><span class="overview-section-badge">Net Profit</span></div><div class="overview-selling-list">${topSelling.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topSelling.items.length?topSelling.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(JSON.stringify(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Net Profit</small><strong>${money(x.profit)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No selling profit data captured yet.</div>'}</div></div>
-<div id="overviewTopGross" class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Gross Resources</h3><span>Captured sales value · ${escapeHtml(overviewDate(topGross.rangeStart)&&overviewDate(topGross.rangeEnd)?`${overviewDate(topGross.rangeStart)} – ${overviewDate(topGross.rangeEnd)}`:'Captured range unavailable')}</span></div><span class="overview-section-badge">Gross</span></div><div class="overview-selling-list">${topGross.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topGross.items.length?topGross.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(JSON.stringify(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Gross</small><strong>${money(x.gross)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No gross sales data captured yet.</div>'}</div></div></div>`; if($('#overviewRealmBadge')){const syncTime=viewStore?.lastSync||s.lastSync;const hasCapturedData=!!(viewStore&&(viewStore.lastSync||viewStore.fullSyncDiagnostics||viewStore.gameOverlaySnapshot||(Array.isArray(viewStore.buildings)&&viewStore.buildings.length)||(Array.isArray(viewStore.warehouseResources)&&viewStore.warehouseResources.length)||(viewStore.endpointData&&Object.keys(viewStore.endpointData).length)||(viewStore.productionRateSnapshots&&Object.keys(viewStore.productionRateSnapshots).length)));const badgeStatus=__realmHydrationPending?'Switching…':syncTime?new Date(syncTime).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):(hasCapturedData?'Captured · sync not completed':'Not synced');$('#overviewRealmBadge').textContent=`${realm!=null?realmName(realm):'Realm —'} · ${badgeStatus}`; } if($('#accountingSource')){const period=accountingDisplay.period?.dateFrom&&accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.dateFrom).toLocaleDateString()}–${new Date(accountingDisplay.period.date).toLocaleDateString()}`:(accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.date).toLocaleDateString()}`:''); $('#accountingSource').textContent=`Source: ${a.sourceType==='income-statement'?'income statement':a.sourceType==='cash-flow-derived'?'cash-flow statement':'unavailable'}${period}`;} if($('#accountingPeriodBadge')){const badge=$('#accountingPeriodBadge'),dateEl=$('#accountingPeriodDate'),metaEl=$('#accountingPeriodMeta');document.querySelectorAll('[data-accounting-period]').forEach(x=>x.classList.toggle('active',String(x.dataset.accountingPeriod||'current')===accountingPeriodView));const labels={current:'Current',day:'Day',week:'Week',month:'Month'};if(dateEl)dateEl.textContent=labels[accountingPeriodView]||'Current';if(metaEl)metaEl.textContent=accountingDisplay.periodSource==='recent-cashflow'?`Derived from captured cash-flow rows · ${Number(accountingDisplay.periodTransactionCount)||0} transactions`:'Game accounting view';} if($('#accountingLiveStatus')){
+<div id="overviewTopGross" class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Gross Resources</h3><span>Captured sales value · ${escapeHtml(overviewDate(topGross.rangeStart)&&overviewDate(topGross.rangeEnd)?`${overviewDate(topGross.rangeStart)} – ${overviewDate(topGross.rangeEnd)}`:'Captured range unavailable')}</span></div><span class="overview-section-badge">Gross</span></div><div class="overview-selling-list">${topGross.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topGross.items.length?topGross.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(JSON.stringify(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Gross</small><strong>${money(x.gross)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No gross sales data captured yet.</div>'}</div></div></div>`; if($('#overviewRealmBadge')){const syncTime=viewStore?.lastSync||s.lastSync;const hasCapturedData=!!(viewStore&&(viewStore.lastSync||viewStore.fullSyncDiagnostics||viewStore.gameOverlaySnapshot||(Array.isArray(viewStore.buildings)&&viewStore.buildings.length)||(Array.isArray(viewStore.warehouseResources)&&viewStore.warehouseResources.length)||(viewStore.endpointData&&Object.keys(viewStore.endpointData).length)||(viewStore.productionRateSnapshots&&Object.keys(viewStore.productionRateSnapshots).length)));const badgeStatus=__realmHydrationPending?'Switching…':syncTime?new Date(syncTime).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):(hasCapturedData?'Captured · sync not completed':'Not synced');$('#overviewRealmBadge').textContent=`${realm!=null?realmName(realm):'Realm —'} · ${badgeStatus}`; } if($('#accountingSource')){const period=accountingDisplay.period?.dateFrom&&accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.dateFrom).toLocaleDateString()}–${new Date(accountingDisplay.period.date).toLocaleDateString()}`:(accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.date).toLocaleDateString()}`:''); $('#accountingSource').textContent=`Source: ${a.sourceType==='income-statement'?'income statement':a.sourceType==='cash-flow-derived'?'cash-flow statement':'unavailable'}${period}`;} if($('#accountingPeriodBadge')){const badge=$('#accountingPeriodBadge'),dateEl=$('#accountingPeriodDate'),metaEl=$('#accountingPeriodMeta');document.querySelectorAll('[data-accounting-period]').forEach(x=>x.classList.toggle('active',String(x.dataset.accountingPeriod||'current')===accountingPeriodView));const labels={current:'Current statements date',day:'Day',week:'Week',month:'Month'};const stmtText=accountingPeriodView==='current'?accountingStatementPeriodText(accountingDisplay.period):'';if(dateEl)dateEl.textContent=labels[accountingPeriodView]||labels.current;if(metaEl)metaEl.textContent=accountingDisplay.periodSource==='recent-cashflow'?`Derived from captured cash-flow rows · ${Number(accountingDisplay.periodTransactionCount)||0} transactions`:(stmtText||'Game accounting view');} if($('#accountingLiveStatus')){
    const accountingEndpoint=/\/api\/(?:v2|v3)\/companies\/(?:me|\d+)\/(?:balance-sheet|cashflow(?:\/recent)?|cashflow-statement|income-statement|past-finances-overview|administration-overhead|past-finances)(?:\/\d+)?\/?$/i;
    const accountingTimes=Object.entries(s.endpointData||{})
      .filter(([url,v])=>accountingEndpoint.test(url)&&Number(v?.status)===200&&v?.data!=null)

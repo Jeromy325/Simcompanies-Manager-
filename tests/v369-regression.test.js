@@ -1,11 +1,11 @@
 // 2.5.369: Accounting audit fixes. Fixture = user's R2 capture 2026-10-25 (day/0, day/1 statements, past finances).
 const assert = require('assert'); const fs = require('fs'); const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.381');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.382');
 const dash = read('dashboard.js'), bg = read('background.js');
 const fnSrc = name => { const i = dash.indexOf(`function ${name}(`); assert.ok(i >= 0, name); let d = 0, j = dash.indexOf('){', i) + 1; for (let k = j; k < dash.length; k++) { if (dash[k] === '{') d++; else if (dash[k] === '}' && --d === 0) return dash.slice(i, k + 1); } };
 const fx = JSON.parse(read('tests/fixtures/r2-accounting-days-2026-10-25.json'));
-const env = new Function(`${fnSrc('gameOperatingExpenses')}\n${fnSrc('accountingDayStatements')}\n${fnSrc('accountingDailyHistory')}\n${fnSrc('accountingPreviousPeriod')}\nreturn {gameOperatingExpenses,accountingDayStatements,accountingDailyHistory,accountingPreviousPeriod};`)();
+const env = new Function(`${fnSrc('gameOperatingExpenses')}\n${fnSrc('accountingStatementDay')}\n${fnSrc('accountingDayStatements')}\n${fnSrc('accountingDailyHistory')}\n${fnSrc('accountingPreviousPeriod')}\nreturn {gameOperatingExpenses,accountingDayStatements,accountingDailyHistory,accountingPreviousPeriod};`)();
 // Game "Operating expenses" subtotal (screen 10/24: (-) $236,958), not cash paid out (3,907,158).
 assert.equal(env.gameOperatingExpenses(fx['income-statement/day/0'].data), -236958);
 assert.equal(env.gameOperatingExpenses(fx['income-statement/day/1'].data), -301165);

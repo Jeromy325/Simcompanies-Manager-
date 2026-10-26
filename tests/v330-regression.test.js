@@ -29,7 +29,9 @@ assert.equal(prev.profit, 414048); assert.equal(prev.cash, 2774327); assert.equa
 const unverified = vm.runInContext(`accountingDailyHistory(${JSON.stringify(overview)},${JSON.stringify(detail)},${JSON.stringify(ledger)},{sales:true,expenses:false})`, ctx);
 assert.equal(unverified[1].expenses, undefined, 'an incomplete ledger never produces an expenses figure');
 assert.equal(vm.runInContext(`accountingComparisonBase({previousPeriod:null})`, ctx), null, 'no fake baseline when the game has no earlier day');
-assert.match(dash, /const v=value==null\|\|value===''\?NaN:Number\(value\),p=old==null\|\|old===''\?NaN:Number\(old\)/, 'null previous values are not treated as $0');
+// v2.5.382 overview rows: acctNum keeps a missing figure as null (never $0); no earlier figure = no change shown.
+assert.match(dash, /function acctNum\(v\)\{if\(v==null\|\|v===''\)return null;/, 'null previous values are not treated as $0');
+assert.match(dash, /if\(p==null\)return '<span class="acct-row-chg acct-flat">No earlier figure captured<\/span>';/);
 assert.match(dash, /function money\(v\)\{if\(v==null\|\|v===''\)return '—';/, 'money(null) shows a dash, not $0.00');
 assert.match(html, /id="accountingHistory"/, 'Last 8 days table on the Accounting tab');
 

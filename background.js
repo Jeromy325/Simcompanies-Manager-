@@ -6367,11 +6367,12 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
           if(Number(value.realm)!==realm){send({ok:false,error:'Accounting snapshot realm mismatch.'});return;}
         }else if(field==='accountingDailySeries'){
           // v2.5.377: per-day figures Manager already read (Day statements / balance sheets), newest 120 days.
+          // v2.5.382: + Cost of goods sold, Freight out, Exchange fees, Executives cost, Total change in cash.
           const days=value&&typeof value.days==='object'&&!Array.isArray(value.days)?value.days:null;
           if(!days){send({ok:false,error:'Invalid accounting series.'});return;}
           const num=v=>v==null||v===''||!Number.isFinite(Number(v))?undefined:Number(v);
           const keep=Object.keys(days).filter(k=>/^\d{4}-\d{2}-\d{2}$/.test(k)).sort().slice(-120);
-          value={v:1,days:Object.fromEntries(keep.map(k=>{const d=days[k]||{};const row={};for(const f of ['sales','operatingExpenses','netIncome','currentLiabilities']){const x=num(d[f]);if(x!==undefined)row[f]=x;}return [k,row];}))};
+          value={v:1,days:Object.fromEntries(keep.map(k=>{const d=days[k]||{};const row={};for(const f of ['sales','operatingExpenses','netIncome','currentLiabilities','cogs','freightOut','marketFees','executives','cashChange']){const x=num(d[f]);if(x!==undefined)row[f]=x;}return [k,row];}))};
         }else if(field==='savedContracts'){
           if(!Array.isArray(value)){send({ok:false,error:'Invalid saved-contract list.'});return;}
           value=value.map(x=>x&&typeof x==='object'?{...x}:x);

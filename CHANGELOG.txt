@@ -1,3 +1,18 @@
+2.5.382 — 2026-10-26 — Accounting overview: Cash / Income / Expenses rows, chart popout, current statements date
+- New "Accounting overview" card (expands / collapses) replaces the 9 chart cards. One row per figure with its chart:
+  Cash: Cash, Total change in cash (cash-flow statement total) · Income: Sales, Net income · Expenses: Cost of goods
+  sold, Freight out, Exchange fees, Executives cost (salaries + training + poaching), Operating expenses (total).
+  Total Assets, Liabilities, Inventory, Current Assets and Current Liabilities stay in Balance Sheet Summary.
+- Every row = the latest finished game day vs the day before. Expenses show as positive costs: a cost going up is red
+  (↑), going down is green (↓); the charts follow the same rule.
+- The page header shows "Current statements date" with the statement period (e.g. 8:21 PM 10/24 to 8:20 PM 10/25);
+  the date line on the cards is gone.
+- Fix: the comparison date could stay on an old day. The current statement was the one received last, from either
+  realm; now it is the newest finished day of the realm you view (current statement or the walk's day 0).
+- The chart icon opens the full chart as a popout over the page (✕, tap outside or Esc closes it) with value, change,
+  7D / 30D / 90D and "7 of 30 days collected" while a figure's history is still building.
+- New figures are saved per day and build up to 90 days (Cash already has 90).
+
 2.5.381 — 2026-10-26 — VWAP: download about once a day instead of after every Sync
 - SimcoTools / Sim Companies publish VWAP once a day, but the Manager re-downloaded the full dataset (989 values,
   ~9 s plus a full realm-store save) whenever it was older than 15 minutes: after every Sync, every hourly market

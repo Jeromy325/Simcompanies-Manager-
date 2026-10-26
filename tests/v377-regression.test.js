@@ -7,7 +7,7 @@ const path = require('path');
 const vm = require('vm');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const dash = read('dashboard.js'), bg = read('background.js');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.381');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.382');
 function fn(src, name) {
   const start = src.indexOf(`function ${name}(`); assert.notEqual(start, -1, name);
   let depth = 0, q = null;
@@ -22,11 +22,12 @@ const ctx = { Number, Math, Date, JSON, Object, Map, Array, String, RegExp };
 vm.createContext(ctx);
 vm.runInContext(['const ACCT_CHART_DAY=86400000;const ACCT_SERIES_KEEP_DAYS=120;',
   "const ACCT_CHART_FIELDS={cash:'cash',revenue:'sales',operatingExpenses:'operatingExpenses',profit:'netIncome',assets:'assets',liabilities:'liabilities',inventory:'inventory',currentAssets:'currentAssets',currentLiabilities:'currentLiabilities'};",
-  ...['acctDayKey', 'accountingDailySeriesMerge', 'accountingChartPoints', 'accountingChartTrend', 'accountingChartAverage', 'accountingDayBalanceSheets'].map(n => fn(dash, n))].join('\n'), ctx);
+  "const ACCT_COST_KEYS=new Set();",
+  ...['acctNum', 'acctSigned', 'acctDayKey', 'accountingDailySeriesMerge', 'accountingChartPoints', 'accountingChartTrend', 'accountingChartAverage', 'accountingDayBalanceSheets'].map(n => fn(dash, n))].join('\n'), ctx);
 // constants used above match the source
 assert.match(dash, /const ACCT_CHART_DAY=86400000;/);
 assert.match(dash, /const ACCT_SERIES_KEEP_DAYS=120;/);
-assert.match(dash, /profit:'netIncome'/, 'Profit chart = Net income');
+assert.match(dash, /netIncome:'netIncome'/, 'Net income chart = Net income (v2.5.382 key)');
 
 const day = n => Date.parse('2026-10-25T01:21:31Z') - n * 864e5;
 // 90 game-history rows; only the last 7 carry Day statements
