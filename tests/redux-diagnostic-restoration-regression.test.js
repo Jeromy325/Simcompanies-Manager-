@@ -6,7 +6,7 @@ const root = path.join(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'dashboard.html'), 'utf8');
 const dashboard = fs.readFileSync(path.join(root, 'dashboard.js'), 'utf8');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
-assert.equal(manifest.version, '2.5.383');
+assert.equal(manifest.version, '2.5.384');
 assert.match(html, /id="downloadReduxStoreDump"/, 'Redux diagnostic download control is present');
 assert.match(dashboard, /querySelector\('#downloadReduxStoreDump'\)/, 'Redux download click handler is present');
 assert.match(dashboard, /sendGameTabMessage\(tab\.id,\{type:'RUN_REDUX_STATE_DIAGNOSTIC'/, 'Redux capture uses content-script recovery');

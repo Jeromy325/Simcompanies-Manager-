@@ -1,7 +1,7 @@
 // 2.5.370: Sync walks the game's Accounting page (Day 0–6) after completing; Last 7 days.
 const assert = require('assert'); const fs = require('fs'); const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.383');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.384');
 const bg = read('background.js'), dash = read('dashboard.js'), html = read('dashboard.html');
 assert.ok(/const ACCOUNTING_DAY_WALK_DAYS=7;/.test(bg));
 // scheduled only after the core Sync succeeded, next to the week ledger, never inside the Sync transaction

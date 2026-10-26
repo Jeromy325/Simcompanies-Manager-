@@ -39,7 +39,9 @@ const FX = f => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures'
   });
   await page.click('button.tab[data-tab="analyze"]'); await page.waitForTimeout(1200);
   const body = async () => (await page.textContent('#analyzeBody').catch(() => '')) || '';
-  const go = async p => { await page.click(`#analyzeBody [data-an-go="${p}"]`); await page.waitForTimeout(300); };
+  // Main pages carry the Overview · Margins · Stock · Costs switch; detail pages only "‹ Back" (as the mockups), so
+  // go back to Overview first when the target is not linked from the current page.
+  const go = async p => { if (!(await page.$(`#analyzeBody [data-an-go="${p}"]`))) { if (await page.$('#analyzeBody [data-an-back]')) { await page.click('#analyzeBody [data-an-back]'); await page.waitForTimeout(200); } if (!(await page.$(`#analyzeBody [data-an-go="${p}"]`))) { await page.click('#analyzeBody [data-an-go="overview"]'); await page.waitForTimeout(200); } } await page.click(`#analyzeBody [data-an-go="${p}"]`); await page.waitForTimeout(300); };
   const noScroll = async p => { const w = await page.evaluate(() => document.documentElement.scrollWidth); H.check(`${p}: no horizontal scroll at 360px`, w <= 360, '≤360', w); };
 
   let t = await body();
@@ -51,13 +53,13 @@ const FX = f => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures'
 
   await go('fees'); t = await body();
   H.check('Fees: paid = Σ paired fees ($2,717)', /\$2,717\.00/.test(t), '$2,717.00', t.match(/Fees paid · 7 days\s*\$[\d,.]+/)?.[0]);
-  H.check('Fees: day statements (Sun $152.2k)', /\$152\.2k/.test(t), '$152.2k', '');
+  H.check('Fees: day statements (Sun $152k)', /\$152k/.test(t), '$152k', '');
   await noScroll('fees');
 
   await go('stock'); t = await body();
   const bd = await page.$eval('#analyzeBody [data-an-card="st-112:3"]', e => e.innerText).catch(() => '');
   H.check('Stock: Bulldozer Q3 cost per unit $1,751.64', /\$1,751\.64/.test(bd), '$1,751.64', bd.match(/Cost per unit\s*(\S+)/)?.[1]);
-  H.check('Stock: Bulldozer Q3 value $27.1k, diff +$6,100', /\+\$6,100/.test(bd) && /\$27\.1k/.test(bd), '+$6,100', bd.match(/[+−]\$[\d,.k]+/)?.[0]);
+  H.check('Stock: Bulldozer Q3 cost → value $21,020 → $27,120, diff +$6,100', /\+\$6,100/.test(bd) && /\$21,020 → \$27,120/.test(bd), '+$6,100 / $21,020 → $27,120', bd.match(/\$[\d,]+ → \$[\d,]+/)?.[0]);
   const rate = 2697 / 67394; // ledger pairs of $1,000 or more
   const be = 1751.64 / (1 - rate); H.check('Stock: break-even = cost ÷ (1 − ledger fee)', bd.includes('$' + be.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')), be.toFixed(2), bd.match(/Break-even[^\n]*\n?\s*(\S+)/)?.[1]);
   await noScroll('stock'); await H.shot(page, 'analyze-stock');
@@ -86,7 +88,7 @@ const FX = f => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures'
   H.check('Cards collapse', open1 && !(await page.$eval('#analyzeBody [data-an-card="dt-src"]', e => e.open)), 'closed', '');
   await page.click('#analyzeBody [data-an-days="30"]'); await page.waitForTimeout(200);
   H.check('Look-back setting persists', await page.evaluate(() => localStorage.getItem('scmAnalyze:days')) === '30', '30', await page.evaluate(() => localStorage.getItem('scmAnalyze:days')));
-  await go('empty'); t = await body(); H.check('First-run preview', /Not enough data yet/.test(t) && /Ready · 3 of 4/.test(t) && /Cash-flow ledger: 0\.\d days so far/.test(t), 'Ready · 3 of 4 (ledger < 3 days)', t.match(/Ready · \d of \d/)?.[0]);
+  await go('empty'); t = await body(); H.check('First-run preview', /Not enough data yet/.test(t) && /Ready\s*3 of 4/.test(t) && /Cash-flow ledger: 0\.\d days so far/.test(t), 'Ready · 3 of 4 (ledger < 3 days)', t.match(/Ready\s*\d of \d/)?.[0]);
 
   const net = await page.evaluate(() => window.__anNet); H.check('0 network calls from Analyze code', net.length === 0, 0, net.join(' | '));
   H.check('no images in Analyze', (await page.$$('#analyzeBody img')).length === 0, 0, (await page.$$('#analyzeBody img')).length);
@@ -97,7 +99,7 @@ const FX = f => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures'
   await sw.evaluate(async () => { await chrome.storage.local.clear(); await chrome.storage.local.set({ activeRealmKey: 'realm:1', selectedRealm: '1', viewRealm: 1, realmIsolationSchemaVersion: 13, scmRealmStoreSchema: 1, 'scmRealmStore:1': { endpointData: {}, authData: { authCompany: { realmId: 1, companyId: 5294950 } } } }); });
   await page.evaluate(() => localStorage.setItem('scmAnalyze:page', '"overview"')); await page.reload(); await page.waitForTimeout(2500);
   await page.click('button.tab[data-tab="analyze"]'); await page.waitForTimeout(800); t = await body();
-  H.check('Empty store → first-run state', /Not enough data yet/.test(t) && /Ready · 0 of 4/.test(t), 'Ready · 0 of 4', t.match(/Ready · \d of \d/)?.[0]);
+  H.check('Empty store → first-run state', /Not enough data yet/.test(t) && /Ready\s*0 of 4/.test(t), 'Ready · 0 of 4', t.match(/Ready\s*\d of \d/)?.[0]);
   await H.shot(page, 'analyze-empty'); await noScroll('empty');
   await ctx.close(); H.done();
 })();

@@ -9,7 +9,7 @@ const path = require('path');
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
 const manifest = JSON.parse(read('manifest.json'));
-assert.equal(manifest.version, '2.5.383');
+assert.equal(manifest.version, '2.5.384');
 const C = require('../tools-core.js');
 const fx = require('./fixtures/profit-calc-2026-10-24.json');
 const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg}: ${a} vs ${b}`);

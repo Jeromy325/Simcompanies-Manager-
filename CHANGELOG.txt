@@ -1,3 +1,12 @@
+2.5.384 — 2026-10-26 — Analyze pages laid out as the Analyze mockups
+- Every Analyze page now follows its mockup: mockup colours, "Analyze" eyebrow and title, the Overview · Margins ·
+  Stock · Costs switch on the main pages, "‹ Back" on the detail pages (Company, Fees, Cash, Sales, Routes, Data,
+  product pages), section headings above their cards, coloured left edge on stock cards, teal buttons, switches in
+  Settings, the first-run checklist with progress bar. Cards still fold (tap a heading or a product card's header).
+- Settings that were only drawn in the mockup now work: "Compute when the tab opens" (off = keep the last result until
+  Recalculate) and "Keep the last result for 10 minutes" (coming back to the tab shows the last result at once).
+- Day columns (fees by day, EVA) use short figures ($152k) so seven fit on a phone; Stock totals no longer cut off.
+
 2.5.383 — 2026-10-26 — Analyze tab: what the company earns, from data already captured
 - New top-level tab "Analyze", right after Tools. Its own files (analyze-core.js maths, analyze-ui.js pages); nothing
   added to Tools. Computed when the tab opens from stored data only: 0 network calls, no SimcoTools polling.
