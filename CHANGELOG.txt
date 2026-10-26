@@ -1,4 +1,4 @@
-2.5.389 — 2026-10-26 — Analyze: retail sales
+2.5.390 — 2026-10-26 — Analyze: retail sales
 - Retail sales (Sales of Jack o'lantern, Witch costume …, ledger rows retail-<resource>) were skipped, so those
   products showed no sales. On the R2 ledger that was 67 rows and $127,692 in 7 days; Analyze now matches the game's
   account-history CSV row for row (Jack o'lantern 44 rows, 1,967 units, $93,883; Witch costume 23 rows, 537 units,
@@ -6,7 +6,19 @@
 - Units = money ÷ price; cost = the game's COGS per unit; quality = the sold stock's average rounded to the nearest
   quality (0.59 → Q1). Retail shows on All sales and product pages tagged "retail"; it stays out of exchange
   margins, fees and contract-vs-exchange routes.
-- The ledger archive keeps retail rows and re-reads the stored pages once to add them.
+- The ledger archive keeps retail rows and re-reads the stored pages once to add them. Retail rows on ledger pages
+  that 2.5.389 already compacted (older than 8 days) are not recovered.
+
+2.5.389 — 2026-10-26 — Sync no longer stalls on a large store
+- R2 Sync sat 88 s before reading the warehouse (export 2026-10-26). The cause was storage, not the game: the R2 store
+  had grown to 7.6 MB, 5.1 MB of it 307 ledger pages kept twice, and every save rewrites the whole store.
+- Ledger pages (/cashflow/<id>/) are now kept in the store only while recent (last 8 days, 60 at most) and no longer
+  copied into accountingCapture. Their sales rows stay in the ledger archive (Analyze unchanged). Existing stores are
+  shrunk once on update, archive first: R2 7.0 MB -> 2.9 MB on the user's export.
+- Sync's own writes (game session, realm activation, final commit) go ahead of queued game captures and time out
+  instead of hanging. One fewer full store read per save.
+- The Accounting day walk stops as soon as a Sync starts and runs again after it (it walked over Sync and ended 0/7).
+- A failed Sync retries itself once, a minute later.
 
 2.5.388 — 2026-10-26 — Daily Accounting walk catches up the ledger
 - On days without a Sync only the newest 30 ledger rows were captured (the walk's cashflow/recent request), so most

@@ -1,9 +1,9 @@
-// 2.5.389 Retail sales reach Analyze. 'retail-<resource>' rows (category s) were skipped, so Jack o'lantern and Witch
+// 2.5.390 Retail sales reach Analyze. 'retail-<resource>' rows (category s) were skipped, so Jack o'lantern and Witch
 // costume showed no sales (user's R2 ledger: 67 rows, $127,692 in 7 days). Shape from the user's real ledger + CSV:
 // details {building, building_name, price, quality (average, e.g. 0.5856), unit_cogs, remaining}; no resource/amount.
 const assert = require('assert'), fs = require('fs'), path = require('path');
 const A = require('../analyze-core.js');
-assert.equal(require('../manifest.json').version, '2.5.389');
+assert.equal(require('../manifest.json').version, '2.5.390');
 const fx = require('./fixtures/r2-accounting-day-walk-2026-10-25.json'), ep = {};
 for (const [k, v] of Object.entries(fx)) ep[k] = { data: v };
 const sales = A.salesFromLedger(A.ledgerRows(ep)), retail = sales.filter(s => s.channel === 'retail');
@@ -32,4 +32,4 @@ assert.ok(fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8').i
 // UI: retail sale card has no fee row and uses the game cost.
 const ui = fs.readFileSync(path.join(__dirname, '..', 'analyze-ui.js'), 'utf8');
 assert.ok(/s\.channel === 'retail' \? s\.ledgerCost/.test(ui) && /· retail/.test(ui));
-console.log('v389-regression: all assertions passed');
+console.log('v390-regression: all assertions passed');

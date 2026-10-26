@@ -21,6 +21,8 @@ const FX = f => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures'
   const runs = [6, 4, 2, 0.5].map((n, i) => ({ k: `77|${n}`, b: 77, bn: 'Factory', id: 45, q: 2, c: 10 + i * 0.25, t: new Date(Date.now() - n * 864e5).toISOString(), n: 1000 }));
   storage.scmGameConstants = { core: gc.core, buildings: gc.buildings, resources: gc.resources };
   storage['scmProductionCostHistory:1'] = runs;
+  // 2.5.385 Analyze counts only runs from this realm's own buildings, so the runs' Factory (#77) must be in the store.
+  store.buildings = [...(Array.isArray(store.buildings) ? store.buildings : []), { id: 77, kind: 'N', name: 'Factory' }];
 
   const ctx = await H.launch(); const sw = await H.worker(ctx);
   await require('./mock-export').seedExport(sw, storage);
