@@ -1760,7 +1760,7 @@ document.addEventListener('change',e=>{if(e.target?.id==='acctWalkEnabled'||e.ta
 document.addEventListener('click',async e=>{
   if(e.target?.id!=='acctWalkRunNow')return;
   e.target.disabled=true; setAccountingWalkMsg('Walking the game Accounting page…');
-  try{const r=await chrome.runtime.sendMessage({type:'RUN_ACCOUNTING_WALK_NOW',realm:accountingWalkRealm()});setAccountingWalkMsg(r?.error?r.error:`${Number(r?.captured)||0}/7 days read.`);}
+  try{const r=await chrome.runtime.sendMessage({type:'RUN_ACCOUNTING_WALK_NOW',realm:accountingWalkRealm()});setAccountingWalkMsg(r?.error?r.error:`${Number(r?.captured)||0}/7 days read${r?.ledgerPages!=null?` · ledger ${r.ledgerPages} page${r.ledgerPages===1?'':'s'}${r.ledger==='caught-up'?'':r.ledger==='capped'?' (more next run)':` (${r.ledger})`}`:''}.`);}
   catch(err){setAccountingWalkMsg(err?.message||String(err));}
   finally{renderAccountingWalkSchedule(window.__scmState||{});}
 });

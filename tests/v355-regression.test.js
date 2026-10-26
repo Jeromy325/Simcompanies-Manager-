@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.387');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.388');
 const cs = read('content.js');
 const src = cs.slice(cs.indexOf('  const placeCard=(el,x,y)=>'), cs.indexOf('  const unpinCard=el=>'));
 const ctx = { window: { innerWidth: 360, innerHeight: 780 } }; vm.createContext(ctx);

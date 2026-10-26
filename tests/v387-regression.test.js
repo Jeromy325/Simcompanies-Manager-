@@ -5,7 +5,7 @@
 const assert = require('assert'), fs = require('fs'), path = require('path');
 const A = require('../analyze-core.js');
 const manifest = require('../manifest.json');
-assert.equal(manifest.version, '2.5.387');
+assert.ok(manifest.version >= '2.5.387');
 
 const now = Date.now(), MIN = 60000, R2 = 1;
 // 120 rows, one every 10 minutes over 20 h: Chemicals (17) fills alternating Q1 / Q2, each with its fee row.

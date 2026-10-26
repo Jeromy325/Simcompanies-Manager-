@@ -1,3 +1,10 @@
+2.5.388 — 2026-10-26 — Daily Accounting walk catches up the ledger
+- On days without a Sync only the newest 30 ledger rows were captured (the walk's cashflow/recent request), so most
+  of a day's sales never reached Analyze. The scheduled daily walk now also reads the ledger pages back from that
+  page until it meets what is already archived: about 5 pages for a day at 150 rows, 0 when nothing is missing,
+  at most 40 per run (a longer hole finishes on the next runs). Sync is unchanged.
+- "Run now" shows "7/7 days read · ledger N pages."
+
 2.5.387 — 2026-10-26 — Analyze: ledger archive, gap detection, sales at every quality
 - Sales no longer vanish between syncs. The game's "recent" ledger holds only the newest 30 rows and each capture
   replaced the last one, so sales that rolled off before a full sync never reached Analyze (Chemicals "Recent sales:

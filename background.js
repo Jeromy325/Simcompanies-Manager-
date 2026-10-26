@@ -1324,6 +1324,27 @@ function queueLedgerArchive(realm,pages){
   ledgerArchiveQueues.set(n,run.catch(()=>{}));
   return run.catch(()=>({ok:false}));
 }
+// 2.5.388 Daily-walk ledger catch-up: cashflow/recent holds only the newest 30 rows, so on days without a Sync most of
+// the day's rows were never captured. Walk /cashflow/<id>/ back from the oldest row of the newest archived stretch
+// only until a page reaches the stretch before it (~5 pages a day). Each page goes through saveData, which archives it.
+const LEDGER_CATCHUP_MAX_PAGES=40;
+async function catchUpLedgerArchive(realm,reason='daily-walk'){
+  const n=validRealmNumber(realm); if(n==null)return {ok:false,error:'Invalid realm.'};
+  await (ledgerArchiveQueues.get(n)||Promise.resolve()); // the refreshed recent page is archived first
+  const plan=globalThis.SCM_ANALYZE_CORE.catchUpPlan((await chrome.storage.local.get({[ledgerArchiveKey(n)]:null}))[ledgerArchiveKey(n)]);
+  if(!plan)return {ok:true,pages:0,caughtUp:true};
+  let cursor=plan.startId,pages=0,oldest=plan.startAt;const seen=new Set();
+  while(cursor&&oldest>plan.stopAt&&!seen.has(cursor)&&pages<LEDGER_CATCHUP_MAX_PAGES){
+    seen.add(cursor);pages++;
+    const path=`/api/v2/companies/me/cashflow/${cursor}/`;
+    const res=await pageGet(path,n,null,`ledger-catchup:${reason}`);
+    if(!res?.ok)return {ok:false,pages,error:`Ledger page ${cursor} failed (HTTP ${res?.status||0}).`};
+    await saveData(path,res.data,res.status,'GET',n);
+    cursor=null;
+    for(const r of Array.isArray(res.data?.data)?res.data.data:[]){const t=Date.parse(String(r?.datetime||''));if(Number.isFinite(t)&&r?.id!=null&&t<=oldest){oldest=t;cursor=String(r.id);}}
+  }
+  return {ok:true,pages,caughtUp:!cursor||oldest<=plan.stopAt,capped:pages>=LEDGER_CATCHUP_MAX_PAGES&&oldest>plan.stopAt};
+}
 // One-time seed from the cash-flow pages already in each realm store (stamped with that realm).
 async function seedLedgerArchiveOnce(){
   const FLAG='scmLedgerArchiveSeededV1';
@@ -3070,10 +3091,12 @@ async function runScheduledAccountingWalk(trigger='alarm'){
   const expected=Number.isFinite(Date.parse(sch.nextAt||''))?Date.parse(sch.nextAt)-accountingWalkOffset(sch.offsetMin)*60000:null;
   // The game has not finished today's statements yet (or no game tab): try again later, a few times.
   const rolled=after!=null&&(before==null||after>before||(expected!=null&&after>=expected-2*3600000));
+  // Ledger rows since the last capture (the recent page was just refreshed above).
+  const ledger=refresh?.ok?await catchUpLedgerArchive(realm,`scheduled:${trigger}`).catch(e=>({ok:false,error:e?.message||String(e)})):null;
   let walk=null;
   if(refresh?.ok&&rolled||trigger==='manual')walk=await runAccountingDayWalk(realm,`scheduled:${trigger}`).catch(e=>({ok:false,error:e?.message||String(e)}));
   const okRun=walk&&walk.ok&&walk.status!=='failed';
-  const result={at:new Date().toISOString(),trigger,attempt,refresh:refresh?.ok?'ok':(refresh?.error||'failed'),rolledOver:rolled,walk:walk?walk.status:null,captured:walk?.captured??null,error:okRun?null:(walk?.error||refresh?.error||(rolled?null:'Statements not updated yet'))};
+  const result={at:new Date().toISOString(),trigger,attempt,refresh:refresh?.ok?'ok':(refresh?.error||'failed'),rolledOver:rolled,ledgerPages:ledger?.pages??null,ledger:ledger?(ledger.ok?(ledger.caughtUp?'caught-up':'capped'):ledger.error):null,walk:walk?walk.status:null,captured:walk?.captured??null,error:okRun?null:(walk?.error||refresh?.error||(rolled?null:'Statements not updated yet'))};
   if(!okRun&&trigger==='alarm'&&attempt<ACCOUNTING_WALK_MAX_ATTEMPTS){
     const retryAt=new Date(Date.now()+ACCOUNTING_WALK_RETRY_MS).toISOString();
     await writeAccountingWalkSchedule({attempt,retryAt,nextAt:retryAt,lastResult:result});

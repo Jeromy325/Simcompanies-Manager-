@@ -112,6 +112,14 @@
     spans = mergeSpans(spans.map(x => [Math.max(x[0], cut), x[1]]));
     return { v: 1, rows, anchors, spans, added: p ? p.rows.length : 0 };
   }
+  // Daily-walk ledger catch-up plan: the newest span holds the latest captures; walk back from its oldest row (the
+  // anchor at its start) until a page reaches the span before it. One span = no hole = nothing to fetch (null).
+  function catchUpPlan(archive) {
+    const sp = mergeSpans(archive && archive.spans), last = sp[sp.length - 1];
+    if (sp.length < 2) return null;
+    let startId = null; for (const [id, t] of Object.entries((archive && archive.anchors) || {})) if (Number(t) === last[0]) startId = id;
+    return startId ? { startId, startAt: last[0], stopAt: sp[sp.length - 2][1] } : null;
+  }
   // Spans proven by the pages still in endpointData (same rules, anchors from those pages).
   function pageSpans(endpointData) {
     const pages = Object.entries(endpointData || {}).filter(([k]) => PAGE_RX.test(k)).map(([k, v]) => [k, v && v.data, v && v.receivedAt]);
@@ -350,7 +358,7 @@
   }
   const rangeStats = pts => { const v = (pts || []).map(p => p[1]); return v.length ? { lo: Math.min(...v), hi: Math.max(...v), change: v.length > 1 && v[0] ? (v[v.length - 1] - v[0]) / Math.abs(v[0]) : null } : null; };
 
-  const api = { DAY, keyOf, realmEndpoints, realmCostHistory, ledgerRows, salesFromLedger, ARCHIVE_DAYS, archiveMerge, pageSpans, mergeSpans, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
+  const api = { DAY, keyOf, realmEndpoints, realmCostHistory, ledgerRows, salesFromLedger, ARCHIVE_DAYS, archiveMerge, catchUpPlan, pageSpans, mergeSpans, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
   root.SCM_ANALYZE_CORE = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
