@@ -1,0 +1,276 @@
+/* Sim Companies Manager — Analyze tab maths (pure, no DOM, no network).
+ * Reads only what the manager already captured: cash-flow ledger pages, warehouse lots, past finances, day statements,
+ * production cost history and stored prices. Products are matched by resource id + quality, never by page text.
+ * Nothing here hardcodes a game value: the exchange fee comes from the ledger (fees-<id> ÷ marketfilled-<id>). */
+(function (root) {
+  'use strict';
+  const DAY = 864e5;
+  const num = v => (v === null || v === undefined || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
+  const pos = v => Number.isFinite(Number(v)) && Number(v) > 0;
+  const keyOf = (id, q) => `${Number(id)}:${Number(q)}`;
+  const ms = v => { const t = Date.parse(String(v || '')); return Number.isFinite(t) ? t : null; };
+
+  /* ------------------------------------------------------------ ledger */
+  const LEDGER_RX = /\/api\/v2\/companies\/me\/cashflow\/(?:recent|\d+)\/?$/;
+  // Every captured cash-flow page (recent + cursor pages), deduped by row id, newest first.
+  function ledgerRows(endpointData) {
+    const out = new Map();
+    for (const [k, v] of Object.entries(endpointData || {})) {
+      if (!LEDGER_RX.test(k)) continue;
+      const d = v && v.data, list = Array.isArray(d && d.data) ? d.data : Array.isArray(d) ? d : [];
+      for (const r of list) {
+        if (!r || typeof r !== 'object' || ms(r.datetime) == null) continue;
+        out.set(String(r.id != null ? r.id : `${r.datetime}|${r.descriptionKey}|${r.money}`), r);
+      }
+    }
+    return [...out.values()].sort((a, b) => ms(b.datetime) - ms(a.datetime));
+  }
+  // Exchange fills ('marketfilled-<resource>', category m) and contract sales ('cs-<resource>-<buyer>').
+  // Each exchange fill is paired with the 'fees-<resource>' row written at the same moment (≤ 5 s apart).
+  function salesFromLedger(rows) {
+    const list = Array.isArray(rows) ? rows : [];
+    const fees = list.filter(r => r && r.category === 'f' && /^fees-\d+$/.test(String(r.descriptionKey || '')) && Number(r.money) < 0);
+    const used = new Set(), out = [];
+    for (const r of list) {
+      const dk = String(r && r.descriptionKey || ''), d = (r && r.details) || {};
+      const exchange = r && r.category === 'm' && /^marketfilled-\d+$/.test(dk), contract = /^cs-\d+/.test(dk);
+      if (!exchange && !contract) continue;
+      const rid = num(d.resource), q = num(d.quality), amount = num(d.amount), price = num(d.price), t = ms(r.datetime);
+      if (!pos(rid) || q == null || !pos(amount) || !pos(price) || t == null) continue;
+      const gross = pos(r.money) ? Number(r.money) : amount * price;
+      let fee = null;
+      if (exchange) {
+        const f = fees.find(x => !used.has(x) && x.descriptionKey === `fees-${rid}` && Math.abs(ms(x.datetime) - t) <= 5000);
+        if (f) { used.add(f); fee = -Number(f.money); }
+      }
+      const profit = num(d.profit);
+      out.push({ id: String(r.id), t, rid, q, amount, price, gross, fee, ledgerProfit: profit, ledgerCost: profit != null ? (gross - profit) / amount : null, channel: exchange ? 'exchange' : 'contract', buyer: String(d.buyer || (contract ? dk.split('-').slice(2).join('-') : '')) });
+    }
+    return out.sort((a, b) => b.t - a.t);
+  }
+  // Fee rate = Σ paired fees ÷ Σ paired sale value (sales ≥ $1,000 so integer rounding of small fees cannot skew it).
+  function feeRate(sales) {
+    const p = (Array.isArray(sales) ? sales : []).filter(s => s.channel === 'exchange' && s.fee != null && s.gross >= 1000);
+    if (!p.length) return null;
+    const fee = p.reduce((a, s) => a + s.fee, 0), gross = p.reduce((a, s) => a + s.gross, 0);
+    return gross > 0 ? { rate: fee / gross, pairs: p.length, at: Math.max(...p.map(s => s.t)) } : null;
+  }
+  const inWindow = (list, days, now) => (Array.isArray(list) ? list : []).filter(x => x.t >= now - days * DAY && x.t <= now + 60000);
+
+  /* ------------------------------------------------------------ warehouse */
+  const lotTotal = l => Object.values((l && l.cost) || {}).reduce((a, v) => a + (Number(v) || 0), 0);
+  // Warehouse cost per unit for one product + quality = Σ lot cost breakdown ÷ Σ amount.
+  function warehouseCost(lots, rid, q) {
+    let cost = 0, amount = 0, oldest = null;
+    for (const l of Array.isArray(lots) ? lots : []) {
+      if (!l || Number(l.kind) !== Number(rid) || Number(l.quality) !== Number(q) || !pos(l.amount)) continue;
+      cost += lotTotal(l); amount += Number(l.amount);
+      const t = ms(l.datetime); if (t != null && (oldest == null || t < oldest)) oldest = t;
+    }
+    return amount > 0 ? { unitCost: cost / amount, cost, amount, oldest } : null;
+  }
+  // Split of one product's lot cost per unit: named materials (lot.materials[i] ↔ cost.material{i+1}), labour (workers + admin), bought (market).
+  function costSplit(lots, rid, q) {
+    const parts = new Map(); let amount = 0, workers = 0, admin = 0, market = 0;
+    for (const l of Array.isArray(lots) ? lots : []) {
+      if (!l || Number(l.kind) !== Number(rid) || Number(l.quality) !== Number(q) || !pos(l.amount)) continue;
+      amount += Number(l.amount); const c = l.cost || {};
+      workers += Number(c.workers) || 0; admin += Number(c.admin) || 0; market += Number(c.market) || 0;
+      const names = Array.isArray(l.materials) ? l.materials : [];
+      for (let i = 0; i < 5; i++) { const v = Number(c[`material${i + 1}`]) || 0; if (!v) continue; const n = String(names[i] || `Material ${i + 1}`); parts.set(n, (parts.get(n) || 0) + v); }
+    }
+    if (!(amount > 0)) return null;
+    const inputs = [...parts].map(([name, v]) => ({ name, perUnit: v / amount }));
+    const inputsPU = inputs.reduce((a, x) => a + x.perUnit, 0);
+    return { amount, inputs, inputsPerUnit: inputsPU, labourPerUnit: (workers + admin) / amount, workersPerUnit: workers / amount, adminPerUnit: admin / amount, boughtPerUnit: market / amount, totalPerUnit: inputsPU + (workers + admin + market) / amount };
+  }
+  const breakEven = (cost, rate) => (pos(cost) && rate != null && rate < 1 ? cost / (1 - rate) : null);
+  const headroom = (price, be) => (pos(price) && be != null ? (price - be) / price : null);
+  // Stock by product + quality: units, cost, value at today's price, break-even with fee, price-fall headroom, oldest lot date.
+  function stock(lots, { priceOf, rate = null, minUnits = 0 } = {}) {
+    const keys = new Map();
+    for (const l of Array.isArray(lots) ? lots : []) if (l && pos(l.amount) && pos(l.kind)) keys.set(keyOf(l.kind, l.quality), [Number(l.kind), Number(l.quality)]);
+    const rows = [];
+    for (const [k, [rid, q]] of keys) {
+      const w = warehouseCost(lots, rid, q); if (!w || w.amount < minUnits) continue;
+      const p = typeof priceOf === 'function' ? priceOf(rid, q) : null, price = p && pos(p.price) ? Number(p.price) : null;
+      const value = price != null ? w.amount * price : null, be = breakEven(w.unitCost, rate);
+      rows.push({ key: k, rid, q, units: w.amount, unitCost: w.unitCost, cost: w.cost, price, priceSource: p && p.source || null, value, diff: value != null ? value - w.cost : null, breakEven: be, headroom: headroom(price, be), oldest: w.oldest });
+    }
+    rows.sort((a, b) => (a.diff == null) - (b.diff == null) || (a.diff ?? 0) - (b.diff ?? 0));
+    const priced = rows.filter(r => r.value != null);
+    return { rows, value: priced.reduce((a, r) => a + r.value, 0), cost: priced.reduce((a, r) => a + r.cost, 0), diff: priced.reduce((a, r) => a + r.diff, 0), below: priced.filter(r => r.diff < 0), unpriced: rows.filter(r => r.value == null) };
+  }
+
+  /* ------------------------------------------------------------ margins */
+  // Calculator profit per unit (game Profit Calculator basis) = sale − Σ input qty × unit cost − labour. No fee, no transport.
+  function calculatorProfit({ salePrice, inputs = [], labourPerUnit = 0, ratePerLevel = null } = {}) {
+    if (!pos(salePrice)) return null;
+    const cost = inputs.reduce((a, x) => a + Number(x.qty) * Number(x.unitCost), 0) + Number(labourPerUnit || 0);
+    const profit = Number(salePrice) - cost;
+    return { cost, profit, profitPerHourPerLevel: pos(ratePerLevel) ? profit * Number(ratePerLevel) : null };
+  }
+  // Per product + quality, exchange sales only:
+  //   earned/unit = avg sold − cost/unit − avg sold × fee rate; gap = calculator − earned = (price now − avg sold) + fee + (cost − calculator cost).
+  function margins(sales, { costOf, priceOf, calcOf, rate = null } = {}) {
+    const g = new Map();
+    for (const s of Array.isArray(sales) ? sales : []) {
+      if (s.channel !== 'exchange') continue;
+      const k = keyOf(s.rid, s.q), x = g.get(k) || { key: k, rid: s.rid, q: s.q, units: 0, gross: 0, n: 0, fees: 0, ledgerCostSum: 0, ledgerUnits: 0 };
+      x.units += s.amount; x.gross += s.gross; x.n++; if (s.fee != null) x.fees += s.fee;
+      if (s.ledgerCost != null) { x.ledgerCostSum += s.ledgerCost * s.amount; x.ledgerUnits += s.amount; }
+      g.set(k, x);
+    }
+    const rows = [];
+    for (const x of g.values()) {
+      const avg = x.gross / x.units, ledgerCost = x.ledgerUnits ? x.ledgerCostSum / x.ledgerUnits : null;
+      const w = typeof costOf === 'function' ? costOf(x.rid, x.q) : null;
+      const cost = w != null ? w : ledgerCost, costSource = w != null ? 'warehouse' : ledgerCost != null ? 'ledger' : null;
+      const feePU = rate != null ? avg * rate : null;
+      const earned = cost != null && feePU != null ? avg - cost - feePU : null;
+      const p = typeof priceOf === 'function' ? priceOf(x.rid, x.q) : null, price = p && pos(p.price) ? Number(p.price) : null;
+      const c = typeof calcOf === 'function' && price != null ? calcOf(x.rid, x.q, price) : null;
+      const calc = c && c.ok && c.complete && c.profitPerUnit != null ? c.profitPerUnit : null;
+      const calcCost = c && c.ok && c.complete ? c.sourcingCostPerUnit : null;
+      const gap = calc != null && earned != null ? calc - earned : null;
+      rows.push({ ...x, avg, cost, costSource, ledgerCost, feePU, earned, total: earned != null ? earned * x.units : null, price, priceSource: p && p.source || null, calc, calcCost, calcResult: c,
+        gap, priceDiff: price != null ? price - avg : null, costDiff: calcCost != null && cost != null ? cost - calcCost : null, pctOfCalc: calc != null && calc > 0 && earned != null ? earned / calc : null });
+    }
+    return rows.sort((a, b) => (b.gap ?? -Infinity) - (a.gap ?? -Infinity));
+  }
+
+  /* ------------------------------------------------------------ costs */
+  // Production cost history (one entry per run: {id, q, c unit cost, t start}) for one product + quality.
+  function costSeries(history, rid, q, days, now) {
+    const pts = (Array.isArray(history) ? history : []).filter(e => e && Number(e.id) === Number(rid) && Number(e.q) === Number(q) && pos(e.c) && ms(e.t) != null)
+      .map(e => [ms(e.t), Number(e.c)]).filter(([t]) => days == null || t >= now - days * DAY).sort((a, b) => a[0] - b[0]);
+    const first = pts[0], last = pts[pts.length - 1];
+    return { pts, first: first ? first[1] : null, last: last ? last[1] : null, change: pts.length > 1 && first[1] > 0 ? (last[1] - first[1]) / first[1] : null };
+  }
+  function producedKeys(history, days, now) {
+    const m = new Map();
+    for (const e of Array.isArray(history) ? history : []) { const t = ms(e && e.t); if (e && pos(e.id) && t != null && t >= now - days * DAY) m.set(keyOf(e.id, e.q), [Number(e.id), Number(e.q)]); }
+    return [...m.values()];
+  }
+
+  /* ------------------------------------------------------------ fees & routes */
+  function feesSummary(sales, rate) {
+    const ex = (Array.isArray(sales) ? sales : []).filter(s => s.channel === 'exchange');
+    const gross = ex.reduce((a, s) => a + s.gross, 0), paid = ex.reduce((a, s) => a + (s.fee || 0), 0), unpaired = ex.filter(s => s.fee == null).length;
+    const by = new Map();
+    for (const s of ex) { const k = keyOf(s.rid, s.q), x = by.get(k) || { key: k, rid: s.rid, q: s.q, fee: 0, units: 0, gross: 0 }; x.fee += s.fee || 0; x.units += s.amount; x.gross += s.gross; by.set(k, x); }
+    const products = [...by.values()].map(x => ({ ...x, share: paid > 0 ? x.fee / paid : null, perUnit: x.units ? x.fee / x.units : null })).sort((a, b) => b.fee - a.fee);
+    return { gross, paid, rate: rate != null ? rate : (gross > 0 && !unpaired ? paid / gross : null), unpaired, products };
+  }
+  // Day statements: /income-statement/day/<n>/ → [{t, fees, sales}] oldest first (company totals, unaffected by missing ledger pages).
+  function dayStatements(endpointData, field) {
+    const out = [];
+    for (const [k, v] of Object.entries(endpointData || {})) {
+      const m = k.match(/\/api\/v2\/companies\/me\/(income-statement|cashflow-statement|balance-sheet)\/day\/(\d+)\/?$/);
+      if (!m || m[1] !== field) continue;
+      const d = v && v.data, t = ms(d && d.date); if (t == null) continue;
+      out.push({ t, day: Number(m[2]), data: d });
+    }
+    return out.sort((a, b) => a.t - b.t);
+  }
+  // Contract vs exchange per product: contract = average of your own paid contracts in the window; exchange net = price × (1 − fee).
+  function routes(sales, { priceOf, rate = null } = {}) {
+    const g = new Map();
+    for (const s of Array.isArray(sales) ? sales : []) {
+      const k = keyOf(s.rid, s.q), x = g.get(k) || { key: k, rid: s.rid, q: s.q, contracts: [], cUnits: 0, cGross: 0, exUnits: 0 };
+      if (s.channel === 'contract') { x.contracts.push(s); x.cUnits += s.amount; x.cGross += s.gross; } else x.exUnits += s.amount;
+      g.set(k, x);
+    }
+    return [...g.values()].map(x => {
+      const p = typeof priceOf === 'function' ? priceOf(x.rid, x.q) : null, price = p && pos(p.price) ? Number(p.price) : null;
+      const exNet = price != null && rate != null ? price * (1 - rate) : null, cAvg = x.cUnits ? x.cGross / x.cUnits : null;
+      return { ...x, price, exNet, contractAvg: cAvg, last: x.contracts[0] ? x.contracts[0].price : null, diff: cAvg != null && exNet != null ? cAvg - exNet : null, diffPct: cAvg != null && exNet ? (cAvg - exNet) / exNet : null };
+    }).sort((a, b) => (b.contracts.length > 0) - (a.contracts.length > 0) || (b.diff ?? -Infinity) - (a.diff ?? -Infinity));
+  }
+
+  /* ------------------------------------------------------------ company & cash */
+  const PF_ASSETS = [['buildings', 'Buildings'], ['patents', 'Patents'], ['cashAndReceivables', 'Cash and receivables'], ['investmentInBonds', 'Investment in bonds'], ['inventory', 'Inventory'], ['deposits', 'Deposits']];
+  function pastFinances(endpointData) {
+    const ep = endpointData || {}, d = ep['/api/v3/companies/me/past-finances/'] && ep['/api/v3/companies/me/past-finances/'].data;
+    return (Array.isArray(d) ? d : []).map(r => ({ ...r, t: ms(r && r.date) })).filter(r => r.t != null && Number.isFinite(Number(r.total))).sort((a, b) => a.t - b.t);
+  }
+  function company(endpointData, now) {
+    const rows = pastFinances(endpointData); if (!rows.length) return null;
+    const last = rows[rows.length - 1], pts = rows.map(r => [r.t, Number(r.total)]);
+    const back = (days) => { const tgt = last.t - days * DAY; let best = null; for (const r of rows) if (r.t <= tgt + DAY / 2 && (!best || r.t > best.t)) best = r; return best; };
+    const w = back(7);
+    const parts = PF_ASSETS.map(([k, label]) => ({ key: k, label, value: Number(last[k]) || 0 })).filter(p => p.value !== 0);
+    const assets = Number(last.total), liabilities = Number(last.liabilities) || 0;
+    const ov = endpointData && endpointData['/api/v2/companies/me/past-finances-overview/'] && endpointData['/api/v2/companies/me/past-finances-overview/'].data;
+    const eva = (Array.isArray(ov) ? ov : []).map(r => ({ t: ms(r && r.date), v: num(r && r.economicValueAdded), rank: num(r && r.evaRank) })).filter(r => r.t != null && r.v != null).sort((a, b) => a.t - b.t);
+    // EVA by week: 7-day buckets counted back from the newest daily row.
+    const weeks = [];
+    if (eva.length) { const end = eva[eva.length - 1].t; for (let i = 0; i < 6; i++) { const hi = end - i * 7 * DAY, lo = hi - 7 * DAY; const b = eva.filter(r => r.t > lo && r.t <= hi); if (!b.length) break; weeks.unshift({ end: hi, v: b.reduce((a, r) => a + r.v, 0), days: b.length }); } }
+    return { last, pts, value: assets, liabilities, net: assets - liabilities, rank: num(last.rank), weekAgo: w ? Number(w.total) : null, change7: w && Number(w.total) ? (assets - Number(w.total)) / Number(w.total) : null, parts, assets, eva, weeks };
+  }
+  function cash(endpointData) {
+    const rows = pastFinances(endpointData);
+    const bs = endpointData && endpointData['/api/v2/companies/me/balance-sheet/'] && endpointData['/api/v2/companies/me/balance-sheet/'].data;
+    const days = dayStatements(endpointData, 'cashflow-statement').map(d => -Number(d.data.cashAllExpenses)).filter(v => Number.isFinite(v) && v > 0);
+    const cf = endpointData && endpointData['/api/v2/companies/me/cashflow-statement/'] && endpointData['/api/v2/companies/me/cashflow-statement/'].data;
+    if (!days.length && cf && Number(cf.cashAllExpenses) < 0) days.push(-Number(cf.cashAllExpenses));
+    const last = rows[rows.length - 1] || null;
+    const car = last ? Number(last.cashAndReceivables) : (bs ? (Number(bs.cash) || 0) + (Number(bs.accountsReceivable) || 0) + (Number(bs.cashReservedForOrders) || 0) : null);
+    const payout = days.length ? days.reduce((a, v) => a + v, 0) / days.length : null;
+    return { pts: rows.map(r => [r.t, Number(r.cashAndReceivables)]).filter(p => Number.isFinite(p[1])), share: rows.map(r => [r.t, Number(r.total) ? Number(r.cashAndReceivables) / Number(r.total) : null]).filter(p => p[1] != null),
+      value: car, total: last ? Number(last.total) : null, shareNow: last && Number(last.total) ? Number(last.cashAndReceivables) / Number(last.total) : null,
+      cashOnHand: bs ? num(bs.cash) : null, reserved: bs ? num(bs.cashReservedForOrders) : null, receivable: bs ? num(bs.accountsReceivable) : null,
+      payoutPerDay: payout, payoutDays: days.length, covers: payout && car != null ? car / payout : null };
+  }
+
+  /* ------------------------------------------------------------ findings & coverage */
+  function findings({ stockRows = [], marginRows = [], costRows = [], routeRows = [] } = {}) {
+    const out = [];
+    for (const r of stockRows) if (r.diff != null && r.diff < 0) out.push({ tone: 'bad', w: -r.diff, key: r.key, kind: 'stock', r });
+    for (const r of marginRows) {
+      if (r.earned != null && r.earned < 0) out.push({ tone: 'bad', w: -r.total, key: r.key, kind: 'loss', r });
+      else if (r.pctOfCalc != null && r.pctOfCalc < 0.75) out.push({ tone: 'warn', w: r.gap * r.units, key: r.key, kind: 'margin', r });
+    }
+    for (const r of costRows) if (r.change != null && r.change > 0.05) out.push({ tone: 'warn', w: r.change * 1000, key: r.key, kind: 'cost', r });
+    for (const r of routeRows) if (r.diff != null && r.diff > 0 && r.contracts.length) out.push({ tone: 'good', w: r.diff * r.cUnits, key: r.key, kind: 'route', r });
+    const rank = { bad: 0, warn: 1, good: 2 };
+    return out.sort((a, b) => rank[a.tone] - rank[b.tone] || b.w - a.w);
+  }
+  function ledgerCoverage(rows, days, now) {
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) return { rows: 0, oldest: null, newest: null, coverage: 0, spanDays: 0 };
+    const ts = list.map(r => ms(r.datetime)), oldest = Math.min(...ts), newest = Math.max(...ts), start = now - days * DAY;
+    return { rows: list.length, oldest, newest, spanDays: (newest - oldest) / DAY, coverage: oldest <= start ? 1 : Math.max(0, Math.min(1, (now - oldest) / (now - start))) };
+  }
+
+  /* ------------------------------------------------------------ chart (build 2.5.382 Accounting sparkline style) */
+  function trend(pts) {
+    if (pts.length < 2) return null; const t0 = pts[0][0]; let sx = 0, sy = 0, sxy = 0, sxx = 0; const n = pts.length;
+    for (const [t, y] of pts) { const x = (t - t0) / DAY; sx += x; sy += y; sxy += x * y; sxx += x * x; }
+    const den = n * sxx - sx * sx; if (!den) return null; const m = (n * sxy - sx * sy) / den, b = (sy - m * sx) / n;
+    return { m, at: t => m * ((t - t0) / DAY) + b };
+  }
+  function average(pts, days = 7) { return pts.map(([t]) => { const w = pts.filter(([u]) => u <= t && u > t - days * DAY); return [t, w.reduce((s, [, v]) => s + v, 0) / w.length]; }); }
+  // tone: 'up-good' (value, price), 'up-bad' (cost, fees) or a fixed 'good' | 'bad' | 'flat'.
+  function sparkline(pts, { tone = 'up-good', label = 'trend' } = {}) {
+    const p = (Array.isArray(pts) ? pts : []).filter(x => Number.isFinite(x[0]) && Number.isFinite(x[1]));
+    if (!p.length) return '<div class="acct-chart-empty">No history captured yet</div>';
+    const W = 160, H = 64, P = 4, t0 = p[0][0], t1 = p[p.length - 1][0];
+    let lo = Math.min(...p.map(x => x[1])), hi = Math.max(...p.map(x => x[1])); if (lo === hi) { lo -= 1; hi += 1; }
+    const X = t => (t1 === t0 ? W / 2 : P + (t - t0) * (W - 2 * P) / (t1 - t0)), Y = v => H - P - (v - lo) * (H - 2 * P) / (hi - lo);
+    const tr = trend(p), up = tr ? tr.m > 0 : null;
+    const cls = tone === 'up-good' || tone === 'up-bad' ? (up == null || !tr.m ? 'flat' : (up === (tone === 'up-good') ? 'good' : 'bad')) : tone;
+    const path = list => list.map((x, i) => (i ? 'L' : 'M') + X(x[0]).toFixed(1) + ',' + Y(x[1]).toFixed(1)).join('');
+    const line = path(p), e = p[p.length - 1];
+    const area = p.length > 1 ? `<path class="acct-area" d="${line}L${X(t1).toFixed(1)},${H}L${X(t0).toFixed(1)},${H}Z"/>` : '';
+    const avg = p.length > 2 ? `<path class="acct-avg" d="${path(average(p))}"/>` : '';
+    const tl = tr ? `<line class="acct-trend" x1="${X(t0).toFixed(1)}" y1="${Y(tr.at(t0)).toFixed(1)}" x2="${X(t1).toFixed(1)}" y2="${Y(tr.at(t1)).toFixed(1)}"/>` : '';
+    const safe = String(label).replace(/[&<>"']/g, '');
+    return `<svg class="acct-spark an-spark acct-${cls}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${safe}">${area}<path class="acct-line" d="${line}"/>${avg}${tl}<circle class="acct-dot" cx="${X(e[0]).toFixed(1)}" cy="${Y(e[1]).toFixed(1)}" r="2.4"/></svg>`;
+  }
+  const rangeStats = pts => { const v = (pts || []).map(p => p[1]); return v.length ? { lo: Math.min(...v), hi: Math.max(...v), change: v.length > 1 && v[0] ? (v[v.length - 1] - v[0]) / Math.abs(v[0]) : null } : null; };
+
+  const api = { DAY, keyOf, ledgerRows, salesFromLedger, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
+  root.SCM_ANALYZE_CORE = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);

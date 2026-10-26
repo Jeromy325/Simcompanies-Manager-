@@ -2949,6 +2949,22 @@ function plannerInsightsData(ctx){
   const eventPctOf=id=>{try{return plannerActiveProductionEvent(s,nameOf(id),recipes,id)||0;}catch{return 0;}};
   return {ok:true,C,s,gc,economyState,adminPct,bonusPct:Number(ctx.bonusPct)||0,inputCostOf,nameOf,eventPctOf,map};
 }
+// v2.5.383 Analyze tab context: the same price, warehouse and game-calculator helpers the Production cards use, so
+// Analyze numbers match them. Reads stored state only (no network); products by resource id + quality.
+function analyzeContext(s){
+  const map=buildMarketPriceMap(s),lots=plannerWarehouseLots(s),realm=validRealmNumber(s?.viewRealm??s?.selectedRealm??s?.authData?.authCompany?.realmId);
+  let d=null;try{d=plannerInsightsData({s,priceMap:map,recipes:[],bonusPct:plannerCompanyProductionModifier(s)});}catch{}
+  const owned=Array.isArray(s?.buildings)?s.buildings:[];
+  const maker=id=>owned.find(b=>Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId)===Number(id))||null;
+  return {realm,lots,companyName:s?.authData?.authCompany?.company||'',
+    nameOf:id=>resourceName({_id:Number(id),kind:Number(id)},s),
+    priceOf:(id,q)=>{const p=plannerMarketPrice(s,map,id,q,'sell');return p&&Number(p.price)>0?{price:Number(p.price),source:p.source||''}:null;},
+    calcOf:(id,q,salePrice)=>{
+      if(!d?.ok)return {ok:false,reason:d?.reason||'Calculator not available.'};
+      const b=maker(id);
+      return d.C.gameCalcProduct({c:d.gc,resourceId:Number(id),economyState:d.economyState,eventPct:d.eventPctOf(Number(id)),bonusPct:d.bonusPct,adminPct:d.adminPct,robots:Boolean(b?.robotsSpecialization),salePrice,inputCostOf:d.inputCostOf,abundancePct:b?plannerAbundancePct(s,b.id,Number(id)):null});
+    }};
+}
 function renderPlannerInsights(host){
   const el=host?.querySelector?.('#plannerInsights'),ctx=host?.__plannerProfitCtx;
   if(!el||!ctx)return;
@@ -3721,7 +3737,7 @@ function render(s){
  if(activeTab==='overview'&&$('#cashflowDetails'))$('#cashflowDetails').innerHTML=buildCashflowSections(a.source?.cf,a.source?.recent); if(activeTab==='market'){ renderLiveMarketProduct(s); renderMarketHistory(s); renderMarketAlerts(s); } if(activeTab==='production') renderBuildingPlanner(s);
  renderVwapDiagnostics(s);
  const rawEl=$('#raw'); if(rawEl) rawEl.textContent=JSON.stringify({auth:s.authData,warehouseCount:rows.length,accounting:a,marketEndpointCount:Object.keys(s.endpointData||{}).filter(k=>/\/market\//.test(k)).length,marketCacheResources:Object.keys(s.marketCache||{}).length,marketDebug:s.marketDebug||{}},null,2).slice(0,30000);
- if(activeTab==='executives'){try{renderBoardRoom(s);}catch(e){console.error('Executives tab render failed',e);}} if(activeTab==='tools'){try{globalThis.SCM_TOOLS_UI?.render(s,catalogEntries(s));}catch(e){console.error('Tools tab render failed',e);}} if(activeTab==='contracts') { populateContractProducts(s); renderContracts(s); } if(activeTab==='diagnostic'){ renderApiList(s); renderDiagnostics(s); }
+ if(activeTab==='executives'){try{renderBoardRoom(s);}catch(e){console.error('Executives tab render failed',e);}} if(activeTab==='tools'){try{globalThis.SCM_TOOLS_UI?.render(s,catalogEntries(s));}catch(e){console.error('Tools tab render failed',e);}} if(activeTab==='analyze'){try{globalThis.SCM_ANALYZE_UI?.render(s,analyzeContext(s));}catch(e){console.error('Analyze tab render failed',e);}} if(activeTab==='contracts') { populateContractProducts(s); renderContracts(s); } if(activeTab==='diagnostic'){ renderApiList(s); renderDiagnostics(s); }
   requestAnimationFrame(()=>{ if(Math.abs(window.scrollX-__scrollX)>0 || Math.abs(window.scrollY-__scrollY)>0) window.scrollTo(__scrollX,__scrollY); });
 }
 function deepCompanyName(v, seen=new Set()){
@@ -4361,6 +4377,7 @@ function dashboardChangeAffectsTab(changes,tab){
     market:['warehouseResources','warehouseCostDetails','vwapData','vwapStatus','liveMarketData','liveMarketPriceData'],
     production:['buildings','warehouseResources','productionEvents','productionRateSnapshots','productionPlans','frozenNetworkPlan','productionRunHours','vwapData','vwapStatus','liveMarketData','liveMarketPriceData'],
     tools:['warehouseResources','vwapData','liveMarketPriceData','history'],
+    analyze:['warehouseResources','vwapData','liveMarketPriceData','history','endpointData','buildings'],
     executives:['endpointData','buildings']
   };
   const physicalFields=physicalFieldsByTab[tab];
@@ -4781,6 +4798,7 @@ const queuePhysicalRealmStateRefresh=(previousState,changes={})=>{
        }
       if((flags.warehouseChanged||flags.vwapChanged||flags.liveMarketPriceDataChanged||flags.liveMarketProductChanged||flags.liveMarketProductCacheChanged)&&activeTab==='warehouse')scheduleDashboardRender();
       if((flags.liveMarketPriceDataChanged||flags.vwapChanged||flags.warehouseChanged)&&activeTab==='tools')scheduleDashboardRender();
+      if((flags.liveMarketPriceDataChanged||flags.vwapChanged||flags.warehouseChanged||flags.accountingChanged||flags.historyChanged||flags.buildingsChanged)&&activeTab==='analyze')scheduleDashboardRender();
       if(flags.contractsChanged&&activeTab==='overview')scheduleDashboardRender();if(flags.accountingChanged&&activeTab==='accounting')scheduleDashboardRender();if(flags.diagnosticChanged&&activeTab==='diagnostic')scheduleDashboardRender();if((flags.vwapChanged||flags.warehouseChanged||flags.historyChanged||flags.liveMarketProductChanged||flags.liveMarketProductCacheChanged||flags.liveMarketPriceDataChanged)&&activeTab==='market')scheduleDashboardRender();
     }catch(e){__physicalStateRefreshPendingStores=Object.create(null);__physicalStateRefreshPendingDiagnostics=Object.create(null);console.debug('Physical realm state refresh failed',e);}
   },120);

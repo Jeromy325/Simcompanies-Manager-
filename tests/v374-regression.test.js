@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const C = require('../tools-core.js');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.382');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.383');
 const now = Date.parse('2026-10-25T12:50:00Z'), cfg = { trainS: 60 * 60 * 27, settleS: 60 * 60 * 3 };
 const w = (id, pos, skills, extra = {}) => ({ id, skills, currentWorkHistory: { position: pos, start: '2026-09-01T00:00:00Z', accelerated: false }, strikeUntil: null, ...extra });
 const execs = [

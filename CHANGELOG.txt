@@ -1,3 +1,17 @@
+2.5.383 — 2026-10-26 — Analyze tab: what the company earns, from data already captured
+- New top-level tab "Analyze", right after Tools. Its own files (analyze-core.js maths, analyze-ui.js pages); nothing
+  added to Tools. Computed when the tab opens from stored data only: 0 network calls, no SimcoTools polling.
+- Pages: Overview (6 linked KPI tiles, 30-day company value chart, "Worth a look" findings, all sales, how to read the
+  numbers), Margins, Stock, Costs, Company (value, what it owns, EVA by week), Fees, Cash, Sales, Routes (contract vs
+  exchange), a page per product (price now + trend, per unit sold, cost per unit with recipe inputs, warehouse, recent
+  sales, contract vs exchange), Data & settings (sources, known gaps, look-back 7/14/30 days, ignore lots under 5
+  units, recalculate) and a first-run state. Compact collapsible cards; charts in the 2.5.382 Accounting style.
+- Exchange fee read from your ledger: fees-<id> ÷ marketfilled-<id> on pairs of $1,000+ (R2 10/25: 2,697 ÷ 67,394 =
+  4.00%). Earned/unit = avg sold − warehouse cost/unit − avg sold × fee; calculator = the Production card's game
+  Profit Calculator at today's price for that quality; gap = price gap + fee + cost gap. Break-even = cost ÷ (1 − fee).
+- Products matched by resource id + quality. Input names from the game constants recipe (Bulldozer: Steel × 4,
+  Car body × 1, Combustion engine × 2). Contract fee and transport shown as "to verify".
+
 2.5.382 — 2026-10-26 — Accounting overview: Cash / Income / Expenses rows, chart popout, current statements date
 - New "Accounting overview" card (expands / collapses) replaces the 9 chart cards. One row per figure with its chart:
   Cash: Cash, Total change in cash (cash-flow statement total) · Income: Sales, Net income · Expenses: Cost of goods
