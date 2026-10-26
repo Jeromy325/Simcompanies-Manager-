@@ -3903,6 +3903,17 @@ function vwapDatasetSignature(rows){
     .join('|');
 }
 
+// v2.5.381 SimcoTools / Sim Companies publish VWAP once a day; the old 15-minute cache downloaded the full 989-row
+// dataset after every Sync and hourly cycle (R2: 3 downloads in 20 min, ~9 s + a 6 MB store write each).
+// After a download that CHANGED the data, the next one waits 20 h; while the data is unchanged (not published yet),
+// retry no sooner than every 3 h. That converges on ~1-3 downloads a day, at most ~3 h after the daily update.
+const VWAP_AFTER_CHANGE_MS=20*3600e3;
+const VWAP_RECHECK_MS=3*3600e3;
+function vwapCacheFresh(cached,now=Date.now()){
+  const fetched=Date.parse(String(cached?.fetchedAt||'')),changed=Date.parse(String(cached?.dataChangedAt||''));
+  if(Number.isFinite(changed)&&now-changed>=0&&now-changed<VWAP_AFTER_CHANGE_MS)return true;
+  return Number.isFinite(fetched)&&now-fetched>=0&&now-fetched<VWAP_RECHECK_MS;
+}
 async function runVwapSyncUnlocked(options={}){
   const activeView=await state();
   const authRealm=Number(activeView.authData?.authCompany?.realmId), gameRealm=Number(activeView.gameState?.realm), storedRealm=activeView.activeRealmKey?Number(String(activeView.activeRealmKey).replace('realm:','')):null;
@@ -3921,11 +3932,13 @@ async function runVwapSyncUnlocked(options={}){
   const cached=targetStore.vwapData||null;
   const cachedRows=Array.isArray(cached?.rows)&&Number(cached?.sourceRealm)===realm?cached.rows:[];
   const cachedAt=Date.parse(String(cached?.fetchedAt||''));
-  const cacheFresh=Number.isFinite(cachedAt)&&Date.now()-cachedAt<(15*60*1000)&&!cached?.stale&&!cached?.fallback&&Number(cached?.sourceRealm)===realm;
-  const cachedDay=String(cached?.fetchedAt||'').slice(0,10),today=new Date().toISOString().slice(0,10);
-  if(cachedRows.length&&cacheFresh&&cachedDay===today){
+  const cacheFresh=!options.force&&vwapCacheFresh(cached,Date.now())&&!cached?.stale&&!cached?.fallback&&Number(cached?.sourceRealm)===realm;
+  const today=new Date().toISOString().slice(0,10);
+  if(cachedRows.length&&cacheFresh){
     const warehouseVwaps=filterVwapRowsToWarehouse(cachedRows,warehouseRows);
     const mergedHistory=mergeDailyVwapHistory(targetStore.history||{},warehouseVwaps,today);
+    // Nothing new: no 6 MB realm-store write and no status write.
+    if(JSON.stringify(mergedHistory)===JSON.stringify(targetStore.history||{}))return {ok:true,cached:true,unchanged:true,records:warehouseVwaps.length,requested:cachedRows.length,failed:0,source:cached.source||'SimcoTools',realm};
     await vwapLockedCommit(realm,{history:mergedHistory},['history','vwapData']);
     await vwapLockedStatus({message:`R${realm===0?'1':'2'} VWAP data already current for ${today}: ${cachedRows.length} values; ${warehouseVwaps.length} warehouse matches.`,vwapRecords:cachedRows.length,vwapWarehouseRecords:warehouseVwaps.length,vwapRequested:cachedRows.length,vwapFailed:0,vwapFetchedAt:targetStore.vwapData.fetchedAt,vwapSourceRealm:realm,vwapWarehouseRealm:realm,vwapWarehouseRows:warehouseRows.length,vwapSyncing:false,vwapError:null,vwapRealm:realm},realm);
     return {ok:true,cached:true,records:warehouseVwaps.length,requested:cachedRows.length,failed:0,source:targetStore.vwapData.source||'SimcoTools',realm};
@@ -3970,7 +3983,9 @@ async function runVwapSyncUnlocked(options={}){
   const warehouseVwaps=filterVwapRowsToWarehouse(allVwaps,warehouseRows);
   const now=new Date().toISOString(),day=now.slice(0,10),mergedHistory=mergeDailyVwapHistory(targetStore.history||{},warehouseVwaps,day);
   const stale=sourceMode==='bundled-last-known-fallback';
-  const vwapData={rows:allVwaps,fetchedAt:stale?(cached?.fetchedAt||now):now,updatedAt:now,source:'SimcoTools',sourceMode,stale,fallback:stale,endpoint:`/v1/realms/${realm}/market/vwaps`,count:allVwaps.length,warehouseOnly:false,warehouseCombinations:warehouseVwaps.length,requestedCombinations:sourceMode==='live-pairs'?allVwaps.length:null,failedCombinations:failures.length,datasetRows:result.datasetRows||allVwaps.length,sourceRealm:realm,warehouseRealm:realm,failures:failures.slice(0,50),signature:vwapDatasetSignature(allVwaps)};
+  const signature=vwapDatasetSignature(allVwaps),prevSignature=Number(cached?.sourceRealm)===realm&&!cached?.stale?String(cached?.signature||''):'';
+  const dataChangedAt=stale?(cached?.dataChangedAt||null):(prevSignature&&prevSignature===signature?(cached?.dataChangedAt||null):now);
+  const vwapData={rows:allVwaps,fetchedAt:stale?(cached?.fetchedAt||now):now,updatedAt:now,dataChangedAt,source:'SimcoTools',sourceMode,stale,fallback:stale,endpoint:`/v1/realms/${realm}/market/vwaps`,count:allVwaps.length,warehouseOnly:false,warehouseCombinations:warehouseVwaps.length,requestedCombinations:sourceMode==='live-pairs'?allVwaps.length:null,failedCombinations:failures.length,datasetRows:result.datasetRows||allVwaps.length,sourceRealm:realm,warehouseRealm:realm,failures:failures.slice(0,50),signature};
   const nextWatch={...(targetStore.vwapWatch||DEFAULTS.vwapWatch),lastSourceRealm:realm};
   await vwapLockedCommit(realm,{vwapData,history:mergedHistory,vwapWatch:nextWatch},['vwapData','history','vwapWatch']);
   if(!stale)void recordPriceObservations(realm,allVwaps,now);
@@ -6657,7 +6672,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const requestedResourceIdRaw=validRealmNumber(m.resourceId); const requestedResourceId=(requestedResourceIdRaw!=null&&Number(requestedResourceIdRaw)>0)?Number(requestedResourceIdRaw):null; const inferredResourceId=requestedResourceId!=null?requestedResourceId:(endpointMarketIds[0]?.id??null);
         const cachedRows=Array.isArray(store.vwapData?.rows)&&Number(store.vwapData?.sourceRealm)===realm?store.vwapData.rows:[];
         const cachedAt=Date.parse(String(store.vwapData?.fetchedAt||''));
-        const fresh=Number.isFinite(cachedAt)&&(Date.now()-cachedAt)<(10*60*1000)&&!store.vwapData?.stale&&!store.vwapData?.fallback;
+        const fresh=Number.isFinite(cachedAt)&&vwapCacheFresh(store.vwapData)&&!store.vwapData?.stale&&!store.vwapData?.fallback;
         let rows=cachedRows,sourceRealm=store.vwapData?.sourceRealm??null,fetchedAt=store.vwapData?.fetchedAt||null;
         let refreshInBackground=false;
         if(!rows.length){
