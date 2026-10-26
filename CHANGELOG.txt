@@ -1,3 +1,9 @@
+2.5.378 — 2026-10-26 — Sync: no more "API storage queue drain timed out after 20 seconds"
+- The drain waited for the realm write queue to go fully idle. While the game tab keeps sending traffic, each passive
+  capture rewrites the realm store (R2: 5.9 MB, 438 endpoints), so the queue never went idle within 20 s and Sync failed.
+- The drain now waits only for writes queued before it. A drain timeout is logged in the Sync trace
+  (api-queue-drain-timeout) instead of failing Sync; the final per-endpoint durable check still decides success.
+
 2.5.377 — 2026-10-26 — Accounting: trend charts on every card; background refresh no longer rebuilds the tab
 - All 9 Accounting cards (Cash, Revenue, Operating expenses, Profit, Total Assets, Liabilities, Inventory, Current
   Assets, Current Liabilities) show a sparkline with a dashed straight trend line and a 7-day average, plus a chart icon

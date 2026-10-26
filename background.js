@@ -2358,9 +2358,15 @@ async function runApiStorageScheduler(key,scheduler){
     }else runApiStorageScheduler(key,scheduler);
   }
 }
+// Barrier, not "wait until idle": resolve once every job queued before this
+// call has committed. Passive game captures keep arriving while the player
+// browses, so waiting for a fully idle queue could starve Sync (R2 2.5.377:
+// "API storage queue drain timed out after 20 seconds" on a 5.9 MB store).
 function apiStorageQueueForRealm(realm){
-  const key=`realm:${validRealmNumber(realm)}`;
-  return apiStorageQueues.get(key)||Promise.resolve();
+  const n=validRealmNumber(realm);
+  const scheduler=apiStorageSchedulers.get(`realm:${n}`);
+  if(!scheduler||(!scheduler.running&&!scheduler.queue.length))return Promise.resolve();
+  return enqueueApiStorage(async()=>{},n,{url:'scm:queue-barrier'}).catch(()=>{});
 }
 function accountingWeekRefreshAlarmName(realm){
   const n=validRealmNumber(realm);
@@ -5502,8 +5508,10 @@ async function syncNow(requestedRealm=null){
       if(i<targets.length-1) await yieldSyncStep();
     }
 
-    await withSyncTimeout(apiStorageQueueForRealm(selected),20000,'API storage queue drain');
-    trace('api-queue-drained',{});
+    // Drain is best-effort: the final durable verification below re-reads and
+    // retries every required endpoint, so a slow queue must not fail Sync.
+    try{await withSyncTimeout(apiStorageQueueForRealm(selected),20000,'API storage queue drain');trace('api-queue-drained',{});}
+    catch(e){trace('api-queue-drain-timeout',{error:e?.message||String(e)});}
 
     // Market-data requests are intentionally excluded from the core Sync transaction.
     // They run from a delayed post-sync alarm after game API captures and durable
@@ -5522,8 +5530,8 @@ async function syncNow(requestedRealm=null){
     // now, retry only missing records, drain those retries, and verify again before
     // declaring any target successful.
     session.capturePaths=[];
-    await withSyncTimeout(apiStorageQueueForRealm(selected),20000,'Final API storage queue drain');
-    trace('final-api-queue-drained',{});
+    try{await withSyncTimeout(apiStorageQueueForRealm(selected),20000,'Final API storage queue drain');trace('final-api-queue-drained',{});}
+    catch(e){trace('final-api-queue-drain-timeout',{error:e?.message||String(e)});}
     const total=results.length;
     for(const result of results){
       const target=targets.find(item=>item.name===result.name)||{name:result.name};
