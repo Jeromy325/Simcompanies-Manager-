@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const root=path.join(__dirname,'..');const bg=fs.readFileSync(path.join(root,'background.js'),'utf8');const dash=fs.readFileSync(path.join(root,'dashboard.js'),'utf8');const manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8'));
-assert.equal(manifest.version, '2.5.382');
+assert.equal(manifest.version, '2.5.384');
 assert.match(bg,/simcoRateLimitUntilByUrl=new Map\(\)/,'URL cooldown map is shared by market endpoints');
 assert.match(bg,/if\(Math\.max\(knownCooldown,simcoRateLimitUntil\)>Date\.now\(\)\)\{[\s\S]*?skipped:true/,'URL cooldown suppresses repeated request');
 assert.match(bg,/rateLimitedUntilByEndpoint/,'endpoint cooldowns are persisted');
