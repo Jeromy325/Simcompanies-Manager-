@@ -1380,3 +1380,57 @@ html.scm-mobile .contract-table.saved-contract-table.mobile-cards:not(.contract-
 .ec-legend i,.ec-tip i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
 .ec-tip{position:absolute;pointer-events:none;background:#0d151e;border:1px solid #243140;border-radius:8px;padding:6px 8px;font-size:12px;color:#e8edf3;box-shadow:0 4px 14px rgba(0,0,0,.4);white-space:nowrap;z-index:5}
 .ec-tip small{color:#8f9eae}
+/* v2.5.377 Accounting card charts */
+.acct-chart-card{position:relative}
+.acct-chart-card .finance-label{padding-right:26px}
+.acct-chart-open{position:absolute;top:8px;right:8px;width:24px;height:24px;min-height:0;padding:0;margin:0;border-radius:6px;border:1px solid #2d4153;background:#0d1721;color:var(--accent);display:grid;place-items:center;cursor:pointer;z-index:1}
+.acct-chart-open[aria-expanded="true"]{background:var(--accent);color:#04121f;border-color:var(--accent)}
+.acct-chart-open:focus-visible,.acct-range-btn:focus-visible,.acct-chart-apply:focus-visible,.acct-sheet-close:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.acct-chart-bar{display:flex;justify-content:flex-end;margin:0 0 8px}
+.acct-range{display:flex;gap:4px}
+.acct-range-btn{font-size:10px;font-weight:700;min-height:0;padding:4px 9px;margin:0;border-radius:999px;border:1px solid #2d4153;background:#0d1721;color:var(--muted);cursor:pointer}
+.acct-range-btn[aria-pressed="true"]{background:var(--accent);color:#04121f;border-color:var(--accent)}
+.acct-chart-pending{display:flex;justify-content:space-between;align-items:center;gap:8px;background:rgba(98,182,255,.08);border:1px solid rgba(98,182,255,.35);color:var(--accent);border-radius:8px;padding:6px 8px;font-size:11px;margin:0 0 8px}
+.acct-chart-pending[hidden]{display:none}
+.acct-chart-apply,.acct-sheet-close{font-size:10px;font-weight:700;min-height:0;padding:5px 9px;margin:0;border-radius:6px;border:1px solid var(--accent);background:var(--accent);color:#04121f;cursor:pointer}
+.acct-sheet-close{background:#0d1721;color:var(--fg,#e8edf3);border-color:#2d4153}
+.acct-chart{position:relative;margin-top:6px}
+.acct-spark{display:block;width:100%;height:64px;cursor:crosshair;touch-action:none;overflow:visible}
+.acct-spark path,.acct-spark line,.acct-big path,.acct-big line{vector-effect:non-scaling-stroke}
+.acct-line{fill:none;stroke-width:1.6}
+.acct-area{stroke:none;fill-opacity:.14}
+.acct-avg{fill:none;stroke:var(--accent);stroke-width:1.1;stroke-opacity:.85}
+.acct-trend{stroke:#e8edf3;stroke-opacity:.55;stroke-width:1;stroke-dasharray:3 3}
+.acct-cross{stroke:#e8edf3;stroke-opacity:0;stroke-width:1}
+.acct-cross.on{stroke-opacity:.5}
+.acct-good .acct-line{stroke:#35f27b}.acct-good .acct-area,.acct-good .acct-dot{fill:#35f27b}
+.acct-bad .acct-line{stroke:#ff4b4b}.acct-bad .acct-area,.acct-bad .acct-dot{fill:#ff4b4b}
+.acct-flat .acct-line{stroke:#91a0b2}.acct-flat .acct-area,.acct-flat .acct-dot{fill:#91a0b2}
+.finance-card .acct-chart span,.acct-chart-sheet span{display:inline;margin:0;font-size:inherit;color:inherit}
+.acct-trend-row{display:flex;justify-content:space-between;gap:4px;font-size:10px;color:var(--muted);margin-top:3px;white-space:nowrap}
+.finance-card .acct-trend-row span{color:var(--muted)}
+.finance-card .acct-trend-row span.acct-good,.acct-stats b.acct-good{color:#35f27b}
+.finance-card .acct-trend-row span.acct-bad,.acct-stats b.acct-bad{color:#ff4b4b}
+.acct-collect{font-size:10px;color:#ffb547;margin-top:2px}
+.acct-chart-empty{font-size:10px;color:var(--muted);padding:18px 0;text-align:center}
+.acct-tip{position:absolute;top:0;pointer-events:none;background:#0d1721;border:1px solid #2d4153;border-radius:6px;padding:4px 6px;font-size:10px;line-height:1.35;white-space:nowrap;font-variant-numeric:tabular-nums;z-index:2}
+.finance-card .acct-tip span,.finance-card .acct-tip b{display:block}
+.finance-card .acct-tip b{font-size:11px;color:#e8edf3}
+.finance-card .acct-tip .change-up{color:#35f27b}.finance-card .acct-tip .change-down{color:#ff4b4b}.finance-card .acct-tip .acct-flat{color:var(--muted)}
+.acct-chart-sheet{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px;margin-top:10px}
+.acct-chart-sheet[hidden]{display:none}
+.acct-sheet-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px}
+.acct-sheet-head strong{font-size:13px}
+.acct-big{display:block;width:100%;height:auto}
+.acct-big text{fill:var(--muted);font-size:8px}
+.acct-grid{stroke:var(--line);stroke-width:1}
+.acct-legend{display:flex;flex-wrap:wrap;gap:12px;font-size:10px;color:var(--muted);margin-top:4px}
+.acct-legend i{display:inline-block;width:14px;height:0;border-top:2px solid;vertical-align:middle;margin-right:4px}
+.acct-key-line{border-color:#35f27b}.acct-key-avg{border-color:var(--accent)}.acct-key-trend{border-top-style:dashed!important;border-color:#e8edf3}
+.acct-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:8px}
+.acct-stats div{background:#0d1721;border:1px solid var(--line);border-radius:8px;padding:6px;min-width:0}
+.acct-chart-sheet .acct-stats span{display:block;font-size:9px;color:var(--muted)}
+.acct-stats b{font-size:12px;font-variant-numeric:tabular-nums}
+@keyframes acctPatched{from{box-shadow:0 0 0 1px var(--accent) inset}to{box-shadow:0 0 0 1px transparent inset}}
+.acct-patched{animation:acctPatched 1.4s ease-out}
+@media(prefers-reduced-motion:reduce){.acct-patched{animation:none}}

@@ -5,7 +5,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.376');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.377');
 const lu = read('live-updates.js'), cs = read('content.js'), bg = read('background.js'), dash = read('dashboard.js');
 
 // 1. monitor: × = small dot; a monitor hidden by the old × comes back once as the dot; no − button

@@ -227,7 +227,7 @@ const REALM_SCOPED_KEYS = Object.freeze([
   'accountingWeekSales','accountingWeekSalesSummary','accountingWeekRevision','vwapData','vwapWatch','vwapStatus',
   'realmQuarantine','productionEvents','productionRateSnapshots','productionPlans','frozenNetworkPlan',
   'productionRunHours','gameOverlaySnapshot','javascriptDiagnostic','javascriptDiagnosticHistory',
-  'buildingAlarms','productionEventMonitor','accountingWeekLedgerStatus','accountingDayWalkStatus','activeRealmIdentity','realmIsolationNote','vwapLegacyDiscarded',
+  'buildingAlarms','productionEventMonitor','accountingWeekLedgerStatus','accountingDayWalkStatus','accountingDailySeries','activeRealmIdentity','realmIsolationNote','vwapLegacyDiscarded',
   'gameLocalStorageSnapshot','criticalDataBaseline'
 ]);
 
@@ -2044,6 +2044,7 @@ function defaultRealmValue(key){
   if(key==='buildingAlarms'||key==='productionEventMonitor'||key==='resourceImageCacheStatus') return {};
   if(key==='accountingWeekLedgerStatus') return null;
   if(key==='accountingDayWalkStatus') return null;
+  if(key==='accountingDailySeries') return null;
   if(key==='accountingWeekRevision') return 0;
   if(key==='vwapLegacyDiscarded') return false;
   if(key==='productionRunHours') return 24;
@@ -6304,7 +6305,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       try{
         const realm=validRealmNumber(m.realm ?? (String(m.realmKey||'').match(/^realm:(\d+)$/)?.[1]));
         const field=String(m.field||'');
-        const allowed=new Set(['accountingSnapshots','productionRunHours','savedContracts']);
+        const allowed=new Set(['accountingSnapshots','accountingDailySeries','productionRunHours','savedContracts']);
         if(realm==null||!allowed.has(field)){send({ok:false,error:'Invalid realm field.'});return;}
         let value=m.value;
         if(field==='productionRunHours'){
@@ -6313,6 +6314,13 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
           if(!value||typeof value!=='object'||Array.isArray(value)){send({ok:false,error:'Invalid accounting snapshot.'});return;}
           value={...value,realm:Number(value.realm??realm)};
           if(Number(value.realm)!==realm){send({ok:false,error:'Accounting snapshot realm mismatch.'});return;}
+        }else if(field==='accountingDailySeries'){
+          // v2.5.377: per-day figures Manager already read (Day statements / balance sheets), newest 120 days.
+          const days=value&&typeof value.days==='object'&&!Array.isArray(value.days)?value.days:null;
+          if(!days){send({ok:false,error:'Invalid accounting series.'});return;}
+          const num=v=>v==null||v===''||!Number.isFinite(Number(v))?undefined:Number(v);
+          const keep=Object.keys(days).filter(k=>/^\d{4}-\d{2}-\d{2}$/.test(k)).sort().slice(-120);
+          value={v:1,days:Object.fromEntries(keep.map(k=>{const d=days[k]||{};const row={};for(const f of ['sales','operatingExpenses','netIncome','currentLiabilities']){const x=num(d[f]);if(x!==undefined)row[f]=x;}return [k,row];}))};
         }else if(field==='savedContracts'){
           if(!Array.isArray(value)){send({ok:false,error:'Invalid saved-contract list.'});return;}
           value=value.map(x=>x&&typeof x==='object'?{...x}:x);

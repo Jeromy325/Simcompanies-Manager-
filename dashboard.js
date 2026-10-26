@@ -198,7 +198,7 @@ async function get(attempt=0){
     if(physical[`scmGameOverlaySnapshot:${realmNumber}`]&&typeof physical[`scmGameOverlaySnapshot:${realmNumber}`]==='object') store={...(store||{}),gameOverlaySnapshot:physical[`scmGameOverlaySnapshot:${realmNumber}`]};
     productionPlannerState=physical[`scmProductionPlannerState:${realmNumber}`]&&typeof physical[`scmProductionPlannerState:${realmNumber}`]==='object'?physical[`scmProductionPlannerState:${realmNumber}`]:null;
   }
-  const empty={authData:null,companyData:null,buildings:null,warehouseResources:[],gameState:null,resourceCatalog:null,endpointData:{},apiEndpoints:[],history:{},contracts:[],savedContracts:[],contractEvents:[],marketCache:{},marketDebug:{},marketTicker:null,marketQueue:[],marketQueueCursor:0,marketLastRequestAt:null,marketQueueStatus:null,liveMarketData:null,liveMarketProduct:null,liveMarketProductCache:{},liveMarketPriceData:null,resourceImageData:{},resourceImageCache:{},resourceImageMeta:{},resourceImageCacheStatus:null,warehouseCapture:null,lastSync:null,syncStatus:'No active realm data',syncError:null,fullSyncDiagnostics:null,warehouseCostDetails:{},accountingLastComputed:null,accountingLastComputedIncome:null,accountingCapture:{},accountingSnapshots:{},tickerSnapshots:{},sellingHistory:{},accountingWeekSales:{},accountingWeekSalesSummary:null,vwapData:null,vwapWatch:null,vwapStatus:null,realmQuarantine:{},productionEvents:[],productionRateSnapshots:{},productionPlans:{},frozenNetworkPlan:null,productionPlannerState:null,gameOverlaySnapshot:null,productionRunHours:24,accountingWeekLedgerStatus:null,accountingDayWalkStatus:null,javascriptDiagnostic:null,javascriptDiagnosticHistory:[]};
+  const empty={authData:null,companyData:null,buildings:null,warehouseResources:[],gameState:null,resourceCatalog:null,endpointData:{},apiEndpoints:[],history:{},contracts:[],savedContracts:[],contractEvents:[],marketCache:{},marketDebug:{},marketTicker:null,marketQueue:[],marketQueueCursor:0,marketLastRequestAt:null,marketQueueStatus:null,liveMarketData:null,liveMarketProduct:null,liveMarketProductCache:{},liveMarketPriceData:null,resourceImageData:{},resourceImageCache:{},resourceImageMeta:{},resourceImageCacheStatus:null,warehouseCapture:null,lastSync:null,syncStatus:'No active realm data',syncError:null,fullSyncDiagnostics:null,warehouseCostDetails:{},accountingLastComputed:null,accountingLastComputedIncome:null,accountingCapture:{},accountingSnapshots:{},tickerSnapshots:{},sellingHistory:{},accountingWeekSales:{},accountingWeekSalesSummary:null,vwapData:null,vwapWatch:null,vwapStatus:null,realmQuarantine:{},productionEvents:[],productionRateSnapshots:{},productionPlans:{},frozenNetworkPlan:null,productionPlannerState:null,gameOverlaySnapshot:null,productionRunHours:24,accountingWeekLedgerStatus:null,accountingDayWalkStatus:null,accountingDailySeries:null,javascriptDiagnostic:null,javascriptDiagnosticHistory:[]};
   const scoped={...empty};
   if(store){for(const key of Object.keys(empty)){if(Object.prototype.hasOwnProperty.call(store,key))scoped[key]=store[key];}}
   const result={...scoped,productionPlannerState,realmStores:viewKey?{[viewKey]:scoped}:{},activeRealmKey:s.activeRealmKey??null,selectedRealm:s.selectedRealm!=null?Number(s.selectedRealm):null,viewRealm:activeRealm!=null?Number(activeRealm):null,captureRealm:activeRealm!=null?Number(activeRealm):null,apiBase:s.apiBase,syncMinutes:s.syncMinutes};
@@ -690,6 +690,16 @@ function gameOperatingExpenses(e){
   if(!e||typeof e!=='object'||!('marketFees' in e||'salariesCosts' in e))return null;
   const v=k=>Number(e[k])||0; return v('constructionCosts')+v('salariesCosts')+v('trainingCosts')+v('poachingCosts')+v('marketFees');
 }
+function accountingDayBalanceSheets(endpointData,realmMatches=()=>true){
+  const out=new Map();const n=v=>v==null||v===''||!Number.isFinite(Number(v))?null:Number(v);
+  for(const [k,item] of Object.entries(endpointData||{})){
+    if(!/\/api\/v2\/companies\/(?:me|\d+)\/balance-sheet\/day\/\d+\/?$/i.test(k))continue;
+    const e=item?.data; if(Number(item?.status)!==200||!e||typeof e!=='object'||e.isComputed===false||!realmMatches(item))continue;
+    const t=Date.parse(String(e.date||'').replace(' ','T')); if(!Number.isFinite(t))continue;
+    out.set(Math.round(t/60000),{accountsPayable:n(e.accountsPayable),bondsPayable:n(e.bondsPayable)});
+  }
+  return out;
+}
 function accountingDayStatements(endpointData,realmMatches=()=>true){
   const out=new Map();
   for(const [k,item] of Object.entries(endpointData||{})){
@@ -970,6 +980,10 @@ function accounting(s, realmStore=null){
   // Operating expenses and Net income. Matched to history rows by the statement's end date.
   const dayIncome=accountingDayStatements(endpointData,realmMatches);
   for(const r of history){const st=dayIncome.get(Math.round(r.t/60000));if(st){r.sales=st.sales;r.operatingExpenses=st.operatingExpenses;r.netIncome=st.netIncome;r.statement=true;}}
+  // v2.5.377: Current Liabilities per completed day = the Day balance sheet's accounts payable, or (as for the
+  // card) that day's total liabilities minus its bonds payable. Matched to history rows by the sheet's date.
+  const daySheets=accountingDayBalanceSheets(endpointData,realmMatches);
+  for(const r of history){const bsd=daySheets.get(Math.round(r.t/60000));if(!bsd)continue;const cl=bsd.accountsPayable!=null?Math.abs(bsd.accountsPayable):(r.liabilities!=null&&bsd.bondsPayable!=null?Math.max(0,Math.abs(r.liabilities)-Math.abs(bsd.bondsPayable)):null);if(cl!=null)r.currentLiabilities=cl;}
   const operatingExpenses=gameOperatingExpenses(income);
   const previousPeriod=accountingPreviousPeriod(history,period.date);
   return {cash,revenue:finalRevenue,expenses,operatingExpenses,profit:finalProfit,netMargin:finalMargin,assets,liabilities,inventory,accountsReceivable,accountsPayable:payable,bondsPayable,currentAssets,currentLiabilities,period,history,previousPeriod,ledgerCheck,source:{bs,cf,recent,pf,income},sourceType: income ? 'income-statement' : (cf ? (transactionRows.length?'cash-flow-transactions':'cash-flow-derived') : 'unavailable')};
@@ -1693,7 +1707,7 @@ async function renderAccountingWalkSchedule(s){
   if(el.contains(document.activeElement)&&document.activeElement?.id==='acctWalkOffset')return;
   let sch=null; try{sch=(await chrome.storage.local.get({scmAccountingWalkSchedule:null})).scmAccountingWalkSchedule;}catch{}
   const realm=Number.isFinite(Number(s?.viewRealm))?Number(s.viewRealm):null;
-  el.innerHTML=accountingWalkScheduleHtml(sch||{},null,realm);
+  scmSetHTML(el,accountingWalkScheduleHtml(sch||{},null,realm));
   const head=document.querySelector('#acctWalkHead'); if(head)head.textContent=accountingWalkHeadText(sch||{});
 }
 function accountingWalkRealm(){const s=window.__scmState||{};const r=Number(s.viewRealm??s.selectedRealm);return Number.isFinite(r)?r:null;}
@@ -1745,8 +1759,195 @@ function accountingOverview(a,previous){
     return `<div class="finance-change ${up?'change-up':'change-down'}"><span class="finance-change-arrow">${up?'↑':'↓'}</span><div class="finance-change-values"><strong>${delta>0?'+':''}${money(delta)}</strong><small>${pct==null?'N/A':`${pct>0?'+':''}${pct.toFixed(2)}%`}</small></div></div>`;
   };
   const basis=previous?.date?`<p class="muted finance-basis">Changes compare with the day ending ${escapeHtml(new Date(previous.date).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}))} (game history).</p>`:'';
-  return basis+`<div class="finance-card-grid">${cards.map(([label,key,value])=>`<div class="finance-card"><span class="finance-label">${escapeHtml(label)}</span><div class="finance-value">${value==null?'—':money(value)}</div>${changeInfo(value,previous?.[key])}</div>`).join('')}</div>`;
+  // v2.5.377: each card carries data-acct-part blocks so a background refresh patches only the blocks whose
+  // numbers changed (scmPatchParts) and the chart area (data-acct-chart) is left to renderAccountingCharts.
+  return `<div data-acct-part="basis">${basis}</div><div class="acct-chart-bar"><div class="acct-range" role="group" aria-label="Chart range">${ACCT_CHART_RANGES.map(n=>`<button type="button" class="acct-range-btn" data-acct-range="${n}" aria-pressed="${n===acctChartRange}">${n}D</button>`).join('')}</div></div><div class="acct-chart-pending" data-acct-pending hidden><span></span><button type="button" class="acct-chart-apply" data-acct-apply>Update charts</button></div><div class="finance-card-grid">${cards.map(([label,key,value])=>`<div class="finance-card acct-chart-card" data-acct-card="${key}"><button type="button" class="acct-chart-open" data-acct-open="${key}" aria-expanded="false" aria-label="Open ${escapeHtml(label)} chart">${ACCT_CHART_ICON}</button><span class="finance-label">${escapeHtml(label)}</span><div data-acct-part="${key}"><div class="finance-value">${value==null?'—':money(value)}</div>${changeInfo(value,previous?.[key])}</div><div class="acct-chart" data-acct-chart="${key}"></div></div>`).join('')}</div><div class="acct-chart-sheet" data-acct-sheet hidden></div>`;
 }
+
+// v2.5.377 Accounting card charts: up to 90 days per card, straight trend line + 7-day average, one 7D/30D/90D
+// range for every card, tap readout (date, value, change from the day before). Gaps are joined.
+// Background refreshes never rebuild the cards: values are patched in place, and while a chart is being touched
+// or its full view is open, new chart data waits behind an "Update charts" button.
+const ACCT_CHART_RANGES=[7,30,90];
+const ACCT_CHART_DAY=86400000;
+const ACCT_SERIES_KEEP_DAYS=120;
+const ACCT_CHART_ICON='<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 11h10M2 8l3-3 2 2 4-5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+// Card key -> daily history field. Revenue / Operating expenses / Profit come from the game's Day statements
+// (Profit = Net income); Current Liabilities from the game's Day balance sheets. Older days come from
+// accountingDailySeries, which keeps what Manager has already read (nothing extra is requested).
+const ACCT_CHART_FIELDS={cash:'cash',revenue:'sales',operatingExpenses:'operatingExpenses',profit:'netIncome',assets:'assets',liabilities:'liabilities',inventory:'inventory',currentAssets:'currentAssets',currentLiabilities:'currentLiabilities'};
+const ACCT_CHART_TITLES={cash:'Cash & receivables',profit:'Net income'};
+// A rising line is bad news for these cards (Operating expenses is stored negative, so rising is good).
+const ACCT_CHART_RISING_BAD=new Set(['liabilities','currentLiabilities']);
+let acctChartRange=90, acctChartOpenKey=null, acctChartTouching=false, acctChartPending=null, acctChartPendingCount=0, acctChartDrawn=null;
+function acctDayKey(t){const d=new Date(t);return Number.isFinite(d.getTime())?d.toISOString().slice(0,10):null;}
+function accountingDailySeriesMerge(oldSeries,history){
+  // Saves each completed day's statement / balance-sheet figures by the day's end date, newest 120 days.
+  const days={...(oldSeries&&typeof oldSeries.days==='object'?oldSeries.days:{})};
+  for(const r of Array.isArray(history)?history:[]){
+    const k=acctDayKey(r?.t);if(!k)continue;const cur={...(days[k]||{})};
+    const put=(f,v)=>{if(v!=null&&v!==''&&Number.isFinite(Number(v)))cur[f]=Number(v);};
+    if(r.statement){put('sales',r.sales);put('operatingExpenses',r.operatingExpenses);put('netIncome',r.netIncome);}
+    put('currentLiabilities',r.currentLiabilities);
+    if(Object.keys(cur).length)days[k]=cur;
+  }
+  const keep=Object.keys(days).sort().slice(-ACCT_SERIES_KEEP_DAYS);
+  return {v:1,days:Object.fromEntries(keep.map(k=>[k,days[k]]))};
+}
+function updateAccountingDailySeries(s,a){
+  const realm=realmSnapshotStore(s);
+  const old=realm?.store?.accountingDailySeries||s.accountingDailySeries||null;
+  const next=accountingDailySeriesMerge(old,a?.history);
+  if(JSON.stringify(old?.days||{})!==JSON.stringify(next.days)&&realm){
+    realm.store.accountingDailySeries=next;realm.stores[realm.key]=realm.store;
+    chrome.runtime.sendMessage({type:'SAVE_REALM_FIELD',realmKey:realm.key,field:'accountingDailySeries',value:next}).catch(()=>{});
+  }
+  s.accountingDailySeries=next;
+  return next;
+}
+function accountingChartPoints(history,series,key,range){
+  // One point per game day: [t, value]. Game history first, saved days fill fields history lacks.
+  const field=ACCT_CHART_FIELDS[key];if(!field)return [];
+  const saved=series?.days||{};const byDay=new Map();
+  for(const r of Array.isArray(history)?history:[]){const k=acctDayKey(r?.t);if(k)byDay.set(k,{t:r.t,v:r[field]});}
+  for(const [k,row] of Object.entries(saved)){const cur=byDay.get(k);if(cur){if(cur.v==null)cur.v=row?.[field];}else byDay.set(k,{t:Date.parse(k+'T00:00:00Z'),v:row?.[field],saved:true});}
+  const pts=[...byDay.values()].filter(p=>p.v!=null&&Number.isFinite(Number(p.v))&&Number.isFinite(p.t)).map(p=>[p.t,Number(p.v)]).sort((x,y)=>x[0]-y[0]);
+  if(!pts.length)return pts;
+  const end=pts[pts.length-1][0],from=end-(range-1)*ACCT_CHART_DAY-ACCT_CHART_DAY/2;
+  return pts.filter(p=>p[0]>=from);
+}
+function accountingChartTrend(pts){
+  // Least-squares straight line; x in days so the slope reads per day.
+  if(pts.length<2)return null;const t0=pts[0][0];let sx=0,sy=0,sxy=0,sxx=0;const n=pts.length;
+  for(const [t,y] of pts){const x=(t-t0)/ACCT_CHART_DAY;sx+=x;sy+=y;sxy+=x*y;sxx+=x*x;}
+  const den=n*sxx-sx*sx;if(!den)return null;const m=(n*sxy-sx*sy)/den;const b=(sy-m*sx)/n;
+  return {m,at:t=>m*((t-t0)/ACCT_CHART_DAY)+b};
+}
+function accountingChartAverage(pts,days=7){
+  return pts.map(([t])=>{const w=pts.filter(([u])=>u<=t&&u>t-days*ACCT_CHART_DAY);return [t,w.reduce((s,[,v])=>s+v,0)/w.length];});
+}
+function acctCompact(v){const n=Number(v);return Number.isFinite(n)?n.toLocaleString(undefined,{style:'currency',currency:'USD',notation:'compact',maximumFractionDigits:2}):'—';}
+function acctTone(key,m){if(!m)return 'flat';const up=m>0;return (ACCT_CHART_RISING_BAD.has(key)?!up:up)?'good':'bad';}
+function accountingSparkline(key,pts){
+  if(!pts.length)return '<div class="acct-chart-empty">No daily history yet</div>';
+  const W=160,H=64,P=4,t0=pts[0][0],t1=pts[pts.length-1][0];
+  let lo=Math.min(...pts.map(p=>p[1])),hi=Math.max(...pts.map(p=>p[1]));if(lo===hi){lo-=1;hi+=1;}
+  const X=t=>t1===t0?W/2:P+(t-t0)*(W-2*P)/(t1-t0),Y=v=>H-P-(v-lo)*(H-2*P)/(hi-lo);
+  const tr=accountingChartTrend(pts),tone=acctTone(key,tr?.m);
+  const path=list=>list.map((p,i)=>(i?'L':'M')+X(p[0]).toFixed(1)+','+Y(p[1]).toFixed(1)).join('');
+  const line=path(pts),e=pts[pts.length-1];
+  const area=pts.length>1?`<path class="acct-area" d="${line}L${X(t1).toFixed(1)},${H}L${X(t0).toFixed(1)},${H}Z"/>`:'';
+  const avg=pts.length>2?`<path class="acct-avg" d="${path(accountingChartAverage(pts))}"/>`:'';
+  const trend=tr?`<line class="acct-trend" x1="${X(t0).toFixed(1)}" y1="${Y(tr.at(t0)).toFixed(1)}" x2="${X(t1).toFixed(1)}" y2="${Y(tr.at(t1)).toFixed(1)}"/>`:'';
+  return `<svg class="acct-spark acct-${tone}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(key)} trend" data-acct-spark="${escapeHtml(key)}">${area}<path class="acct-line" d="${line}"/>${avg}${trend}<circle class="acct-dot" cx="${X(e[0]).toFixed(1)}" cy="${Y(e[1]).toFixed(1)}" r="2.4"/><line class="acct-cross" x1="0" x2="0" y1="0" y2="${H}"/></svg>`;
+}
+function accountingChartFooter(key,pts,range){
+  const tr=accountingChartTrend(pts),tone=acctTone(key,tr?.m);
+  const have=pts.length?Math.round((pts[pts.length-1][0]-pts[0][0])/ACCT_CHART_DAY)+1:0;
+  const collecting=range>have?`<div class="acct-collect">Collecting · ${have} of ${range} days</div>`:'';
+  return `<div class="acct-trend-row"><span>${range}D trend</span><span class="acct-${tone}">${tr?`${tr.m>=0?'+':''}${acctCompact(tr.m)}/day`:'needs 2 days'}</span></div>${collecting}`;
+}
+function accountingChartSheet(key,label,pts,range){
+  const W=340,H=170,L=50,R=8,T=8,B=20;
+  if(!pts.length)return `<div class="acct-sheet-head"><strong>${escapeHtml(label)}</strong><button type="button" class="acct-sheet-close" data-acct-close>Close</button></div><p class="muted">No daily history yet.</p>`;
+  const t0=pts[0][0],t1=pts[pts.length-1][0];let lo=Math.min(...pts.map(p=>p[1])),hi=Math.max(...pts.map(p=>p[1]));if(lo===hi){lo-=1;hi+=1;}const pad=(hi-lo)*.08;lo-=pad;hi+=pad;
+  const X=t=>t1===t0?(L+W-R)/2:L+(t-t0)*(W-L-R)/(t1-t0),Y=v=>T+(hi-v)*(H-T-B)/(hi-lo);
+  const tr=accountingChartTrend(pts),tone=acctTone(key,tr?.m);
+  const path=list=>list.map((p,i)=>(i?'L':'M')+X(p[0]).toFixed(1)+','+Y(p[1]).toFixed(1)).join('');
+  const day=t=>new Date(t).toLocaleDateString(undefined,{month:'short',day:'numeric'});
+  const grid=[0,1,2,3].map(i=>lo+(hi-lo)*i/3).map(v=>`<line class="acct-grid" x1="${L}" x2="${W-R}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}"/><text x="${L-4}" y="${(Y(v)+3).toFixed(1)}" text-anchor="end">${escapeHtml(acctCompact(v))}</text>`).join('');
+  const ticks=(t1===t0?[t0]:[t0,t0+(t1-t0)/2,t1]).map((t,i,a)=>`<text x="${X(t).toFixed(1)}" y="${H-6}" text-anchor="${a.length===1?'middle':['start','middle','end'][i]}">${escapeHtml(day(t))}</text>`).join('');
+  const line=path(pts),vals=pts.map(p=>p[1]),change=tr?tr.at(t1)-tr.at(t0):null;
+  const body=pts.length>1?`<path class="acct-area" d="${line}L${X(t1).toFixed(1)},${Y(lo).toFixed(1)}L${X(t0).toFixed(1)},${Y(lo).toFixed(1)}Z"/><path class="acct-line" d="${line}"/>`:`<circle class="acct-dot" cx="${X(t0).toFixed(1)}" cy="${Y(pts[0][1]).toFixed(1)}" r="3"/>`;
+  const avg=pts.length>2?`<path class="acct-avg" d="${path(accountingChartAverage(pts))}"/>`:'';
+  const trend=tr?`<line class="acct-trend" x1="${X(t0).toFixed(1)}" y1="${Y(tr.at(t0)).toFixed(1)}" x2="${X(t1).toFixed(1)}" y2="${Y(tr.at(t1)).toFixed(1)}"/>`:'';
+  const have=Math.round((t1-t0)/ACCT_CHART_DAY)+1;
+  return `<div class="acct-sheet-head"><strong>${escapeHtml(label)} · ${have} day${have===1?'':'s'}</strong><button type="button" class="acct-sheet-close" data-acct-close>Close</button></div><svg class="acct-big acct-${tone}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(label)} chart">${grid}${body}${avg}${trend}${ticks}</svg><div class="acct-legend"><span><i class="acct-key-line"></i>Daily value</span><span><i class="acct-key-avg"></i>7-day average</span><span><i class="acct-key-trend"></i>Trend</span></div><div class="acct-stats"><div><span>High</span><b>${escapeHtml(acctCompact(Math.max(...vals)))}</b></div><div><span>Low</span><b>${escapeHtml(acctCompact(Math.min(...vals)))}</b></div><div><span>Trend change</span><b class="acct-${tone}">${change==null?'—':`${change>=0?'+':''}${escapeHtml(acctCompact(change))}`}</b></div></div>`;
+}
+function scmPatchParts(root,html){
+  // Excel-style refresh: rebuild only when the card layout itself changed; otherwise replace just the
+  // [data-acct-part] blocks whose HTML differs. Untouched blocks keep their DOM, focus and hover state.
+  if(!root)return [];
+  const tpl=document.createElement('template');tpl.innerHTML=html;
+  const layout=[...tpl.content.querySelectorAll('[data-acct-part]')].map(e=>e.dataset.acctPart).join('|');
+  if(root.__scmLayout!==layout){root.innerHTML=html;root.__scmLayout=layout;root.__scmParts={};root.querySelectorAll('[data-acct-part]').forEach(e=>{root.__scmParts[e.dataset.acctPart]=e.innerHTML;});return null;}
+  const changed=[];
+  for(const src of tpl.content.querySelectorAll('[data-acct-part]')){const k=src.dataset.acctPart;if(root.__scmParts[k]===src.innerHTML)continue;const dst=root.querySelector(`[data-acct-part="${CSS.escape(k)}"]`);if(!dst)continue;dst.innerHTML=src.innerHTML;root.__scmParts[k]=src.innerHTML;changed.push(k);}
+  return changed;
+}
+function scmSetHTML(el,html){
+  // Writes only when the section's HTML changed, so an unchanged section keeps its DOM between refreshes.
+  if(!el||el.__scmHtml===html)return false;el.innerHTML=html;el.__scmHtml=html;return true;
+}
+function renderAccountingOverview(root,a,previous,history,series){
+  if(!root)return;
+  const changed=scmPatchParts(root,accountingOverview(a,previous));
+  if(changed)for(const k of changed){const card=root.querySelector(`[data-acct-card="${CSS.escape(k)}"]`);if(card){card.classList.remove('acct-patched');void card.offsetWidth;card.classList.add('acct-patched');}}
+  root.querySelectorAll('[data-acct-range]').forEach(b=>b.setAttribute('aria-pressed',String(Number(b.dataset.acctRange)===acctChartRange)));
+  const data={history,series};
+  // Nothing to hold yet (first draw, or no daily history drawn so far): draw straight away.
+  if(changed===null||!acctChartDrawn?.hasData){acctChartPending=null;renderAccountingCharts(root,data);return;}
+  if(acctChartTouching||acctChartOpenKey){
+    if(accountingChartSignature(data)!==acctChartDrawn.sig){acctChartPending=data;acctChartPendingCount=(acctChartPendingCount||0)+1;}
+    accountingChartPendingBar(root);return;
+  }
+  renderAccountingCharts(root,data);
+}
+function accountingChartSignature(data){return JSON.stringify(Object.keys(ACCT_CHART_FIELDS).map(k=>accountingChartPoints(data.history,data.series,k,acctChartRange)));}
+function accountingChartPendingBar(root){
+  const bar=root?.querySelector('[data-acct-pending]');if(!bar)return;
+  const n=acctChartPending?acctChartPendingCount:0;bar.hidden=!n;
+  if(n)bar.querySelector('span').textContent=`${n} update${n===1?'':'s'} waiting while you look`;
+}
+function renderAccountingCharts(root,data){
+  if(!root||!data)return;
+  const sig=accountingChartSignature(data);
+  const labels=Object.fromEntries([...root.querySelectorAll('[data-acct-card]')].map(c=>[c.dataset.acctCard,c.querySelector('.finance-label')?.textContent||c.dataset.acctCard]));
+  for(const key of Object.keys(ACCT_CHART_FIELDS)){
+    const box=root.querySelector(`[data-acct-chart="${key}"]`);if(!box)continue;
+    const pts=accountingChartPoints(data.history,data.series,key,acctChartRange);
+    const html=accountingSparkline(key,pts)+accountingChartFooter(key,pts,acctChartRange);
+    if(box.__scmHtml!==html){box.innerHTML=html;box.__scmHtml=html;}
+    box.__acctPts=pts;
+  }
+  acctChartDrawn={sig,data,hasData:/\d/.test(sig)};acctChartPending=null;acctChartPendingCount=0;accountingChartPendingBar(root);
+  const sheet=root.querySelector('[data-acct-sheet]');
+  root.querySelectorAll('[data-acct-open]').forEach(b=>b.setAttribute('aria-expanded',String(b.dataset.acctOpen===acctChartOpenKey)));
+  if(sheet){if(acctChartOpenKey&&labels[acctChartOpenKey]){const k=acctChartOpenKey;sheet.innerHTML=accountingChartSheet(k,ACCT_CHART_TITLES[k]||labels[k],accountingChartPoints(data.history,data.series,k,acctChartRange),acctChartRange);sheet.hidden=false;}else{sheet.hidden=true;sheet.innerHTML='';}}
+}
+function accountingChartFlush(){
+  if(acctChartTouching||acctChartOpenKey||!acctChartPending)return;
+  renderAccountingCharts(document.getElementById('accountingOverview'),acctChartPending);
+}
+function accountingChartTip(svg,clientX){
+  const box=svg.closest('[data-acct-chart]');const pts=box?.__acctPts||[];if(!pts.length)return;
+  const r=svg.getBoundingClientRect();if(!r.width)return;
+  const t0=pts[0][0],t1=pts[pts.length-1][0];const at=t0+Math.min(1,Math.max(0,((clientX-r.left)/r.width*160-4)/152))*(t1-t0);
+  let i=0;for(let j=1;j<pts.length;j++)if(Math.abs(pts[j][0]-at)<Math.abs(pts[i][0]-at))i=j;
+  const [t,v]=pts[i],prev=i>0?pts[i-1][1]:null;
+  const x=t1===t0?80:4+(t-t0)*152/(t1-t0);const cross=svg.querySelector('.acct-cross');if(cross){cross.setAttribute('x1',x.toFixed(1));cross.setAttribute('x2',x.toFixed(1));cross.classList.add('on');}
+  let tip=box.querySelector('.acct-tip');if(!tip){tip=document.createElement('div');tip.className='acct-tip';box.appendChild(tip);}
+  const d=prev==null?null:roundCurrencyUp(v-prev),pct=prev?d/Math.abs(prev)*100:null;
+  const date=new Date(t).toLocaleDateString(undefined,{month:'short',day:'numeric'});
+  tip.innerHTML=`<span>${escapeHtml(date)}</span><b>${escapeHtml(money(roundCurrencyUp(v)))}</b>${d==null?'<span class="acct-flat">First day</span>':`<span class="${d>0?'change-up':d<0?'change-down':'acct-flat'}">${d>0?'+':''}${escapeHtml(money(d))}${pct==null?'':` (${pct>0?'+':''}${pct.toFixed(2)}%)`}</span>`}`;
+  const left=x/160*r.width;tip.style.left=Math.max(0,Math.min(r.width-tip.offsetWidth,left-tip.offsetWidth/2))+'px';
+}
+function accountingChartTipEnd(svg){
+  const box=svg?.closest?.('[data-acct-chart]');box?.querySelector('.acct-tip')?.remove();svg?.querySelector?.('.acct-cross')?.classList.remove('on');
+  acctChartTouching=false;accountingChartFlush();
+}
+document.addEventListener('pointermove',e=>{const svg=e.target?.closest?.('[data-acct-spark]');if(!svg)return;acctChartTouching=true;accountingChartTip(svg,e.clientX);});
+document.addEventListener('pointerdown',e=>{const svg=e.target?.closest?.('[data-acct-spark]');if(!svg)return;acctChartTouching=true;accountingChartTip(svg,e.clientX);});
+document.addEventListener('pointerout',e=>{const svg=e.target?.closest?.('[data-acct-spark]');if(svg&&!svg.contains(e.relatedTarget))accountingChartTipEnd(svg);});
+document.addEventListener('pointerup',e=>{if(e.pointerType==='mouse')return;const svg=e.target?.closest?.('[data-acct-spark]');if(svg)setTimeout(()=>accountingChartTipEnd(svg),1500);});
+document.addEventListener('click',e=>{
+  const root=document.getElementById('accountingOverview');if(!root||!root.contains(e.target))return;
+  const range=e.target.closest('[data-acct-range]'),open=e.target.closest('[data-acct-open]'),close=e.target.closest('[data-acct-close]'),apply=e.target.closest('[data-acct-apply]');
+  if(range){acctChartRange=Number(range.dataset.acctRange)||90;root.querySelectorAll('[data-acct-range]').forEach(b=>b.setAttribute('aria-pressed',String(b===range)));renderAccountingCharts(root,acctChartPending||acctChartDrawn?.data);}
+  else if(open){acctChartOpenKey=acctChartOpenKey===open.dataset.acctOpen?null:open.dataset.acctOpen;renderAccountingCharts(root,acctChartPending||acctChartDrawn?.data);}
+  else if(close){acctChartOpenKey=null;renderAccountingCharts(root,acctChartPending||acctChartDrawn?.data);}
+  else if(apply){renderAccountingCharts(root,acctChartPending||acctChartDrawn?.data);}
+});
 
 function renderFullSyncDiagnostics(s){
   // Diagnostic rendering must never be able to break the main dashboard render.
@@ -3442,7 +3643,7 @@ function render(s){
    $('#accountingLiveStatus').textContent=latestTime
      ?`Last updated: ${new Date(latestTime).toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'})}`
      :'Waiting for latest financial response';
-} if($('#accountingOverview'))$('#accountingOverview').innerHTML=accountingOverview(accountingDisplay,accountingPeriodView==='current'?accountingComparisonBase(a):null); if($('#accountingHistory')){$('#accountingHistory').innerHTML=accountingHistoryTable(a.history,(viewStore||s)?.accountingDayWalkStatus||null);renderAccountingWalkSchedule(s);scmApplyCollapse($('#accountingHistory'));} if($('#accountingBalanceSummary'))$('#accountingBalanceSummary').innerHTML=`<div class="overview-stat-grid accounting-balance-summary"><div class="overview-stat-card"><span>Cash</span><strong>${money(a.cash)}</strong></div><div class="overview-stat-card"><span>Accounts Receivable</span><strong>${money(a.accountsReceivable)}</strong></div><div class="overview-stat-card"><span>Inventory</span><strong>${money(a.inventory)}</strong></div><div class="overview-stat-card"><span>Current Assets</span><strong>${money(a.currentAssets)}</strong></div><div class="overview-stat-card"><span>Accounts Payable</span><strong>${money(a.accountsPayable)}</strong></div><div class="overview-stat-card"><span>Bonds Payable</span><strong>${money(a.bondsPayable)}</strong></div><div class="overview-stat-card"><span>Current Liabilities</span><strong>${money(a.currentLiabilities)}</strong></div><div class="overview-stat-card"><span>Total Assets</span><strong>${money(a.assets)}</strong></div><div class="overview-stat-card"><span>Total Liabilities</span><strong>${money(a.liabilities)}</strong></div></div>`; if($('#accountingCashflowSummary'))$('#accountingCashflowSummary').innerHTML=accountingCashflowSummary(a.source?.cf); if($('#accountingIncomeStatement'))$('#accountingIncomeStatement').innerHTML=accountingIncomeStatement(a.source?.income); if($('#balanceDetails'))$('#balanceDetails').innerHTML=buildBalanceSections(a.source?.bs); if($('#accountingRatios'))$('#accountingRatios').innerHTML=accountingFinancialRatios(a.source?.income,a.source?.bs);
+} if($('#accountingOverview'))renderAccountingOverview($('#accountingOverview'),accountingDisplay,accountingPeriodView==='current'?accountingComparisonBase(a):null,a.history,updateAccountingDailySeries(s,a)); if($('#accountingHistory')){if(scmSetHTML($('#accountingHistory'),accountingHistoryTable(a.history,(viewStore||s)?.accountingDayWalkStatus||null)))scmApplyCollapse($('#accountingHistory'));renderAccountingWalkSchedule(s);} if($('#accountingBalanceSummary'))scmSetHTML($('#accountingBalanceSummary'),`<div class="overview-stat-grid accounting-balance-summary"><div class="overview-stat-card"><span>Cash</span><strong>${money(a.cash)}</strong></div><div class="overview-stat-card"><span>Accounts Receivable</span><strong>${money(a.accountsReceivable)}</strong></div><div class="overview-stat-card"><span>Inventory</span><strong>${money(a.inventory)}</strong></div><div class="overview-stat-card"><span>Current Assets</span><strong>${money(a.currentAssets)}</strong></div><div class="overview-stat-card"><span>Accounts Payable</span><strong>${money(a.accountsPayable)}</strong></div><div class="overview-stat-card"><span>Bonds Payable</span><strong>${money(a.bondsPayable)}</strong></div><div class="overview-stat-card"><span>Current Liabilities</span><strong>${money(a.currentLiabilities)}</strong></div><div class="overview-stat-card"><span>Total Assets</span><strong>${money(a.assets)}</strong></div><div class="overview-stat-card"><span>Total Liabilities</span><strong>${money(a.liabilities)}</strong></div></div>`); if($('#accountingCashflowSummary'))scmSetHTML($('#accountingCashflowSummary'),accountingCashflowSummary(a.source?.cf)); if($('#accountingIncomeStatement'))scmSetHTML($('#accountingIncomeStatement'),accountingIncomeStatement(a.source?.income)); if($('#balanceDetails'))scmSetHTML($('#balanceDetails'),buildBalanceSections(a.source?.bs)); if($('#accountingRatios'))scmSetHTML($('#accountingRatios'),accountingFinancialRatios(a.source?.income,a.source?.bs));
  renderWarehouseMarketTimestamp(s); try{renderWarehouseRunOut(s);}catch(e){console.error('Run-out render failed',e);} const inventoryRowsEl=$('#inventoryRows'); if(inventoryRowsEl) inventoryRowsEl.innerHTML=rows.length?rows.map(r=>{const marketPrice=cachedMarketPrice(s,r._id,r._quality);const margin=marketPrice!=null&&r._unitCost>0?(marketPrice-r._unitCost)/r._unitCost*100:null;const ri=resourceInfo(r,s);const imgs=ri.imageCandidates||[];const localImage=s.resourceImageCache?.[String(r._id)]||s.resourceImageData?.[String(r._id)]||null;if(!localImage) requestResourceImage(r._id);const srcs=localImage?[localImage,...imgs]:imgs;const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(JSON.stringify(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';const activeCost=activeProductionCostCells(s,r);return `<tr data-warehouse-key="${Number(r._id)}:${Number(r._quality)}"><td><div class="product-cell">${img}<span><strong>${resourceName(r,s)}</strong><small>#${r._id}</small></span></div>${warehouseHeadCost(r)}</td><td>${num(r._qty)}</td><td>${r._quality??'—'}</td><td>${r._unitCost==null?'—':money(r._unitCost)}</td><td>${activeCost.costHtml}</td><td>${activeCost.diffHtml}</td><td data-cell="prod-cost-history">${productionCostHistoryCell(s,r)}</td><td><span class="cell-stack">${marketPrice==null?'—':money(marketPrice)}<small class="market-source">${marketPrice==null?'Market price not captured':'Current market price'}</small></span></td><td class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td></tr>`}).join(''):'<tr><td colspan="9">No warehouse data captured.</td></tr>';
  if(activeTab==='overview'&&$('#cashflowDetails'))$('#cashflowDetails').innerHTML=buildCashflowSections(a.source?.cf,a.source?.recent); if(activeTab==='market'){ renderLiveMarketProduct(s); renderMarketHistory(s); renderMarketAlerts(s); } if(activeTab==='production') renderBuildingPlanner(s);
  renderVwapDiagnostics(s);

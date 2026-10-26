@@ -7,7 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const content = read('content.js'), background = read('background.js');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.376');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.377');
 
 // Run the real matcher. The page lists exchange sellers ("PATO SILICON AND METALS"), so a saved Silicon contract
 // for the same company matched the Electronic components page by page text and injected its price.

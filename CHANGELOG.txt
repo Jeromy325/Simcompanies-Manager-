@@ -1,3 +1,16 @@
+2.5.377 — 2026-10-26 — Accounting: trend charts on every card; background refresh no longer rebuilds the tab
+- All 9 Accounting cards (Cash, Revenue, Operating expenses, Profit, Total Assets, Liabilities, Inventory, Current
+  Assets, Current Liabilities) show a sparkline with a dashed straight trend line and a 7-day average, plus a chart icon
+  (top right) that opens a full chart with axes, high / low and trend change.
+- One 7D / 30D / 90D switch for all cards. Drag or tap a chart: date, value and change from the day before.
+- History: Cash (cash & receivables), Total Assets, Liabilities, Inventory, Current Assets = the game's 90-day history.
+  Revenue, Operating expenses, Profit (Net income) = the game's Day statements; Current Liabilities = Day balance sheets
+  (liabilities − bonds payable). These start with the 7 days the Manager already reads and are saved per realm
+  (accountingDailySeries, newest 120 days), growing to 90. Nothing is added to Sync. Missing days are joined across.
+- Background updates patch only the cards and sections whose numbers changed; nothing else is redrawn, so scroll,
+  open sections and charts stay as they are. While a chart is touched or its full view is open, new chart data waits
+  behind an "Update charts" button.
+
 2.5.376 — 2026-10-25 — Executives: charts
 - Team impact: donut "Where your COO points come from" (each exec's COO skill × its weight, centre = effective COO)
   and donut "Salaries per day".
