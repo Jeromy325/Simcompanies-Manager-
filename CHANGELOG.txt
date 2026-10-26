@@ -1,3 +1,13 @@
+2.5.380 — 2026-10-26 — Sync has priority over background work
+- R2 Sync took 239 s. While Sync runs (setup, the three targets and the post-sync steps), background work now waits
+  and resumes once Sync ends: market price (VWAP) stages, warehouse/overlay refreshes and endpoint-seen writes.
+  Before, the VWAP stage rescheduled itself every second with a storage write (162 times in one Sync) and four
+  warehouse refreshes ran in the middle of it.
+- Game traffic captured during Sync setup is no longer saved ahead of Sync's own writes (cost 57 s before the realm
+  was activated). Sync saves the data it needs itself.
+- Sync's own saves wait in line (up to 30 s) instead of timing out after 8 s; 6 of 7 Accounting saves had timed out
+  and forced a slow fallback that clicked through the game's Accounting page.
+
 2.5.379 — 2026-10-26 — Product images: 31 images that never loaded now load
 - "Product images checked · partial: 31 resource image(s) failed to validate": the bundled image list guessed 31 wrong
   file names (e.g. smartphones.png; the game uses smart-phones.png), so those products never got a picture.

@@ -5,7 +5,7 @@ const path = require('path');
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
 const manifest = JSON.parse(read('manifest.json'));
-assert.equal(manifest.version, '2.5.379');
+assert.equal(manifest.version, '2.5.380');
 assert.ok(manifest.permissions.includes('notifications'), 'notifications permission');
 const bg = read('background.js');
 const fnSrc = bg.slice(bg.indexOf('function productionFinishAlarms('), bg.indexOf('async function scheduleProductionFinishAlarms('));

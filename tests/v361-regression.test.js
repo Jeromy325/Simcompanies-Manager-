@@ -5,7 +5,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.379');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.380');
 const lu = read('live-updates.js'), cs = read('content.js'), bg = read('background.js'), dash = read('dashboard.js');
 
 // 1. monitor: × = small dot; a monitor hidden by the old × comes back once as the dot; no − button
@@ -32,7 +32,7 @@ assert.ok(/if\(batch\)\{if\(!sameImage\)batch\.cache\[sid\]=dataUrl;batch\.meta\
 assert.ok(/await Promise\.all\(workers\);\n  await saveResourceImages\(batch\.cache,batch\.meta\);/.test(bg), 'one write after the run');
 assert.ok(/scmResourceImagesValidatedAt[\s\S]{0,80}<6\.5\*24\*3600e3\)return;/.test(bg), 'validation at most weekly (not 1 min after every update)');
 // 6. API_SEEN batched
-assert.ok(bg.includes("queueEndpointSeen(url,method,m.captureRealm).then(()=>send({ok:true,queued:true}));") && /Date\.now\(\)-Date\.parse\(e\.seenAt\|\|0\)>10\*60e3/.test(bg) && /setTimeout\(\(\)=>\{pendingEndpointSeenTimer=0;flushEndpointSeen\(\)\.catch\(\(\)=>\{\}\);\},20000\)/.test(bg), 'seen endpoints flushed every 20 s, repeats skipped');
+assert.ok(bg.includes("queueEndpointSeen(url,method,m.captureRealm).then(()=>send({ok:true,queued:true}));") && /Date\.now\(\)-Date\.parse\(e\.seenAt\|\|0\)>10\*60e3/.test(bg) && /setTimeout\(function flush\(\)\{if\(coreSyncActive\(\)\)\{pendingEndpointSeenTimer=setTimeout\(flush,20000\);return;\}pendingEndpointSeenTimer=0;flushEndpointSeen\(\)\.catch\(\(\)=>\{\}\);\},20000\)/.test(bg), 'seen endpoints flushed every 20 s, repeats skipped');
 // 7. Manager: catalog / captured-image lookups memoized
 assert.ok(dash.includes('const __scmCatalogMemo=new WeakMap(),__scmImageIndexMemo=new WeakMap(),__scmFlatMemo=new WeakMap();') && /image=scmCapturedImageIndex\(s,\[s\.buildings,s\.gameState,s\.endpointData\]\)\.get\(Number\(id\)\)\|\|null;/.test(dash));
 // functional: the image index returns the same first match the old flatten().find() did

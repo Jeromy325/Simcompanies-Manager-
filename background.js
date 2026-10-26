@@ -13,6 +13,18 @@ const __scmOwnWriteHooks=globalThis.__scmOwnWriteHooks=[];
 {const __orig=chrome.storage.local.set.bind(chrome.storage.local);chrome.storage.local.set=(items,...rest)=>{if(items&&typeof items==='object')for(const h of __scmOwnWriteHooks){try{h(items);}catch{}}return __orig(items,...rest);};}
 const realmSyncSessions=new Map();
 let syncCaptureRealm=null;
+// v2.5.380 Sync priority: while a core Sync runs (setup, targets and the post-sync tail), optional background work
+// (VWAP stages, warehouse/overlay refreshes, endpoint-seen flushes) waits instead of competing for the storage lane,
+// and resumes once Sync ends. R2 2.5.378: 162 VWAP reschedules + 4 warehouse refreshes ran inside one 239 s Sync.
+const syncDeferredWork=new Map();
+function coreSyncActive(){return realmSyncSessions.size>0;}
+function deferUntilSyncEnds(key,fn){syncDeferredWork.set(String(key),fn);}
+function resumeSyncDeferredWork(){
+  if(coreSyncActive())return 0;
+  const jobs=[...syncDeferredWork.values()];syncDeferredWork.clear();
+  for(const fn of jobs){try{Promise.resolve(fn()).catch(()=>{});}catch{}}
+  return jobs.length;
+}
 const realmWriteQueues=new Map();
 const frozenRateEnsurePromises=new Map();
 function withRealmWriteLock(realm,task){
@@ -209,6 +221,9 @@ function simcoReleaseRequestSlot(){
 // v2.5.345 the phone's game API answers took 14–70 s; 8 s × 2 made every Sync fail on that link. One attempt,
 // up to 45 s (the page hook aborts at the same limit, max 60 s); retrying a slow request only doubles the load.
 const SYNC_PAGE_API_TIMEOUT_MS=45000;
+// v2.5.380 Sync writes are serialized (~3 s each on a 6 MB realm store); 8 s timed out 6/7 Accounting writes that
+// landed a few seconds later and forced a slow UI-click fallback. Wait in line instead.
+const SYNC_PERSIST_VERIFY_TIMEOUT_MS=30000;
 const SYNC_PAGE_API_ATTEMPTS=1;
 const SYNC_CLICK_TIMEOUT_MS=2000;
 const SYNC_CAPTURE_FALLBACK_MS=8000;
@@ -2301,7 +2316,7 @@ const apiStorageQueues=new Map();
 const apiStorageCommitQueues=new Map();
 const apiStorageSchedulers=new Map();
 function shouldPersistPassiveApiCaptureDuringSync(session,url,method='GET'){
-  if(!session||session.phase!=='running'||String(method||'GET').toUpperCase()!=='GET')return true;
+  if(!session||String(method||'GET').toUpperCase()!=='GET')return true;
   const allowed=Array.isArray(session.capturePaths)?session.capturePaths:[];
   return allowed.includes(String(url||''));
 }
@@ -2440,7 +2455,7 @@ function queueEndpointSeen(url,method='GET',captureRealm=null){
   const n=validRealmNumber(captureRealm);
   if(n==null||!String(url||'').startsWith('/api/'))return saveEndpoint(url,method,captureRealm); // quarantine path unchanged
   const m=String(method||'GET').toUpperCase();pendingEndpointSeen.set(`${n}|${m}|${url}`,{url,method:m,realm:n});
-  if(!pendingEndpointSeenTimer)pendingEndpointSeenTimer=setTimeout(()=>{pendingEndpointSeenTimer=0;flushEndpointSeen().catch(()=>{});},20000);
+  if(!pendingEndpointSeenTimer)pendingEndpointSeenTimer=setTimeout(function flush(){if(coreSyncActive()){pendingEndpointSeenTimer=setTimeout(flush,20000);return;}pendingEndpointSeenTimer=0;flushEndpointSeen().catch(()=>{});},20000);
   return Promise.resolve();
 }
 async function flushEndpointSeen(){
@@ -4339,7 +4354,7 @@ async function scheduleMarketCycle(realmArg,reason='scheduled-market-cycle'){
 }
 async function runMarketStage(realm,stage,reason='alarm'){
   const n=validRealmNumber(realm);if(n==null)return {ok:false,error:'Invalid realm for market stage.'};
-  if(realmSyncSessions.size>0){await scheduleMarketStage(n,stage,POST_SYNC_MARKET_COOLDOWN_MS,'core-sync-active');return {ok:false,skipped:true,reason:'core-sync-active',realm:n,stage};}
+  if(coreSyncActive()){deferUntilSyncEnds(`market:${n}:${stage}`,()=>scheduleMarketStage(n,stage,POST_SYNC_MARKET_COOLDOWN_MS,'resumed-after-sync'));return {ok:false,skipped:true,reason:'core-sync-active',realm:n,stage};}
   if(marketStageRun)return marketStageRun;
   marketStageRun=(async()=>{
     const startedAt=new Date().toISOString(),started=Date.now();let result;
@@ -5237,7 +5252,7 @@ async function syncNow(requestedRealm=null){
     try{
       const persisted=await withSyncTimeout(saveData(path,response.data,response.status,'GET',selected,timing=>{
         trace('endpoint-storage-queue-timing',{path,...timing});
-      },{realm:selected,startedAtMs:persistStartedAt,expectedData:response.data,expectedStatus:response.status,allowPreserved:row.name==='Accounting'}),8000,`Persist and verify ${path}`);
+      },{realm:selected,startedAtMs:persistStartedAt,expectedData:response.data,expectedStatus:response.status,allowPreserved:row.name==='Accounting'}),SYNC_PERSIST_VERIFY_TIMEOUT_MS,`Persist and verify ${path}`);
       const verification=persisted?.durableVerification;
       if(!verification?.ok)throw new Error(`Durable endpoint verification missing for ${path}.`);
       (row.authoritative||(row.authoritative=[])).push({path,status:Number(response.status)||200,ok:true,durable:true,captureRealm:responseRealm,verification});
@@ -5777,6 +5792,7 @@ async function syncNow(requestedRealm=null){
       const scheduled=await schedulePostSyncMarketRefresh(selected,'sync-complete').catch(e=>({ok:false,error:e?.message||String(e)}));
       try{await recordBackgroundJobEvent(selected,{job:'post-sync-market-refresh-scheduled',trigger:'sync-complete',startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),durationMs:0,outcome:scheduled?.ok?'success':'failure',error:scheduled?.error||null,details:scheduled||{}});}catch{}
     }
+    if(ownsSyncSession)resumeSyncDeferredWork();
   }
 }
 
@@ -6015,6 +6031,7 @@ const warehouseOverlayRefreshRuns=new Map();
 async function refreshRealmWarehouseForOverlay(realm,maxAgeMs=15000){
   const n=validRealmNumber(realm);if(n==null)return {ok:false,error:'Invalid realm.'};
   const existing=warehouseOverlayRefreshRuns.get(n);if(existing)return existing;
+  if(coreSyncActive()){if(maxAgeMs===0)deferUntilSyncEnds(`warehouse:${n}`,()=>scheduleWarehouseRefreshAfterStockMutation(n,300));return {ok:false,skipped:true,deferredByCoreSync:true,error:'Warehouse refresh deferred until Sync completes.'};}
   if(warehouseOverlayRefreshInBackoff(n,maxAgeMs))return {ok:false,backoff:true,error:'Warehouse refresh paused after a failed attempt.'};
   const startedMs=Date.now(),startedAt=new Date(startedMs).toISOString();
   const run=refreshRealmWarehouseForOverlayUnlocked(n,maxAgeMs).then(async result=>{
@@ -6045,6 +6062,7 @@ function scheduleGameOverlayRefreshNotification(realm,delayMs=650,{markDirty=tru
   const prior=gameOverlayNotifyTimers.get(n); if(prior)clearTimeout(prior);
   const timer=setTimeout(()=>{
     gameOverlayNotifyTimers.delete(n);
+    if(coreSyncActive()){deferUntilSyncEnds(`overlay:${n}`,()=>scheduleGameOverlayRefreshNotification(n,150,{markDirty:false}));return;}
     notifyGameOverlayRefresh(n).catch(()=>{});
   },Math.max(150,Number(delayMs)||650));
   gameOverlayNotifyTimers.set(n,timer);
@@ -6783,7 +6801,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     const url=String(m.url||'');
     replayEvent('api-seen',{realm:validRealmNumber(m.captureRealm),url,method});
     const session=currentCaptureSyncSession();
-    if(method==='GET'&&session?.phase==='running'){
+    if(method==='GET'&&session){
       // The sync's explicit saveData calls will update the endpoint registry;
       // do not write the whole realm store once before and again after each GET.
       send({ok:true,coveredBySyncCapture:true});
