@@ -10,6 +10,21 @@
   const keyOf = (id, q) => `${Number(id)}:${Number(q)}`;
   const ms = v => { const t = Date.parse(String(v || '')); return Number.isFinite(t) ? t : null; };
 
+  /* ------------------------------------------------------------ realm */
+  // Only captures stamped with this realm (endpointData[url].captureRealm, set on every write). Entries from another
+  // realm or with no stamp are dropped, and with no realm nothing is kept: Analyze never mixes R1 and R2.
+  function realmEndpoints(endpointData, realm) {
+    const n = num(realm), out = {};
+    if (n == null) return out;
+    for (const [k, v] of Object.entries(endpointData || {})) if (v && typeof v === 'object' && num(v.captureRealm) === n) out[k] = v;
+    return out;
+  }
+  // Production runs (entries carry the building id b) only from buildings this realm owns. No building list = no runs.
+  function realmCostHistory(history, buildingIds) {
+    const own = new Set([...(buildingIds || [])].map(Number).filter(pos));
+    return own.size ? (Array.isArray(history) ? history : []).filter(e => e && own.has(Number(e.b))) : [];
+  }
+
   /* ------------------------------------------------------------ ledger */
   const LEDGER_RX = /\/api\/v2\/companies\/me\/cashflow\/(?:recent|\d+)\/?$/;
   // Every captured cash-flow page (recent + cursor pages), deduped by row id, newest first.
@@ -27,6 +42,7 @@
   }
   // Exchange fills ('marketfilled-<resource>', category m) and contract sales ('cs-<resource>-<buyer>').
   // Each exchange fill is paired with the 'fees-<resource>' row written at the same moment (≤ 5 s apart).
+  // Money in only (money > 0): a row where money goes out is a purchase, never a sale.
   function salesFromLedger(rows) {
     const list = Array.isArray(rows) ? rows : [];
     const fees = list.filter(r => r && r.category === 'f' && /^fees-\d+$/.test(String(r.descriptionKey || '')) && Number(r.money) < 0);
@@ -34,10 +50,10 @@
     for (const r of list) {
       const dk = String(r && r.descriptionKey || ''), d = (r && r.details) || {};
       const exchange = r && r.category === 'm' && /^marketfilled-\d+$/.test(dk), contract = /^cs-\d+/.test(dk);
-      if (!exchange && !contract) continue;
+      if ((!exchange && !contract) || !pos(r.money)) continue;
       const rid = num(d.resource), q = num(d.quality), amount = num(d.amount), price = num(d.price), t = ms(r.datetime);
       if (!pos(rid) || q == null || !pos(amount) || !pos(price) || t == null) continue;
-      const gross = pos(r.money) ? Number(r.money) : amount * price;
+      const gross = Number(r.money);
       let fee = null;
       if (exchange) {
         const f = fees.find(x => !used.has(x) && x.descriptionKey === `fees-${rid}` && Math.abs(ms(x.datetime) - t) <= 5000);
@@ -270,7 +286,7 @@
   }
   const rangeStats = pts => { const v = (pts || []).map(p => p[1]); return v.length ? { lo: Math.min(...v), hi: Math.max(...v), change: v.length > 1 && v[0] ? (v[v.length - 1] - v[0]) / Math.abs(v[0]) : null } : null; };
 
-  const api = { DAY, keyOf, ledgerRows, salesFromLedger, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
+  const api = { DAY, keyOf, realmEndpoints, realmCostHistory, ledgerRows, salesFromLedger, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
   root.SCM_ANALYZE_CORE = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

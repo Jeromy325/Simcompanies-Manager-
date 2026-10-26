@@ -31,33 +31,37 @@
     chrome.storage.local.get({ ['scmPriceLog:' + realm]: null }).then(r => { S.log = r['scmPriceLog:' + realm]; S.logRealm = realm; })
       .catch(() => { S.log = null; }).finally(() => { S.logLoading = false; if (isActive()) paint(true); });
   }
+  // The price log is shown only for the realm it was read for.
+  const priceLog = () => (S.logRealm === S.ctx?.realm ? S.log : null);
   const isActive = () => $('#analyze')?.classList.contains('active');
   const nameOf = rid => { try { return S.ctx?.nameOf?.(rid) || `Resource #${rid}`; } catch { return `Resource #${rid}`; } };
   const label = (rid, q) => `${esc(nameOf(rid))} Q${Number(q)}`;
   function dataSig(s) {
     const ep = s?.endpointData || {};
     const ledger = Object.keys(ep).filter(k => /\/cashflow\/(?:recent|\d+)\/?$/.test(k)).map(k => ep[k]?.receivedAt || '').join(',');
-    return [S.days, S.minUnits, s?.lastSync, ledger, (s?.warehouseResources || []).length, JSON.stringify((s?.warehouseResources || []).map(l => [l?.id, l?.amount])).length, s?.vwapData?.updatedAt, s?.liveMarketPriceData?.updatedAt, (s?.productionCostHistory || []).length, ep['/api/v3/companies/me/past-finances/']?.receivedAt, ep['/api/v2/companies/me/balance-sheet/']?.receivedAt].join('|');
+    return [S.ctx?.realm, S.days, S.minUnits, s?.lastSync, ledger, (s?.warehouseResources || []).length, JSON.stringify((s?.warehouseResources || []).map(l => [l?.id, l?.amount])).length, s?.vwapData?.updatedAt, s?.liveMarketPriceData?.updatedAt, (s?.productionCostHistory || []).length, ep['/api/v3/companies/me/past-finances/']?.receivedAt, ep['/api/v2/companies/me/balance-sheet/']?.receivedAt].join('|');
   }
   function compute(force, revisit = false) {
-    const s = S.s, ctx = S.ctx || {}, sig = dataSig(s);
+    const s = S.s, ctx = S.ctx || {}, sig = dataSig(s), realm = Number.isInteger(ctx.realm) ? ctx.realm : null;
     const set = `${S.days}|${S.minUnits}`;
-    if (!force && S.model && S.modelSet === set) {
+    // A result from another realm is never reused, whatever the settings below say.
+    if (!force && S.model && S.modelSet === set && S.model.realm === realm) {
       // Settings: "Compute when the tab opens" off = keep the last result until Recalculate; "Keep the last result for
       // 10 minutes" = coming back to the tab within 10 minutes shows the last result at once; data arriving while the
       // tab is open always recomputes.
       if (sig === S.modelSig || !S.auto || (revisit && S.keep && Date.now() - S.at < 10 * 60000)) return S.model;
     }
-    const t0 = performance.now(), now = Date.now(), ep = s?.endpointData || {};
+    // Realm-only inputs: captures stamped with this realm, this realm's lots, runs from this realm's buildings.
+    const t0 = performance.now(), now = Date.now(), ep = A.realmEndpoints(s?.endpointData, realm);
     const memo = new Map(), priceOf = (rid, q) => { const k = A.keyOf(rid, q); if (!memo.has(k)) { let p = null; try { p = ctx.priceOf?.(rid, q) || null; } catch { /* no price */ } memo.set(k, p); } return memo.get(k); };
     const calcMemo = new Map(), calcOf = (rid, q, price) => { const k = `${A.keyOf(rid, q)}@${price}`; if (!calcMemo.has(k)) { let c = null; try { c = ctx.calcOf?.(rid, q, price) || null; } catch { /* no calculator */ } calcMemo.set(k, c); } return calcMemo.get(k); };
-    const lots = Array.isArray(ctx.lots) ? ctx.lots : [];
+    const lots = realm != null && Array.isArray(ctx.lots) ? ctx.lots : [];
     const rows = A.ledgerRows(ep), allSales = A.salesFromLedger(rows), fr = A.feeRate(allSales), rate = fr ? fr.rate : null;
     const sales = A.inWindow(allSales, S.days, now);
     const stock = A.stock(lots, { priceOf, rate, minUnits: S.minUnits });
     const costOf = (rid, q) => A.warehouseCost(lots, rid, q)?.unitCost ?? null;
     const margins = A.margins(sales, { costOf, priceOf, calcOf, rate });
-    const pch = Array.isArray(s?.productionCostHistory) ? s.productionCostHistory : [];
+    const pch = realm != null ? A.realmCostHistory(s?.productionCostHistory, ctx.buildingIds) : [];
     const keys = new Map(A.producedKeys(pch, S.days, now).map(([r, q]) => [A.keyOf(r, q), [r, q]]));
     for (const m of margins) if (!keys.has(m.key) && A.costSeries(pch, m.rid, m.q, S.days, now).pts.length) keys.set(m.key, [m.rid, m.q]);
     const costRows = [...keys.values()].map(([rid, q]) => ({ key: A.keyOf(rid, q), rid, q, ...A.costSeries(pch, rid, q, S.days, now), split: A.costSplit(lots, rid, q) })).sort((a, b) => (b.change ?? -Infinity) - (a.change ?? -Infinity));
@@ -68,7 +72,7 @@
     const findings = A.findings({ stockRows: stock.rows, marginRows: margins, costRows, routeRows: routes });
     const coverage = A.ledgerCoverage(rows, S.days, now);
     const earned = margins.filter(m => m.total != null).reduce((a, m) => a + m.total, 0);
-    S.model = { now, rows, allSales, sales, fr, rate, lots, stock, margins, costRows, fees, feeDays, routes, company, cash, findings, coverage, earned, priceOf, calcOf, pch };
+    S.model = { realm, ep, now, rows, allSales, sales, fr, rate, lots, stock, margins, costRows, fees, feeDays, routes, company, cash, findings, coverage, earned, priceOf, calcOf, pch };
     S.modelSig = sig; S.modelSet = set; S.took = performance.now() - t0; S.at = now;
     return S.model;
   }
@@ -102,7 +106,7 @@
     const h = S.s?.history?.[A.keyOf(rid, q)];
     const daily = (Array.isArray(h) ? h : []).map(x => [Date.parse(`${x?.date}T12:00:00Z`), Number(x?.vwap)]).filter(p => Number.isFinite(p[0]) && p[1] > 0).sort((a, b) => a[0] - b[0]);
     if (daily.length > 1) return { pts: daily, src: `daily VWAP, Q${q}` };
-    const log = S.log?.series?.[rid];
+    const log = priceLog()?.series?.[rid];
     return { pts: (Array.isArray(log) ? log : []).filter(p => Number.isFinite(p?.[0]) && Number(p?.[1]) > 0).map(p => [p[0], Number(p[1])]), src: 'price log, lowest captured quality' };
   }
   const MAIN = [['overview', 'Overview'], ['margins', 'Margins'], ['stock', 'Stock'], ['costs', 'Costs']];
@@ -268,8 +272,8 @@
     return `${detailHead(label(rid, q), S.back, k ? pill(`${pct(mg.pctOfCalc, 0)} of calculator`, k) : '')}${priceCard}${per}${cost}${lot}${wh}${rs}${rt}`;
   }
   function sources(m) {
-    const s = S.s || {}, ep = s.endpointData || {}, gc = s.gameConstants;
-    const days = A.dayStatements(ep, 'income-statement').length, pf = A.pastFinances(ep).length, log = S.log?.series ? Object.keys(S.log.series).length : 0;
+    const s = S.s || {}, ep = m.ep, gc = s.gameConstants, pl = priceLog();
+    const days = A.dayStatements(ep, 'income-statement').length, pf = A.pastFinances(ep).length, log = pl?.series ? Object.keys(pl.series).length : 0;
     const prods = new Set(m.lots.map(l => `${l.kind}:${l.quality}`)).size;
     return [
       ['Warehouse lots', `${prods} products · ${m.lots.length} lots${s.lastSync ? ` · sync ${when(Date.parse(s.lastSync))}` : ''}`, m.lots.length > 0, m.lots.length ? 'Complete' : 'Missing'],
@@ -295,7 +299,7 @@
   function pageEmpty(m) {
     const ledgerDays = m.coverage.spanDays, items = [
       [m.lots.length > 0, false, 'Warehouse captured', 'Unlocks Stock', 'stock', 'Stock'],
-      [A.pastFinances(S.s?.endpointData).length > 0, false, 'Past finances captured', 'Unlocks Company value and Cash', 'company', 'Company value and EVA'],
+      [A.pastFinances(m.ep).length > 0, false, 'Past finances captured', 'Unlocks Company value and Cash', 'company', 'Company value and EVA'],
       [ledgerDays >= 3, m.coverage.rows > 0, `Cash-flow ledger: ${m.coverage.rows ? `${ledgerDays.toFixed(1)} days so far` : 'none yet'}`, 'Needs 3 or more days for Margins, Sales and Fees', 'margins', 'Margins'],
       [m.pch.length > 1, m.pch.length > 0, `Production cost history: ${m.pch.length ? `${m.pch.length} run${m.pch.length === 1 ? '' : 's'}` : 'none yet'}`, 'Needs 2 runs for the cost trend on Costs', 'costs', 'Costs']
     ], ready = items.filter(x => x[0]);
@@ -355,6 +359,8 @@
     root.innerHTML = `${html}<p class="an-center">Computed on open from stored data · 0 network calls · updated ${new Date(S.at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</p>`;
   }
   function render(s, ctx) {
+    // Realm change: drop the other realm's product page, sales filter and price log.
+    if (S.ctx && S.ctx.realm !== ctx?.realm) { if (S.page === 'product') S.page = S.back || 'overview'; S.prod = null; S.salesKey = 'all'; S.log = null; S.logRealm = null; }
     S.s = s; S.ctx = ctx || {};
     const revisit = !!S.left; S.left = false;
     loadLog(S.ctx.realm);

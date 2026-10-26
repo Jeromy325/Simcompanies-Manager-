@@ -2956,7 +2956,7 @@ function analyzeContext(s){
   let d=null;try{d=plannerInsightsData({s,priceMap:map,recipes:[],bonusPct:plannerCompanyProductionModifier(s)});}catch{}
   const owned=Array.isArray(s?.buildings)?s.buildings:[];
   const maker=id=>owned.find(b=>Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId)===Number(id))||null;
-  return {realm,lots,companyName:s?.authData?.authCompany?.company||'',
+  return {realm,lots,buildingIds:owned.map(b=>Number(b?.id)).filter(id=>id>0),companyName:s?.authData?.authCompany?.company||'',
     nameOf:id=>resourceName({_id:Number(id),kind:Number(id)},s),
     priceOf:(id,q)=>{const p=plannerMarketPrice(s,map,id,q,'sell');return p&&Number(p.price)>0?{price:Number(p.price),source:p.source||''}:null;},
     calcOf:(id,q,salePrice)=>{
