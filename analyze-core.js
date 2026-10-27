@@ -282,12 +282,26 @@
     return { cost, profit, profitPerHourPerLevel: pos(ratePerLevel) ? profit * Number(ratePerLevel) : null };
   }
   // Per product + quality + channel (2.5.391: contract and retail too, each its own row):
-  //   exchange earned/unit = avg sold − cost/unit − avg sold × fee rate; gap = calculator − earned = (price now − avg sold) + fee + (cost − calculator cost).
-  //   contract earned/unit = avg sold − cost/unit (no fee: the ledger has none for contracts; transport not included).
+  //   exchange earned/unit = avg sold − cost/unit − avg sold × fee rate − transport/unit;
+  //     gap = calculator − earned = (price now − avg sold) + fee + transport + (cost − calculator cost).
+  //   contract earned/unit = avg sold − cost/unit − transport/unit (no fee: the ledger has none for contracts).
   //   retail   earned/unit = avg sold − the game's COGS per unit (unit_cogs on each retail row).
-  // Calculator and gap only for exchange rows (the calculator prices at today's exchange price).
+  // 2.5.394 cost/unit = the game's cost at the time of each sale (sale money − the row's profit), the warehouse lot cost
+  // only for a sale whose row has no profit. Calculator and gap only for exchange rows (today's exchange price).
   const CHANNEL_ORDER = { exchange: 0, contract: 1, retail: 2 };
-  function margins(sales, { costOf, priceOf, calcOf, rate = null } = {}) {
+  // 2.5.394 transport: the seller pays it from its own Transport units, never in cash. An exchange sale takes the product's
+  // transport units (game constants .transportation), a contract half as many (Sim Companies FAQ; Times #76); retail
+  // none. Valued at one Transport unit's cost.
+  const TRANSPORT_SHARE = { exchange: 1, contract: 0.5, retail: 0 }, CONTRACT_TRANSPORT_SHARE = TRANSPORT_SHARE.contract;
+  function saleTransport(channel, rid, transportOf, transportCost) {
+    const share = TRANSPORT_SHARE[channel];
+    if (share == null) return null;
+    if (share === 0) return 0;
+    const u = typeof transportOf === 'function' ? num(transportOf(rid)) : null;
+    return u != null && u >= 0 && transportCost != null && transportCost >= 0 ? u * share * transportCost : null;
+  }
+  const contractTransport = (rid, transportOf, transportCost) => saleTransport('contract', rid, transportOf, transportCost);
+  function margins(sales, { costOf, priceOf, calcOf, rate = null, transportOf = null, transportCost = null } = {}) {
     const g = new Map();
     for (const s of Array.isArray(sales) ? sales : []) {
       if (!(s.channel in CHANNEL_ORDER)) continue;
@@ -299,16 +313,18 @@
     const rows = [];
     for (const x of g.values()) {
       const ex = x.channel === 'exchange', avg = x.gross / x.units, ledgerCost = x.ledgerUnits ? x.ledgerCostSum / x.ledgerUnits : null;
-      const w = x.channel !== 'retail' && typeof costOf === 'function' ? costOf(x.rid, x.q) : null;
-      const cost = w != null ? w : ledgerCost, costSource = w != null ? 'warehouse' : ledgerCost != null ? 'ledger' : null;
+      const w = x.channel !== 'retail' && typeof costOf === 'function' ? num(costOf(x.rid, x.q)) : null, rest = x.units - x.ledgerUnits;
+      const cost = !rest ? ledgerCost : w != null ? (x.ledgerCostSum + w * rest) / x.units : ledgerCost;
+      const costSource = !rest ? 'ledger' : w != null ? (x.ledgerUnits ? 'mixed' : 'warehouse') : ledgerCost != null ? 'ledger' : null;
       const feePU = ex ? (rate != null ? avg * rate : null) : 0;
-      const earned = cost != null && feePU != null ? avg - cost - feePU : null;
+      const transportPU = saleTransport(x.channel, x.rid, transportOf, transportCost);
+      const earned = cost != null && feePU != null ? avg - cost - feePU - (transportPU || 0) : null;
       const p = typeof priceOf === 'function' ? priceOf(x.rid, x.q) : null, price = p && pos(p.price) ? Number(p.price) : null;
       const c = ex && typeof calcOf === 'function' && price != null ? calcOf(x.rid, x.q, price) : null;
       const calc = c && c.ok && c.complete && c.profitPerUnit != null ? c.profitPerUnit : null;
       const calcCost = c && c.ok && c.complete ? c.sourcingCostPerUnit : null;
       const gap = calc != null && earned != null ? calc - earned : null;
-      rows.push({ ...x, avg, cost, costSource, ledgerCost, feePU, earned, total: earned != null ? earned * x.units : null, price, priceSource: p && p.source || null, calc, calcCost, calcResult: c,
+      rows.push({ ...x, avg, cost, costSource, ledgerCost, lotCost: w, feePU, transportPU, earned, total: earned != null ? earned * x.units : null, price, priceSource: p && p.source || null, calc, calcCost, calcResult: c,
         gap, priceDiff: ex && price != null ? price - avg : null, costDiff: calcCost != null && cost != null ? cost - calcCost : null, pctOfCalc: calc != null && calc > 0 && earned != null ? earned / calc : null });
     }
     return rows.sort((a, b) => CHANNEL_ORDER[a.channel] - CHANNEL_ORDER[b.channel] || (b.gap ?? -Infinity) - (a.gap ?? -Infinity) || (b.total ?? -Infinity) - (a.total ?? -Infinity));
@@ -318,6 +334,29 @@
     const out = { exchange: 0, contract: 0, retail: 0, total: 0 };
     for (const r of Array.isArray(rows) ? rows : []) if (r.total != null && r.channel in out) { out[r.channel] += r.total; out.total += r.total; }
     return out;
+  }
+
+  // 2.5.394 checks against the game, per finished day statement the captured ledger fully reaches (dateFrom ≥ since):
+  //   freight: Σ modelled transport (exchange fills + contracts) vs the day's Freight Out; cogs: Σ game cost at sale × units vs COGS.
+  function statementCheck(sales, days, { transportOf, transportCost, since = null } = {}) {
+    const f = { model: 0, game: 0, unknown: 0 }, c = { model: 0, game: 0, unknown: 0 };
+    let n = 0, prev = null;
+    for (const d of Array.isArray(days) ? days : []) {
+      // CSV-imported days carry no dateFrom: the previous day's close, else 24 h before this close.
+      const to = ms(d && d.data && d.data.date), fo = num(d && d.data && d.data.freightOut), cg = num(d && d.data && d.data.cogs);
+      const from = ms(d && d.data && d.data.dateFrom) ?? (to == null ? null : prev != null && to - prev <= 1.1 * DAY ? prev : to - DAY);
+      prev = to;
+      if (from == null || to == null || since == null || from < since) continue;
+      for (const s of Array.isArray(sales) ? sales : []) {
+        if (s.t < from || s.t >= to) continue;
+        if (s.ledgerCost != null) c.model += s.ledgerCost * s.amount; else c.unknown++;
+        const t = saleTransport(s.channel, s.rid, transportOf, transportCost);
+        if (t == null) f.unknown++; else f.model += t * s.amount;
+      }
+      f.game += -(fo || 0); c.game += -(cg || 0); n++;
+    }
+    const pctOf = x => x.game > 0 ? (x.model - x.game) / x.game : (x.model > 0 ? 1 : 0);
+    return n ? { days: n, freight: { ...f, diffPct: pctOf(f) }, cogs: { ...c, diffPct: pctOf(c) } } : null;
   }
 
   /* ------------------------------------------------------------ costs */
@@ -357,8 +396,9 @@
     }
     return out.sort((a, b) => a.t - b.t);
   }
-  // Contract vs exchange per product: contract = average of your own paid contracts in the window; exchange net = price × (1 − fee).
-  function routes(sales, { priceOf, rate = null } = {}) {
+  // Contract vs exchange per product: contract = average of your own paid contracts in the window less its transport;
+  // exchange net = price × (1 − fee) less its transport (twice the contract's units) (2.5.394).
+  function routes(sales, { priceOf, rate = null, transportOf = null, transportCost = null } = {}) {
     const g = new Map();
     for (const s of Array.isArray(sales) ? sales : []) {
       const k = keyOf(s.rid, s.q), x = g.get(k) || { key: k, rid: s.rid, q: s.q, contracts: [], cUnits: 0, cGross: 0, exUnits: 0 };
@@ -367,8 +407,10 @@
     }
     return [...g.values()].map(x => {
       const p = typeof priceOf === 'function' ? priceOf(x.rid, x.q) : null, price = p && pos(p.price) ? Number(p.price) : null;
-      const exNet = price != null && rate != null ? price * (1 - rate) : null, cAvg = x.cUnits ? x.cGross / x.cUnits : null;
-      return { ...x, price, exNet, contractAvg: cAvg, last: x.contracts[0] ? x.contracts[0].price : null, diff: cAvg != null && exNet != null ? cAvg - exNet : null, diffPct: cAvg != null && exNet ? (cAvg - exNet) / exNet : null };
+      const exTransportPU = saleTransport('exchange', x.rid, transportOf, transportCost), transportPU = contractTransport(x.rid, transportOf, transportCost);
+      const exNet = price != null && rate != null ? price * (1 - rate) - (exTransportPU || 0) : null, cAvg = x.cUnits ? x.cGross / x.cUnits : null;
+      const cNet = cAvg != null ? cAvg - (transportPU || 0) : null;
+      return { ...x, price, exNet, exTransportPU, contractAvg: cAvg, transportPU, contractNet: cNet, last: x.contracts[0] ? x.contracts[0].price : null, diff: cNet != null && exNet != null ? cNet - exNet : null, diffPct: cNet != null && exNet ? (cNet - exNet) / exNet : null };
     }).sort((a, b) => (b.contracts.length > 0) - (a.contracts.length > 0) || (b.diff ?? -Infinity) - (a.diff ?? -Infinity));
   }
 
@@ -462,7 +504,7 @@
   }
   const rangeStats = pts => { const v = (pts || []).map(p => p[1]); return v.length ? { lo: Math.min(...v), hi: Math.max(...v), change: v.length > 1 && v[0] ? (v[v.length - 1] - v[0]) / Math.abs(v[0]) : null } : null; };
 
-  const api = { DAY, keyOf, realmEndpoints, realmCostHistory, ledgerRows, salesFromLedger, ARCHIVE_DAYS, archiveMerge, archiveImport, csvImport, parseCsv, CSV_STATEMENTS, pruneLedgerPages, catchUpPlan, pageSpans, mergeSpans, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, margins, earnedBy, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
+  const api = { DAY, keyOf, realmEndpoints, realmCostHistory, ledgerRows, salesFromLedger, ARCHIVE_DAYS, archiveMerge, archiveImport, csvImport, parseCsv, CSV_STATEMENTS, pruneLedgerPages, catchUpPlan, pageSpans, mergeSpans, feeRate, inWindow, lotTotal, warehouseCost, costSplit, breakEven, headroom, stock, calculatorProfit, TRANSPORT_SHARE, CONTRACT_TRANSPORT_SHARE, saleTransport, contractTransport, margins, earnedBy, statementCheck, costSeries, producedKeys, feesSummary, dayStatements, routes, pastFinances, company, cash, findings, ledgerCoverage, trend, average, sparkline, rangeStats };
   root.SCM_ANALYZE_CORE = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

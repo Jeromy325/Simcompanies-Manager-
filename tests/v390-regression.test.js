@@ -31,5 +31,5 @@ assert.equal(A.salesFromLedger(Object.values(a.rows)).filter(s => s.channel === 
 assert.ok(fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8').includes("const FLAG='scmLedgerArchiveSeededV2';"));
 // UI: retail sale card has no fee row and uses the game cost.
 const ui = fs.readFileSync(path.join(__dirname, '..', 'analyze-ui.js'), 'utf8');
-assert.ok(/s\.channel === 'retail' \? s\.ledgerCost/.test(ui) && /· retail/.test(ui));
+assert.ok(ui.includes("const saleCost = (s, m) => s.ledgerCost ?? (s.channel === 'retail' ? null : m.costOf(s.rid, s.q));") && /· retail/.test(ui));
 console.log('v390-regression: all assertions passed');

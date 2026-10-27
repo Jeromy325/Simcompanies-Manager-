@@ -60,19 +60,26 @@
     const sales = A.inWindow(allSales, S.days, now);
     const stock = A.stock(lots, { priceOf, rate, minUnits: S.minUnits });
     const costOf = (rid, q) => A.warehouseCost(lots, rid, q)?.unitCost ?? null;
-    const margins = A.margins(sales, { costOf, priceOf, calcOf, rate });
+    // 2.5.394 transport the seller pays from its Transport units: exchange = the product's units, contract = half;
+    // valued at one Transport unit (your lot cost, else market).
+    const transportOf = rid => { try { return ctx.transportOf?.(rid) ?? null; } catch { return null; } };
+    const tLot = costOf(13, 0), tPrice = tLot == null ? priceOf(13, 0)?.price ?? null : null;
+    const transportCost = tLot ?? tPrice, transportSrc = tLot != null ? 'your lot' : tPrice != null ? 'market' : null, tr = { transportOf, transportCost };
+    const margins = A.margins(sales, { costOf, priceOf, calcOf, rate, ...tr });
     const pch = realm != null ? A.realmCostHistory(s?.productionCostHistory, ctx.buildingIds) : [];
     const keys = new Map(A.producedKeys(pch, S.days, now).map(([r, q]) => [A.keyOf(r, q), [r, q]]));
     for (const m of margins) if (!keys.has(m.key) && A.costSeries(pch, m.rid, m.q, S.days, now).pts.length) keys.set(m.key, [m.rid, m.q]);
     const costRows = [...keys.values()].map(([rid, q]) => ({ key: A.keyOf(rid, q), rid, q, ...A.costSeries(pch, rid, q, S.days, now), split: A.costSplit(lots, rid, q) })).sort((a, b) => (b.change ?? -Infinity) - (a.change ?? -Infinity));
     const fees = A.feesSummary(sales, rate);
     const feeDays = A.dayStatements(ep, 'income-statement', realm != null ? S.s?.statementHistory : null).map(d => ({ t: d.t, fee: -Number(d.data.marketFees) || 0, sales: Number(d.data.sales) || 0 }));
-    const routes = A.routes(sales, { priceOf, rate });
+    const routes = A.routes(sales, { priceOf, rate, ...tr });
+    const oldest = rows.length ? Date.parse(rows[rows.length - 1].datetime) : null;
+    const check = A.statementCheck(allSales, A.dayStatements(ep, 'income-statement', realm != null ? S.s?.statementHistory : null), { ...tr, since: oldest != null ? Math.max(oldest, now - S.days * A.DAY) : null });
     const company = A.company(ep, now), cash = A.cash(ep);
     const findings = A.findings({ stockRows: stock.rows, marginRows: margins, costRows, routeRows: routes });
     const coverage = A.ledgerCoverage(rows, S.days, now, A.mergeSpans([...(archive?.spans || []), ...A.pageSpans(ep)]));
     const by = A.earnedBy(margins), earned = by.total;
-    S.model = { realm, ep, now, rows, allSales, sales, fr, rate, lots, stock, margins, costRows, fees, feeDays, routes, company, cash, findings, coverage, earned, earnedBy: by, priceOf, calcOf, pch };
+    S.model = { realm, ep, now, rows, allSales, sales, fr, rate, lots, stock, margins, costRows, fees, feeDays, routes, company, cash, findings, coverage, earned, earnedBy: by, priceOf, calcOf, pch, costOf, transportOf, transportCost, transportSrc, check };
     S.modelSig = sig; S.modelSet = set; S.took = performance.now() - t0; S.at = now;
     return S.model;
   }
@@ -127,7 +134,7 @@
     if (f.kind === 'loss') return [`${L}: ${money(r.earned)} earned per unit`, `Sold at ${money(r.avg)} avg, cost ${money(r.cost)}, fee ${money(r.feePU)}.`];
     if (f.kind === 'margin') return [`${L}: ${money(r.earned)} earned per unit, ${money(r.calc)} on the calculator`, `Sold ${money(Math.abs(r.priceDiff))} ${r.priceDiff >= 0 ? 'under' : 'over'} today's price, plus ${money(r.feePU)} exchange fee`];
     if (f.kind === 'cost') return [`${esc(nameOf(r.rid))} costs ${spct(r.change)} in ${S.days} days`, `${money(r.first)} → ${money(r.last)} per unit, from your production runs`];
-    if (f.kind === 'route') return [`${esc(nameOf(r.rid))} pays more by contract`, `${money(r.contractAvg)} vs ${money(r.exNet)} net on the exchange (${spct(r.diffPct)})`];
+    if (f.kind === 'route') return [`${esc(nameOf(r.rid))} pays more by contract`, `${money(r.contractNet)} net (after transport) vs ${money(r.exNet)} net on the exchange (${spct(r.diffPct)})`];
     return ['', ''];
   }
   function pageOverview(m) {
@@ -148,32 +155,38 @@
     const how = `<details class="an-card an-dash an-how" data-an-card="ov-how"${isOpen('ov-how') ? ' open' : ''}><summary>How to read the numbers</summary><div><b>Earned</b> = sold price − cost per unit − ${feeLbl(m)} exchange fee, from your sales.</div><div><b>Calculator</b> = the game's profit calculator at today's price. It leaves the fee out.</div><div><b>Cost per unit</b> = inputs + labour from your warehouse lot.</div></details>`;
     return `${mainHead(esc(S.ctx?.companyName || 'Your company'), settingsIcon)}<div class="an-tiles">${tiles}</div>${chart}${finds}<button type="button" class="an-wide" data-an-go="sales"><span>All sales · last ${S.days} days</span><b>${units(salesUnits)} units ›</b></button>${how}`;
   }
+  // 2.5.394 cost per unit = the game's cost at the time of each sale; today's lot cost is only the fallback and a check.
+  const costLbl = r => r.costSource === 'ledger' ? 'game cost at sale' : r.costSource === 'mixed' ? 'game cost at sale, lot cost where missing' : 'warehouse lot cost today';
+  const lotCheck = r => r.lotCost != null && r.costSource !== 'warehouse' && Math.abs(r.lotCost - r.cost) >= 0.005 ? row('Lot cost today (check)', money(r.lotCost)) : '';
+  const transportRow = (rid, t, m, ch = 'contract') => { const u = m.transportOf(rid); return row(`− Transport (${u != null ? `${+(u * A.TRANSPORT_SHARE[ch]).toFixed(3)} unit${u * A.TRANSPORT_SHARE[ch] === 1 ? '' : 's'}` : 'units unknown'}${m.transportCost != null ? ` × ${money(m.transportCost)} ${m.transportSrc}` : ''})`, t != null ? money(t) : '<span class="an-warn">no Transport price</span>'); };
   function marginCard(r, m) {
     const k = r.pctOfCalc == null ? null : r.pctOfCalc < 0.75 ? 'bad' : r.pctOfCalc < 0.95 ? 'warn' : 'good';
     const badge = r.calc != null && r.calc < 0 && r.price != null && r.avg > r.price ? pill(`Price fell ${pct((r.avg - r.price) / r.avg, 0)}`, 'bad') : k ? pill(`Profit realization: ${pct(r.pctOfCalc, 0)}`, k) : '';
     const parts = [];
     if (r.priceDiff != null) parts.push(`you sold ${money(Math.abs(r.priceDiff))} ${r.priceDiff >= 0 ? 'under' : 'above'} today's price`);
     if (r.feePU != null) parts.push(`paid ${money(r.feePU)} in fee`);
+    if (r.transportPU) parts.push(`${money(r.transportPU)} in transport`);
     if (r.costDiff != null && Math.abs(r.costDiff) >= 0.005) parts.push(`your cost is ${money(Math.abs(r.costDiff))} ${r.costDiff > 0 ? 'above' : 'below'} the calculator's`);
     const gap = r.gap != null ? gapbox(`Gap of ${money(r.gap)} per unit: ${parts.join(', ')}.`) : r.price == null ? gapbox('No current price captured for this quality, so no calculator figure.') : r.calcResult && !r.calcResult.ok ? gapbox(esc(r.calcResult.error || r.calcResult.reason || 'Calculator not available.')) : r.calcResult && !r.calcResult.complete ? gapbox(`Calculator needs a price for ${esc((r.calcResult.missing || []).map(nameOf).join(', '))}.`) : '';
     const ex = r.channel === 'exchange', what = r.channel === 'contract' ? 'contract' : r.channel === 'retail' ? 'retail sale' : 'sale';
     if (!ex) {
       const b = [row(`Sold for (avg of ${r.n} ${what}${r.n === 1 ? '' : 's'})`, money(r.avg)),
-        row(`− Cost per unit (${r.channel === 'retail' ? 'game COGS' : r.costSource === 'ledger' ? 'game cost at sale' : 'inputs + labour'})`, money(r.cost)),
-        r.channel === 'contract' ? row('− Fee / transport', '<span class="an-warn">not included</span>') : '', hr,
+        row(`− Cost per unit (${r.channel === 'retail' ? 'game COGS' : costLbl(r)})`, money(r.cost)),
+        r.channel === 'contract' ? transportRow(r.rid, r.transportPU, m) : '', hr,
         row('Earned per unit', money(r.earned), `an-total ${r.earned != null && r.earned < 0 ? 'an-bad' : ''}`),
         row(`Total earned (${units(r.units)} units)`, money(r.total, 0)),
-        r.ledgerCost != null && r.costSource === 'warehouse' ? row('Game cost at sale (check)', money(r.ledgerCost)) : ''].join('');
+        lotCheck(r)].join('');
       return pcard(`mg-${r.key}-${r.channel}`, `${plink(r.rid, r.q)}${pill(r.channel === 'contract' ? 'Contract' : 'Retail', 'info')}`, b);
     }
     const body = [
       row(`Sold for (avg of ${r.n} sale${r.n === 1 ? '' : 's'})`, money(r.avg)),
-      row(`− Cost per unit (${r.costSource === 'ledger' ? 'game cost at sale' : 'inputs + labour'})`, money(r.cost)),
-      row(`− Exchange fee ${feeLbl(m)}`, money(r.feePU)), hr,
+      row(`− Cost per unit (${costLbl(r)})`, money(r.cost)),
+      row(`− Exchange fee ${feeLbl(m)}`, money(r.feePU)),
+      transportRow(r.rid, r.transportPU, m, 'exchange'), hr,
       row('Earned per unit', money(r.earned), `an-total ${r.earned != null && r.earned < 0 ? 'an-bad' : ''}`),
       row(`Calculator today (price ${money(r.price)}, no fee)`, money(r.calc), r.calc != null && r.calc < 0 ? 'an-bad' : ''),
       row(`Total earned (${units(r.units)} units)`, money(r.total, 0)),
-      r.ledgerCost != null && r.costSource === 'warehouse' ? row('Game cost at sale (check)', money(r.ledgerCost)) : '',
+      lotCheck(r),
       gap
     ].join('');
     return pcard(`mg-${r.key}`, `${plink(r.rid, r.q)}${badge}`, body);
@@ -183,7 +196,7 @@
     const eb = m.earnedBy, split = [['Exchange', eb.exchange, m.margins.some(r => r.channel === 'exchange')], ['Contracts', eb.contract, m.margins.some(r => r.channel === 'contract')], ['Retail', eb.retail, m.margins.some(r => r.channel === 'retail')]].filter(x => x[2]);
     const sum = `<div class="an-card an-sumrow"><div><small>Earned from sales · ${S.days} days</small><b>${money(m.earned, 0)}</b>${split.length > 1 ? `<small>${split.map(([l, v]) => `${l} ${money(v, 0)}`).join(' · ')}</small>` : ''}</div><div class="an-sumright"><button type="button" class="an-link" data-an-go="sales">${units(u)} units sold ›</button><small>${money(rev, 0)} revenue</small></div></div>`;
     const cards = m.margins.map(r => marginCard(r, m)).join('') || dash(`No sales in the captured ledger for the last ${S.days} days.`);
-    return `${mainHead('What each product earns')}${sum}${intro('Each card shows how a product\'s sale price turns into profit. Exchange cards compare it with the game\'s calculator, sorted by biggest gap; contract and retail cards follow (no exchange fee; contract transport not included).')}${cards}${dash(`Coverage ${pct(m.coverage.coverage, 0)}: ${m.coverage.coverage < 1 ? 'some ledger pages are missing, so this uses only the sales the ledger shows. ' : ''}Cost per unit is the current warehouse lot cost, not the cost at the time of each sale. ${quality()}`)}`;
+    return `${mainHead('What each product earns')}${sum}${intro('Each card shows how a product\'s sale price turns into profit. Exchange cards compare it with the game\'s calculator, sorted by biggest gap; contract and retail cards follow. Transport is the Transport units you use: a contract takes half an exchange sale\'s.')}${cards}${dash(`Coverage ${pct(m.coverage.coverage, 0)}: ${m.coverage.coverage < 1 ? 'some ledger pages are missing, so this uses only the sales the ledger shows. ' : ''}Cost per unit is the game's cost at the time of each sale (sale money less the profit on the ledger row). ${quality()}`)}`;
   }
   function stockCard(r, m) {
     const tip = r.price == null ? gapbox('No current price captured for this quality.') : r.headroom != null ? gapbox(r.headroom >= 0 ? `Price can fall ${pct(r.headroom)} before this lot loses money.` : `Price must rise ${pct(r.breakEven / r.price - 1)} to break even.`, r.headroom >= 0 ? 'an-good' : 'an-bad') : '';
@@ -203,14 +216,14 @@
     return pcard(`co-${r.key}`, head, body);
   }
   function routeBlock(r, m) {
-    return `<div class="an-rt"><div class="an-rt-h"><span>${label(r.rid, r.q)}</span><b class="${tone(r.diff)}">${smoney(r.diff)} (${spct(r.diffPct)})</b></div>${row(`Exchange (${money(r.price)} less ${feeLbl(m)})`, money(r.exNet))}${row('Contract (your average paid)', money(r.contractAvg))}</div>`;
+    return `<div class="an-rt"><div class="an-rt-h"><span>${label(r.rid, r.q)}</span><b class="${tone(r.diff)}">${smoney(r.diff)} (${spct(r.diffPct)})</b></div>${row(`Exchange (${money(r.price)} less ${feeLbl(m)} and transport)`, money(r.exNet))}${row('Contract (your average paid)', money(r.contractAvg))}${row('Contract net (less transport)', money(r.contractNet))}</div>`;
   }
   function pageCosts(m) {
     const cards = m.costRows.map(costCard).join('') || dash(`No production runs captured in the last ${S.days} days.`);
     const f = m.fees;
     const fees = sec('co-fees', `Exchange fees · ${S.days} days`, `${row('Sold on the exchange', money(f.gross, 0))}${row('Fee rate (from your ledger)', pct(m.rate, 2))}${hr}${row('Fees paid', money(f.paid, 0), 'an-total')}${small(`${m.earned > 0 ? `That is ${pct(f.paid / m.earned, 0)} of the ${money(m.earned, 0)} you earned. ` : ''}${link('fees', 'See fee breakdown')}`)}`);
     const rr = m.routes.filter(r => r.contracts.length).slice(0, 3);
-    const routes = sec('co-routes', 'Contract vs exchange · net per unit', `${rr.map(r => routeBlock(r, m)).join(hr) || small(`No paid contracts in the last ${S.days} days.`)}${small(`Contract transport is not included in these figures. ${link('routes', 'All routes')}`)}`);
+    const routes = sec('co-routes', 'Contract vs exchange · net per unit', `${rr.map(r => routeBlock(r, m)).join(hr) || small(`No paid contracts in the last ${S.days} days.`)}${small(`Both nets are after transport; a contract uses half the Transport units of an exchange sale. ${link('routes', 'All routes')}`)}`);
     return `${mainHead('Costs, fees and routes')}<div class="an-h2 an-h2-static">Cost per unit · last ${S.days} days</div>${intro('From your production history. Split into inputs (materials) and labour (wages + admin) from your warehouse lot.')}${cards}${fees}${routes}`;
   }
   function pageCompany(m) {
@@ -241,10 +254,12 @@
     const sh = sec('ca-share', `Share of assets, last ${share.length} days`, `${A.sparkline(share, { tone: 'flat', label: 'Cash share of assets' })}<div class="an-cols">${share.map((p, i) => `<span class="${i === share.length - 1 ? 'an-now' : ''}">${pct(p[1])}</span>`).join('')}</div>`);
     return `${detailHead('Cash')}${hero}${chart}${br}${last}${sh}${dash('This page only reports. It does not say what to do with the cash.')}`;
   }
+  const saleCost = (s, m) => s.ledgerCost ?? (s.channel === 'retail' ? null : m.costOf(s.rid, s.q));
   function saleCard(s, m) {
-    const cost = s.channel === 'retail' ? s.ledgerCost : A.warehouseCost(m.lots, s.rid, s.q)?.unitCost ?? s.ledgerCost, fee = s.fee != null ? s.fee : (m.rate != null && s.channel === 'exchange' ? s.gross * m.rate : 0);
-    const earned = cost != null ? s.gross - fee - cost * s.amount : null;
-    return `<div class="an-card an-sale"><div class="an-sale-h"><button type="button" class="an-plink an-plink-sm" data-an-prod="${A.keyOf(s.rid, s.q)}">${label(s.rid, s.q)}</button><small>${when(s.t)}${s.channel === 'contract' ? ' · contract' : s.channel === 'retail' ? ` · retail${s.buyer ? ` · ${esc(s.buyer)}` : ''}` : ''}</small></div>${row(`${units(s.amount)} × ${money(s.price)}`, money(s.gross))}${s.channel === 'exchange' ? row(`Fee ${feeLbl(m)}`, money(-fee)) : s.channel === 'retail' ? '' : row('Contract fee / transport', '<span class="an-warn">to verify</span>')}${row(`Cost ${units(s.amount)} × ${money(cost)}${s.channel === 'retail' ? ' (game cost)' : ''}`, money(cost != null ? -cost * s.amount : null))}${row('Earned', smoney(earned), `an-total14 ${tone(earned)}`)}</div>`;
+    const cost = saleCost(s, m), fee = s.fee != null ? s.fee : (m.rate != null && s.channel === 'exchange' ? s.gross * m.rate : 0);
+    const tpu = A.saleTransport(s.channel, s.rid, m.transportOf, m.transportCost);
+    const earned = cost != null ? s.gross - fee - (cost + (tpu || 0)) * s.amount : null;
+    return `<div class="an-card an-sale"><div class="an-sale-h"><button type="button" class="an-plink an-plink-sm" data-an-prod="${A.keyOf(s.rid, s.q)}">${label(s.rid, s.q)}</button><small>${when(s.t)}${s.channel === 'contract' ? ' · contract' : s.channel === 'retail' ? ` · retail${s.buyer ? ` · ${esc(s.buyer)}` : ''}` : ''}</small></div>${row(`${units(s.amount)} × ${money(s.price)}`, money(s.gross))}${s.channel === 'exchange' ? row(`Fee ${feeLbl(m)}`, money(-fee)) : ''}${s.channel === 'retail' ? '' : row(`Transport ${units(s.amount)} × ${money(tpu)}`, tpu != null ? money(-tpu * s.amount) : '<span class="an-warn">no Transport price</span>')}${row(`Cost ${units(s.amount)} × ${money(cost)}${s.ledgerCost != null ? ' (game cost at sale)' : ' (lot cost today)'}`, money(cost != null ? -cost * s.amount : null))}${row('Earned', smoney(earned), `an-total14 ${tone(earned)}`)}</div>`;
   }
   function pageSales(m) {
     const prods = [...new Map(m.sales.map(s => [A.keyOf(s.rid, s.q), s])).values()];
@@ -253,14 +268,14 @@
     const earned = S.salesKey === 'all' ? m.earned : m.margins.filter(r => r.key === S.salesKey && r.total != null).reduce((a, r) => a + r.total, 0);
     const sum = `<div class="an-card an-sumbar"><span>${units(list.reduce((a, s) => a + s.amount, 0))} units · ${money(list.reduce((a, s) => a + s.gross, 0), 0)}</span><b>Earned ${money(earned, 0)}</b></div>`;
     const more = list.length > S.salesShow ? `<button type="button" class="an-wide" data-an-more><span>Show more</span><b>${S.salesShow} of ${list.length} sales ›</b></button>` : '';
-    return `${detailHead('All sales')}${chips}${daySeg()}${sum}${list.slice(0, S.salesShow).map(s => saleCard(s, m)).join('') || dash('No sales in the captured ledger for this window.')}${more}${dash(`Sales come from the cash-flow ledger. Cost uses the current warehouse lot cost. Ledger pages that were never captured are missing here. ${quality()}`)}`;
+    return `${detailHead('All sales')}${chips}${daySeg()}${sum}${list.slice(0, S.salesShow).map(s => saleCard(s, m)).join('') || dash('No sales in the captured ledger for this window.')}${more}${dash(`Sales come from the cash-flow ledger. Cost is the game's cost at the time of each sale (today's lot cost only when a row has none). Ledger pages that were never captured are missing here. ${quality()}`)}`;
   }
   function routeCard(r, m) {
     if (!r.contracts.length) return `<div class="an-card an-dash">${plink(r.rid, r.q)}${small(`No contracts in the last ${S.days} days. Exchange net would be ${money(r.exNet)} per unit at today's price.`)}</div>`;
-    return pcard(`rt-${r.key}`, `${plink(r.rid, r.q)}<b class="an-pc-val ${tone(r.diff)}">${spct(r.diffPct)}</b>`, `${row(`Exchange (${money(r.price)} less ${feeLbl(m)})`, money(r.exNet))}${row('Contract average', money(r.contractAvg))}${hr}<small class="an-lbl">Last contracts</small>${r.contracts.slice(0, 4).map(c => row(`${when(c.t)} · ${units(c.amount)} × ${money(c.price)}${c.buyer ? ` · ${esc(c.buyer)}` : ''}`, money(c.gross), 'an-row-txt')).join('')}`);
+    return pcard(`rt-${r.key}`, `${plink(r.rid, r.q)}<b class="an-pc-val ${tone(r.diff)}">${spct(r.diffPct)}</b>`, `${row(`Exchange (${money(r.price)} less ${feeLbl(m)} and transport)`, money(r.exNet))}${row('Contract average', money(r.contractAvg))}${transportRow(r.rid, r.transportPU, m)}${row('Contract net', money(r.contractNet), 'an-total14')}${hr}<small class="an-lbl">Last contracts</small>${r.contracts.slice(0, 4).map(c => row(`${when(c.t)} · ${units(c.amount)} × ${money(c.price)}${c.buyer ? ` · ${esc(c.buyer)}` : ''}`, money(c.gross), 'an-row-txt')).join('')}`);
   }
   function pageRoutes(m) {
-    return `${detailHead('Contract vs exchange', 'costs')}${intro(`Net per unit if you sell by contract or on the exchange, using your own paid contracts from the last ${S.days} days. Products with no contracts show an empty card.`)}${m.routes.map(r => routeCard(r, m)).join('') || dash('No sales in the captured ledger for this window.')}${dash(`Not included: contract transport. Whether contracts carry a fee is still to verify in your ledger. ${quality()}`)}`;
+    return `${detailHead('Contract vs exchange', 'costs')}${intro(`Net per unit if you sell by contract or on the exchange, using your own paid contracts from the last ${S.days} days. Products with no contracts show an empty card.`)}${m.routes.map(r => routeCard(r, m)).join('') || dash('No sales in the captured ledger for this window.')}${dash(`Contract net = your average paid less its transport (half the units of an exchange sale). Exchange net = today's price less fee and transport. Contracts carry no fee in the ledger. ${quality()}`)}`;
   }
   function pageProduct(m) {
     const [rid, q] = String(S.prod || '').split(':').map(Number);
@@ -273,15 +288,15 @@
     const route = m.routes.find(r => r.key === key), sales = m.sales.filter(s => s.rid === rid && s.q === q), allQ = m.sales.filter(s => s.rid === rid);
     const k = mg?.pctOfCalc == null ? null : mg.pctOfCalc < 0.75 ? 'bad' : mg.pctOfCalc < 0.95 ? 'warn' : 'good';
     const priceCard = `<div class="an-card"><small class="an-lbl">Exchange price now</small><div class="an-pricerow"><div><div class="an-big an-big28">${money(price)}</div><div class="an-sub ${wk && price ? tone(price - wk[1]) : 'an-muted'}">${wk && price ? `${spct((price - wk[1]) / wk[1])} vs ${money(wk[1])} a week ago` : esc(p?.source || 'no current price captured')}</div></div><span class="an-mini">${A.sparkline(ser.pts.slice(-60), { label: `${nameOf(rid)} price` })}</span></div>${small(`Trend: ${ser.src}.`)}</div>`;
-    const per = sec('pd-per', 'Per unit sold', `${mg ? `${row(`Sold for (avg of ${mg.n} sales)`, money(mg.avg))}${row('− Cost per unit', money(mg.cost))}${row(`− Exchange fee ${feeLbl(m)}`, money(mg.feePU))}${hr}${row('Earned per unit', money(mg.earned), 'an-total')}${row('Calculator today (no fee)', money(mg.calc))}${mg.gap != null ? gapbox(`Gap ${money(mg.gap)}: sold ${money(Math.abs(mg.priceDiff))} ${mg.priceDiff >= 0 ? 'under' : 'above'} today's price, ${money(mg.feePU)} fee${mg.costDiff != null && Math.abs(mg.costDiff) >= 0.005 ? `, cost ${money(Math.abs(mg.costDiff))} ${mg.costDiff > 0 ? 'above' : 'below'} the calculator's` : ''}.`) : ''}` : small(`No exchange sales of this quality in the last ${S.days} days.`)}${other.map(r => `${hr}${row(`${r.channel === 'contract' ? 'Contracts' : 'Retail'} (${r.n}): ${money(r.avg)} − ${money(r.cost)} cost`, money(r.earned), `an-total14 ${tone(r.earned)}`)}${row(`Total earned (${units(r.units)} units)`, money(r.total, 0))}`).join('')}`);
+    const per = sec('pd-per', 'Per unit sold', `${mg ? `${row(`Sold for (avg of ${mg.n} sales)`, money(mg.avg))}${row('− Cost per unit', money(mg.cost))}${row(`− Exchange fee ${feeLbl(m)}`, money(mg.feePU))}${transportRow(rid, mg.transportPU, m, 'exchange')}${hr}${row('Earned per unit', money(mg.earned), 'an-total')}${row('Calculator today (no fee)', money(mg.calc))}${mg.gap != null ? gapbox(`Gap ${money(mg.gap)}: sold ${money(Math.abs(mg.priceDiff))} ${mg.priceDiff >= 0 ? 'under' : 'above'} today's price, ${money(mg.feePU)} fee${mg.transportPU ? `, ${money(mg.transportPU)} transport` : ''}${mg.costDiff != null && Math.abs(mg.costDiff) >= 0.005 ? `, cost ${money(Math.abs(mg.costDiff))} ${mg.costDiff > 0 ? 'above' : 'below'} the calculator's` : ''}.`) : ''}` : small(`No exchange sales of this quality in the last ${S.days} days.`)}${other.map(r => `${hr}${row(`${r.channel === 'contract' ? 'Contracts' : 'Retail'} (${r.n}): ${money(r.avg)} − ${money(r.cost)} cost${r.channel === 'contract' && r.transportPU ? ` − ${money(r.transportPU)} transport` : ''}`, money(r.earned), `an-total14 ${tone(r.earned)}`)}${row(`Total earned (${units(r.units)} units)`, money(r.total, 0))}`).join('')}`);
     const calcLines = calc && calc.ok ? `${calc.inputs.map(x => row(`${esc(nameOf(x.id))} × ${x.qty} @ ${money(x.unitCost)}`, x.unitCost == null ? 'no price' : money(x.qty * x.unitCost))).join('')}${row('Labour (wages + admin)', money(calc.labourPerUnit))}${hr}${row('Total per unit', money(calc.sourcingCostPerUnit), 'an-total14')}${calc.profitPerUnit != null ? row(`Calculator profit at ${money(price)}`, money(calc.profitPerUnit), tone(calc.profitPerUnit)) : ''}${calc.profitPerHourPerLevel != null ? row(`Profit / h / level (× ${calc.ratePerLevel.toFixed(3)})`, money(calc.profitPerHourPerLevel)) : ''}${small(`Game calculator basis: recipe from the game constants, input costs from your cheapest warehouse lot (as the game does), else the market. Lines are rounded to cents.${cs.first != null && cs.pts.length > 1 ? ` ${S.days} days ago: ${money(cs.first)} (${spct(cs.change)}).` : ''}`)}` : small(esc(calc?.error || calc?.reason || (price == null ? 'No current price for this quality, so no calculator figure.' : 'Calculator not available.')));
     const cost = sec('pd-cost', 'Cost per unit', calcLines);
     const lot = split ? sec('pd-lot', 'Your warehouse lot', `${split.inputs.map(x => row(esc(x.name), money(x.perUnit))).join('')}${row('Labour (wages + admin)', money(split.labourPerUnit))}${split.boughtPerUnit > 0 ? row('Bought on the market', money(split.boughtPerUnit)) : ''}${hr}${row('Lot cost per unit', money(split.totalPerUnit), 'an-total14')}`) : '';
     const wh = sec('pd-wh', 'In your warehouse', st ? `${row('Units', units(st.units))}${row('Total cost → value today', `${money(st.cost, 0)} → ${money(st.value, 0)}`)}${row('Break-even price (with fee)', money(st.breakEven))}${row('Oldest lot', age(st.oldest))}${row('Difference', sbig(st.diff), `an-total14 ${tone(st.diff)}`)}${st.headroom != null ? small(st.headroom >= 0 ? `Price can fall ${pct(st.headroom)} before this lot loses money.` : `Price must rise ${pct(st.breakEven / st.price - 1)} to break even.`, st.headroom >= 0 ? 'an-good' : 'an-bad') : ''}` : small('None of this quality in the warehouse.'), { cls: st?.diff == null ? '' : st.diff < 0 ? 'an-edge-bad' : 'an-edge-good' });
-    const earnedOf = s => { const c = s.channel === 'retail' ? s.ledgerCost : (s.q === q ? st?.unitCost : A.warehouseCost(m.lots, s.rid, s.q)?.unitCost) ?? s.ledgerCost; const fee = s.fee != null ? s.fee : (m.rate != null && s.channel === 'exchange' ? s.gross * m.rate : 0); return c != null ? s.gross - fee - c * s.amount : null; };
+    const earnedOf = s => { const c = saleCost(s, m), t = A.saleTransport(s.channel, s.rid, m.transportOf, m.transportCost) || 0; const fee = s.fee != null ? s.fee : (m.rate != null && s.channel === 'exchange' ? s.gross * m.rate : 0); return c != null ? s.gross - fee - (c + t) * s.amount : null; };
     const multiQ = allQ.some(s => s.q !== q);
     const rs = sec('pd-sales', multiQ ? 'Recent sales · all qualities' : 'Recent sales', `${allQ.slice(0, 5).map(s => { const e = earnedOf(s); return row(`${multiQ ? `Q${s.q} · ` : ''}${when(s.t)}${s.channel === 'retail' ? ' · retail' : s.channel === 'contract' ? ' · contract' : ''} · ${units(s.amount)} × ${money(s.price)}`, smoney(e), `an-row-txt ${tone(e)}`); }).join('') || small(`No sales in the last ${S.days} days.`)}<button type="button" class="an-link" data-an-sales="${key}">All ${esc(nameOf(rid))} sales ›</button>`);
-    const rt = route && route.contracts.length ? sec('pd-route', 'Contract vs exchange', `${row(`Exchange (${money(route.price)} less ${feeLbl(m)})`, money(route.exNet))}${row('Contract average', money(route.contractAvg))}${row('Difference', `${smoney(route.diff)} (${spct(route.diffPct)})`, `an-total14 ${tone(route.diff)}`)}${link('routes', 'All routes')}`) : `<div class="an-h2 an-h2-static">Contract vs exchange</div>${dash(`No outgoing contracts for this product in the last ${S.days} days, so there is nothing to compare. ${link('routes', 'All routes')}`)}`;
+    const rt = route && route.contracts.length ? sec('pd-route', 'Contract vs exchange', `${row(`Exchange (${money(route.price)} less ${feeLbl(m)} and transport)`, money(route.exNet))}${row('Contract average', money(route.contractAvg))}${transportRow(rid, route.transportPU, m)}${row('Difference', `${smoney(route.diff)} (${spct(route.diffPct)})`, `an-total14 ${tone(route.diff)}`)}${link('routes', 'All routes')}`) : `<div class="an-h2 an-h2-static">Contract vs exchange</div>${dash(`No outgoing contracts for this product in the last ${S.days} days, so there is nothing to compare. ${link('routes', 'All routes')}`)}`;
     return `${detailHead(label(rid, q), S.back, k ? pill(`Profit realization: ${pct(mg.pctOfCalc, 0)}`, k) : '')}${priceCard}${per}${cost}${lot}${wh}${rs}${rt}`;
   }
   function sources(m) {
@@ -300,12 +315,22 @@
   }
   const sw = (key, on, title, sub) => `<div class="an-swrow"><div><div>${title}</div><small>${sub}</small></div><button type="button" class="an-sw" role="switch" aria-checked="${on}" aria-label="${esc(title)}" data-an-switch="${key}"><i></i></button></div>`;
   function pageData(m) {
+    // 2.5.394 each gap shows its real state: good (green), warn (yellow, needs a look), info (grey, a known limit only).
+    const ls = m.sales.filter(x => x.channel !== 'retail'), lsU = ls.reduce((a, x) => a + x.amount, 0), noCost = ls.filter(x => x.ledgerCost == null), noCostU = noCost.reduce((a, x) => a + x.amount, 0);
+    const ck = m.check, chk = (x, l) => `${l}: model ${money(x.model, 0)} vs game ${money(x.game, 0)} (${spct(x.diffPct)})`, near = x => x && Math.abs(x.diffPct) <= 0.05 && !x.unknown;
+    const cost = !ls.length ? ['No exchange or contract sales in this window.', 'good']
+      : noCostU / lsU > 0.005 ? [`${units(noCost.length)} of ${units(ls.length)} sales have no profit on their ledger row, so they use today's lot cost.`, 'warn']
+      : [`Every sale (${units(ls.length)}) uses the game's cost at the time of sale: sale money less the profit on its ledger row.${ck ? ` ${chk(ck.cogs, `COGS over ${ck.days} day${ck.days === 1 ? '' : 's'}`)}.` : ''}`, ck && !near(ck.cogs) ? 'warn' : 'good'];
+    const rule = `Transport is paid in Transport units, not cash: an exchange sale uses the product's units, a contract half as many, × ${m.transportCost != null ? `${money(m.transportCost)} (${m.transportSrc})` : 'one Transport unit'}. No contract fee.`;
+    const contracts = m.transportCost == null ? [`${rule} No Transport price or lot captured, so contract transport is left out.`, 'warn']
+      : ck && (ck.freight.game > 0 || ck.freight.model > 0) ? [`${rule} ${chk(ck.freight, `Freight Out over ${ck.days} day${ck.days === 1 ? '' : 's'}`)}.`, near(ck.freight) ? 'good' : 'warn']
+      : [`${rule} ${m.sales.some(x => x.channel !== 'retail') ? 'Not yet checked: no finished day statement inside the captured ledger.' : 'No exchange or contract sales in this window.'}`, m.sales.some(x => x.channel !== 'retail') ? 'info' : 'good'];
     const gaps = [
-      ['Ledger pages missing.', m.coverage.coverage < 0.995 ? `${m.coverage.gaps.length ? `${m.coverage.gaps.length} hole${m.coverage.gaps.length === 1 ? '' : 's'} in the ledger: ${m.coverage.gaps.slice(-3).map(([a, b]) => `${when(a)} to ${when(b)}`).join('; ')}. ` : ''}The captured ledger reaches back ${m.coverage.spanDays.toFixed(1)} of ${S.days} days. Per-product sales and fees read low for the missing time; company totals use the day statements instead. Holes form when more than 30 ledger rows pass between two captures; every page captured is now kept.` : 'None for this window.', m.coverage.coverage < 0.995],
-      ['Cost at time of sale.', 'Earned figures use the current lot cost, not the cost when each unit was made. Margins shows the game\'s own cost at sale as a check.', true],
-      ['Contracts.', 'Only your own contracts. Transport and any contract fee are not confirmed.', true],
-      ['Cost split over time.', 'Production history keeps the total cost per run, so the inputs / labour split is today\'s lot.', true]
-    ].map(([a, b, warn]) => `<div class="an-gapitem"><i class="an-dot ${warn ? 'an-dot-warn' : 'an-dot-good'}"></i><div><b>${a}</b> <span>${esc(b)}</span></div></div>`).join('');
+      ['Ledger pages missing.', m.coverage.coverage < 0.995 ? `${m.coverage.gaps.length ? `${m.coverage.gaps.length} hole${m.coverage.gaps.length === 1 ? '' : 's'} in the ledger: ${m.coverage.gaps.slice(-3).map(([a, b]) => `${when(a)} to ${when(b)}`).join('; ')}. ` : ''}The captured ledger reaches back ${m.coverage.spanDays.toFixed(1)} of ${S.days} days. Per-product sales and fees read low for the missing time; company totals use the day statements instead. Holes form when more than 30 ledger rows pass between two captures; every page captured is now kept.` : 'None for this window.', m.coverage.coverage < 0.995 ? 'warn' : 'good'],
+      ['Cost at time of sale.', ...cost],
+      ['Transport and contracts.', ...contracts],
+      ['Cost split over time.', 'Each production run keeps its total cost per unit (the Costs trend is exact). Only the inputs / labour split is taken from today\'s lot. Nothing to do.', 'info']
+    ].map(([a, b, st]) => `<div class="an-gapitem"><i class="an-dot an-dot-${st}"></i><div><b>${a}</b> <span>${esc(b)}</span></div></div>`).join('');
     const set = `${sw('auto', S.auto, 'Compute when the tab opens', 'No background work')}${hr}${sw('keep', S.keep, 'Keep the last result for 10 minutes', 'Opens instantly on revisit')}${hr}${sw('min', S.minUnits > 0, 'Ignore lots under 5 units', 'Hides tiny leftovers on Stock')}${hr}<div class="an-setblk"><div>Look-back window</div>${daySeg()}</div>`;
     const imp = `<div class="an-setblk"><div>Add history from the game's CSV downloads</div><small class="an-muted">Accounting → csv: account history (ledger), income statement, cash-flow statement, balance sheet. Several files at once. Goes into ${esc(S.ctx?.realm === 0 ? 'R1' : S.ctx?.realm === 1 ? 'R2' : 'this realm')}; days and rows already captured are kept as they are.</small><label class="an-btn an-file">Import CSV files<input type="file" accept=".csv,text/csv" multiple data-an-import hidden></label><p class="an-center" id="anImportMsg">${esc(S.importMsg || '')}</p></div>`;
     return `${detailHead('Data and settings')}${sec('dt-src', 'What Analyze reads', sources(m))}${sec('dt-imp', 'Import', imp)}${sec('dt-gaps', 'Known gaps', gaps)}${sec('dt-set', 'Settings', set)}<button type="button" class="an-btn" data-an-recalc>Recalculate now</button><p class="an-center">Last calculated ${when(S.at)} · took ${S.took < 1000 ? `${S.took.toFixed(0)} ms` : `${(S.took / 1000).toFixed(1)} s`} · 0 network calls</p><button type="button" class="an-link an-link-c" data-an-go="empty">Preview the first-run screen ›</button>`;

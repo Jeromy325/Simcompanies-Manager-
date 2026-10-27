@@ -1,7 +1,7 @@
 // 2.5.371: daily scheduled Accounting walk (on/off, minutes after the game's statement time).
 const assert = require('assert'); const fs = require('fs'); const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.393');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.394');
 const bg = read('background.js'), dash = read('dashboard.js'), html = read('dashboard.html');
 const src = name => { const i = bg.indexOf(`function ${name}(`); let d = 0, j = bg.indexOf('{', bg.indexOf(')', i)); for (let k = j; k < bg.length; k++) { if (bg[k] === '{') d++; else if (bg[k] === '}' && --d === 0) return bg.slice(i, k + 1); } };
 const env = new Function(`${src('accountingWalkOffset')}\n${src('nextAccountingWalkAt')}\nconst ACCOUNTING_WALK_DEFAULT_OFFSET_MIN=30;return {accountingWalkOffset,nextAccountingWalkAt};`)();

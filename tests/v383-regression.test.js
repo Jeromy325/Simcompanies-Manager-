@@ -2,7 +2,7 @@
 const assert = require('assert'), fs = require('fs'), path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const html = read('dashboard.html'), dash = read('dashboard.js'), ui = read('analyze-ui.js'), core = read('analyze-core.js'), css = read('styles.css');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.393');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.394');
 assert.match(html, /data-tab="tools">Tools<\/button><button class="tab" data-tab="analyze">Analyze<\/button><button class="tab" data-tab="alerts">/, 'Analyze tab right after Tools');
 assert.match(html, /<section id="analyze" class="tabpage analyze-page"><div id="analyzeBody"/);
 const at = s => html.indexOf(`<script src="${s}">`);

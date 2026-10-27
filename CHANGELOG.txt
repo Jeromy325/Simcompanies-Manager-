@@ -1,3 +1,16 @@
+2.5.394 — 2026-10-27 — Analyze: cost at time of sale, transport, Known gaps
+- Cost per unit is now the game's cost at the time of each sale (sale money − the profit on its ledger row; retail:
+  unit_cogs). Today's warehouse lot cost is used only for a sale whose row has no profit, and is shown as
+  "Lot cost today (check)". Margins, Sales, Product and Earned all use it.
+- Transport is paid by the seller in Transport units, not cash: an exchange sale uses the product's transport units
+  (game constants .transportation), a contract half as many (Sim Companies FAQ; Times #76). Valued at your Transport
+  lot cost, else the market price. Shown on every exchange and contract card, in Contract vs exchange (both nets) and
+  in the calculator gap.
+- Checks against the game, per finished day statement inside the captured ledger: modelled transport vs Freight Out,
+  game cost × units vs COGS (shown on Data → Known gaps with both figures).
+- Known gaps dots show the real state (green ok, yellow needs a look, grey info). "Cost split over time" is info:
+  each run's total cost is exact; only the inputs / labour split comes from today's lot.
+
 2.5.393 — 2026-10-26 — Import the game's CSV downloads
 - Analyze → Data → Import: pick the game's Accounting CSVs (account history, income statement, cash-flow statement,
   balance sheet; several at once) to give the manager history before any Sync or walk. Statements are kept by date

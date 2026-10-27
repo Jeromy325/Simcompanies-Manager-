@@ -3,7 +3,7 @@
 // captured (sales 484/484 identical, 266 + 252 + 210 statement values, 0 mismatches).
 const assert = require('assert'), fs = require('fs'), path = require('path');
 const A = require('../analyze-core.js');
-assert.equal(require('../manifest.json').version, '2.5.393');
+assert.equal(require('../manifest.json').version, '2.5.394');
 const F = f => fs.readFileSync(path.join(__dirname, 'fixtures', 'csv', f), 'utf8');
 const names = { 'car body': 51, "jack o'lantern": 147, 'steel': 43, 'glass': 45, 'chemicals': 17 };
 // Statements: real day 10-26 (from the CSVs) → stored field names.

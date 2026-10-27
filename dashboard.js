@@ -2964,6 +2964,8 @@ function analyzeContext(s){
     // 2.5.393 CSV import: the background stores it (realm-keyed queues; captured data wins).
     importCsv:msg=>chrome.runtime.sendMessage(msg),
     priceOf:(id,q)=>{const p=plannerMarketPrice(s,map,id,q,'sell');return p&&Number(p.price)>0?{price:Number(p.price),source:p.source||''}:null;},
+    // 2.5.394 transport units per unit sold: game constants (.transportation), else the bundled recipes.
+    transportOf:id=>{const gv=s?.gameConstants?.resources?.[String(id)]?.transportation,g=gv==null||gv===''?NaN:Number(gv);if(Number.isFinite(g)&&g>=0)return g;const r=(window.__scmBuildingPlannerRaw?.recipes||[]).find(x=>Number(x?.id)===Number(id));const t=Number(r?.transport);return Number.isFinite(t)&&t>=0?t:null;},
     calcOf:(id,q,salePrice)=>{
       if(!d?.ok)return {ok:false,reason:d?.reason||'Calculator not available.'};
       const b=maker(id);

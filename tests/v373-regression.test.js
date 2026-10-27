@@ -3,7 +3,7 @@
 // finished after the tab had rendered, because scmAccountingSignature ignored accountingDayWalkStatus).
 const assert = require('assert'); const fs = require('fs'); const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.393');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.394');
 const dash = read('dashboard.js');
 const start = dash.indexOf('function scmAccountingSignature('); const end = dash.indexOf('\n}\n', start) + 3;
 const sig = new Function(`${dash.slice(start, end)}; return scmAccountingSignature;`)();

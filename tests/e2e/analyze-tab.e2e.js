@@ -13,7 +13,8 @@ const FX = f => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures'
   store.warehouseResources = [...pc.warehouseLots,
     lot(9001, 43, 2, 1000, { market: 9450 }), lot(9002, 51, 2, 10, { market: 6552.7 }), lot(9003, 52, 2, 20, { market: 9675 }),
     lot(9004, 112, 3, 12, { material1: 453.6, material2: 7863.24, material3: 11610, workers: 819.54, admin: 273.3 }, ['Steel', 'Car body', 'Combustion engine']),
-    lot(9005, 45, 2, 3000, { workers: 21000, admin: 6000, material1: 3000 }, ['Sand'])];
+    lot(9005, 45, 2, 3000, { workers: 21000, admin: 6000, material1: 3000 }, ['Sand']),
+    lot(9006, 13, 0, 500, { market: 150 })]; // 2.5.394 Transport at $0.30 a unit (your lot)
   const at = new Date().toISOString();
   store.vwapData = { updatedAt: at, rows: [{ resourceId: 112, quality: 3, value: 2260 }, { resourceId: 45, quality: 2, value: 13.9 }, { resourceId: 43, quality: 2, value: 11.5 }, { resourceId: 21, quality: 2, value: 52 }, { resourceId: 16, quality: 2, value: 8.6 }, { resourceId: 17, quality: 3, value: 14.2 }] };
   const d = n => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
@@ -74,15 +75,21 @@ const FX = f => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures'
 
   await go('margins'); t = await body();
   const gl = await page.$eval('#analyzeBody [data-an-card="mg-45:2"]', e => e.innerText).catch(() => '');
-  // Glass Q2: 2562 units, $34,897 gross → avg 13.6210; cost = lot 30000/3000 = 10.00; fee = avg × rate.
-  const avg = 34897 / 2562, earned = avg - 10 - avg * rate;
-  H.check('Margins: Glass earned per unit = avg − cost − avg × fee', gl.includes(`$${earned.toFixed(2)}`), earned.toFixed(2), gl.match(/Earned per unit\s*(\S+)/)?.[1]);
-  H.check('Margins: game cost at sale shown as a check', /Game cost at sale/.test(gl), true, '');
+  // Glass Q2: 2562 units, $34,897 gross → avg 13.6210; 2.5.394 cost = the game's cost at each sale (money − row profit),
+  // weighted by units; fee = avg × rate; transport = Glass transport units (game constants) × the Transport cost shown.
+  const AC = require('../../analyze-core.js'), gs = AC.salesFromLedger(AC.ledgerRows(AC.realmEndpoints(store.endpointData, 1), null)).filter(x => x.rid === 45 && x.q === 2 && x.channel === 'exchange');
+  const gU = gs.reduce((a, x) => a + x.amount, 0), gCost = gs.reduce((a, x) => a + x.ledgerCost * x.amount, 0) / gU;
+  const tU = Number(gc.resources['45'].transportation), tP = Number((gl.match(/− Transport \([\d.]+ units? × \$([\d.]+) your lot/) || [])[1]);
+  const avg = 34897 / 2562, earned = avg - gCost - avg * rate - tU * tP;
+  H.check('Margins: Glass = game cost at sale (2562 units)', gU === 2562 && gl.includes(`$${gCost.toFixed(2)}`) && /game cost at sale/.test(gl), gCost.toFixed(2), `${gU} · ${gl.match(/Cost per unit[^\n]*\n?\s*(\S+)/)?.[1]}`);
+  H.check('Margins: Glass earned per unit = avg − cost − fee − transport', tP === 0.3 && gl.includes(`$${earned.toFixed(2)}`), earned.toFixed(2), gl.match(/Earned per unit\s*(\S+)/)?.[1]);
+  H.check('Margins: lot cost today shown as a check', /Lot cost today \(check\)\s*\$10\.00/.test(gl), '$10.00', '');
   await noScroll('margins');
 
   for (const p of ['costs', 'company', 'cash', 'sales', 'routes', 'data']) { await go(p); t = await body(); H.check(`${p}: renders without error`, t.length > 200 && !/could not be built/.test(t), 'content', t.slice(0, 60)); await noScroll(p); }
   await go('costs'); t = await body(); H.check('Costs: Glass cost trend from production runs $10.00 → $10.75', /\$10\.00 → \$10\.75/.test(t), '$10.00 → $10.75', t.match(/\$[\d.]+ → \$[\d.]+/)?.[0]);
-  await go('routes'); t = await body(); H.check('Routes: contract fee/transport marked to verify', /to verify/.test(t), true, '');
+  await go('routes'); t = await body(); H.check('Routes: contract net after transport, nothing "to verify"', /Contract net/.test(t) && /− Transport \(/.test(t) && !/to verify/.test(t), true, '');
+  await go('data'); t = await body(); H.check('Data: Known gaps — cost split is info, no "not confirmed"', !/not confirmed/.test(t) && /Nothing to do/.test(t) && (await page.$$('#analyzeBody .an-gapitem .an-dot-info')).length >= 1, true, '');
   await go('company'); t = await body(); H.check('Company: assets composition + EVA by week', /What the company owns/.test(t) && /EVA by week/.test(t) && /\+\$550\.4k/.test(t), '+$550.4k week', t.match(/\+\$[\d.]+k/)?.[0]);
   await go('data'); await H.shot(page, 'analyze-data');
   const open1 = await page.$eval('#analyzeBody [data-an-card="dt-src"]', e => e.open);

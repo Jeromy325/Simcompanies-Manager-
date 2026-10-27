@@ -14,8 +14,9 @@ const sales = [
 const rows = A.margins(sales, { costOf: (rid, q) => (rid === 112 && q === 3 ? 1834.25 : null), priceOf: () => ({ price: 2260 }), calcOf: () => ({ ok: true, complete: true, profitPerUnit: 500, sourcingCostPerUnit: 1834.25 }), rate: 0.04 });
 assert.deepEqual(rows.map(r => r.id), ['112:3|exchange', '112:3|contract', '17:1|contract', '147:0|retail'], 'exchange first, then contract, retail; unknown channel ignored');
 const [ex, bc, cc, rt] = rows;
-close(ex.earned, 2200 - 1834.25 - 88, 1e-9, 'exchange unchanged'); assert.equal(ex.calc, 500);
-close(bc.earned, 2150 - 1834.25, 1e-9, 'contract: avg − warehouse cost, no fee'); assert.equal(bc.feePU, 0); assert.equal(bc.calc, null); assert.equal(bc.gap, null);
+// 2.5.394: the game's cost at the time of sale (ledgerCost) comes first; today's lot cost is only a fallback/check.
+close(ex.earned, 2200 - 1800 - 88, 1e-9, 'exchange: game cost at sale'); assert.equal(ex.calc, 500); assert.equal(ex.lotCost, 1834.25);
+close(bc.earned, 2150 - 1790, 1e-9, 'contract: avg − game cost at sale, no fee'); assert.equal(bc.feePU, 0); assert.equal(bc.calc, null); assert.equal(bc.gap, null);
 close(cc.earned, 14 - 12.95, 1e-9, 'contract: game cost at sale when no lot'); assert.equal(cc.costSource, 'ledger');
 close(rt.earned, 47.7 - 35.75, 1e-9, 'retail: avg − game COGS (never the lot)'); assert.equal(rt.costSource, 'ledger');
 const by = A.earnedBy(rows);
