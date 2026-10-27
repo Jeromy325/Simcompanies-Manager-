@@ -1,3 +1,10 @@
+2.5.395 — 2026-10-27 — Transport: contracts use the full units, your lot cost
+- A contract uses the same Transport units as an exchange sale (game constants .transportation; the game page shows
+  Bulldozer 5 for either). 2.5.394 and the Production planner halved it for contracts ("50% paid by buyer"); both
+  now charge the full units.
+- Transport is valued at your own Transport lot cost only. No market-price fallback: with no Transport in the
+  warehouse the cards say "no Transport lot" and Known gaps turns yellow.
+
 2.5.394 — 2026-10-27 — Analyze: cost at time of sale, transport, Known gaps
 - Cost per unit is now the game's cost at the time of each sale (sale money − the profit on its ledger row; retail:
   unit_cogs). Today's warehouse lot cost is used only for a sale whose row has no profit, and is shown as

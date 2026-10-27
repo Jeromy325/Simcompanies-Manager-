@@ -122,7 +122,7 @@
       if (!Number.isFinite(price)) { missing.push(i?.name || String(i?.id ?? '?')); continue; }
       inputCostPerUnit += q * price;
     }
-    const transportPerUnit = num(p.transportUnits) * num(p.transportUnitCost) * (exchange ? 1 : num(p.contractTransportShare, 0.5));
+    const transportPerUnit = num(p.transportUnits) * num(p.transportUnitCost) * (exchange ? 1 : num(p.contractTransportShare, 1)); // 2.5.395 contracts use the same units
     // Contracts carry no exchange fee but are normally sold below market: contractDiscountPct models that.
     const contractDiscount = exchange ? 0 : Math.min(100, Math.max(0, num(p.contractDiscountPct))) / 100;
     const netRevenuePerUnit = sale * (1 - fee) * (1 - contractDiscount);

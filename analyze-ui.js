@@ -60,11 +60,10 @@
     const sales = A.inWindow(allSales, S.days, now);
     const stock = A.stock(lots, { priceOf, rate, minUnits: S.minUnits });
     const costOf = (rid, q) => A.warehouseCost(lots, rid, q)?.unitCost ?? null;
-    // 2.5.394 transport the seller pays from its Transport units: exchange = the product's units, contract = half;
-    // valued at one Transport unit (your lot cost, else market).
+    // 2.5.395 transport the seller pays from its own Transport units: the product's units on an exchange sale or a
+    // contract alike, valued at your Transport lot cost only (no market fallback).
     const transportOf = rid => { try { return ctx.transportOf?.(rid) ?? null; } catch { return null; } };
-    const tLot = costOf(13, 0), tPrice = tLot == null ? priceOf(13, 0)?.price ?? null : null;
-    const transportCost = tLot ?? tPrice, transportSrc = tLot != null ? 'your lot' : tPrice != null ? 'market' : null, tr = { transportOf, transportCost };
+    const transportCost = costOf(13, 0), transportSrc = transportCost != null ? 'your lot' : null, tr = { transportOf, transportCost };
     const margins = A.margins(sales, { costOf, priceOf, calcOf, rate, ...tr });
     const pch = realm != null ? A.realmCostHistory(s?.productionCostHistory, ctx.buildingIds) : [];
     const keys = new Map(A.producedKeys(pch, S.days, now).map(([r, q]) => [A.keyOf(r, q), [r, q]]));
@@ -158,7 +157,7 @@
   // 2.5.394 cost per unit = the game's cost at the time of each sale; today's lot cost is only the fallback and a check.
   const costLbl = r => r.costSource === 'ledger' ? 'game cost at sale' : r.costSource === 'mixed' ? 'game cost at sale, lot cost where missing' : 'warehouse lot cost today';
   const lotCheck = r => r.lotCost != null && r.costSource !== 'warehouse' && Math.abs(r.lotCost - r.cost) >= 0.005 ? row('Lot cost today (check)', money(r.lotCost)) : '';
-  const transportRow = (rid, t, m, ch = 'contract') => { const u = m.transportOf(rid); return row(`− Transport (${u != null ? `${+(u * A.TRANSPORT_SHARE[ch]).toFixed(3)} unit${u * A.TRANSPORT_SHARE[ch] === 1 ? '' : 's'}` : 'units unknown'}${m.transportCost != null ? ` × ${money(m.transportCost)} ${m.transportSrc}` : ''})`, t != null ? money(t) : '<span class="an-warn">no Transport price</span>'); };
+  const transportRow = (rid, t, m, ch = 'contract') => { const u = m.transportOf(rid); return row(`− Transport (${u != null ? `${+(u * A.TRANSPORT_SHARE[ch]).toFixed(3)} unit${u * A.TRANSPORT_SHARE[ch] === 1 ? '' : 's'}` : 'units unknown'}${m.transportCost != null ? ` × ${money(m.transportCost)} ${m.transportSrc}` : ''})`, t != null ? money(t) : '<span class="an-warn">no Transport lot</span>'); };
   function marginCard(r, m) {
     const k = r.pctOfCalc == null ? null : r.pctOfCalc < 0.75 ? 'bad' : r.pctOfCalc < 0.95 ? 'warn' : 'good';
     const badge = r.calc != null && r.calc < 0 && r.price != null && r.avg > r.price ? pill(`Price fell ${pct((r.avg - r.price) / r.avg, 0)}`, 'bad') : k ? pill(`Profit realization: ${pct(r.pctOfCalc, 0)}`, k) : '';
@@ -196,7 +195,7 @@
     const eb = m.earnedBy, split = [['Exchange', eb.exchange, m.margins.some(r => r.channel === 'exchange')], ['Contracts', eb.contract, m.margins.some(r => r.channel === 'contract')], ['Retail', eb.retail, m.margins.some(r => r.channel === 'retail')]].filter(x => x[2]);
     const sum = `<div class="an-card an-sumrow"><div><small>Earned from sales · ${S.days} days</small><b>${money(m.earned, 0)}</b>${split.length > 1 ? `<small>${split.map(([l, v]) => `${l} ${money(v, 0)}`).join(' · ')}</small>` : ''}</div><div class="an-sumright"><button type="button" class="an-link" data-an-go="sales">${units(u)} units sold ›</button><small>${money(rev, 0)} revenue</small></div></div>`;
     const cards = m.margins.map(r => marginCard(r, m)).join('') || dash(`No sales in the captured ledger for the last ${S.days} days.`);
-    return `${mainHead('What each product earns')}${sum}${intro('Each card shows how a product\'s sale price turns into profit. Exchange cards compare it with the game\'s calculator, sorted by biggest gap; contract and retail cards follow. Transport is the Transport units you use: a contract takes half an exchange sale\'s.')}${cards}${dash(`Coverage ${pct(m.coverage.coverage, 0)}: ${m.coverage.coverage < 1 ? 'some ledger pages are missing, so this uses only the sales the ledger shows. ' : ''}Cost per unit is the game's cost at the time of each sale (sale money less the profit on the ledger row). ${quality()}`)}`;
+    return `${mainHead('What each product earns')}${sum}${intro('Each card shows how a product\'s sale price turns into profit. Exchange cards compare it with the game\'s calculator, sorted by biggest gap; contract and retail cards follow. Transport is your own Transport units at your lot cost, the same units for a contract as an exchange sale.')}${cards}${dash(`Coverage ${pct(m.coverage.coverage, 0)}: ${m.coverage.coverage < 1 ? 'some ledger pages are missing, so this uses only the sales the ledger shows. ' : ''}Cost per unit is the game's cost at the time of each sale (sale money less the profit on the ledger row). ${quality()}`)}`;
   }
   function stockCard(r, m) {
     const tip = r.price == null ? gapbox('No current price captured for this quality.') : r.headroom != null ? gapbox(r.headroom >= 0 ? `Price can fall ${pct(r.headroom)} before this lot loses money.` : `Price must rise ${pct(r.breakEven / r.price - 1)} to break even.`, r.headroom >= 0 ? 'an-good' : 'an-bad') : '';
@@ -223,7 +222,7 @@
     const f = m.fees;
     const fees = sec('co-fees', `Exchange fees · ${S.days} days`, `${row('Sold on the exchange', money(f.gross, 0))}${row('Fee rate (from your ledger)', pct(m.rate, 2))}${hr}${row('Fees paid', money(f.paid, 0), 'an-total')}${small(`${m.earned > 0 ? `That is ${pct(f.paid / m.earned, 0)} of the ${money(m.earned, 0)} you earned. ` : ''}${link('fees', 'See fee breakdown')}`)}`);
     const rr = m.routes.filter(r => r.contracts.length).slice(0, 3);
-    const routes = sec('co-routes', 'Contract vs exchange · net per unit', `${rr.map(r => routeBlock(r, m)).join(hr) || small(`No paid contracts in the last ${S.days} days.`)}${small(`Both nets are after transport; a contract uses half the Transport units of an exchange sale. ${link('routes', 'All routes')}`)}`);
+    const routes = sec('co-routes', 'Contract vs exchange · net per unit', `${rr.map(r => routeBlock(r, m)).join(hr) || small(`No paid contracts in the last ${S.days} days.`)}${small(`Both nets are after transport (the same Transport units either way). ${link('routes', 'All routes')}`)}`);
     return `${mainHead('Costs, fees and routes')}<div class="an-h2 an-h2-static">Cost per unit · last ${S.days} days</div>${intro('From your production history. Split into inputs (materials) and labour (wages + admin) from your warehouse lot.')}${cards}${fees}${routes}`;
   }
   function pageCompany(m) {
@@ -259,7 +258,7 @@
     const cost = saleCost(s, m), fee = s.fee != null ? s.fee : (m.rate != null && s.channel === 'exchange' ? s.gross * m.rate : 0);
     const tpu = A.saleTransport(s.channel, s.rid, m.transportOf, m.transportCost);
     const earned = cost != null ? s.gross - fee - (cost + (tpu || 0)) * s.amount : null;
-    return `<div class="an-card an-sale"><div class="an-sale-h"><button type="button" class="an-plink an-plink-sm" data-an-prod="${A.keyOf(s.rid, s.q)}">${label(s.rid, s.q)}</button><small>${when(s.t)}${s.channel === 'contract' ? ' · contract' : s.channel === 'retail' ? ` · retail${s.buyer ? ` · ${esc(s.buyer)}` : ''}` : ''}</small></div>${row(`${units(s.amount)} × ${money(s.price)}`, money(s.gross))}${s.channel === 'exchange' ? row(`Fee ${feeLbl(m)}`, money(-fee)) : ''}${s.channel === 'retail' ? '' : row(`Transport ${units(s.amount)} × ${money(tpu)}`, tpu != null ? money(-tpu * s.amount) : '<span class="an-warn">no Transport price</span>')}${row(`Cost ${units(s.amount)} × ${money(cost)}${s.ledgerCost != null ? ' (game cost at sale)' : ' (lot cost today)'}`, money(cost != null ? -cost * s.amount : null))}${row('Earned', smoney(earned), `an-total14 ${tone(earned)}`)}</div>`;
+    return `<div class="an-card an-sale"><div class="an-sale-h"><button type="button" class="an-plink an-plink-sm" data-an-prod="${A.keyOf(s.rid, s.q)}">${label(s.rid, s.q)}</button><small>${when(s.t)}${s.channel === 'contract' ? ' · contract' : s.channel === 'retail' ? ` · retail${s.buyer ? ` · ${esc(s.buyer)}` : ''}` : ''}</small></div>${row(`${units(s.amount)} × ${money(s.price)}`, money(s.gross))}${s.channel === 'exchange' ? row(`Fee ${feeLbl(m)}`, money(-fee)) : ''}${s.channel === 'retail' ? '' : row(`Transport ${units(s.amount)} × ${money(tpu)}`, tpu != null ? money(-tpu * s.amount) : '<span class="an-warn">no Transport lot</span>')}${row(`Cost ${units(s.amount)} × ${money(cost)}${s.ledgerCost != null ? ' (game cost at sale)' : ' (lot cost today)'}`, money(cost != null ? -cost * s.amount : null))}${row('Earned', smoney(earned), `an-total14 ${tone(earned)}`)}</div>`;
   }
   function pageSales(m) {
     const prods = [...new Map(m.sales.map(s => [A.keyOf(s.rid, s.q), s])).values()];
@@ -275,7 +274,7 @@
     return pcard(`rt-${r.key}`, `${plink(r.rid, r.q)}<b class="an-pc-val ${tone(r.diff)}">${spct(r.diffPct)}</b>`, `${row(`Exchange (${money(r.price)} less ${feeLbl(m)} and transport)`, money(r.exNet))}${row('Contract average', money(r.contractAvg))}${transportRow(r.rid, r.transportPU, m)}${row('Contract net', money(r.contractNet), 'an-total14')}${hr}<small class="an-lbl">Last contracts</small>${r.contracts.slice(0, 4).map(c => row(`${when(c.t)} · ${units(c.amount)} × ${money(c.price)}${c.buyer ? ` · ${esc(c.buyer)}` : ''}`, money(c.gross), 'an-row-txt')).join('')}`);
   }
   function pageRoutes(m) {
-    return `${detailHead('Contract vs exchange', 'costs')}${intro(`Net per unit if you sell by contract or on the exchange, using your own paid contracts from the last ${S.days} days. Products with no contracts show an empty card.`)}${m.routes.map(r => routeCard(r, m)).join('') || dash('No sales in the captured ledger for this window.')}${dash(`Contract net = your average paid less its transport (half the units of an exchange sale). Exchange net = today's price less fee and transport. Contracts carry no fee in the ledger. ${quality()}`)}`;
+    return `${detailHead('Contract vs exchange', 'costs')}${intro(`Net per unit if you sell by contract or on the exchange, using your own paid contracts from the last ${S.days} days. Products with no contracts show an empty card.`)}${m.routes.map(r => routeCard(r, m)).join('') || dash('No sales in the captured ledger for this window.')}${dash(`Contract net = your average paid less its transport (the same units as an exchange sale). Exchange net = today's price less fee and transport. Contracts carry no fee in the ledger. ${quality()}`)}`;
   }
   function pageProduct(m) {
     const [rid, q] = String(S.prod || '').split(':').map(Number);
@@ -321,8 +320,8 @@
     const cost = !ls.length ? ['No exchange or contract sales in this window.', 'good']
       : noCostU / lsU > 0.005 ? [`${units(noCost.length)} of ${units(ls.length)} sales have no profit on their ledger row, so they use today's lot cost.`, 'warn']
       : [`Every sale (${units(ls.length)}) uses the game's cost at the time of sale: sale money less the profit on its ledger row.${ck ? ` ${chk(ck.cogs, `COGS over ${ck.days} day${ck.days === 1 ? '' : 's'}`)}.` : ''}`, ck && !near(ck.cogs) ? 'warn' : 'good'];
-    const rule = `Transport is paid in Transport units, not cash: an exchange sale uses the product's units, a contract half as many, × ${m.transportCost != null ? `${money(m.transportCost)} (${m.transportSrc})` : 'one Transport unit'}. No contract fee.`;
-    const contracts = m.transportCost == null ? [`${rule} No Transport price or lot captured, so contract transport is left out.`, 'warn']
+    const rule = `Transport is paid from your own Transport units, not cash: the product's units on an exchange sale or a contract alike, × ${m.transportCost != null ? `${money(m.transportCost)} (${m.transportSrc} cost)` : 'your Transport lot cost'}. No contract fee.`;
+    const contracts = m.transportCost == null ? [`${rule} No Transport in your warehouse, so transport is left out.`, 'warn']
       : ck && (ck.freight.game > 0 || ck.freight.model > 0) ? [`${rule} ${chk(ck.freight, `Freight Out over ${ck.days} day${ck.days === 1 ? '' : 's'}`)}.`, near(ck.freight) ? 'good' : 'warn']
       : [`${rule} ${m.sales.some(x => x.channel !== 'retail') ? 'Not yet checked: no finished day statement inside the captured ledger.' : 'No exchange or contract sales in this window.'}`, m.sales.some(x => x.channel !== 'retail') ? 'info' : 'good'];
     const gaps = [

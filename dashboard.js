@@ -2916,7 +2916,7 @@ ${row('Labour (incl. admin)',r.labourPerUnit>0?`−${plannerMoney(r.labourPerUni
 ${row('Sourcing cost / unit',plannerMoney(r.inputCostPerUnit+r.labourPerUnit),'inputs + labour','pp-sub')}
 ${row('Profit / unit (game basis)',plannerMoney(gameUnit),'','pp-total')}
 ${row(sellLabel,`−${plannerMoney(r.feePerUnit+r.contractDiscountPerUnit)}`)}
-${row('Transport',`−${plannerMoney(r.transportPerUnit)}`,`${num(ctx.transportUnits)} units × ${plannerMoney(transport?.price??0)}${c.sellMode==='contract'?' · 50% paid by buyer':''}`)}
+${row('Transport',`−${plannerMoney(r.transportPerUnit)}`,`${num(ctx.transportUnits)} units × ${plannerMoney(transport?.price??0)}`)}
 ${row('Profit / unit after fee &amp; transport',plannerMoney(r.profitPerUnit),'','pp-total')}
 ${row('Break-even sale price',plannerMoney(r.breakEvenPrice))}
 ${row('Production / h',num(r.unitsPerHour),`Level ${ctx.level} · ${num(+(r.unitsPerHour/ctx.level).toFixed(3))} per level · ${eco.changed?(eco.source==='measured-stale'?'running batch rate (economy changed)':`${escapeHtml(eco.name(eco.current))} economy rate, see note above`):calcRate>0?`game's calculator rate at ${num(C.GAME_PROFIT_CALC_ABUNDANCE_PCT)}% abundance`:eco.source==='game-constants'?'game formula (constants), as the game':'measured rate from this card'}`)}

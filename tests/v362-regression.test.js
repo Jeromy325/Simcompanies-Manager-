@@ -2,7 +2,7 @@
 const assert = require('assert'); const fs = require('fs'); const path = require('path');
 const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 const content = read('content.js'), bg = read('background.js');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.394');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.395');
 const sec = content.slice(content.indexOf('  const marketLabel=record=>'), content.indexOf('  const style=()=>{', content.indexOf('  const marketLabel=record=>')));
 assert.ok(/window\.addEventListener\('click',onBadgeTap,true\)/.test(sec), 'tap handled in capture phase');
 assert.ok(!/innerHTML/.test(sec), 'popup built with textContent (seller names are not HTML)');

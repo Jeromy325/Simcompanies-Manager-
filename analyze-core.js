@@ -289,10 +289,10 @@
   // 2.5.394 cost/unit = the game's cost at the time of each sale (sale money − the row's profit), the warehouse lot cost
   // only for a sale whose row has no profit. Calculator and gap only for exchange rows (today's exchange price).
   const CHANNEL_ORDER = { exchange: 0, contract: 1, retail: 2 };
-  // 2.5.394 transport: the seller pays it from its own Transport units, never in cash. An exchange sale takes the product's
-  // transport units (game constants .transportation), a contract half as many (Sim Companies FAQ; Times #76); retail
-  // none. Valued at one Transport unit's cost.
-  const TRANSPORT_SHARE = { exchange: 1, contract: 0.5, retail: 0 }, CONTRACT_TRANSPORT_SHARE = TRANSPORT_SHARE.contract;
+  // 2.5.395 transport: the seller pays it from its own Transport units, never in cash. An exchange sale and a contract
+  // both take the product's transport units (game constants .transportation; the game page shows Bulldozer 5 for either,
+  // no contract discount); retail none. Valued at the seller's own Transport lot cost.
+  const TRANSPORT_SHARE = { exchange: 1, contract: 1, retail: 0 }, CONTRACT_TRANSPORT_SHARE = TRANSPORT_SHARE.contract;
   function saleTransport(channel, rid, transportOf, transportCost) {
     const share = TRANSPORT_SHARE[channel];
     if (share == null) return null;
@@ -397,7 +397,7 @@
     return out.sort((a, b) => a.t - b.t);
   }
   // Contract vs exchange per product: contract = average of your own paid contracts in the window less its transport;
-  // exchange net = price × (1 − fee) less its transport (twice the contract's units) (2.5.394).
+  // exchange net = price × (1 − fee) less its transport (the same units as a contract) (2.5.394).
   function routes(sales, { priceOf, rate = null, transportOf = null, transportCost = null } = {}) {
     const g = new Map();
     for (const s of Array.isArray(sales) ? sales : []) {

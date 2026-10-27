@@ -42,9 +42,9 @@ const labour=(50*2)/uph*1.1, inputs=2.5, transport=0.25, net=10*0.97;
 near(p.labourPerUnit,labour); near(p.inputCostPerUnit,inputs); near(p.transportPerUnit,transport); near(p.netRevenuePerUnit,net);
 near(p.profitPerUnit,net-inputs-labour-transport); near(p.profitPerHour,(net-inputs-labour-transport)*uph);
 near(p.profitPerHourPerLevel,p.profitPerHour/2); near(p.breakEvenPrice,(inputs+labour+transport)/0.97);
-// contract: no fee, transport halved; robots toggle scales wages
+// contract: no fee, the same transport units as the exchange (2.5.395); robots toggle scales wages
 p=T.profitPerHour({baseRatePerLevel:10,salePrice:10,sellMode:'contract',transportUnits:2,transportUnitCost:1,inputs:[]});
-near(p.netRevenuePerUnit,10); near(p.transportPerUnit,1);
+near(p.netRevenuePerUnit,10); near(p.transportPerUnit,2);
 const w1=T.profitPerHour({baseRatePerLevel:10,salePrice:10,wagePerHourPerLevel:100,inputs:[]}), w2=T.profitPerHour({baseRatePerLevel:10,salePrice:10,wagePerHourPerLevel:100,robots:true,inputs:[]});
 near(w2.hourlyWages,w1.hourlyWages*0.97);
 // level cancels out of profit per unit, not per hour
@@ -111,12 +111,12 @@ console.log('tools-core: all assertions passed');
   near(ex.unitsPerHour,26.452); near(ex.inputCostPerUnit,inputCost); near(ex.transportPerUnit,1.25);
   near(ex.netRevenuePerUnit,2190.94*0.96); near(ex.profitPerHour,(2190.94*0.96-inputCost-1.25)*26.452,1e-6); near(ex.profitPerHourPerLevel,ex.profitPerHour/4);
   near(ex.feePerUnit,2190.94*0.04);
-  // Contract: no exchange fee, half transport, sold at a discount from market.
+  // Contract: no exchange fee, the same 5 transport units as the exchange (2.5.395), sold at a discount from market.
   const ct=T.buildingProfit({...base,sellMode:'contract',exchangeFeePct:4,contractDiscountPct:3});
-  near(ct.netRevenuePerUnit,2190.94*0.97); near(ct.transportPerUnit,0.625); near(ct.breakEvenPrice,ct.totalCostPerUnit/0.97);
-  // Contract with the same 4% discount as the exchange fee differs only by the transport share.
+  near(ct.netRevenuePerUnit,2190.94*0.97); near(ct.transportPerUnit,1.25); near(ct.breakEvenPrice,ct.totalCostPerUnit/0.97);
+  // Contract with the same 4% discount as the exchange fee earns the same per unit.
   const ct4=T.buildingProfit({...base,sellMode:'contract',contractDiscountPct:4});
-  near(ct4.profitPerUnit-ex.profitPerUnit,0.625,1e-9);
+  near(ct4.profitPerUnit-ex.profitPerUnit,0,1e-9);
   assert.equal(T.buildingProfit({level:4}).ok,false);
 }
 console.log('tools-core: buildingProfit assertions passed');
