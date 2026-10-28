@@ -6,6 +6,10 @@
 - Exchange overlay: the badge is now a small ⓘ. Tapping it opens the pop-out: Cheap / Fair / Expensive ±% vs the
   market price (cheapest other listing at the same quality or better), VWAP as a labelled fallback
   ("VWAP (fallback)"), and the net after the 4% fee. Works without SimcoTools VWAP when the order book is known.
+- Pending / decided (owner, 2026-10-28):
+  - Chat search + keyword alerts (Alerts tab, GET only, max once per 5 min): approved, NOT built. Needs a Network
+    Capture of the game's chat to find its endpoint (page-hook.js skips chat URLs on purpose).
+  - Retail saturation / "Market Pulse" and Top-10 retail by PPHPL: dropped, do not build.
 
 2.5.395 — 2026-10-27 — Transport: contracts use the full units, your lot cost
 - A contract uses the same Transport units as an exchange sale (game constants .transportation; the game page shows
