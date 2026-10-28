@@ -1136,7 +1136,7 @@ let hookReady = false;
       const realmN=Number(response.realm);
       let marketRows=Array.isArray(response.marketRows)?response.marketRows:[];
       const lv=liveMarket.get(rid);if(lv&&lv.realm===realmN&&lv.rows.length)marketRows=lv.rows;
-      // 2.5.396 market price comes first; VWAP rows are only needed as the fallback.
+      // The overlay compares with VWAP only (see exchangeCompare); marketRows are kept for other readers.
       if(!vrows.length&&!marketRows.length)return null;
       response.rows=vrows;
       if(vrows.length)vwapCache={rows:vrows,realm:realmN,at:Date.now()};
@@ -1169,31 +1169,23 @@ let hookReady = false;
     st.textContent=`.scx-vwap-host{position:relative;display:inline-flex;align-items:center;justify-content:flex-end;white-space:nowrap;vertical-align:middle;min-width:0;z-index:5}.scx-vwap-badge{position:relative;z-index:6;display:inline-flex;align-items:center;padding:2px 5px;border-radius:6px;cursor:pointer;user-select:none;white-space:nowrap;font:700 9px/1.1 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 1px 2px rgba(0,0,0,.25);pointer-events:auto}.scx-vwap-badge.scx-expensive{color:#ffd2d6;background:rgba(120,20,25,.90);border:1px solid rgba(255,90,100,.55)}.scx-vwap-badge.scx-cheap{color:#bff8d8;background:rgba(20,100,60,.90);border:1px solid rgba(78,230,139,.55)}.scx-vwap-badge.scx-flat{color:#e6edf5;background:rgba(10,23,34,.92);border:1px solid rgba(120,145,170,.55)}.scx-vwap-popover{position:fixed;z-index:2147483647;display:none;width:max-content;min-width:190px;max-width:min(250px,calc(100vw - 20px));background:#0d1621;color:#e8edf3;border:1px solid #36485e;border-radius:8px;padding:8px;box-shadow:0 8px 24px rgba(0,0,0,.55);font:10px/1.25 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.scx-vwap-popover-title{font-weight:800;color:#aebdcb;margin-bottom:5px;padding-bottom:5px;border-bottom:1px solid #26364a}.scx-vwap-popover-row{display:flex;justify-content:space-between;gap:12px;margin-top:4px}.scx-vwap-popover-label{color:#91a2b4}.scx-vwap-popover-value{font-weight:700;white-space:nowrap}`;
     (document.head||document.documentElement).appendChild(st);
   };
-  // Compare a listing with the VWAP for its own quality (the exchange is the market, so the cheapest
-  // other listing would only compare the listing with itself). Falls back to the cheapest other listing
-  // at the same quality or better when no VWAP is known. ±2% = Fair.
+  // Compare a listing with the VWAP for its own quality only. VWAP is the previous day's figure.
+  // No VWAP for that quality means no badge. ±2% = Fair.
   /*SCM-XCMP-START*/
-  const exchangeCompare=(listing,marketRows,vwap)=>{
-    const price=Number(listing?.price),q=Number(listing?.quality)||0,id=listing?.id;
+  const exchangeCompare=(listing,vwap)=>{
+    const price=Number(listing?.price);
     if(!Number.isFinite(price)||price<=0)return null;
-    const build=(ref,source)=>{const pct=(price-ref)/ref*100;return {ref,source,pct,diff:price-ref,verdict:pct<=-2?'Cheap':pct>=2?'Expensive':'Fair'};};
-    if(Number.isFinite(Number(vwap))&&Number(vwap)>0)return build(Number(vwap),'vwap');
-    let ref=null;
-    for(const r of Array.isArray(marketRows)?marketRows:[]){
-      const p=Number(r?.price);if(!Number.isFinite(p)||p<=0||(Number(r?.quality)||0)<q)continue;
-      if(id!=null&&r?.id===id)continue;
-      if(id==null&&p===price&&Number(r?.quantity)===Number(listing?.quantity))continue;
-      if(ref==null||p<ref)ref=p;
-    }
-    return ref==null?null:build(ref,'market');
+    const ref=Number(vwap);
+    if(!Number.isFinite(ref)||ref<=0)return null;
+    const pct=(price-ref)/ref*100;
+    return {ref,pct,diff:price-ref,verdict:pct<=-2?'Cheap':pct>=2?'Expensive':'Fair'};
   };
   /*SCM-XCMP-END*/
   const pctText=p=>`${p>=0?'+':'−'}${Math.abs(p).toFixed(1)}%`;
-  const makeBadge=(candidate,rid,mapped,marketRows)=>{
+  const makeBadge=(candidate,rid,mapped)=>{
     const q=Number(candidate.record?.quality);if(!Number.isFinite(q))return null;
-    const v=mapped.get(q);
-    const cmp=exchangeCompare({price:candidate.price,quantity:candidate.quantity,quality:q,id:candidate.record?.id},marketRows,v);if(!cmp)return null;
-    const pct=cmp.pct,diff=cmp.diff,refLabel=cmp.source==='vwap'?`VWAP Q${q}`:`Market price Q${q}+ (no VWAP)`;
+    const cmp=exchangeCompare({price:candidate.price,quantity:candidate.quantity},mapped.get(q));if(!cmp)return null;
+    const pct=cmp.pct,diff=cmp.diff,refLabel=`VWAP Q${q}`;
     const host=document.createElement('span');host.className='scx-vwap-host';
     host.dataset.vwapKey=`${rid}:${candidate.record?.id??`${q}:${candidate.quantity}:${candidate.price}`}`;
     const b=document.createElement('button');b.type='button';b.className='scx-vwap-badge '+(pct>0.0001?'scx-expensive':pct<-0.0001?'scx-cheap':'scx-flat');
@@ -1256,7 +1248,7 @@ let hookReady = false;
         let host=existingHosts.get(key)||null;
         if(!host||host.__scmRow!==row||host.dataset.open!=='1'){
           if(host)removeBadge(host);
-          host=makeBadge(candidate,rid,mapped,data.marketRows||[]);
+          host=makeBadge(candidate,rid,mapped);
         }else{
           host.__scmRow=row;host.__scmPrice=candidate.price;
         }
