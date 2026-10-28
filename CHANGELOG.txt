@@ -1,3 +1,7 @@
+2.5.397 — 2026-10-28 — Exchange badge shows the verdict
+- The Exchange overlay badge now shows the verdict, percent and quality (for example 'Expensive +2.5% · Q2') instead of only the info icon.
+- Tapping the badge still opens the full details. The popover title uses the same text.
+
 2.5.396 — 2026-10-28 — 4% fee, contract price rank, exchange market-price pop-out
 - Exchange fee is always 4% in every Manager calculation (planner, sell advice, profit per hour). The fee read
   from your listings or sales is no longer used; a fee you type in the planner still overrides it.
