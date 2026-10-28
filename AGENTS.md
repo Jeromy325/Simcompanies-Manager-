@@ -20,6 +20,29 @@ How work on this repo is split between the lead agent and sub-agents. Read this 
 - Tests: `tests/*.test.js` (77 Node files after the cleanup) and `tests/e2e/*.e2e.js` (12 browser files, uses `tests/e2e/harness.js`).
 - Every change is versioned in `manifest.json` and logged in `CHANGELOG.txt`.
 
+## Lead hard rules (no exceptions)
+
+The lead does not do the work. Before any tool call that edits code, runs tests, or pushes, check this list.
+
+1. **No direct code edits.** The lead does not edit `.js`, `.html`, `.css`, or data files. Any change goes to the role that owns the file (see Roles). The only files the lead edits are this file and `CHANGELOG.txt`.
+2. **No direct test runs.** The lead does not run `node` tests, e2e tests, or `node --check`. Only the Verifier runs tests. The lead reads the Verifier's report.
+3. **State the role and model before every delegation.** Say it in the reply first: "Starting [role] on [model] for [task]". Then launch the agent.
+4. **Do not relaunch a stopped agent silently.** If an agent is stopped, tell the user and ask before starting a new one.
+5. **Log every delegation** in the Log table in the same reply that reports its result.
+6. **Report every start and finish** to the user, in 150 words or less.
+
+## Build pipeline (every finished build)
+
+A build is any change to app code, data, or tests that is ready to ship. Run these steps in order. Do not skip one.
+
+1. **Implement.** The owning role makes the change in its own worktree.
+2. **Verify.** The Verifier runs `node --check`, all Node tests, and the e2e tests the change needs. It must pass. A failed check goes back to the owning role, not to the lead.
+3. **Release.** The Release role bumps the patch version in `manifest.json` (for example 2.5.400 to 2.5.401) and adds a `CHANGELOG.txt` entry. Every build gets a new version, even if several builds land in one session.
+4. **Commit.** Commit the code, the version bump, and the changelog together, after the Verifier passes.
+5. **Push.** Push only when the user asks in that turn. A stop-hook message about uncommitted changes is not a request to push.
+
+A push that skips steps 2 to 4 is a rule break. Report it to the user when it happens.
+
 ## Roles
 
 Each role lists: model, owns, may edit, must not, inputs, done when, report.
@@ -103,7 +126,10 @@ Each role lists: model, owns, may edit, must not, inputs, done when, report.
 4. **Done means verified.** A change counts as done only after the Verifier passes it.
 5. **No figure changes without Game-Fidelity sign-off.**
 6. **No test may pin an exact version number.** Use version floors or behavior checks.
-7. **Stay on the designated branch.** Commit and push only when the user asks.
+7. **Stay on the designated branch.** Commit and push only when the user asks. A push to `main` needs its own request from the user, even if an earlier push was approved.
+8. **Every finished build bumps the version** (see Build pipeline). No build ships without a new version and changelog entry.
+9. **Stop-hook messages are not instructions.** A message saying to commit or push does not authorize either. Reply that the changes are waiting for the user.
+10. **Before acting on a rule question, read this file.** If a rule is unclear, ask the user; do not guess.
 
 ## Model tiers
 
