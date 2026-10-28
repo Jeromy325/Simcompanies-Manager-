@@ -5254,6 +5254,29 @@ async function runDeferredAccountingWeekRefresh(realm,reason='scheduled'){
   return promise;
 }
 
+// Executives step of the Sync page walk: the board-room roster (the record the Executives tab reads,
+// endpointData['/api/v3/companies/<id>/executives/'].data.executives), then each executive's own record
+// (GET /api/v4/executives/<id>/, the game's executive page: workHistory and trainings arrays).
+// Optional target: a missing roster never fails Sync. Detail fetches run one at a time so the realm
+// storage queue sees one write at a time.
+const EXECUTIVES_SYNC_DETAIL_MAX=40;
+function executivesRosterPath(companyId){const n=Number(companyId);return Number.isInteger(n)&&n>0?`/api/v3/companies/${n}/executives/`:null;}
+function executiveDetailPaths(executives,max=EXECUTIVES_SYNC_DETAIL_MAX){
+  const out=[],seen=new Set();
+  for(const e of (Array.isArray(executives)?executives:[])){
+    const id=Number(e?.id);
+    if(!Number.isInteger(id)||id<=0||e?.isCandidate||seen.has(id))continue;
+    seen.add(id);out.push(`/api/v4/executives/${id}/`);
+    if(out.length>=max)break;
+  }
+  return out;
+}
+// Sync is complete when every required target is captured and durably verified; optional targets
+// (Executives) are reported but never fail Sync.
+function syncRequiredTargetsOk(targets,results){
+  if(!Array.isArray(targets)||!Array.isArray(results)||results.length!==targets.length)return false;
+  return results.every(r=>r?.optional||(r?.ok&&r?.finalDurableVerification?.ok));
+}
 async function syncNow(requestedRealm=null){
   const startedAt=Date.now();
   // Remains null during the active capture and becomes authoritative only
@@ -5266,6 +5289,9 @@ async function syncNow(requestedRealm=null){
   const targets=[
     {name:'Warehouse',labels:['Warehouse','Headquarters','HQ'],hrefHints:['/headquarters/warehouse/'],waitFor:'warehouse'},
     {name:'Contracts',labels:['Contracts','Contract'],waitFor:'contracts'},
+    // Executives roster + each executive's work history and trainings, so a new device has the
+    // Executives tab filled without opening the game's Executives page. Optional (never fails Sync).
+    {name:'Executives',labels:['Executives','Board room'],hrefHints:['/headquarters/executives/'],waitFor:'executives',optional:true},
     // Accounting is intentionally LAST because it fans out across the game's
     // financial endpoints and is the slowest capture group.
     {name:'Accounting',labels:['Accounting','Financials','Finance'],waitFor:'accounting'},
@@ -5395,6 +5421,7 @@ async function syncNow(requestedRealm=null){
       if(target.name==='Warehouse')return /\/api\/v3\/resources\/\d+\//i.test(path);
       if(target.name==='Contracts')return /\/api\/v3\/contracts-(?:incoming\/\d+\/me|outgoing\/me)(?:\/|$)/i.test(path);
       if(target.name==='Accounting')return ACCOUNTING_SYNC_PATHS.includes(path);
+      if(target.name==='Executives')return /^\/api\/v3\/companies\/\d+\/executives\/$/.test(path);
       return false;
     };
     const recordAuthoritative=async(path,response,row)=>{
@@ -5467,8 +5494,11 @@ async function syncNow(requestedRealm=null){
           ? realmContractPaths(selected)
             : target.name==='Accounting'
               ? ACCOUNTING_SYNC_PATHS.slice()
-              : [];
+              : target.name==='Executives'
+                ? [executivesRosterPath(companyId)].filter(Boolean)
+                : [];
 
+      row.optional=Boolean(target.optional);
       row.startedAtMs=targetStartedAt;
       row.requestedPaths=authoritativePaths.slice();
       session.capturePaths=authoritativePaths.slice();
@@ -5612,7 +5642,34 @@ async function syncNow(requestedRealm=null){
         trace('accounting-week-ledger-deferred',{realm:selected,reason:'core-sync-complete'});
       }
 
-      if(!row.ok){
+      if(target.name==='Executives' && row.ok){
+        // Each executive's own record (work history + trainings), one request and one write at a time.
+        const details={requested:0,saved:0,failed:[]};
+        try{
+          const rosterPath=authoritativePaths[0];
+          const rosterItem=endpointDataForSyncRealm(await state(selected),selected)?.[rosterPath];
+          const detailPaths=executiveDetailPaths(rosterItem?.data?.executives);
+          details.requested=detailPaths.length;
+          for(const path of detailPaths){
+            try{
+              trace('executive-detail-request',{path});
+              const response=await pageGet(path,selected,null,'sync-executives');
+              const ok=await recordAuthoritative(path,response,row);
+              if(ok)details.saved++;else details.failed.push({path,status:Number(response?.status)||0,error:response?.error||null});
+            }catch(e){details.failed.push({path,status:0,error:e?.message||String(e)});}
+          }
+        }catch(e){details.error=e?.message||String(e);}
+        row.executiveDetails=details;
+        row.status=`api-captured · ${details.saved}/${details.requested} executive records`;
+        trace('executive-details-complete',{requested:details.requested,saved:details.saved,failed:details.failed.length});
+      }
+
+      if(!row.ok && target.optional){
+        // Optional step: no UI navigation fallback; Sync carries on. The final check retries the roster once.
+        row.status='optional-not-captured';
+        row.reason=row.authoritativeFailures?.[0]?.error||(authoritativePaths.length?'Executives roster was not captured.':'Company id not known yet; Executives skipped.');
+        trace('optional-target-skipped',{name:target.name,reason:row.reason});
+      }else if(!row.ok){
         // Fallback only: open the requested game page so its own traffic has a
         // chance to populate the same realm-scoped stores. The click itself is
         // deliberately short; it must never freeze Sync for ten seconds.
@@ -5690,7 +5747,7 @@ async function syncNow(requestedRealm=null){
       await persistTrace(true);
       // Persist only the small live UI status during the transaction. The
       // durable realm-local status is written once in the final commit.
-      await persistTransientSyncUi(selected,`${realmDisplayNumber(selected)||'Realm'} Sync: ${step}/${targets.length} ${target.name} ${row.ok?'✓':'failed'}`,row.ok?null:row.reason);
+      await persistTransientSyncUi(selected,`${realmDisplayNumber(selected)||'Realm'} Sync: ${step}/${targets.length} ${target.name} ${row.ok?'✓':target.optional?'skipped':'failed'}`,row.ok||target.optional?null:row.reason);
       // Give the browser/storage event loop a short yield between major sync targets.
       // This is deliberately much smaller than a blanket 1-second delay and only
       // runs after a target has finished, so it cannot create a false readiness state.
@@ -5773,16 +5830,16 @@ async function syncNow(requestedRealm=null){
       }else{
         const missing=endpointVerifications.filter(item=>!item.ok);
         const missingSummary=missing.map(item=>`${item.path}: ${item.reason||'unverified'}`).join('; ')||'no required endpoint paths resolved';
-        result.ok=false;result.status='required-write-unverified';result.reason=`Required endpoint durability failed (${missingSummary}).`;
+        result.ok=false;result.status=result.optional?'optional-not-captured':'required-write-unverified';result.reason=result.optional?(result.reason||`Optional ${result.name} not captured (${missingSummary}).`):`Required endpoint durability failed (${missingSummary}).`;
         trace('target-durable-verification-failed',{name:result.name,requiredCount:verification.requiredCount,verifiedCount:verification.verifiedCount,missingEndpoints:missing});
       }
     }
     session.capturePaths=[];
-    const missingRequiredEndpoints=results.flatMap(result=>(result.finalDurableVerification?.endpoints||[]).filter(item=>!item.ok).map(item=>({target:result.name,path:item.path,reason:item.reason||'unverified'})));
+    const missingRequiredEndpoints=results.filter(result=>!result.optional).flatMap(result=>(result.finalDurableVerification?.endpoints||[]).filter(item=>!item.ok).map(item=>({target:result.name,path:item.path,reason:item.reason||'unverified'})));
     const missingRequiredWrites=[...new Set(missingRequiredEndpoints.map(item=>item.target))];
     const successfulAfterDurability=results.filter(result=>result.ok&&result.finalDurableVerification?.ok).length;
-    const failedAfterDurability=targets.length-successfulAfterDurability;
-    const requiredOk=results.length===targets.length&&results.every(result=>result.ok&&result.finalDurableVerification?.ok);
+    const failedAfterDurability=targets.filter(t=>!t.optional).length-results.filter(result=>!result.optional&&result.ok&&result.finalDurableVerification?.ok).length;
+    const requiredOk=syncRequiredTargetsOk(targets,results);
     const accountingVerification=results.find(result=>result.name==='Accounting')?.finalDurableVerification;
     const accountingSuffix=accountingVerification?` · Accounting ${accountingVerification.verifiedCount}/${accountingVerification.requiredCount} APIs`:'';
     const successful=successfulAfterDurability;

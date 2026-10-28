@@ -1,3 +1,8 @@
+2.5.400 — 2026-10-28 — SYNC-EXECUTIVES: Sync fetches executives
+- First-install Sync now also fetches the executives roster (/api/v3/companies/<id>/executives/) and up to 40
+  per-executive detail records (/api/v4/executives/<id>/), stored in the realm's endpoint data.
+- A failed executives step does not fail Sync.
+
 2.5.399 — 2026-10-28 — Exchange overlay: VWAP only
 - The Exchange overlay compares each listing only with the VWAP for its quality (the previous day's VWAP). The market price is no longer used for the badge.
 - A quality with no VWAP shows no badge.
