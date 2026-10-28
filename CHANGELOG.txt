@@ -1,3 +1,8 @@
+2.5.401 — 2026-10-28 — DASHBOARD-PERFORMANCE: render only the active tab
+- Each tab builds only its own sections, so switching tabs no longer rebuilds the whole dashboard.
+- The unused recordHistory pass is removed from render().
+- get() reads the dashboard's store keys in one storage call; resource and market price lookups are memoized per render.
+
 2.5.400 — 2026-10-28 — SYNC-EXECUTIVES: Sync fetches executives
 - First-install Sync now also fetches the executives roster (/api/v3/companies/<id>/executives/) and up to 40
   per-executive detail records (/api/v4/executives/<id>/), stored in the realm's endpoint data.
