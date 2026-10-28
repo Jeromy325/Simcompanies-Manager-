@@ -1,3 +1,8 @@
+2.5.398 — 2026-10-28 — Exchange overlay compares with VWAP for the listing's quality
+- The Exchange overlay compares each listing with the VWAP for its own quality. It no longer compares with the cheapest other listing, which made the market compare with itself.
+- Falls back to the cheapest other listing at the same quality or better only when no VWAP is known; the popover says so.
+- The popover shows one reference row (VWAP Qn, or market price when no VWAP).
+
 2.5.397 — 2026-10-28 — Exchange badge shows the verdict
 - The Exchange overlay badge now shows the verdict, percent and quality (for example 'Expensive +2.5% · Q2') instead of only the info icon.
 - Tapping the badge still opens the full details. The popover title uses the same text.

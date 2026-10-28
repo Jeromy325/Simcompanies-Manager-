@@ -6,7 +6,7 @@ const H = require('./harness');
 const fs = require('fs');
 (async () => {
   const now = new Date().toISOString(), RID = 3;
-  // Listing 2 star, 2000 units at $20.50; cheapest other Q2+ listing is $20.00 -> +2.5%, VWAP Q2 19.77.
+  // Listing 2 star, 2000 units at $20.50; VWAP Q2 is 19.77 -> +3.7% (the overlay compares to VWAP, not other listings).
   const book = [
     { id: 11, price: 20.5, quality: 2, quantity: 2000, seller: { company: 'Long Company Name Holdings International' } },
     { id: 12, price: 20.0, quality: 2, quantity: 500, seller: { company: 'Base Metals Inc' } },
@@ -31,7 +31,7 @@ const fs = require('fs');
   const badges = await p.$$eval('.scx-vwap-badge', bs => bs.map(b => { const r = b.getBoundingClientRect(), row = b.closest('.row').getBoundingClientRect(); return { t: b.textContent, inRow: r.left >= row.left && r.right <= row.right + 0.5 }; }));
   H.check('one badge per listing (div.row)', badges.length === 2, 2, badges.length);
   const first = badges.find(b => /Expensive/.test(b.t));
-  H.check('badge text Expensive +2.5% and Q2', /Expensive \+2\.5%/.test(first?.t || '') && /Q2/.test(first?.t || ''), 'Expensive +2.5% · Q2', first?.t);
+  H.check('badge text Expensive +3.7% and Q2', /Expensive \+3\.7%/.test(first?.t || '') && /Q2/.test(first?.t || ''), 'Expensive +3.7% · Q2', first?.t);
   H.check('badge inside row', badges.every(b => b.inRow), true, badges.map(b => b.inRow).join(','));
   const sw = await p.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
   H.check('no horizontal overflow at 360px', sw.sw <= sw.cw, `<=${sw.cw}`, sw.sw);
