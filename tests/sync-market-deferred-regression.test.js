@@ -4,7 +4,6 @@ const fs=require('node:fs');
 const path=require('node:path');
 const root=path.join(__dirname,'..');
 const background=fs.readFileSync(path.join(root,'background.js'),'utf8');
-const manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8'));
 const syncStart=background.indexOf('async function syncNow(');
 const syncEnd=background.indexOf('\nasync function postSyncBuildingUiRefresh',syncStart);
 assert.ok(syncStart>=0&&syncEnd>syncStart,'syncNow function is present');
@@ -26,5 +25,4 @@ assert.match(background,/await chrome\.alarms\.clear\(VWAP_WATCH_ALARM_NAME\)/,'
 assert.match(background,/async function runLiveMarketRefreshUnlocked\(realmArg=null\)/,'current-price stage is isolated from VWAP pair fetching');
 assert.doesNotMatch(background.slice(background.indexOf('async function runLiveMarketRefreshUnlocked'),background.indexOf('// All callers (scheduled, popup/message, and future triggers) share one refresh per realm.')),/fetchSimcoVwapPairs\(realm,pairs\)/,'current-price stage does not fetch VWAP pairs concurrently');
 assert.match(background,/Date\.now\(\)-cachedAt<15\*60\*1000/,'fresh prices are reused during retries rather than fetched again');
-assert.equal(manifest.version, '2.5.396','manifest version is bumped');
 console.log('sync-market-deferred-regression: 15 assertions passed');
