@@ -1196,11 +1196,12 @@ let hookReady = false;
     const host=document.createElement('span');host.className='scx-vwap-host';
     host.dataset.vwapKey=`${rid}:${candidate.record?.id??`${q}:${candidate.quantity}:${candidate.price}`}`;
     const b=document.createElement('button');b.type='button';b.className='scx-vwap-badge '+(pct>0.0001?'scx-expensive':pct<-0.0001?'scx-cheap':'scx-flat');
-    b.textContent='ⓘ';b.title='Compare with market price';b.setAttribute('aria-label','Compare with market price');
+    const verdictText=`${cmp.verdict} ${pctText(pct)} · Q${q}`;
+    b.textContent=`ⓘ ${verdictText}`;b.title='Compare with market price';b.setAttribute('aria-label','Compare with market price');
     const pop=document.createElement('div');pop.className='scx-vwap-popover';
     const row=(k,val,cls='')=>`<div class="scx-vwap-popover-row"><span class="scx-vwap-popover-label">${k}</span><span class="scx-vwap-popover-value ${cls}">${val}</span></div>`;
     const fee=0.04; // 2.5.396 Manager exchange fee is always 4%
-    pop.innerHTML=`<div class="scx-vwap-popover-title">${cmp.verdict} ${pctText(pct)} · Q${q}</div>${row('Listing price',money(candidate.price))}${row(refLabel,money(cmp.ref))}${row('Difference',`${diff>=0?'+':''}${money(diff)} · ${pctText(pct)}`,pct<=-2?'good':pct>=2?'bad':'')}${cmp.source==='market'&&Number.isFinite(v)&&v>0?row(`VWAP Q${q}`,money(v)):''}${row('Listing quantity',candidate.quantity.toLocaleString())}${row('Net after 4% fee',money(candidate.price*(1-fee)))}`;
+    pop.innerHTML=`<div class="scx-vwap-popover-title">${verdictText}</div>${row('Listing price',money(candidate.price))}${row(refLabel,money(cmp.ref))}${row('Difference',`${diff>=0?'+':''}${money(diff)} · ${pctText(pct)}`,pct<=-2?'good':pct>=2?'bad':'')}${cmp.source==='market'&&Number.isFinite(v)&&v>0?row(`VWAP Q${q}`,money(v)):''}${row('Listing quantity',candidate.quantity.toLocaleString())}${row('Net after 4% fee',money(candidate.price*(1-fee)))}`;
     host.__scmPopover=pop;host.__scmRow=candidate.row;host.__scmPrice=candidate.price;
     b.addEventListener('click',e=>{
       e.preventDefault();e.stopPropagation();
