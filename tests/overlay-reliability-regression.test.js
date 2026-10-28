@@ -9,7 +9,7 @@ const background=fs.readFileSync(path.join(root,'background.js'),'utf8');
 // Exchange overlay: use the game's own market response; do not wait for storage round trip.
 assert.match(content,/const liveMarket=new Map\(\)/,'exchange overlay keeps live market rows in memory');
 assert.match(content,/type!=='API_DATA'/,'exchange overlay listens for page-hook API_DATA');
-assert.match(content,/vwapCache=\{rows:response\.rows/,'VWAP rows cached separately from market rows');
+assert.match(content,/if\(vrows\.length\)vwapCache=\{rows:vrows/,'VWAP rows cached separately from market rows');
 assert.match(content,/if\(processing\)\{rerun=true;return;\}/,'a call arriving mid-process is re-run, not dropped');
 const handler=background.slice(background.indexOf("m?.type==='GET_VWAP_OVERLAY_DATA'"),background.indexOf("m?.type==='CLEAR_EXTENSION_DATA'"));
 assert.equal((handler.match(/await state\(\)/g)||[]).length,1,'GET_VWAP_OVERLAY_DATA reads full state once');

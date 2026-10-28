@@ -1,6 +1,6 @@
 // 2.5.394 Analyze Known gaps fixes. (1) Cost per unit = the game's cost at the time of each sale (sale money − the
 // ledger row's profit); today's lot cost only when a row has none. (2) The seller pays transport from its own Transport
-// units: the product's units on an exchange sale or a contract alike (2.5.395: no contract discount); checked against
+// units: the product's units on an exchange sale or a contract alike (2.5.396: no contract discount); checked against
 // the day's Freight Out, cost against COGS.
 // (3) Known gaps dots show the real state; "Cost split over time" is info (grey), not a warning.
 const assert = require('assert'), fs = require('fs'), path = require('path');

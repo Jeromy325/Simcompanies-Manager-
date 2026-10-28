@@ -108,7 +108,7 @@
     const sale = p.salePrice == null || p.salePrice === '' ? NaN : Number(p.salePrice);
     if (!Number.isFinite(sale) || sale < 0) return { ok: false, error: 'No sale price available.' };
     const exchange = p.sellMode !== 'contract';
-    const fee = exchange ? num(p.exchangeFee, 0.03) : 0;
+    const fee = exchange ? num(p.exchangeFee, EXCHANGE_FEE_PCT / 100) : 0;
     const bonus = num(p.productionBonusPct) / 100, abundance = (p.abundancePct == null ? 100 : num(p.abundancePct, 100)) / 100;
     const unitsPerHour = base * level * (1 + bonus) * abundance;
     if (!(unitsPerHour > 0)) return { ok: false, error: 'Units per hour is 0.' };
@@ -810,6 +810,9 @@
     return out;
   }
 
+  // 2.5.396 the Manager always prices the exchange seller fee at 4% (owner's call); listing/sales-derived fees are not used.
+  const EXCHANGE_FEE_PCT = 4;
+
   // Exchange fee % from your own listings (/api/v2/companies/<id>/market-orders/): fees ÷ (quantity × price).
   function listingFeePct(orders) {
     const ok = (Array.isArray(orders) ? orders : []).filter(o => pos(o && o.fees) && pos(o.quantity) && pos(o.price));
@@ -916,7 +919,8 @@
     HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
     cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
     seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,
-    productionCostEntriesFromBuildings, productionCostEntriesFromHistory, mergeProductionCostHistory, productionCostSummary
+    productionCostEntriesFromBuildings, productionCostEntriesFromHistory, mergeProductionCostHistory, productionCostSummary,
+    EXCHANGE_FEE_PCT
   };
   root.SCM_TOOLS_CORE = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

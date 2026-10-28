@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, f), 'utf8');
-assert.equal(JSON.parse(read('manifest.json')).version, '2.5.395');
+assert.equal(JSON.parse(read('manifest.json')).version, '2.5.396');
 const C = require('../tools-core.js');
 const N = require('../notify-core.js');
 const fx = require('./fixtures/profit-calc-2026-10-24.json');
@@ -63,7 +63,7 @@ assert.equal(C.upgradePayback({ cost: null, gainPerHour: 5 }).reason, 'no-cost')
   assert.equal(e.suggested, null); assert.equal(e.range, null); assert.deepEqual(e.warnings, []);
   // background handler: refreshes a stale book through the game tab (no lock), excludes your listings, daily history of id:q
   const h = bg.slice(bg.indexOf("if(m?.type==='GET_SELL_PRICE_INFO')"), bg.indexOf("if(m?.type==='GET_INCOMING_CONTRACT_VWAP_DATA')"));
-  assert.ok(/fetchExchangeOrderBookForRealm\(realm,id\)\.catch/.test(h) && /history:store\.history\?\.\[simcoVwapHistoryKey\(id,q\)\]/.test(h) && /ownIds:own\.map/.test(h) && /feePct:C\.listingFeePct\(own\)/.test(h), 'handler wiring');
+  assert.ok(/fetchExchangeOrderBookForRealm\(realm,id\)\.catch/.test(h) && /history:store\.history\?\.\[simcoVwapHistoryKey\(id,q\)\]/.test(h) && /ownIds:own\.map/.test(h) && /feePct:C\.EXCHANGE_FEE_PCT/.test(h), 'handler wiring');
   // content: the card's price block (real code) and the Fill → input[name="price"]
   const s1 = content.indexOf('  const sellMoney=v=>'), s2 = content.indexOf('  const removeSellCard=()=>{');
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

@@ -1,8 +1,8 @@
-// 2.5.395 Transport: a contract uses the same Transport units as an exchange sale (the game page: Bulldozer 5 for
+// 2.5.396 Transport: a contract uses the same Transport units as an exchange sale (the game page: Bulldozer 5 for
 // either; no contract discount), paid from the seller's own Transport, valued at the seller's Transport lot cost only.
 const assert = require('assert'), fs = require('fs'), path = require('path');
 const A = require('../analyze-core.js'), T = require('../tools-core.js');
-assert.equal(require('../manifest.json').version, '2.5.395');
+assert.equal(require('../manifest.json').version, '2.5.396');
 const close = (a, b, e = 1e-9, m = '') => assert.ok(Math.abs(a - b) <= e, `${m} expected ${b} got ${a}`);
 const gc = require('./fixtures/game-constants-full-2026-10-24.json');
 assert.equal(Number(gc.resources['112'].transportation), 5, 'Bulldozer: 5 transport units (game constants)');

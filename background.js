@@ -6648,7 +6648,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const lots=(Array.isArray(store.warehouseResources)?store.warehouseResources:[]).filter(l=>Number(l?.kind)===id&&Number(l?.quality)===q);
         const cost=C.warehouseUnitCostAsGame(lots,id);
         const companyId=store.authData?.authCompany?.companyId??store.authData?.authCompany?.id??null;
-        const advice=C.sellPriceAdvice({listings:haveBook?ep.data:[],quality:q,history:store.history?.[simcoVwapHistoryKey(id,q)],unitCost:cost?.unitCost??null,feePct:C.listingFeePct(own),companyId,ownIds:own.map(o=>o?.id),now:Date.now()});
+        const advice=C.sellPriceAdvice({listings:haveBook?ep.data:[],quality:q,history:store.history?.[simcoVwapHistoryKey(id,q)],unitCost:cost?.unitCost??null,feePct:C.EXCHANGE_FEE_PCT,companyId,ownIds:own.map(o=>o?.id),now:Date.now()});
         send({ok:true,realm,id,quality:q,orderBookAt:haveBook?ep.receivedAt:null,refreshing,...advice});
       }catch(e){send({ok:false,error:e?.message||String(e)});}
     })(); return true;

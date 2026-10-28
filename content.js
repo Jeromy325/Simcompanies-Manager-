@@ -1130,12 +1130,16 @@ let hookReady = false;
       }
       catch{resolve(null);}
     }).then(response=>{
-      if(!response?.ok||!Array.isArray(response.rows)||!response.rows.length)return null;
+      if(!response?.ok)return null;
+      const vrows=Array.isArray(response.rows)?response.rows:[];
       const rid=Number(response.resourceId||hintedRid);
       const realmN=Number(response.realm);
-      vwapCache={rows:response.rows,realm:realmN,at:Date.now()};
       let marketRows=Array.isArray(response.marketRows)?response.marketRows:[];
       const lv=liveMarket.get(rid);if(lv&&lv.realm===realmN&&lv.rows.length)marketRows=lv.rows;
+      // 2.5.396 market price comes first; VWAP rows are only needed as the fallback.
+      if(!vrows.length&&!marketRows.length)return null;
+      response.rows=vrows;
+      if(vrows.length)vwapCache={rows:vrows,realm:realmN,at:Date.now()};
       const next={rows:response.rows,marketRows,realm:realmN,resourceId:rid};
       dataCache=next;cacheRealm=next.realm;cacheResourceId=rid;cacheAt=Date.now();return next;
     }).finally(()=>{dataInflight=null;});
@@ -1165,16 +1169,38 @@ let hookReady = false;
     st.textContent=`.scx-vwap-host{position:relative;display:inline-flex;align-items:center;justify-content:flex-end;white-space:nowrap;vertical-align:middle;min-width:0;z-index:5}.scx-vwap-badge{position:relative;z-index:6;display:inline-flex;align-items:center;padding:2px 5px;border-radius:6px;cursor:pointer;user-select:none;white-space:nowrap;font:700 9px/1.1 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 1px 2px rgba(0,0,0,.25);pointer-events:auto}.scx-vwap-badge.scx-expensive{color:#ffd2d6;background:rgba(120,20,25,.90);border:1px solid rgba(255,90,100,.55)}.scx-vwap-badge.scx-cheap{color:#bff8d8;background:rgba(20,100,60,.90);border:1px solid rgba(78,230,139,.55)}.scx-vwap-badge.scx-flat{color:#e6edf5;background:rgba(10,23,34,.92);border:1px solid rgba(120,145,170,.55)}.scx-vwap-popover{position:fixed;z-index:2147483647;display:none;width:max-content;min-width:190px;max-width:min(250px,calc(100vw - 20px));background:#0d1621;color:#e8edf3;border:1px solid #36485e;border-radius:8px;padding:8px;box-shadow:0 8px 24px rgba(0,0,0,.55);font:10px/1.25 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.scx-vwap-popover-title{font-weight:800;color:#aebdcb;margin-bottom:5px;padding-bottom:5px;border-bottom:1px solid #26364a}.scx-vwap-popover-row{display:flex;justify-content:space-between;gap:12px;margin-top:4px}.scx-vwap-popover-label{color:#91a2b4}.scx-vwap-popover-value{font-weight:700;white-space:nowrap}`;
     (document.head||document.documentElement).appendChild(st);
   };
-  const makeBadge=(candidate,rid,mapped)=>{
+  // 2.5.396 compare a listing with the market price: the cheapest OTHER listing at the same quality or
+  // better in the game's order book. VWAP is only the fallback and is labelled as such. ±2% = Fair.
+  /*SCM-XCMP-START*/
+  const exchangeCompare=(listing,marketRows,vwap)=>{
+    const price=Number(listing?.price),q=Number(listing?.quality)||0,id=listing?.id;
+    if(!Number.isFinite(price)||price<=0)return null;
+    let ref=null,source=null;
+    for(const r of Array.isArray(marketRows)?marketRows:[]){
+      const p=Number(r?.price);if(!Number.isFinite(p)||p<=0||(Number(r?.quality)||0)<q)continue;
+      if(id!=null&&r?.id===id)continue;
+      if(id==null&&p===price&&Number(r?.quantity)===Number(listing?.quantity))continue;
+      if(ref==null||p<ref)ref=p;
+    }
+    if(ref!=null)source='market';else if(Number.isFinite(Number(vwap))&&Number(vwap)>0){ref=Number(vwap);source='vwap';}else return null;
+    const pct=(price-ref)/ref*100;
+    return {ref,source,pct,diff:price-ref,verdict:pct<=-2?'Cheap':pct>=2?'Expensive':'Fair'};
+  };
+  /*SCM-XCMP-END*/
+  const pctText=p=>`${p>=0?'+':'−'}${Math.abs(p).toFixed(1)}%`;
+  const makeBadge=(candidate,rid,mapped,marketRows)=>{
     const q=Number(candidate.record?.quality);if(!Number.isFinite(q))return null;
-    const v=mapped.get(q);if(!Number.isFinite(v)||v<=0)return null;
-    const diff=candidate.price-v,pct=(diff/v)*100;
+    const v=mapped.get(q);
+    const cmp=exchangeCompare({price:candidate.price,quantity:candidate.quantity,quality:q,id:candidate.record?.id},marketRows,v);if(!cmp)return null;
+    const pct=cmp.pct,diff=cmp.diff,refLabel=cmp.source==='market'?`Market price Q${q}+`:'VWAP (fallback)';
     const host=document.createElement('span');host.className='scx-vwap-host';
     host.dataset.vwapKey=`${rid}:${candidate.record?.id??`${q}:${candidate.quantity}:${candidate.price}`}`;
     const b=document.createElement('button');b.type='button';b.className='scx-vwap-badge '+(pct>0.0001?'scx-expensive':pct<-0.0001?'scx-cheap':'scx-flat');
-    b.textContent=`VWAP ${money(v)} · ${pct>=0?'+':''}${pct.toFixed(1)}%`;
+    b.textContent='ⓘ';b.title='Compare with market price';b.setAttribute('aria-label','Compare with market price');
     const pop=document.createElement('div');pop.className='scx-vwap-popover';
-    pop.innerHTML=`<div class="scx-vwap-popover-title">VWAP · Q${q}</div><div class="scx-vwap-popover-row"><span class="scx-vwap-popover-label">VWAP</span><span class="scx-vwap-popover-value">${money(v)}</span></div><div class="scx-vwap-popover-row"><span class="scx-vwap-popover-label">Listing price</span><span class="scx-vwap-popover-value">${money(candidate.price)}</span></div><div class="scx-vwap-popover-row"><span class="scx-vwap-popover-label">Listing quantity</span><span class="scx-vwap-popover-value">${candidate.quantity.toLocaleString()}</span></div><div class="scx-vwap-popover-row"><span class="scx-vwap-popover-label">Difference</span><span class="scx-vwap-popover-value ${pct<0?'good':pct>0?'bad':''}">${diff>=0?'+':''}${money(diff)} · ${pct>=0?'+':''}${pct.toFixed(1)}%</span></div>`;
+    const row=(k,val,cls='')=>`<div class="scx-vwap-popover-row"><span class="scx-vwap-popover-label">${k}</span><span class="scx-vwap-popover-value ${cls}">${val}</span></div>`;
+    const fee=0.04; // 2.5.396 Manager exchange fee is always 4%
+    pop.innerHTML=`<div class="scx-vwap-popover-title">${cmp.verdict} ${pctText(pct)} · Q${q}</div>${row('Listing price',money(candidate.price))}${row(refLabel,money(cmp.ref))}${row('Difference',`${diff>=0?'+':''}${money(diff)} · ${pctText(pct)}`,pct<=-2?'good':pct>=2?'bad':'')}${cmp.source==='market'&&Number.isFinite(v)&&v>0?row(`VWAP Q${q}`,money(v)):''}${row('Listing quantity',candidate.quantity.toLocaleString())}${row('Net after 4% fee',money(candidate.price*(1-fee)))}`;
     host.__scmPopover=pop;host.__scmRow=candidate.row;host.__scmPrice=candidate.price;
     b.addEventListener('click',e=>{
       e.preventDefault();e.stopPropagation();
@@ -1210,7 +1236,7 @@ let hookReady = false;
       if(!data?.rows?.length){if(startup)scheduleStartupRetry();return;}
       const rid=Number(data.resourceId);if(!Number.isFinite(rid)||rid<=0){if(startup)scheduleStartupRetry();return;}
       const mapped=new Map(data.rows.filter(x=>Number(x.resourceId)===rid).map(x=>[Number(x.quality),Number(x.value)]));
-      if(!mapped.size){if(startup)scheduleStartupRetry();return;}
+      if(!mapped.size&&!(data.marketRows||[]).length){if(startup)scheduleStartupRetry();return;}
       currentContext=`${data.realm}:${rid}`;
       const rows=[...document.querySelectorAll('tbody tr, tr, div.row')].filter(row=>row.nodeType===1&&!row.querySelector?.('th'));
       const wanted=new Set();
@@ -1222,15 +1248,14 @@ let hookReady = false;
         // snapshot is often stale for exactly those rows. The badge only needs the quality shown in the row
         // and its price, so fall back to the row's own quality instead of skipping the row.
         let candidate=matchRecord(parsed,data.marketRows||[]);
-        if(!candidate){const rq=Number(parsed.quality);if(Number.isFinite(rq)&&mapped.has(rq))candidate={...parsed,record:{quality:rq}};else continue;}
+        if(!candidate){const rq=Number(parsed.quality);if(Number.isFinite(rq))candidate={...parsed,record:{quality:rq}};else continue;}
         matchedCount++;
         const key=`${rid}:${candidate.record?.id??`${candidate.record?.quality}:${candidate.quantity}:${candidate.price}`}`;wanted.add(key);
         let host=existingHosts.get(key)||null;
-        if(!host||host.__scmRow!==row){
-          host=makeBadge(candidate,rid,mapped);
+        if(!host||host.__scmRow!==row||host.dataset.open!=='1'){
+          if(host)removeBadge(host);
+          host=makeBadge(candidate,rid,mapped,data.marketRows||[]);
         }else{
-          const q=Number(candidate.record?.quality);const v=mapped.get(q);const badge=host.querySelector('.scx-vwap-badge');
-          if(badge&&Number.isFinite(v)){const diff=candidate.price-v,pct=(diff/v)*100;badge.textContent=`VWAP ${money(v)} · ${pct>=0?'+':''}${pct.toFixed(1)}%`;}
           host.__scmRow=row;host.__scmPrice=candidate.price;
         }
         if(host&&host.dataset.open==='1'&&host.__scmPopover?.style.display==='block')positionPopover(host);
@@ -1355,12 +1380,15 @@ let hookReady = false;
   // v2.5.362 compact badge: only the % vs market price (VWAP when no market price is captured); tap it for the details popup.
   const marketLabel=record=>record?.marketPriceSource==='realm-vwap'?'VWAP':'market price';
   const detailLines=record=>{
-    const marketPrice=Number(record?.marketPrice),p=Number(record?.price),qty=Number(record?.quantity);
-    if(!Number.isFinite(marketPrice)||marketPrice<=0||!Number.isFinite(p)||p<=0)return [];
-    const pct=(p-marketPrice)/marketPrice*100,label=marketLabel(record);
+    const marketPrice=Number(record?.marketPrice),p=Number(record?.price),qty=Number(record?.quantity),rk=record?._scmRank;
+    if(!Number.isFinite(p)||p<=0)return [];
+    const hasMarket=Number.isFinite(marketPrice)&&marketPrice>0;
+    const pct=hasMarket?(p-marketPrice)/marketPrice*100:0,label=marketLabel(record);
     const v=record?.verdict||null,ex=v&&Number(v.exchangePrice)>0?v:null;
     const lines=[];
     lines.push({k:'Contract',v:`${qty>0?qty.toLocaleString('en-US')+' @ ':''}${priceText(p)}${qty>0?` (${money(p*qty)})`:''}`});
+    if(rk&&rk.of>1)lines.push({k:'Price rank',v:`#${rk.rank} of ${rk.of} incoming Q${Number(record?.quality)||0} (1 = cheapest)`,cls:rk.rank===1?'cheap':'flat'});
+    if(!hasMarket){lines.push({k:'Market price',v:'not captured yet (no VWAP either)'});return lines;}
     lines.push({k:label==='VWAP'?'VWAP (no market price)':'Market price',v:priceText(marketPrice)});
     lines.push({k:'Vs '+label,v:Math.abs(pct)<0.05?`At ${label}`:`${Math.abs(pct).toFixed(2)}% ${pct<0?'cheaper than':'above'} ${label}`,cls:pct< -0.0001?'cheap':pct>0.0001?'expensive':'flat'});
     if(ex)lines.push({k:`Exchange Q${Number(record?.quality)||0}+`,v:ex.savesPerUnit>=0?`saves ${priceText(ex.savesPerUnit)}/u vs exchange ${priceText(ex.exchangePrice)} (${money(ex.savesTotal)})`:`exchange ${priceText(ex.exchangePrice)} is ${priceText(-ex.savesPerUnit)}/u cheaper (${money(-ex.savesTotal)})`,cls:ex.savesPerUnit>0.0000001?'cheap':ex.savesPerUnit< -0.0000001?'expensive':'flat'});
@@ -1368,14 +1396,35 @@ let hookReady = false;
     if(v&&Number(v.stockCost)>0)lines.push({k:'Your stock',v:`${priceText(v.stockCost)}/u`});
     return lines;
   };
+  // 2.5.396 rank among the visible incoming contracts of the same product + quality by unit price:
+  // cheapest = 1, equal prices share a rank (1, 1, 3). One entry per displayed contract key.
+  /*SCM-RANK-START*/
+  const contractPriceRanks=records=>{
+    const groups=new Map();
+    for(const r of Array.isArray(records)?records:[]){
+      const p=Number(r?.price);if(!Number.isFinite(p)||p<=0||!r?.key)continue;
+      const g=`${Number(r.kind)}:${Number(r.quality)}`;if(!groups.has(g))groups.set(g,new Map());
+      groups.get(g).set(r.key,p);
+    }
+    const out=new Map();
+    for(const m of groups.values()){
+      const prices=[...m.values()];
+      for(const [key,p] of m)out.set(key,{rank:1+prices.filter(x=>x<p-1e-9).length,of:prices.length});
+    }
+    return out;
+  };
+  /*SCM-RANK-END*/
+  const rankText=record=>record?._scmRank&&record._scmRank.of>1?`#${record._scmRank.rank} of ${record._scmRank.of}`:'';
   const badgeFor=record=>{
-    const marketPrice=Number(record?.marketPrice),p=Number(record?.price);
-    if(!Number.isFinite(marketPrice)||marketPrice<=0||!Number.isFinite(p)||p<=0)return null;
-    const pct=(p-marketPrice)/marketPrice*100,label=marketLabel(record);
+    const marketPrice=Number(record?.marketPrice),p=Number(record?.price),rt=rankText(record);
+    const hasMarket=Number.isFinite(marketPrice)&&marketPrice>0&&Number.isFinite(p)&&p>0;
+    if(!hasMarket&&!rt)return null;
+    const pct=hasMarket?(p-marketPrice)/marketPrice*100:0,label=marketLabel(record);
     const badge=document.createElement('span');
-    const cls=pct< -0.0001?'cheap':pct>0.0001?'expensive':'flat';
+    const cls=!hasMarket?'flat':pct< -0.0001?'cheap':pct>0.0001?'expensive':'flat';
     badge.className='scm-contract-vwap-badge '+cls;
-    badge.textContent=Math.abs(pct)<0.05?`= ${label} ⓘ`:`${pct<0?'▼':'▲'} ${Math.abs(pct).toFixed(2)}% ${pct<0?'below':'above'} ${label} ⓘ`;
+    const vs=!hasMarket?'':Math.abs(pct)<0.05?`= ${label}`:`${pct<0?'▼':'▲'} ${Math.abs(pct).toFixed(2)}% ${pct<0?'below':'above'} ${label}`;
+    badge.textContent=`${[rt,vs].filter(Boolean).join(' · ')} ⓘ`;
     badge.title='Tap for details';
     badge.setAttribute('role','button');
     badge.dataset.scmOwned='1';
@@ -1435,6 +1484,7 @@ let hookReady = false;
     if(!records.length){scheduleRetry();return;}
     const wanted=new Set();let missing=0;const priceNodes=collectPriceNodes();
     const processedKeys=new Set();
+    const ranks=contractPriceRanks(records.map(r=>({key:`${Number(r.kind)}:${Number(r.quality)}:${Number(r.price)}:${norm(r.company)}`,kind:r.kind,quality:r.quality,price:r.price})));
     for(const record of records){
       const key=`${Number(record.kind)}:${Number(record.quality)}:${Number(record.price)}:${norm(record.company)}`;
       // Identical API records commonly collapse into one visible row (e.g. 4x).
@@ -1442,6 +1492,7 @@ let hookReady = false;
       if(processedKeys.has(key)){wanted.add(key);continue;}
       processedKeys.add(key);
       wanted.add(key);
+      record._scmRank=ranks.get(key)||null;
       const target=findContractTarget(record,priceNodes);if(!target){missing++;continue;}
       const {row,anchor}=target;
       // One badge per displayed row + company/resource/price, not per API
