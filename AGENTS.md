@@ -20,6 +20,16 @@ How work on this repo is split between the lead agent and sub-agents. Read this 
 - Tests: `tests/*.test.js` (77 Node files after the cleanup) and `tests/e2e/*.e2e.js` (12 browser files, uses `tests/e2e/harness.js`).
 - Every change is versioned in `manifest.json` and logged in `CHANGELOG.txt`.
 
+## Google Drive layout
+
+The user keeps non-repo files in Google Drive (connector available in sessions). Save there, not in the repo.
+
+- `Projects/Simcompanies-Manager/`: the extension folder, synced from GitHub `main`. Do not add, move, rename, or delete anything inside it by hand. The sync owns it.
+- `Notes/` (folder ID `1a6xHhIIuc7jga4PCbz1099Vz3yoAAdaj`): every note we write.
+- `Scripts/` (folder ID `1tecCmAzfabZHAHKor6gn1XOpJztPM3R0`): scripts we write, each in its own subfolder. The sync script is in `Scripts/Google Drive Script/`.
+
+Sync: the Apps Script project "SCM Sync" runs on each push to `main` (GitHub webhook calls `doPost`). It finds the extension folder by ID (`1oSEh3NCecTHPA6O6_xlWr-Kmtdp5Or2U`), so that folder can be moved or renamed. It finds subfolders by name, so `icons`, `tests`, and `tools` must not be renamed or moved. `syncFromGitHub` deletes its own old triggers on start. Editing `doPost` needs a new deployment version; editing `syncFromGitHub` only needs a save.
+
 ## Lead hard rules (no exceptions)
 
 The lead does not do the work. Before any tool call that edits code, runs tests, or pushes, check this list.
