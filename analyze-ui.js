@@ -22,7 +22,7 @@
   const DAY = 864e5;
   const PAGES = [['overview', 'Overview'], ['margins', 'Margins'], ['stock', 'Stock'], ['costs', 'Costs'], ['company', 'Company'], ['fees', 'Fees'], ['cash', 'Cash'], ['sales', 'Sales'], ['routes', 'Routes'], ['data', 'Data']];
 
-  const S = { page: PAGES.some(p => p[0] === store.get('page', 'overview')) ? store.get('page', 'overview') : 'overview', prod: null, back: 'overview', days: [7, 14, 30].includes(store.get('days', 7)) ? store.get('days', 7) : 7, minUnits: store.get('minUnits', 0) === 5 ? 5 : 0, range: store.get('range', 30), salesKey: 'all', salesShow: 20, closed: new Set(store.get('closed', [])), auto: store.get('auto', true) !== false, keep: store.get('keep', true) !== false, s: null, ctx: null, model: null, modelSig: '', took: 0, at: 0, log: null, logRealm: null, logLoading: false };
+  const S = { page: PAGES.some(p => p[0] === store.get('page', 'overview')) ? store.get('page', 'overview') : 'overview', prod: null, back: 'overview', days: [7, 14, 30].includes(store.get('days', 7)) ? store.get('days', 7) : 7, minUnits: store.get('minUnits', 0) === 5 ? 5 : 0, range: store.get('range', 30), salesKey: 'all', salesShow: 20, opened: new Set(store.get('opened', [])), auto: store.get('auto', true) !== false, keep: store.get('keep', true) !== false, s: null, ctx: null, model: null, modelSig: '', took: 0, at: 0, log: null, logRealm: null, logLoading: false };
 
   /* ------------------------------------------------------------ data */
   function loadLog(realm) {
@@ -91,7 +91,8 @@
   const intro = html => `<p class="an-intro">${html}</p>`;
   const gapbox = (html, cls = '') => `<div class="an-gapbox ${cls}">${html}</div>`;
   const dash = html => `<div class="an-card an-dash">${html}</div>`;
-  const isOpen = (id, open = true) => (S.closed.has(id) ? false : open);
+  // Every section / card starts collapsed; only ones the user opened are remembered (new 'opened' key, old 'closed' data ignored).
+  const isOpen = id => S.opened.has(id);
   // A section: heading above its card; the heading folds the card away (collapsible, never a card inside a card).
   const sec = (id, title, body, { open = true, cls = '', right = '' } = {}) => `<details class="an-sec" data-an-card="${esc(id)}"${isOpen(id, open) ? ' open' : ''}><summary class="an-h2"><span>${title}</span>${right ? `<em>${right}</em>` : ''}</summary><div class="an-card ${cls}">${body}</div></details>`;
   // A product card: the card itself folds; its header row stays visible.
@@ -357,7 +358,7 @@
       root.dataset.ready = '1';
       root.addEventListener('click', onClick);
       root.addEventListener('change', e => { if (e.target?.matches?.('[data-an-import]')) importFiles(e.target.files).finally(() => { e.target.value = ''; }); });
-      root.addEventListener('toggle', e => { const d = e.target; if (!d?.matches?.('[data-an-card]')) return; const id = d.dataset.anCard; if (d.open) S.closed.delete(id); else S.closed.add(id); store.set('closed', [...S.closed].slice(-200)); }, true);
+      root.addEventListener('toggle', e => { const d = e.target; if (!d?.matches?.('[data-an-card]')) return; const id = d.dataset.anCard; if (d.open) S.opened.add(id); else S.opened.delete(id); store.set('opened', [...S.opened].slice(-200)); }, true);
       document.querySelectorAll('nav .tab').forEach(b => b.addEventListener('click', () => { if (b.dataset.tab !== 'analyze') S.left = true; }));
     }
     return root;

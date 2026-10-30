@@ -60,7 +60,7 @@ const FX = f => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures'
   await noScroll('fees');
 
   await go('stock'); t = await body();
-  const bd = await page.$eval('#analyzeBody [data-an-card="st-112:3"]', e => e.innerText).catch(() => '');
+  const bd = await page.$eval('#analyzeBody [data-an-card="st-112:3"]', e => e.textContent).catch(() => '');
   H.check('Stock: Bulldozer Q3 cost per unit $1,751.64', /\$1,751\.64/.test(bd), '$1,751.64', bd.match(/Cost per unit\s*(\S+)/)?.[1]);
   H.check('Stock: Bulldozer Q3 cost → value $21,020 → $27,120, diff +$6,100', /\+\$6,100/.test(bd) && /\$21,020 → \$27,120/.test(bd), '+$6,100 / $21,020 → $27,120', bd.match(/\$[\d,]+ → \$[\d,]+/)?.[0]);
   const rate = 2697 / 67394; // ledger pairs of $1,000 or more
@@ -74,7 +74,7 @@ const FX = f => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures'
   await page.click('#analyzeBody [data-an-back]'); await page.waitForTimeout(300);
 
   await go('margins'); t = await body();
-  const gl = await page.$eval('#analyzeBody [data-an-card="mg-45:2"]', e => e.innerText).catch(() => '');
+  const gl = await page.$eval('#analyzeBody [data-an-card="mg-45:2"]', e => e.textContent).catch(() => '');
   // Glass Q2: 2562 units, $34,897 gross → avg 13.6210; 2.5.394 cost = the game's cost at each sale (money − row profit),
   // weighted by units; fee = avg × rate; transport = Glass transport units (game constants) × the Transport cost shown.
   const AC = require('../../analyze-core.js'), gs = AC.salesFromLedger(AC.ledgerRows(AC.realmEndpoints(store.endpointData, 1), null)).filter(x => x.rid === 45 && x.q === 2 && x.channel === 'exchange');
@@ -94,7 +94,7 @@ const FX = f => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures'
   await go('data'); await H.shot(page, 'analyze-data');
   const open1 = await page.$eval('#analyzeBody [data-an-card="dt-src"]', e => e.open);
   await page.click('#analyzeBody [data-an-card="dt-src"] > summary'); await page.waitForTimeout(150);
-  H.check('Cards collapse', open1 && !(await page.$eval('#analyzeBody [data-an-card="dt-src"]', e => e.open)), 'closed', '');
+  H.check('Cards start collapsed and open on click', open1 === false && (await page.$eval('#analyzeBody [data-an-card="dt-src"]', e => e.open)) === true, 'closed then open', String(open1));
   await page.click('#analyzeBody [data-an-days="30"]'); await page.waitForTimeout(200);
   H.check('Look-back setting persists', await page.evaluate(() => localStorage.getItem('scmAnalyze:days')) === '30', '30', await page.evaluate(() => localStorage.getItem('scmAnalyze:days')));
   await go('empty'); t = await body(); H.check('First-run preview', /Not enough data yet/.test(t) && /Ready\s*3 of 4/.test(t) && /Cash-flow ledger: 0\.\d days so far/.test(t), 'Ready · 3 of 4 (ledger < 3 days)', t.match(/Ready\s*\d of \d/)?.[0]);
