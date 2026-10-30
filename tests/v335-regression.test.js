@@ -102,7 +102,7 @@ assert.ok(bg.includes('notifyCostChanges(n,merged.list') && bg.includes('{silent
 assert.ok(bg.includes("startsWith('scm-followup:')"));
 assert.ok(bg.includes('notifyOrderBook(r,id,data)') && !bg.includes('notifyLowStock(r)') /* removed in 2.5.350 */);
 const html = read('dashboard.html');
-assert.ok(html.includes('data-tab="alerts"') && html.includes('<section id="alerts"'), 'own Alerts tab');
+assert.ok(html.includes('data-tab="settings"') && html.includes('<section id="alerts"'), 'Alerts section inside the Settings tab');
 const diag = html.slice(html.indexOf('<section id="diagnostic"'));
 assert.ok(!diag.includes('notifyPanel'), 'no longer in Diagnostic');
 for (const k of ['costChange', 'idle', 'undercut', 'unprofitable', 'jobTrouble']) assert.ok(html.includes(`data-nf="${k}"`), k);

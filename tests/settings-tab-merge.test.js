@@ -1,0 +1,18 @@
+'use strict';
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const path=require('node:path');
+const r=f=>fs.readFileSync(path.join(__dirname,'..',f),'utf8');
+const html=r('dashboard.html'),dash=r('dashboard.js');
+assert.equal((html.match(/class="tab[ "]/g)||[]).length,10,'10 tabs after the merge');
+assert.ok(html.includes('data-tab="settings"'),'Settings tab exists');
+assert.ok(!html.includes('data-tab="alerts"')&&!html.includes('data-tab="diagnostic"'),'old tabs removed');
+for(const id of ['settings','alerts','diagnostic','notifyPanel','downloadDiagnosticBundle','clearStoredData'])assert.ok(html.includes('id="'+id+'"'),'keeps id '+id);
+const settings=html.slice(html.indexOf('<section id="settings"'));
+assert.ok(settings.indexOf('id="alerts"')>0&&settings.indexOf('id="diagnostic"')>settings.indexOf('id="alerts"'),'both inside Settings');
+assert.ok(settings.indexOf('id="clearStoredData"')>settings.indexOf('id="diagnostic"'),'Clear Stored Data lives in Diagnostic');
+assert.ok(!/<header[\s\S]*id="clearStoredData"[\s\S]*<\/header>/.test(html),'not in the header');
+assert.match(dash,/SCM_TAB_ALIASES=\{alerts:'settings',diagnostic:'settings'\}/,'old tab names map to settings');
+assert.match(dash,/target=SCM_TAB_ALIASES\[target\]\|\|target/,'saved/requested tab aliased');
+assert.match(dash,/CLEAR_EXTENSION_DATA/,'clear handler kept');
+console.log('settings-tab-merge: passed');

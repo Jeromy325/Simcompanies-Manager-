@@ -156,7 +156,9 @@ document.addEventListener('click',e=>{
   table?.querySelectorAll('tbody > tr.scm-row-selected').forEach(x=>x.classList.remove('scm-row-selected'));
   row.classList.add('scm-row-selected');
 });
-function selectDashboardTab(tab){const key=String(tab||'').trim();const b=[...$$('.tab')].find(x=>x.dataset.tab===key);if(b)b.click();}
+// 'alerts' and 'diagnostic' were merged into 'settings' (saved last tab, ?tab=, SCM_SELECT_DASHBOARD_TAB).
+const SCM_TAB_ALIASES={alerts:'settings',diagnostic:'settings'};
+function selectDashboardTab(tab){let key=String(tab||'').trim();key=SCM_TAB_ALIASES[key]||key;const b=[...$$('.tab')].find(x=>x.dataset.tab===key);if(b)b.click();}
 // v2.5.330: remember the open tab and scroll position. Mobile browsers unload background
 // tabs, so coming back to the Manager reloads the page — it now reopens where you left it.
 const SCM_LAST_TAB_KEY='scmDashboardLastTabV1';
@@ -168,13 +170,17 @@ window.addEventListener('pagehide',rememberDashboardTab);
 try{
   const requested=new URLSearchParams(location.search).get('tab');
   let saved=null;try{saved=JSON.parse(localStorage.getItem(SCM_LAST_TAB_KEY)||'null');}catch{}
-  const target=requested||saved?.tab;
+  let target=requested||saved?.tab;target=SCM_TAB_ALIASES[target]||target;
   if(target&&target!==activeTab)selectDashboardTab(target);
   if(!requested&&saved?.tab&&saved.y>0){const y=saved.y;let tries=0;const restore=()=>{if(document.documentElement.scrollHeight>=y+innerHeight*0.5||tries++>20){window.scrollTo(0,y);return;}setTimeout(restore,150);};setTimeout(restore,300);}
 }catch{}
 chrome.runtime.onMessage.addListener(m=>{if(m?.type==='SCM_SELECT_DASHBOARD_TAB'&&m.tab)selectDashboardTab(String(m.tab));});
 $$('.helper-page-grid [data-helper-tab]').forEach(b=>b.addEventListener('click',()=>selectDashboardTab(b.dataset.helperTab)));
 let dashboardImagesMemo=null;
+// NOTE: blob: URLs are not an option here (manifest CSP img-src has no blob:). Icons stay data: URIs in src, but fallback
+// the fallback candidate list no longer repeats the payload (see scmCandidatesJson).
+// data: entries (~26KB each) are blanked in data-candidates; the src already carries the first image.
+const scmCandidatesJson=list=>JSON.stringify((list||[]).map(u=>typeof u==='string'&&u.startsWith('data:')?'':u));
 async function dashboardResourceImages(){
   if(dashboardImagesMemo)return dashboardImagesMemo;
   const raw=(await chrome.storage.local.get({scmResourceImages:null})).scmResourceImages;
@@ -1041,10 +1047,8 @@ function accounting(s, realmStore=null){
   const previousPeriod=accountingPreviousPeriod(history,period.date);
   return {cash,revenue:finalRevenue,expenses,operatingExpenses,cogs:statementNow?.cogs??null,freightOut:statementNow?.freightOut??null,marketFees:statementNow?.marketFees??null,executives:statementNow?.executives??null,cashChange:accountingCashChange(cfObj),profit:finalProfit,netMargin:finalMargin,assets,liabilities,inventory,accountsReceivable,accountsPayable:payable,bondsPayable,currentAssets,currentLiabilities,period,history,previousPeriod,ledgerCheck,source:{bs,cf,recent,pf,income},sourceType: income ? 'income-statement' : (cf ? (transactionRows.length?'cash-flow-transactions':'cash-flow-derived') : 'unavailable')};
 }
-window.scmImageFallback=function(img){try{const c=JSON.parse(img.dataset.candidates||'[]');const i=Number(img.dataset.idx||0)+1;if(i<c.length){img.dataset.idx=String(i);img.src=c[i];return;}img.style.display='none';}catch{img.style.display='none';}};
-function recordHistory(s,rows){const history={...(s.history||{})},day=new Date().toISOString().slice(0,10);for(const r of rows){if(!Number.isFinite(r._id)||r._quality==null)continue;const st=marketStats(marketRows(s,r._id,r._quality),r._quality);if(st.vwap==null)continue;const key=`${r._id}:${r._quality}`;const arr=Array.isArray(history[key])?history[key].slice():[];const idx=arr.findIndex(x=>x.date===day);const item={date:day,vwap:st.vwap};if(idx>=0)arr[idx]=item;else arr.push(item);history[key]=arr}return history}
+window.scmImageFallback=function(img){try{const c=JSON.parse(img.dataset.candidates||'[]');let i=Number(img.dataset.idx||0)+1;while(i<c.length&&!c[i])i++;if(i<c.length){img.dataset.idx=String(i);img.src=c[i];return;}img.style.display='none';}catch{img.style.display='none';}};
 function snapshotRealmKey(s){const r=s.viewRealm!=null?Number(s.viewRealm):(s.captureRealm!=null?Number(s.captureRealm):null);return r!=null?`realm:${r}`:'auto';}
-function changeArrow(current,previous){const a=Number(current),b=Number(previous);if(!Number.isFinite(a)||!Number.isFinite(b)||a===b)return '';const up=a>b;return `<span class="change-arrow ${up?'change-up':'change-down'}" title="${up?'Increased':'Decreased'} from previous value">${up?'↑':'↓'}</span>`;}
 function accountingSnapshotValues(a){return {cash:a.cash,revenue:a.revenue,expenses:a.expenses,profit:a.profit,assets:a.assets,liabilities:a.liabilities,inventory:a.inventory};}
 function topSellingResourcesByProfit(accounting,s){
   const summary=s?.accountingWeekSalesSummary&&typeof s.accountingWeekSalesSummary==='object'?s.accountingWeekSalesSummary:null;
@@ -1231,15 +1235,6 @@ function updateAccountingSnapshot(s,a){
   } else s.accountingSnapshots=old;
   return snap||{previous:null,current};
 }
-function adminOverheadData(s,rows){
-  const ep=s.endpointData||{};
-  const keys=Object.keys(ep).filter(k=>/\/api\/v3\/companies-by-company\//i.test(k)||/\/api\/v2\/companies\/me\/administration-overhead\/?(?:\d+)?$/i.test(k)||/administration-overhead/i.test(k)).sort((a,b)=>new Date(ep[b]?.receivedAt||0)-new Date(ep[a]?.receivedAt||0));
-  const sources=[]; for(const k of keys)if(ep[k]?.data!=null)sources.push(ep[k].data);
-  if(s.gameState?.region)sources.push(s.gameState.region); if(s.authData)sources.push(s.authData);
-  let raw=null; for(const data of sources){raw=pickNumericDeep(data,['administrationOverhead','administration','adminOverhead','overheadPercentage','overhead','percentage']);if(raw!=null)break;}
-  if(raw==null||!Number.isFinite(Number(raw))){const buildings=buildingArrayFromState(s);const levels=buildings.reduce((sum,b)=>{const n=Number(pick(b,['size','level','lvl','buildingLevel']));return sum+(Number.isFinite(n)&&n>0?n:0);},0);if(levels>0){const base=Math.max(0,(levels-1)/170*100);return {base,reduction:0,net:base,bonus:0,bonusExact:0,raw:null,source:'building-level calculation',levels};}return {base:null,reduction:0,net:null,bonus:0,bonusExact:0};}
-  raw=Number(raw);const basePct=raw>10?raw:raw>1?(raw-1)*100:raw*100;return {base:basePct,reduction:0,net:Math.max(0,basePct),bonus:0,bonusExact:0,raw,source:'game endpoint'};
-}
 function buildingArrayFromState(s){
   const candidates=[];
   // Prefer the raw buildings API response. The game's localStorage bridge strips
@@ -1334,12 +1329,6 @@ function busyObject(b){
   const x=findNestedObject(b,['busy','production','productionState','currentProduction','runningProduction']);
   return x||null;
 }
-function productionResourceId(b){
-  const busy=busyObject(b)||b;
-  const v=deepValue(busy,['resourceId','productId','resource','product','output','resourceKind','dbLetter','kind']);
-  if(v&&typeof v==='object'){const n=Number(pick(v,['kind','resourceId','productId','id']));return Number.isFinite(n)?n:null;}
-  const n=Number(v);return Number.isFinite(n)?n:null;
-}
 function productionQuantity(b){
   const busy=busyObject(b);
   const roots=[busy,b].filter(x=>x&&typeof x==='object');
@@ -1368,7 +1357,6 @@ function productionEnd(b){
   for(const root of roots){const v=deepValue(root,keys);if(v!=null)return v;}
   return null;
 }
-function timeLeftText(value){if(value==null)return '—';const t=Date.parse(String(value));if(Number.isFinite(t)){const sec=Math.max(0,Math.floor((t-Date.now())/1000));const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),ss=sec%60;return h?`${h}h ${m}m`:m?`${m}m ${ss}s`:`${ss}s`;}const n=Number(value);if(Number.isFinite(n)&&n>=0){const sec=n>100000?Math.floor(n/1000):Math.floor(n);const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),ss=sec%60;return h?`${h}h ${m}m`:m?`${m}m ${ss}s`:`${ss}s`;}return String(value);}
 const REALM_DEFINITIONS={0:{display:'R1',name:'Magnates'},1:{display:'R2',name:'Entrepreneurs'}};
 function realmName(realm){return REALM_DEFINITIONS[Number(realm)]?`${REALM_DEFINITIONS[Number(realm)].display} - ${REALM_DEFINITIONS[Number(realm)].name}`:`Realm ${realm}`;}
 function realmDisplayNumber(realm){return REALM_DEFINITIONS[Number(realm)]?.display||`R${realm}`;}
@@ -1716,16 +1704,6 @@ function findNormalizedNumeric(root,aliases){
     return null;
   };
   return walk(root);
-}
-function gameEmployeeCount(a,s){
-  const roots=[s?.companyData,s?.gameState,a?.source?.pf,a?.source?.income,a?.source?.bs,a?.source?.cf];
-  for(const root of roots){
-    const v=findNormalizedNumeric(root,['employees','employeecount','numberofemployees','staffcount','workers','workercount']);
-    if(Number.isFinite(v)&&v>0)return v;
-    const list=findNestedObject(root,['employees','staff','workers']);
-    if(Array.isArray(list)&&list.length)return list.length;
-  }
-  return null;
 }
 
 function accountingComparisonBase(a){
@@ -2166,20 +2144,7 @@ async function loadBuildingPlannerData(){
   return window.__scmBuildingPlannerData;
 }
 function plannerNormalizeName(v){return globalThis.SCMPlannerCore?.normalizeName?globalThis.SCMPlannerCore.normalizeName(v):String(v??'').toLowerCase().replace(/[’']/g,'').replace(/[^a-z0-9]+/g,'').replace(/s$/,'');}
-function plannerResourceMap(rows){const m=new Map();for(const r of rows||[]){const id=Number(r.id);if(Number.isFinite(id)&&id>0){m.set(id,r);const n=plannerNormalizeName(r.name);if(n)m.set(n,r);}}return m;}
 function plannerRecipeMap(recipes){const m=new Map();for(const r of recipes||[]){m.set(Number(r.id),r);m.set(plannerNormalizeName(r.name),r);}return m;}
-function plannerProductionEvents(s){
-  const out=[];
-  const sources=[s?.endpointData?.['/api/v2/companies/me/cashflow/recent/'],s?.accountingCapture?.['/api/v2/companies/me/cashflow/recent/']];
-  for(const entry of sources){
-    const rows=entry?.data?.data;
-    if(!Array.isArray(rows)) continue;
-    for(const e of rows){
-      if(e?.category==='p' && e?.details?.amount!=null) out.push(e);
-    }
-  }
-  return out;
-}
 function plannerStoredProductionPlan(s,building){
   const id=Number(building?.id??building?.raw?.id);
   const plan=s?.productionPlans?.[String(id)];
@@ -2215,17 +2180,6 @@ function plannerCompanySalesModifier(s){
 // v2.5.341 game formula (bundle tSe): rate = base × event / (1 − bonus/100), e.g. 8% → ÷0.92 = ×1.08696.
 function plannerCompanyProductionFactor(s){
   const m=plannerCompanyProductionModifier(s);return m<100?1/(1-m/100):0;
-}
-function plannerCaptureProductionRateSnapshot(building,product,baseRatePerLevel,observedRatePerHour,eventModifier,source,s){
-  if(!chrome?.runtime?.id||!Number.isFinite(Number(baseRatePerLevel))||Number(baseRatePerLevel)<=0)return;
-  const key=plannerProductionSnapshotKey(building,product,s);
-  if(s?.productionRateSnapshots?.[key])return;
-  const b=building?.raw||building||{};
-  const busy=b?.busy||{};
-  const rid=Number(busy?.resource?.kind??busy?.resource?.resourceId);
-  const realm=Number(s?.viewRealm??s?.captureRealm??s?.authData?.authCompany?.realmId);
-  if(!Number.isFinite(realm)||!Number.isFinite(rid)||rid<=0)return;
-  try{chrome.runtime.sendMessage({type:'CAPTURE_PRODUCTION_RATE_SNAPSHOT',realm,buildingId:Number(b?.id),resourceId:rid,started:busy?.started,product,baseRatePerLevel:Number(baseRatePerLevel),observedRatePerHour:Number(observedRatePerHour)||null,eventModifier:Number(eventModifier)||0,companyProductionModifier:plannerCompanyProductionModifier(s),companyModifierNormalized:true,source});}catch{}
 }
 
 // v2.5.343 abundance % of a natural resource at a building (mines, oil rigs, quarries), from the game's
@@ -2494,31 +2448,9 @@ function constructionMaterialPlan(s,building,currentLevel,targetLevel,discount,v
   const totalCost=roundCurrencyUp(deficitItems.reduce((sum,x)=>sum+(Number(x.lineTotal)||0),0));
   return {current,target,stepFactor,items,deficitItems,totalCost,costUnits,source:costUnits!=null?'game-constants':'cost-estimate'};
 }
-function renderConstructionMaterialText(s,plan,building,discount){
-  const displayItems=Array.isArray(plan.deficitItems)?plan.deficitItems:(plan.items||[]).filter(x=>x.amount>0);
-  if(plan.unavailable){
-    return {plain:'Construction material data unavailable for this building.',html:'<div class="planner-copy-empty">Construction material data unavailable for this building.</div>'};
-  }
-  if(!displayItems.length){
-    const text=`No additional construction materials required at Level ${plan.current}.`;
-    return {plain:text,html:`<div class="planner-copy-empty">${escapeHtml(text)}</div>`};
-  }
-  const pct=globalThis.SCMPlannerCore?.clampDiscount?globalThis.SCMPlannerCore.clampDiscount(discount):Math.min(10,Math.max(0,Number(discount)||0));
-  const rows=displayItems.map((x,i)=>{
-    const code=`:re-${Number(x.id)}:`;
-    const unit=x.price!=null?money(x.price):'—';
-    const line=x.lineTotal!=null?money(x.lineTotal):'—';
-    const plain=`${num(x.amount)}-Q${x.quality}-${x.name}-${code}-${unit} @ ${pct}% off-${line}`;
-    return {plain,html:`<div class="planner-copy-line"><span>${escapeHtml(plain)}</span></div>`};
-  });
-  const totalLine=`Total material cost - ${money(plan.totalCost)}`;
-  return {plain:`${rows.map(r=>r.plain).join('\n')}\n${totalLine}`,html:`${rows.map(r=>r.html).join('')}<div class="planner-copy-total"><strong>${escapeHtml(totalLine)}</strong></div>`};
-}
 function plannerDiscountPercent(value){return globalThis.SCMPlannerCore?.clampDiscount?globalThis.SCMPlannerCore.clampDiscount(value):Math.min(10,Math.max(0,Number(value)||0));}
-function plannerExactVwap(s,id,quality,vwapMap){const map=vwapMap instanceof Map?vwapMap:buildMarketPriceMap(s);return globalThis.SCMPlannerCore?.exactVwap?globalThis.SCMPlannerCore.exactVwap(map,id,quality):null;}
 function plannerDiscountQuote(s,x,type,discount,marketPriceMap){const q=qualityForPlannerResource(x,type);const amount=type==='deficit'?Number(x.deficit)||0:Number(x.surplus)||0;const reference=marketPriceReference(marketPriceMap instanceof Map?marketPriceMap:buildMarketPriceMap(s),x.id,q);const marketPrice=reference?.price??null;const pct=plannerDiscountPercent(discount);const unitPrice=marketPrice!=null?roundCurrencyUp(marketPrice*(1-pct/100)):null;const total=unitPrice!=null&&amount>0?roundCurrencyUp(unitPrice*amount):null;return {id:Number(x.id),name:x.name,quality:q,amount,marketPrice,marketPriceQuality:reference?.quality??null,marketPriceExact:reference?.exact??false,discount:pct,unitPrice,total,type,key:`${Number(x.id)}:${Number(q)}`};}
 function qualityForPlannerResource(x,type){if(Number.isFinite(Number(x?.quality)))return Number(x.quality);if(type==='deficit'){const qs=Array.isArray(x?.minQuality)?x.minQuality.map(Number).filter(Number.isFinite):[];return qs.length?Math.max(...qs):0;}const qs=(x?.productionByQuality||[]).map(v=>Number(v?.quality)).filter(Number.isFinite);return qs.length?Math.max(...qs):0;}
-function discountedMarketValue(marketPrice,amount,discount){const p=plannerDiscountPercent(discount);const v=Number(marketPrice),q=Number(amount);return Number.isFinite(v)&&v>0&&Number.isFinite(q)&&q>0?roundCurrencyUp(roundCurrencyUp(v*(1-p/100))*q):null;}
 async function ensurePlannerCompanyModifiers(s){
   const company=plannerCompanyAuthData(s)||{};
   const hasProduction=Number.isFinite(Number(company.productionModifier));
@@ -2630,12 +2562,6 @@ function plannerMarketPrice(s,map,id,q,mode){
   if(v)return {price:Number(v.value),quality:q,source:'VWAP'};
   return null;
 }
-function plannerWarehouseCost(s,id,minQ){
-  let rows=[];try{rows=warehouseRows(s);}catch{}
-  const lots=rows.filter(r=>Number(r?._id)===Number(id)&&Number(r?._quality)>=Number(minQ)&&Number(r?._qty)>0).sort((a,b)=>Number(a._quality)-Number(b._quality));
-  for(const r of lots){let c=null;try{c=warehouseAlertUnitCost(s,r);}catch{c=r._unitCost;}if(Number.isFinite(Number(c))&&Number(c)>=0)return {price:Math.round(Number(c)*100)/100,quality:Number(r._quality),source:`warehouse · ${num(r._qty)} in stock`};}
-  return null;
-}
 function plannerProfitWageKey(building){return String(building?.raw?.kind||building?.kind||building?.category||building?.name||'building');}
 // v2.5.324 Labour and admin come from the game's own cost records, never hard-coded:
 // every produced warehouse lot carries cost.workers and cost.admin for the whole lot, so
@@ -2644,6 +2570,12 @@ function plannerProfitWageKey(building){return String(building?.raw?.kind||build
 const PLANNER_LABOUR_CACHE_KEY='scmPlannerLabourCacheV1';
 function plannerRealmOf(s){return validRealmNumber(s?.viewRealm??s?.captureRealm??s?.authData?.authCompany?.realmId);}
 function plannerWarehouseLots(s){return Array.isArray(s?.warehouseResources)?s.warehouseResources:[];}
+function plannerWarehouseCost(s,id,minQ){
+  let rows=[];try{rows=warehouseRows(s);}catch{}
+  const lots=rows.filter(r=>Number(r?._id)===Number(id)&&Number(r?._quality)>=Number(minQ)&&Number(r?._qty)>0).sort((a,b)=>Number(a._quality)-Number(b._quality));
+  for(const r of lots){let c=null;try{c=warehouseAlertUnitCost(s,r);}catch{c=r._unitCost;}if(Number.isFinite(Number(c))&&Number(c)>=0)return {price:Math.round(Number(c)*100)/100,quality:Number(r._quality),source:`warehouse · ${num(r._qty)} in stock`};}
+  return null;
+}
 function plannerAdminOverheadFromLots(s){
   const lots=plannerWarehouseLots(s).filter(x=>Number(x?.cost?.workers)>0&&Number.isFinite(Number(x?.cost?.admin)));
   if(!lots.length)return null;
@@ -3459,23 +3391,6 @@ async function refreshNetworkCaptureStatus(){try{const v3=await chrome.runtime.s
 async function waitForNetworkCaptureStarted(captureId,timeoutMs=4000){const started=Date.now();while(Date.now()-started<timeoutMs){const capture=await readNetworkCapture();if(capture?.captureId===captureId&&capture?.status==='recording'&&Array.isArray(capture.events)&&capture.events.some(event=>event?.kind==='capture-start'))return capture;await new Promise(resolve=>setTimeout(resolve,100));}const capture=await readNetworkCapture();throw new Error(`Recorder did not confirm start in storage (status=${capture?.status||'missing'}, events=${Array.isArray(capture?.events)?capture.events.length:0}).`);}
 async function resolveNetworkCaptureTab(){if(networkCaptureTabId!=null){try{const tab=await chrome.tabs.get(networkCaptureTabId);if(tab?.id&&/^https:\/\/(?:www\.)?simcompanies\.com\//i.test(String(tab.url||'')))return tab;}catch{}}const tabs=await chrome.tabs.query({url:['https://www.simcompanies.com/*','https://simcompanies.com/*']});const tab=(tabs||[]).find(t=>t.active)||tabs?.[0];if(tab?.id)networkCaptureTabId=tab.id;return tab||null;}
 async function waitForNetworkCaptureQuiet(quietMs=900,timeoutMs=8000){const started=Date.now();let lastCount=-1,lastChange=Date.now();while(Date.now()-started<timeoutMs){const c=await readNetworkCapture();const count=Array.isArray(c?.events)?c.events.length:0;if(count!==lastCount){lastCount=count;lastChange=Date.now();}if(Date.now()-lastChange>=quietMs&&c?.status==='stopped')return c;await new Promise(r=>setTimeout(r,150));}return await readNetworkCapture();}
-async function stopNetworkCapture({allowPartial=false}={}){
-  const capture=await readNetworkCapture();
-  if(!capture||!['starting','recording','stopping'].includes(String(capture.status||''))){networkCaptureActive=false;await refreshNetworkCaptureStatus();return {capture,confirmed:capture?.status==='stopped'};}
-  networkCaptureId=String(capture.captureId||networkCaptureId||'');
-  const tab=await resolveNetworkCaptureTab();
-  if(!tab?.id)throw new Error('Cannot find the Sim Companies tab for this capture. Reopen the game tab and retry Stop.');
-  const result=await sendGameTabMessage(tab.id,{type:'SET_NETWORK_CAPTURE',enabled:false,captureId:networkCaptureId},{timeoutMs:6500,bootstrapTimeoutMs:1200});
-  if(result?.ok!==true)throw new Error(result?.error||'The game-page recorder did not acknowledge Stop.');
-  networkCaptureActive=false;
-  if(networkCaptureButton){networkCaptureButton.textContent='Start Network Capture';networkCaptureButton.setAttribute('aria-pressed','false');}
-  if(networkCaptureStatusEl)networkCaptureStatusEl.textContent='Network capture stopping · waiting for pending writes…';
-  const settled=await waitForNetworkCaptureQuiet(900,8000);
-  const confirmed=settled?.captureId===networkCaptureId&&settled?.status==='stopped'&&Array.isArray(settled.events)&&settled.events.some(event=>event?.kind==='capture-stop');
-  await refreshNetworkCaptureStatus();
-  if(!confirmed&&!allowPartial)throw new Error(`Stop was acknowledged by the game page, but the durable stop marker was not saved (status=${settled?.status||'missing'}, events=${settled?.events?.length||0}, captureIdMatch=${settled?.captureId===networkCaptureId}). Existing events are preserved; export the partial capture and retry Stop.`);
-  return {capture:settled,confirmed};
-}
 scmOnStorageChanged((changes,area)=>{if(area==='local'&&changes.scmNetworkTrafficCapture){renderNetworkCaptureStatus(changes.scmNetworkTrafficCapture.newValue);const c=changes.scmNetworkTrafficCapture.newValue;networkCaptureActive=['starting','recording','stopping'].includes(String(c?.status||''));if(c?.captureId)networkCaptureId=String(c.captureId);if(networkCaptureButton){networkCaptureButton.textContent=networkCaptureActive?'Stop Network Capture':'Start Network Capture';networkCaptureButton.setAttribute('aria-pressed',String(networkCaptureActive));}}});
 refreshNetworkCaptureStatus();
 async function toggleMobileNetworkCapture(button){const stat=await chrome.runtime.sendMessage({type:'SCM_NET3_STATUS'});const status=stat?.status||{};if(status.status==='recording'&&status.mode==='mobile-page'){const stopped=await chrome.runtime.sendMessage({type:'SCM_MOBILE_NET_STOP'});if(!stopped?.ok)throw new Error(stopped?.error||'Could not stop mobile capture.');networkCaptureActive=false;networkCaptureId=stopped.captureId;if(networkCaptureStatusEl)networkCaptureStatusEl.textContent=`Mobile page capture stopped · ${stopped.events||0} events · ${stopped.requests||0} requests · ${stopped.responses||0} responses · ${stopped.errors||0} errors`;button.textContent='Start Network Capture';button.setAttribute('aria-pressed','false');alert(`Mobile network capture stopped.\n\nEvents: ${stopped.events||0}\nRequests: ${stopped.requests||0}\nResponses: ${stopped.responses||0}\nErrors: ${stopped.errors||0}\n\nUse Download Network Capture to export the JSON.`);return;}const tab=await resolveNetworkCaptureTab();if(!tab?.id)throw new Error('Open Sim Companies in a browser tab first.');networkCaptureTabId=tab.id;const result=await chrome.runtime.sendMessage({type:'SCM_MOBILE_NET_START',tabId:tab.id});if(!result?.ok)throw new Error(result?.error||'Could not start mobile page capture.');networkCaptureId=result.captureId;networkCaptureActive=true;button.textContent='Stop Network Capture';button.setAttribute('aria-pressed','true');if(networkCaptureStatusEl)networkCaptureStatusEl.textContent=`Mobile page capture recording · ${result.events||0} events · fetch/XHR only · up to 100,000 events. Keep game tab open; Android may suspend background tabs.`;alert('Mobile network capture started. Keep the Sim Companies tab open overnight. Android may suspend a background tab, so this records activity only while the page is running.');}
@@ -3503,7 +3418,7 @@ async function runJavascriptDiagnosticFromDashboard(button){
 document.querySelector('#runJavascriptDiagnostic')?.addEventListener('click',e=>runJavascriptDiagnosticFromDashboard(e.currentTarget));
 document.querySelector('#runJavascriptDiagnosticInline')?.addEventListener('click',e=>runJavascriptDiagnosticFromDashboard(e.currentTarget));
 
-document.querySelector('#clearStoredData')?.addEventListener('click',async()=>{if(!confirm('Clear all data stored by Sim Companies Manager?\n\nThis cannot be undone. Your Sim Companies account and game data will not be affected.\n\nIf you want a backup first, use Download Stored Data.')) return; const button=document.querySelector('#clearStoredData'); button.disabled=true; try{const result=await chrome.runtime.sendMessage({type:'CLEAR_EXTENSION_DATA'}); if(!result?.ok) throw new Error(result?.error||'Reset failed.'); alert('Stored data cleared. The Manager is starting fresh.'); window.location.reload();}catch(e){button.disabled=false; alert('Unable to clear stored data: '+(e?.message||String(e)));}});
+document.querySelector('#clearStoredData')?.addEventListener('click',async()=>{if(!confirm('Clear all data stored by Sim Companies Manager?\n\nThis cannot be undone. Your Sim Companies account and game data will not be affected.\n\nIf you want a backup first, use Full Stored Data (Settings tab › Diagnostic › Advanced diagnostics).')) return; const button=document.querySelector('#clearStoredData'); button.disabled=true; try{const result=await chrome.runtime.sendMessage({type:'CLEAR_EXTENSION_DATA'}); if(!result?.ok) throw new Error(result?.error||'Reset failed.'); alert('Stored data cleared. The Manager is starting fresh.'); window.location.reload();}catch(e){button.disabled=false; alert('Unable to clear stored data: '+(e?.message||String(e)));}});
 document.addEventListener('click',async e=>{const b=e.target.closest('.diag-copy');if(!b)return;let s=await get();let text='';const type=b.dataset.copyJson;const realm=Number(s.viewRealm??s.authData?.authCompany?.realmId??s.authData?.authCompany?.realm);const realmKey=Number.isFinite(realm)?`realm:${realm}`:null;const ep=s.endpointData||{};const endpointEntries=Object.entries(ep).sort((a,c)=>new Date(c[1]?.receivedAt||0)-new Date(a[1]?.receivedAt||0));const matching=(rx)=>endpointEntries.filter(([k])=>rx.test(k)).map(([k,v])=>({endpoint:k,status:v?.status,receivedAt:v?.receivedAt,data:v?.data??null}));
 if(type==='sync')text=JSON.stringify({page:'sync',realm:Number.isFinite(realm)?realm:null,syncStatus:s.syncStatus||null,syncError:s.syncError||null,fullSyncDiagnostics:s.fullSyncDiagnostics||null,endpointData:s.endpointData||{},apiEndpoints:s.apiEndpoints||[]},null,2);
 else if(type==='warehouse')text=JSON.stringify(s.fullSyncDiagnostics?.warehouseCosts||[],null,2);
@@ -3733,7 +3648,7 @@ function render(s){
   // Sync/background progress can change content above the current viewport; restoring the
   // position prevents the page from jumping when Sync updates state.
   const __scrollX=window.scrollX, __scrollY=window.scrollY;
-  s=s||{}; s.endpointData=s.endpointData||{}; commitDashboardState(s); updateRealmSwitcher(s); renderLiveMarketProduct(s); if(activeTab==='diagnostic')renderFullSyncDiagnostics(s);
+  s=s||{}; s.endpointData=s.endpointData||{}; commitDashboardState(s); updateRealmSwitcher(s); renderLiveMarketProduct(s); if(activeTab==='settings')renderFullSyncDiagnostics(s);
  const viewRealm=s.viewRealm!=null?Number(s.viewRealm):(s.captureRealm!=null?Number(s.captureRealm):null);
  const viewKey=viewRealm!=null?`realm:${viewRealm}`:null;
  const viewStore=viewKey&&s.realmStores?.[viewKey]?s.realmStores[viewKey]:null;
@@ -3750,8 +3665,8 @@ function render(s){
  const acctDailySeries=updateAccountingDailySeries(s,a); if(activeTab==='overview'){ const contractRows=currentContracts(s); const incomingGross=contractRows.filter(c=>c.direction==='Incoming').reduce((sum,c)=>sum+(Number(c.total)||0),0); const outgoingGross=contractRows.filter(c=>c.direction==='Outgoing').reduce((sum,c)=>sum+(Number(c.total)||0),0); const savedRows=savedContracts(s); const savedGross=savedRows.reduce((sum,c)=>sum+(Number(c.total)||0),0); const buildingCount=buildingArrayFromState(s).length; const warehouseQty=rows.reduce((sum,r)=>sum+(Number(r._qty)||0),0); const vwapCount=Array.isArray(s.vwapData?.rows)?s.vwapData.rows.length:Number(s.vwapData?.count)||0; const topSelling=topSellingResourcesByProfit(accountingDisplayBase,s); const topGross=topGrossResources(accountingDisplayBase,s); const overviewDate=v=>{const d=v!=null?new Date(v):null;return d&&Number.isFinite(d.getTime())?d.toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}):null;}; const overviewRange=overviewDate(topSelling.rangeStart)&&overviewDate(topSelling.rangeEnd)?`${overviewDate(topSelling.rangeStart)} – ${overviewDate(topSelling.rangeEnd)}`:'Captured range unavailable'; const overviewCards=$('#overviewCards'); if(overviewCards) overviewCards.innerHTML=`<div class="overview-grid">
 <div class="overview-section overview-operations-card"><div class="overview-section-head"><div><h3>Operations</h3><span>Company activity at a glance</span></div></div><div class="overview-stat-grid"><div class="overview-stat-card"><span>Buildings</span><strong>${buildingCount||'—'}</strong></div><div class="overview-stat-card"><span>Warehouse Lines</span><strong>${rows.length||'—'}</strong></div><div class="overview-stat-card"><span>Warehouse Qty</span><strong>${warehouseQty?num(warehouseQty):'—'}</strong></div><div class="overview-stat-card"><span>VWAP Values</span><strong>${vwapCount?num(vwapCount):'—'}</strong></div></div></div>
 <div class="overview-section"><div class="overview-section-head"><div><h3>Contracts</h3><span>Current active and saved value</span></div></div><div class="overview-stat-grid overview-stat-grid-compact"><div class="overview-stat-card"><span>Incoming</span><strong>${money(incomingGross)}</strong><small>${contractRows.filter(c=>c.direction==='Incoming').length} active</small></div><div class="overview-stat-card"><span>Outgoing</span><strong>${money(outgoingGross)}</strong><small>${contractRows.filter(c=>c.direction==='Outgoing').length} active</small></div><div class="overview-stat-card"><span>Saved</span><strong>${money(savedGross)}</strong><small>${savedRows.length} saved</small></div></div></div>
-<div class="overview-resource-ranking-stack"><div class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Net Profit Resources</h3><span>Captured selling profit · ${escapeHtml(overviewRange)}</span></div><span class="overview-section-badge">Net Profit</span></div><div class="overview-selling-list">${topSelling.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topSelling.items.length?topSelling.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(JSON.stringify(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Net Profit</small><strong>${money(x.profit)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No selling profit data captured yet.</div>'}</div></div>
-<div id="overviewTopGross" class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Gross Resources</h3><span>Captured sales value · ${escapeHtml(overviewDate(topGross.rangeStart)&&overviewDate(topGross.rangeEnd)?`${overviewDate(topGross.rangeStart)} – ${overviewDate(topGross.rangeEnd)}`:'Captured range unavailable')}</span></div><span class="overview-section-badge">Gross</span></div><div class="overview-selling-list">${topGross.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topGross.items.length?topGross.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(JSON.stringify(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Gross</small><strong>${money(x.gross)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No gross sales data captured yet.</div>'}</div></div></div>`; if($('#overviewRealmBadge')){const syncTime=viewStore?.lastSync||s.lastSync;const hasCapturedData=!!(viewStore&&(viewStore.lastSync||viewStore.fullSyncDiagnostics||viewStore.gameOverlaySnapshot||(Array.isArray(viewStore.buildings)&&viewStore.buildings.length)||(Array.isArray(viewStore.warehouseResources)&&viewStore.warehouseResources.length)||(viewStore.endpointData&&Object.keys(viewStore.endpointData).length)||(viewStore.productionRateSnapshots&&Object.keys(viewStore.productionRateSnapshots).length)));const badgeStatus=__realmHydrationPending?'Switching…':syncTime?new Date(syncTime).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):(hasCapturedData?'Captured · sync not completed':'Not synced');$('#overviewRealmBadge').textContent=`${realm!=null?realmName(realm):'Realm —'} · ${badgeStatus}`; } } if(activeTab==='accounting'){ if($('#accountingSource')){const period=accountingDisplay.period?.dateFrom&&accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.dateFrom).toLocaleDateString()}–${new Date(accountingDisplay.period.date).toLocaleDateString()}`:(accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.date).toLocaleDateString()}`:''); $('#accountingSource').textContent=`Source: ${a.sourceType==='income-statement'?'income statement':a.sourceType==='cash-flow-derived'?'cash-flow statement':'unavailable'}${period}`;} if($('#accountingPeriodBadge')){const badge=$('#accountingPeriodBadge'),dateEl=$('#accountingPeriodDate'),metaEl=$('#accountingPeriodMeta');document.querySelectorAll('[data-accounting-period]').forEach(x=>x.classList.toggle('active',String(x.dataset.accountingPeriod||'current')===accountingPeriodView));const labels={current:'Current statements date',day:'Day',week:'Week',month:'Month'};const stmtText=accountingPeriodView==='current'?accountingStatementPeriodText(accountingDisplay.period):'';if(dateEl)dateEl.textContent=labels[accountingPeriodView]||labels.current;if(metaEl)metaEl.textContent=accountingDisplay.periodSource==='recent-cashflow'?`Derived from captured cash-flow rows · ${Number(accountingDisplay.periodTransactionCount)||0} transactions`:(stmtText||'Game accounting view');} if($('#accountingLiveStatus')){
+<div class="overview-resource-ranking-stack"><div class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Net Profit Resources</h3><span>Captured selling profit · ${escapeHtml(overviewRange)}</span></div><span class="overview-section-badge">Net Profit</span></div><div class="overview-selling-list">${topSelling.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topSelling.items.length?topSelling.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Net Profit</small><strong>${money(x.profit)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No selling profit data captured yet.</div>'}</div></div>
+<div id="overviewTopGross" class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Gross Resources</h3><span>Captured sales value · ${escapeHtml(overviewDate(topGross.rangeStart)&&overviewDate(topGross.rangeEnd)?`${overviewDate(topGross.rangeStart)} – ${overviewDate(topGross.rangeEnd)}`:'Captured range unavailable')}</span></div><span class="overview-section-badge">Gross</span></div><div class="overview-selling-list">${topGross.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topGross.items.length?topGross.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Gross</small><strong>${money(x.gross)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No gross sales data captured yet.</div>'}</div></div></div>`; if($('#overviewRealmBadge')){const syncTime=viewStore?.lastSync||s.lastSync;const hasCapturedData=!!(viewStore&&(viewStore.lastSync||viewStore.fullSyncDiagnostics||viewStore.gameOverlaySnapshot||(Array.isArray(viewStore.buildings)&&viewStore.buildings.length)||(Array.isArray(viewStore.warehouseResources)&&viewStore.warehouseResources.length)||(viewStore.endpointData&&Object.keys(viewStore.endpointData).length)||(viewStore.productionRateSnapshots&&Object.keys(viewStore.productionRateSnapshots).length)));const badgeStatus=__realmHydrationPending?'Switching…':syncTime?new Date(syncTime).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):(hasCapturedData?'Captured · sync not completed':'Not synced');$('#overviewRealmBadge').textContent=`${realm!=null?realmName(realm):'Realm —'} · ${badgeStatus}`; } } if(activeTab==='accounting'){ if($('#accountingSource')){const period=accountingDisplay.period?.dateFrom&&accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.dateFrom).toLocaleDateString()}–${new Date(accountingDisplay.period.date).toLocaleDateString()}`:(accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.date).toLocaleDateString()}`:''); $('#accountingSource').textContent=`Source: ${a.sourceType==='income-statement'?'income statement':a.sourceType==='cash-flow-derived'?'cash-flow statement':'unavailable'}${period}`;} if($('#accountingPeriodBadge')){const badge=$('#accountingPeriodBadge'),dateEl=$('#accountingPeriodDate'),metaEl=$('#accountingPeriodMeta');document.querySelectorAll('[data-accounting-period]').forEach(x=>x.classList.toggle('active',String(x.dataset.accountingPeriod||'current')===accountingPeriodView));const labels={current:'Current statements date',day:'Day',week:'Week',month:'Month'};const stmtText=accountingPeriodView==='current'?accountingStatementPeriodText(accountingDisplay.period):'';if(dateEl)dateEl.textContent=labels[accountingPeriodView]||labels.current;if(metaEl)metaEl.textContent=accountingDisplay.periodSource==='recent-cashflow'?`Derived from captured cash-flow rows · ${Number(accountingDisplay.periodTransactionCount)||0} transactions`:(stmtText||'Game accounting view');} if($('#accountingLiveStatus')){
    const accountingEndpoint=/\/api\/(?:v2|v3)\/companies\/(?:me|\d+)\/(?:balance-sheet|cashflow(?:\/recent)?|cashflow-statement|income-statement|past-finances-overview|administration-overhead|past-finances)(?:\/\d+)?\/?$/i;
    const accountingTimes=Object.entries(s.endpointData||{})
      .filter(([url,v])=>accountingEndpoint.test(url)&&Number(v?.status)===200&&v?.data!=null)
@@ -3763,11 +3678,11 @@ function render(s){
      ?`Last updated: ${new Date(latestTime).toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'})}`
      :'Waiting for latest financial response';
 } if($('#accountingOverview'))renderAccountingOverview($('#accountingOverview'),accountingDisplay,accountingPeriodView==='current'?accountingComparisonBase(a):null,a.history,acctDailySeries); if($('#accountingHistory')){if(scmSetHTML($('#accountingHistory'),accountingHistoryTable(a.history,(viewStore||s)?.accountingDayWalkStatus||null)))scmApplyCollapse($('#accountingHistory'));renderAccountingWalkSchedule(s);} if($('#accountingBalanceSummary'))scmSetHTML($('#accountingBalanceSummary'),`<div class="overview-stat-grid accounting-balance-summary"><div class="overview-stat-card"><span>Cash</span><strong>${money(a.cash)}</strong></div><div class="overview-stat-card"><span>Accounts Receivable</span><strong>${money(a.accountsReceivable)}</strong></div><div class="overview-stat-card"><span>Inventory</span><strong>${money(a.inventory)}</strong></div><div class="overview-stat-card"><span>Current Assets</span><strong>${money(a.currentAssets)}</strong></div><div class="overview-stat-card"><span>Accounts Payable</span><strong>${money(a.accountsPayable)}</strong></div><div class="overview-stat-card"><span>Bonds Payable</span><strong>${money(a.bondsPayable)}</strong></div><div class="overview-stat-card"><span>Current Liabilities</span><strong>${money(a.currentLiabilities)}</strong></div><div class="overview-stat-card"><span>Total Assets</span><strong>${money(a.assets)}</strong></div><div class="overview-stat-card"><span>Total Liabilities</span><strong>${money(a.liabilities)}</strong></div></div>`); if($('#accountingCashflowSummary'))scmSetHTML($('#accountingCashflowSummary'),accountingCashflowSummary(a.source?.cf)); if($('#accountingIncomeStatement'))scmSetHTML($('#accountingIncomeStatement'),accountingIncomeStatement(a.source?.income)); if($('#balanceDetails'))scmSetHTML($('#balanceDetails'),buildBalanceSections(a.source?.bs)); if($('#accountingRatios'))scmSetHTML($('#accountingRatios'),accountingFinancialRatios(a.source?.income,a.source?.bs)); }
- if(activeTab==='warehouse'){ renderWarehouseMarketTimestamp(s); try{renderWarehouseRunOut(s);}catch(e){console.error('Run-out render failed',e);} const inventoryRowsEl=$('#inventoryRows'); if(inventoryRowsEl) inventoryRowsEl.innerHTML=rows.length?rows.map(r=>{const marketPrice=cachedMarketPrice(s,r._id,r._quality);const margin=marketPrice!=null&&r._unitCost>0?(marketPrice-r._unitCost)/r._unitCost*100:null;const ri=resourceInfo(r,s);const imgs=ri.imageCandidates||[];const localImage=s.resourceImageCache?.[String(r._id)]||s.resourceImageData?.[String(r._id)]||null;if(!localImage) requestResourceImage(r._id);const srcs=localImage?[localImage,...imgs]:imgs;const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(JSON.stringify(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';const activeCost=activeProductionCostCells(s,r);return `<tr data-warehouse-key="${Number(r._id)}:${Number(r._quality)}"><td><div class="product-cell">${img}<span><strong>${resourceName(r,s)}</strong><small>#${r._id}</small></span></div>${warehouseHeadCost(r)}</td><td>${num(r._qty)}</td><td>${r._quality??'—'}</td><td>${r._unitCost==null?'—':money(r._unitCost)}</td><td>${activeCost.costHtml}</td><td>${activeCost.diffHtml}</td><td data-cell="prod-cost-history">${productionCostHistoryCell(s,r)}</td><td><span class="cell-stack">${marketPrice==null?'—':money(marketPrice)}<small class="market-source">${marketPrice==null?'Market price not captured':'Current market price'}</small></span></td><td class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td></tr>`}).join(''):'<tr><td colspan="9">No warehouse data captured.</td></tr>'; }
+ if(activeTab==='warehouse'){ renderWarehouseMarketTimestamp(s); try{renderWarehouseRunOut(s);}catch(e){console.error('Run-out render failed',e);} const inventoryRowsEl=$('#inventoryRows'); if(inventoryRowsEl) inventoryRowsEl.innerHTML=rows.length?rows.map(r=>{const marketPrice=cachedMarketPrice(s,r._id,r._quality);const margin=marketPrice!=null&&r._unitCost>0?(marketPrice-r._unitCost)/r._unitCost*100:null;const ri=resourceInfo(r,s);const imgs=ri.imageCandidates||[];const localImage=s.resourceImageCache?.[String(r._id)]||s.resourceImageData?.[String(r._id)]||null;if(!localImage) requestResourceImage(r._id);const srcs=localImage?[localImage,...imgs]:imgs;const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';const activeCost=activeProductionCostCells(s,r);return `<tr data-warehouse-key="${Number(r._id)}:${Number(r._quality)}"><td><div class="product-cell">${img}<span><strong>${resourceName(r,s)}</strong><small>#${r._id}</small></span></div>${warehouseHeadCost(r)}</td><td>${num(r._qty)}</td><td>${r._quality??'—'}</td><td>${r._unitCost==null?'—':money(r._unitCost)}</td><td>${activeCost.costHtml}</td><td>${activeCost.diffHtml}</td><td data-cell="prod-cost-history">${productionCostHistoryCell(s,r)}</td><td><span class="cell-stack">${marketPrice==null?'—':money(marketPrice)}<small class="market-source">${marketPrice==null?'Market price not captured':'Current market price'}</small></span></td><td class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td></tr>`}).join(''):'<tr><td colspan="9">No warehouse data captured.</td></tr>'; }
  if(activeTab==='overview'&&$('#cashflowDetails'))$('#cashflowDetails').innerHTML=buildCashflowSections(a.source?.cf,a.source?.recent); if(activeTab==='market'){ renderLiveMarketProduct(s); renderMarketHistory(s); renderMarketAlerts(s); } if(activeTab==='production') renderBuildingPlanner(s);
  renderVwapDiagnostics(s);
- const rawEl=activeTab==='diagnostic'?$('#raw'):null; if(rawEl) rawEl.textContent=JSON.stringify({auth:s.authData,warehouseCount:rows.length,accounting:a,marketEndpointCount:Object.keys(s.endpointData||{}).filter(k=>/\/market\//.test(k)).length,marketCacheResources:Object.keys(s.marketCache||{}).length,marketDebug:s.marketDebug||{}},null,2).slice(0,30000);
- if(activeTab==='executives'){try{renderBoardRoom(s);}catch(e){console.error('Executives tab render failed',e);}} if(activeTab==='tools'){try{globalThis.SCM_TOOLS_UI?.render(s,catalogEntries(s));}catch(e){console.error('Tools tab render failed',e);}} if(activeTab==='analyze'){try{globalThis.SCM_ANALYZE_UI?.render(s,analyzeContext(s));}catch(e){console.error('Analyze tab render failed',e);}} if(activeTab==='contracts') { populateContractProducts(s); renderContracts(s); } if(activeTab==='diagnostic'){ renderApiList(s); renderDiagnostics(s); }
+ const rawEl=activeTab==='settings'?$('#raw'):null; if(rawEl) rawEl.textContent=JSON.stringify({auth:s.authData,warehouseCount:rows.length,accounting:a,marketEndpointCount:Object.keys(s.endpointData||{}).filter(k=>/\/market\//.test(k)).length,marketCacheResources:Object.keys(s.marketCache||{}).length,marketDebug:s.marketDebug||{}},null,2).slice(0,30000);
+ if(activeTab==='executives'){try{renderBoardRoom(s);}catch(e){console.error('Executives tab render failed',e);}} if(activeTab==='tools'){try{globalThis.SCM_TOOLS_UI?.render(s,catalogEntries(s));}catch(e){console.error('Tools tab render failed',e);}} if(activeTab==='analyze'){try{globalThis.SCM_ANALYZE_UI?.render(s,analyzeContext(s));}catch(e){console.error('Analyze tab render failed',e);}} if(activeTab==='contracts') { populateContractProducts(s); renderContracts(s); } if(activeTab==='settings'){ renderApiList(s); renderDiagnostics(s); }
   requestAnimationFrame(()=>{ if(Math.abs(window.scrollX-__scrollX)>0 || Math.abs(window.scrollY-__scrollY)>0) window.scrollTo(__scrollX,__scrollY); });
 }
 function deepCompanyName(v, seen=new Set()){
@@ -3960,10 +3875,6 @@ function savedContractProductKey(c){
   const quality=Number(c?.quality!=null?c.quality:(parsed?parsed[2]:0));
   return Number.isFinite(id)?{id,quality:Number.isFinite(quality)?quality:0}:null;
 }
-function savedContractWarehouseQuantity(c,s){
-  const key=savedContractProductKey(c);if(!key)return 0;
-  return warehouseRows(s).filter(r=>Number(r?._id)===key.id&&Number(r?._quality)===key.quality).reduce((n,r)=>n+Math.max(0,Number(r?._qty)||0),0);
-}
 function savedContractPlanForState(s){
   const realm=Number(s?.viewRealm??s?.selectedRealm??s?.captureRealm??s?.authData?.authCompany?.realmId);
   const store=Number.isFinite(realm)?s?.realmStores?.[`realm:${realm}`]:null;
@@ -4030,10 +3941,6 @@ function savedContractResolvedQuantityMap(s){
     ?core.resolveSavedContractQuantities({savedContracts:contracts,baseBalanceByKey:savedContractBaseBalanceMap(s),surplusByKey:savedContractSurplusMap(s)})
     :new Map();
 }
-function savedContractLeftQuantity(c,s){
-  const quantities=savedContractResolvedQuantityMap(s);
-  return quantities.has(c)?Math.max(0,Number(quantities.get(c))||0):0;
-}
 function savedContractEffectiveQuantity(c,s){
   const quantities=savedContractResolvedQuantityMap(s);
   if(quantities.has(c))return Math.max(0,Number(quantities.get(c))||0);
@@ -4059,10 +3966,6 @@ async function saveRealmField(field,value,s){
     const result=await chrome.runtime.sendMessage({type:'SAVE_REALM_FIELD',realm,field,value});
     return result?.ok===true;
   }catch{return false;}
-}
-async function ensureSavedContractsKey(s){
-  // Never promote captured live API contracts into Manager-saved contracts.
-  if(!Array.isArray(s?.savedContracts))await saveRealmField('savedContracts',[],s);
 }
 function contractMarketPrice(c,s){
   const parsed=String(c?.product??'').trim().match(/^(\d+)(?::(\d+))?$/);
@@ -4377,19 +4280,22 @@ const flushPendingDashboardRender=()=>{
     scheduleDashboardRender();
   }
 };
+// Throttled: at most one full render per SCM_RENDER_MIN_GAP_MS with a trailing render, so storage bursts neither
+// starve the UI (old debounce kept resetting) nor re-render on every event. Deferred while editing or scrolling.
+const SCM_RENDER_MIN_GAP_MS=2500;
+let __lastDashboardRenderAt=0;
 const scheduleDashboardRender=()=>{
   if(dashboardEditorActive()||__dashboardUserScrolling){__renderPendingWhileEditing=true;return;}
-  if(__renderTimer) clearTimeout(__renderTimer);
-  // Batch storage bursts and never replace a form/planner while the user is actively editing it.
-  // Sync can emit many realm-local writes in quick succession; a longer coalescing
-  // window prevents repeated full-dashboard DOM replacement while scrolling.
+  if(__renderTimer)return;
+  const wait=Math.max(150,SCM_RENDER_MIN_GAP_MS-(Date.now()-__lastDashboardRenderAt));
   __renderTimer=setTimeout(()=>{
     __renderTimer=null;
-    if(dashboardEditorActive()){__renderPendingWhileEditing=true;return;}
+    if(dashboardEditorActive()||__dashboardUserScrolling){__renderPendingWhileEditing=true;return;}
+    __lastDashboardRenderAt=Date.now();
     const cached=__scmState;
     if(cached){try{render(cached);return;}catch(e){console.error('Dashboard render failed',e);}}
     get().then(s=>{try{render(s)}catch(e){console.error('Dashboard render failed',e)}});
-  },650);
+  },wait);
 };
 document.addEventListener('focusout',()=>setTimeout(flushPendingDashboardRender,80),true);
 
@@ -4402,25 +4308,8 @@ function dashboardChangeAffectsTab(changes,tab){
   // Without this, prices can be persisted successfully while Warehouse and
   // Market keep rendering the previous in-memory view until another action
   // (often opening Market) happens to trigger a render.
-  const physicalFieldsByTab={
-    warehouse:['warehouseResources','warehouseCostDetails','contracts','savedContracts','contractEvents','vwapData','vwapStatus','liveMarketData','liveMarketPriceData'],
-    market:['warehouseResources','warehouseCostDetails','vwapData','vwapStatus','liveMarketData','liveMarketPriceData'],
-    production:['buildings','warehouseResources','productionEvents','productionRateSnapshots','productionPlans','frozenNetworkPlan','productionRunHours','vwapData','vwapStatus','liveMarketData','liveMarketPriceData'],
-    tools:['warehouseResources','vwapData','liveMarketPriceData','history'],
-    analyze:['warehouseResources','vwapData','liveMarketPriceData','history','endpointData','buildings'],
-    executives:['endpointData','buildings']
-  };
-  const physicalFields=physicalFieldsByTab[tab];
-  if(physicalFields){
-    const viewRealm=Number(__scmState?.viewRealm??__scmState?.selectedRealm);
-    const physicalKey=Number.isFinite(viewRealm)?`scmRealmStore:${viewRealm}`:null;
-    const physicalChange=physicalKey?changes[physicalKey]:null;
-    if(physicalChange){
-      const before=physicalChange.oldValue&&typeof physicalChange.oldValue==='object'?physicalChange.oldValue:{};
-      const after=physicalChange.newValue&&typeof physicalChange.newValue==='object'?physicalChange.newValue:{};
-      if(physicalFields.some(field=>JSON.stringify(before[field]??null)!==JSON.stringify(after[field]??null)))return true;
-    }
-  }
+  // Physical realm stores (scmRealmStore:N) are reconciled by queuePhysicalRealmStateRefresh, which patches or schedules
+  // the active tab itself. Do not JSON.stringify big per-field blobs on every storage event here.
   if(tab==='contracts'&&has('endpointData')){
     const rx=/\/(?:contracts-incoming\/|contracts-outgoing\/|warehouse-contracts-summary\/|contracts-history-(?:incoming|outgoing)\/)/i;
     const oldEp=changes.endpointData?.oldValue&&typeof changes.endpointData.oldValue==='object'?changes.endpointData.oldValue:{};
@@ -4438,7 +4327,7 @@ function dashboardChangeAffectsTab(changes,tab){
   if(tab==='tools')return ['warehouseResources','vwapData','liveMarketPriceData','history'].some(has);
   if(tab==='executives')return ['endpointData','buildings','scmGameConfig','scmGameConstants'].some(has);
   
-  if(tab==='diagnostic')return ['syncStatus','syncError','lastSync','fullSyncJob','fullSyncProgress','endpointData','apiEndpoints','realmQuarantine','productionEvents','productionRateSnapshots','productionPlans','frozenNetworkPlan','gameOverlaySnapshot','warehouseResources','vwapData'].some(has);
+  if(tab==='settings')return ['syncStatus','syncError','lastSync','fullSyncJob','fullSyncProgress','endpointData','apiEndpoints','realmQuarantine','productionEvents','productionRateSnapshots','productionPlans','frozenNetworkPlan','gameOverlaySnapshot','warehouseResources','vwapData'].some(has);
   return false;
 }
 function scmWarehouseSignature(store){
@@ -4653,9 +4542,9 @@ function openProductionCostHistory(s,key){
 document.addEventListener('click',e=>{const b=e.target?.closest?.('[data-pch]');if(!b)return;e.preventDefault();try{openProductionCostHistory(__scmState||{},b.dataset.pch);}catch(err){console.debug('production cost history',err);}});
 try{scmOnStorageChanged((changes,area)=>{if(area!=='local'||!__scmState)return;const r=validRealmNumber(__scmState.viewRealm??__scmState.selectedRealm);const c=r!=null?changes[`scmProductionCostHistory:${r}`]:null;if(!c)return;__scmState.productionCostHistory=Array.isArray(c.newValue)?c.newValue:[];if(activeTab==='warehouse'){try{patchWarehouseCells(__scmState);}catch{}}});}catch{}
 // v2.5.393 statement history (CSV import, new day statements) recomputes Analyze too.
-try{scmOnStorageChanged((changes,area)=>{if(area!=='local'||!__scmState)return;const r=validRealmNumber(__scmState.viewRealm??__scmState.selectedRealm);const c=r!=null?changes[`scmStatementHistory:${r}`]:null;if(!c)return;__scmState.statementHistory=c.newValue&&typeof c.newValue==='object'?c.newValue:null;if(activeTab==='analyze'){try{globalThis.SCM_ANALYZE_UI?.render(__scmState,analyzeContext(__scmState));}catch{}}});}catch{}
+try{scmOnStorageChanged((changes,area)=>{if(area!=='local'||!__scmState)return;const r=validRealmNumber(__scmState.viewRealm??__scmState.selectedRealm);const c=r!=null?changes[`scmStatementHistory:${r}`]:null;if(!c)return;__scmState.statementHistory=c.newValue&&typeof c.newValue==='object'?c.newValue:null;if(activeTab==='analyze')scheduleDashboardRender();});}catch{}
 // v2.5.387 a new ledger page in the archive recomputes Analyze while it is open (the archive is realm-keyed).
-try{scmOnStorageChanged((changes,area)=>{if(area!=='local'||!__scmState)return;const r=validRealmNumber(__scmState.viewRealm??__scmState.selectedRealm);const c=r!=null?changes[`scmLedgerArchive:${r}`]:null;if(!c)return;__scmState.ledgerArchive=c.newValue&&typeof c.newValue==='object'?c.newValue:null;if(activeTab==='analyze'){try{globalThis.SCM_ANALYZE_UI?.render(__scmState,analyzeContext(__scmState));}catch{}}});}catch{}
+try{scmOnStorageChanged((changes,area)=>{if(area!=='local'||!__scmState)return;const r=validRealmNumber(__scmState.viewRealm??__scmState.selectedRealm);const c=r!=null?changes[`scmLedgerArchive:${r}`]:null;if(!c)return;__scmState.ledgerArchive=c.newValue&&typeof c.newValue==='object'?c.newValue:null;if(activeTab==='analyze')scheduleDashboardRender();});}catch{}
 function patchWarehouseCells(state){
   renderWarehouseMarketTimestamp(state);
   const body=$('#inventoryRows'); if(!body)return;
@@ -4670,7 +4559,7 @@ function patchWarehouseCells(state){
     const localImage=state.resourceImageCache?.[String(r._id)]||state.resourceImageData?.[String(r._id)]||null;
     if(!localImage) requestResourceImage(r._id);
     const srcs=localImage?[localImage,...imgs]:imgs;
-    const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(JSON.stringify(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';
+    const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';
     let tr=existing.get(key);
     const activeCost=activeProductionCostCells(state,r);const html=[`<td><div class="product-cell">${img}<span><strong>${escapeHtml(resourceName(r,state))}</strong><small>#${r._id}</small></span></div>${warehouseHeadCost(r)}</td>`, `<td data-cell="qty">${num(r._qty)}</td>`, `<td data-cell="quality">${r._quality??'—'}</td>`, `<td data-cell="cost">${r._unitCost==null?'—':money(r._unitCost)}</td>`, `<td data-cell="active-production-cost">${activeCost.costHtml}</td>`, `<td data-cell="production-stock-diff">${activeCost.diffHtml}</td>`, `<td data-cell="prod-cost-history">${productionCostHistoryCell(state,r)}</td>`, `<td data-cell="vwap"><span class="cell-stack">${currentMarketPrice==null?'—':money(currentMarketPrice)}<small class="market-source">${marketSource(state,r._id,r._quality)}</small></span></td>`, `<td data-cell="margin" class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td>`];
     if(!tr){tr=document.createElement('tr');tr.dataset.warehouseKey=key;tr.innerHTML=html.join('');}
@@ -4703,13 +4592,13 @@ function patchOverviewGrossResources(state){
     const head=netSection.querySelector('.overview-section-head span:first-of-type');
     if(head)head.textContent=`Captured selling profit · ${range(topSelling)}`;
     const list=netSection.querySelector('.overview-selling-list');
-    if(list)list.innerHTML=topSelling.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topSelling.items.length?topSelling.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(JSON.stringify(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Net Profit</small><strong>${money(x.profit)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No selling profit data captured yet.</div>';
+    if(list)list.innerHTML=topSelling.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topSelling.items.length?topSelling.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Net Profit</small><strong>${money(x.profit)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No selling profit data captured yet.</div>';
   }
   if(grossSection){
     const head=grossSection.querySelector('.overview-section-head span:first-of-type');
     if(head)head.textContent=`Captured sales value · ${range(topGross)}`;
     const list=grossSection.querySelector('.overview-selling-list');
-    if(list)list.innerHTML=topGross.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topGross.items.length?topGross.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(JSON.stringify(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Gross</small><strong>${money(x.gross)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No gross sales data captured yet.</div>';
+    if(list)list.innerHTML=topGross.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topGross.items.length?topGross.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Gross</small><strong>${money(x.gross)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No gross sales data captured yet.</div>';
   }
 }
 function patchConstructionMaterials(state){
@@ -4828,12 +4717,19 @@ const queuePhysicalRealmStateRefresh=(previousState,changes={})=>{
            if(plannerInputsChanged)renderBuildingPlanner(scmReactiveViewState(fresh));
            else {
            }
-         }else if(activeTab==='diagnostic')scheduleDashboardRender();
+         }else if(activeTab==='settings')scheduleDashboardRender();
        }
-      if((flags.warehouseChanged||flags.vwapChanged||flags.liveMarketPriceDataChanged||flags.liveMarketProductChanged||flags.liveMarketProductCacheChanged)&&activeTab==='warehouse')scheduleDashboardRender();
+      if((flags.warehouseChanged||flags.vwapChanged||flags.liveMarketPriceDataChanged||flags.liveMarketProductChanged||flags.liveMarketProductCacheChanged)&&activeTab==='warehouse'){
+        // Full re-render only when rows appeared/disappeared; otherwise patchWarehouseCells updates cells in place.
+        const rowKeys=st=>{try{return warehouseRows(scmReactiveViewState(st)).map(r=>`${Number(r._id)}:${Number(r._quality)}`).sort().join(',');}catch{return null;}};
+        const kOld=rowKeys(previous||fresh),kNew=rowKeys(fresh);
+        if(kOld==null||kNew==null||kOld!==kNew)scheduleDashboardRender();
+        else{try{patchWarehouseCells(scmReactiveViewState(fresh));}catch(e){console.debug('warehouse cell patch failed',e);scheduleDashboardRender();}}
+      }
+      if(activeTab==='executives'&&(flags.buildingsChanged||(previous?.realmStores?.[viewKey]?.endpointData!==fresh?.realmStores?.[viewKey]?.endpointData)))scheduleDashboardRender();
       if((flags.liveMarketPriceDataChanged||flags.vwapChanged||flags.warehouseChanged)&&activeTab==='tools')scheduleDashboardRender();
       if((flags.liveMarketPriceDataChanged||flags.vwapChanged||flags.warehouseChanged||flags.accountingChanged||flags.historyChanged||flags.buildingsChanged)&&activeTab==='analyze')scheduleDashboardRender();
-      if(flags.contractsChanged&&activeTab==='overview')scheduleDashboardRender();if(flags.accountingChanged&&activeTab==='accounting')scheduleDashboardRender();if(flags.diagnosticChanged&&activeTab==='diagnostic')scheduleDashboardRender();if((flags.vwapChanged||flags.warehouseChanged||flags.historyChanged||flags.liveMarketProductChanged||flags.liveMarketProductCacheChanged||flags.liveMarketPriceDataChanged)&&activeTab==='market')scheduleDashboardRender();
+      if(flags.contractsChanged&&activeTab==='overview')scheduleDashboardRender();if(flags.accountingChanged&&activeTab==='accounting')scheduleDashboardRender();if(flags.diagnosticChanged&&activeTab==='settings')scheduleDashboardRender();if((flags.vwapChanged||flags.warehouseChanged||flags.historyChanged||flags.liveMarketProductChanged||flags.liveMarketProductCacheChanged||flags.liveMarketPriceDataChanged)&&activeTab==='market')scheduleDashboardRender();
     }catch(e){__physicalStateRefreshPendingStores=Object.create(null);__physicalStateRefreshPendingDiagnostics=Object.create(null);console.debug('Physical realm state refresh failed',e);}
   },120);
 };
@@ -5008,15 +4904,15 @@ document.addEventListener('error',e=>{const t=e.target;if(!t||t.tagName!=='IMG'|
 
 // v2.5.350 expandable / collapsible cards. A container marked data-collapse="<key>" collapses to its
 // [data-collapse-head] child; taps on the head toggle it. Choices are kept per key in localStorage
-// (scmCollapseV1). data-collapse-default="closed" starts collapsed. No inline handlers (CSP).
-const SCM_COLLAPSE_KEY='scmCollapseV1';
+// (scmCollapseV2). data-collapse-default="open" starts expanded; everything else starts collapsed. No inline handlers (CSP).
+const SCM_COLLAPSE_KEY='scmCollapseV2';
 function scmCollapseRead(){try{const v=JSON.parse(localStorage.getItem(SCM_COLLAPSE_KEY)||'{}');return v&&typeof v==='object'?v:{};}catch{return {};}}
 function scmCollapseWrite(key,collapsed){try{const v=scmCollapseRead();delete v[key];v[key]=collapsed?1:0;const keys=Object.keys(v);for(const k of keys.slice(0,Math.max(0,keys.length-300)))delete v[k];localStorage.setItem(SCM_COLLAPSE_KEY,JSON.stringify(v));}catch{}}
 function scmSetCollapsed(el,collapsed){el.classList.toggle('is-collapsed',!!collapsed);const h=el.querySelector(':scope>[data-collapse-head]');if(h)h.setAttribute('aria-expanded',collapsed?'false':'true');}
 function scmApplyCollapse(root){
   if(!root)return;const saved=scmCollapseRead();
   const list=[...(root.matches?.('[data-collapse]')?[root]:[]),...root.querySelectorAll('[data-collapse]')];
-  for(const el of list){const k=el.dataset.collapse;const h=el.querySelector(':scope>[data-collapse-head]');if(!h)continue;h.classList.add('collapse-head');h.setAttribute('role','button');h.tabIndex=0;scmSetCollapsed(el,k in saved?!!saved[k]:el.dataset.collapseDefault==='closed');}
+  for(const el of list){const k=el.dataset.collapse;const h=el.querySelector(':scope>[data-collapse-head]');if(!h)continue;h.classList.add('collapse-head');h.setAttribute('role','button');h.tabIndex=0;scmSetCollapsed(el,k in saved?!!saved[k]:el.dataset.collapseDefault!=='open');}
 }
 // v2.5.358 every card in the Manager is expandable / collapsible. Cards rendered without data-collapse get it here,
 // on every render (MutationObserver, runs before the next paint):
@@ -5066,7 +4962,7 @@ function scmAutoCollapse(root){
     }
   }
   const fresh=[...root.querySelectorAll('[data-collapse]')].filter(el=>{const h=el.querySelector(':scope>[data-collapse-head]');return h&&!h.classList.contains('collapse-head');});
-  if(fresh.length){const saved=scmCollapseRead();for(const el of fresh){const k=el.dataset.collapse,h=el.querySelector(':scope>[data-collapse-head]');h.classList.add('collapse-head');h.setAttribute('role','button');h.tabIndex=0;scmSetCollapsed(el,k in saved?!!saved[k]:el.dataset.collapseDefault==='closed');}}
+  if(fresh.length){const saved=scmCollapseRead();for(const el of fresh){const k=el.dataset.collapse,h=el.querySelector(':scope>[data-collapse-head]');h.classList.add('collapse-head');h.setAttribute('role','button');h.tabIndex=0;scmSetCollapsed(el,k in saved?!!saved[k]:el.dataset.collapseDefault!=='open');}}
 }
 (function(){
   const toggle=(head,e)=>{const el=head.parentElement;if(!el?.dataset?.collapse)return;

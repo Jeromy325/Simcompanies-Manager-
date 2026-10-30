@@ -164,7 +164,7 @@
   const field = (id, label, val, extra = '') => `<label>${label}<input id="${id}" data-calc="__KIND__" type="number" step="any" value="${esc(val)}" ${extra}></label>`;
   function paintRoi(pane) {
     const c = store.get('roi', { cost: 100000, profit: 50, lead: 0, days: 30 }), f = (id, l) => field(id, l, c[id.replace('roi_', '')]).replace('__KIND__', 'roi');
-    pane.innerHTML = `<details class="tl-help" open><summary>How Building ROI works</summary>
+    pane.innerHTML = `<details class="tl-help"><summary>How Building ROI works</summary>
       <p>Use it to decide if a <b>new building</b> or an <b>upgrade</b> is worth the money.</p>
       <ol><li><b>Up-front cost</b> — what the game charges to build or upgrade (shown on its construction screen).</li>
       <li><b>Extra profit per hour</b> — how much <em>more</em> you will earn per hour once it is finished. For an upgrade by one level, use the <b>Profit / h / level</b> number on that building's card in the Production tab.</li>
@@ -182,7 +182,7 @@
   }
   function paintLoan(pane) {
     const c = store.get('loan', { principal: 100000, rate: 1, per: 'day', days: 14, profit: 50, lead: 0 }), f = (id, l) => field(id, l, c[id.replace('loan_', '')]).replace('__KIND__', 'loan');
-    pane.innerHTML = `<details class="tl-help" open><summary>How Loan &amp; bond works</summary>
+    pane.innerHTML = `<details class="tl-help"><summary>How Loan &amp; bond works</summary>
       <p>Use it when you would <b>borrow money</b> (for example by selling a bond in the game) to pay for a building or upgrade, and want to know if it is worth the interest.</p>
       <ol><li><b>Principal</b> — how much you borrow.</li>
       <li><b>Interest rate</b> and <b>per</b> — the rate exactly as the game shows it (per day, per week…).</li>
