@@ -1,3 +1,7 @@
+2.5.406 — 2026-10-30 — Test suite brought up to date (no app change)
+- Version checks in the tests accept this version or newer instead of pinning one number.
+- Tests that checked removed or changed code (executives sync target, Exchange badge and VWAP compare, tab order, card minimise list, timers, storage keys) now check the current code.
+
 2.5.405 — 2026-10-30 — Accounting refresh interrupted by a reload is not an error
 - When the extension is reloaded or updated during an Accounting refresh, the dashboard logs an info line instead of an error. The refresh runs again on the next visit.
 
