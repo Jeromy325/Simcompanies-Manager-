@@ -83,7 +83,12 @@ async function requestAccountingRefresh(){
     if(requestEpoch!==__realmViewEpoch)return;
     const r=await chrome.runtime.sendMessage({type:'REFRESH_ACCOUNTING',realm});
     if(r?.ok){const freshState=await get();try{render(freshState);}catch(e){console.error('Accounting refresh render failed',e);}}
-  }catch(e){console.error('Accounting refresh failed',e);}
+  }catch(e){
+    // The extension was reloaded or updated while the refresh was running: Chrome closes the reply channel. Not a failure;
+    // the endpoints stay stale and the next refresh (next visit or render) fetches them.
+    if(/message channel closed|Extension context invalidated|receiving end does not exist/i.test(String(e?.message||e)))console.info('Accounting refresh interrupted by an extension reload; it will run again on the next visit.');
+    else console.error('Accounting refresh failed',e);
+  }
   finally{accountingRefreshPending=false;}
 }
 async function requestAccountingWeekLedgerRefresh(reason='dashboard-overview'){

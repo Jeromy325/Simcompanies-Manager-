@@ -69,7 +69,10 @@ function handlerContext(storage, store) {
   assert.ok(mod.includes("el.dataset.scmOwned='1'"), 'card/pill marked as SCM-owned (ignored by other observers)');
   assert.ok(mod.includes('if(s===L.sig&&have)return;'), 'renders only when the data changes');
   assert.ok(mod.includes('if(r===L.realm)return;'), 'realm re-announcements do not reset the card');
-  assert.ok(mod.includes('L.refreshTimer=setInterval'), 'listing re-requests with refresh once a minute while open');
+  assert.ok(mod.includes('L.refreshTimer=setInterval(()=>{if(!document.hidden&&L.open)request(true);},60000)'), 'listing asks for a fresh read once a minute while open and visible');
+  const cmodTimers = slice(content, 'const Contracts=(()=>{', "if(document.readyState!=='loading')Contracts.start();");
+  assert.ok(!/refreshTimer|setInterval\(\(\)=>\{if\(!document\.hidden&&C\.open\)/.test(cmodTimers), 'contracts card has no refresh timer (captured data, read on open)');
+  assert.ok(bg.includes('let cid=Number(cur?.companyId)||0;'), 'refresh takes the company id from the small orders key');
   // the background handler holds no lock and writes nothing itself
   const block = slice(bg, "if(m?.type==='GET_OWN_LISTINGS_DATA'){", "if(m?.type==='GET_OUTGOING_CONTRACTS_DATA'){");
   assert.ok(!/withStorageLock|storageSet\(|rawStorageSet\(|fetch\(/.test(block), 'handler: no lock, no write, no direct fetch');

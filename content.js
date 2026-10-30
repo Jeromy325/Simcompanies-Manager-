@@ -1759,7 +1759,7 @@ function scmPageTextNoLayout(){
   if(document.readyState!=='loading')Listings.start();else document.addEventListener('DOMContentLoaded',()=>Listings.start(),{once:true});
   // "Outgoing contracts" card: its own card, pill and saved position, beside (not inside) My listings. Shows the game's
   // outgoing contracts as last captured for this realm (background GET_OUTGOING_CONTRACTS_DATA). It fetches nothing:
-  // "captured X ago" says how old the capture is. Re-reads the capture once a minute while open and visible.
+  // "captured X ago" says how old the capture is. Reads the capture when it opens, when the tab becomes visible and on realm change (no timer: the realm store is large).
   const Contracts=(()=>{
     const CARD='scm-contracts-card',PILL='scm-contracts-pill',OPEN_KEY='scm-contracts-card-v1';
     const C={open:true,data:null,realm:null,sig:'',seq:0,agoTimer:0,started:false,noClickUntil:0};
@@ -1826,7 +1826,7 @@ function scmPageTextNoLayout(){
     document.addEventListener('visibilitychange',()=>{if(!document.hidden&&C.open){request();tickAgo();}});
     // the game re-announces its realm on every state update; act only on a real change
     window.addEventListener('scm-game-realm-change',()=>{const r=currentRealm();if(r===C.realm)return;C.realm=r;C.data=null;C.seq++;paint();request();});
-    const start=()=>{if(C.started||!isSimCompaniesPage())return;C.started=true;C.realm=currentRealm();paint();request();C.agoTimer=setInterval(tickAgo,30000);C.refreshTimer=setInterval(()=>{if(!document.hidden&&C.open)request();},60000);};
+    const start=()=>{if(C.started||!isSimCompaniesPage())return;C.started=true;C.realm=currentRealm();paint();request();C.agoTimer=setInterval(tickAgo,30000);};
     return {start};
   })();
   if(document.readyState!=='loading')Contracts.start();else document.addEventListener('DOMContentLoaded',()=>Contracts.start(),{once:true});

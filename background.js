@@ -331,7 +331,9 @@ async function refreshMarketOrders(realm,maxAgeMs=5*60000){
     const r=validRealmNumber(realm);if(r==null)return {ok:false};
     const k=`scmMarketOrders:${r}`;const cur=(await chrome.storage.local.get({[k]:null}))[k];
     if(cur&&Date.now()-Date.parse(cur.at||0)<maxAgeMs)return {ok:true,cached:true};
-    const st=await notifyRealmStore(r);const cid=Number(st?.authData?.authCompany?.companyId??st?.authData?.authCompany?.id);
+    // The company id is already in the small orders key after the first read; the large realm store is only read when it is not.
+    let cid=Number(cur?.companyId)||0;
+    if(!(cid>0)){const st=await notifyRealmStore(r);cid=Number(st?.authData?.authCompany?.companyId??st?.authData?.authCompany?.id);}
     if(!(cid>0))return {ok:false,error:'company id not captured'};
     const res=await fetch(`https://www.simcompanies.com/api/v2/companies/${cid}/market-orders/`,{credentials:'omit'});
     if(!res.ok)return {ok:false,error:`HTTP ${res.status}`};

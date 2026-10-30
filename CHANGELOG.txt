@@ -1,3 +1,10 @@
+2.5.405 — 2026-10-30 — Accounting refresh interrupted by a reload is not an error
+- When the extension is reloaded or updated during an Accounting refresh, the dashboard logs an info line instead of an error. The refresh runs again on the next visit.
+
+2.5.404 — 2026-10-30 — Game-page cards: no timers
+- My listings updates on its own: while the card is open and the tab visible, it asks for a fresh read once a minute. The refresh now takes the company id from the small orders key, so the large realm store is not read on each minute.
+- Outgoing contracts reads its captured data when it opens, when the tab becomes visible, and on realm change (no timer, because its data only changes when the game captures it).
+
 2.5.403 — 2026-10-30 — My listings refresh; Outgoing contracts card
 - My listings: refresh skips the 5-min market-order cache, so changes show up soon after you change them. While the card is open the listing is re-read once a minute.
 - NEW: Outgoing contracts card on the game page, separate from My listings (own card, pill and saved position). It shows the outgoing contracts captured for this realm; it fetches nothing.
