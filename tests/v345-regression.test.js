@@ -191,6 +191,6 @@ assert.ok(bg.includes('buildingName:b?.name?String(b.name):null') && dash.includ
     assert.equal(r.production.length, 1, 'batch alarms rescheduled from stored buildings');
     console.log('v345-regression alarms ok');
   }).catch(e => { console.error(e); process.exit(1); });
-  assert.ok(bg.includes("const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX,ACCOUNTING_DAY_WALK_ALARM_PREFIX,ACCOUNTING_WALK_DAILY_ALARM];"));
+  assert.ok(bg.includes("const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX,ACCOUNTING_DAY_WALK_ALARM_PREFIX,ACCOUNTING_WALK_DAILY_ALARM,SYNC_AUTO_RETRY_ALARM_PREFIX];"));
 }
 console.log('v345-regression ok');

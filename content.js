@@ -957,6 +957,18 @@ let hookReady = false;
   });
 })();
 
+// P6: page text for "which page is this" checks that run from mutation observers. document.body.innerText
+// forces a full layout; this walks text nodes (no layout), skipping script/style, and joins them with spaces.
+function scmPageTextNoLayout(){
+  try{
+    const body=document.body;if(!body)return '';
+    const skip=/^(?:SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/;
+    const walker=document.createTreeWalker(body,NodeFilter.SHOW_TEXT,{acceptNode:n=>skip.test(n.parentNode?.nodeName||'')?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT});
+    const parts=[];let node;
+    while((node=walker.nextNode()))parts.push(node.nodeValue);
+    return parts.join(' ');
+  }catch{return String(document.body?.textContent||'');}
+}
 
 // Exchange VWAP overlay v2.5.92: table-row injection based on the proven Simco Manager v1.1.24 approach.
 // Keep our existing badge/popover appearance; change only how Exchange rows are discovered and decorated.
@@ -1182,6 +1194,12 @@ let hookReady = false;
   };
   /*SCM-XCMP-END*/
   const pctText=p=>`${p>=0?'+':'−'}${Math.abs(p).toFixed(1)}%`;
+  // P5: what a badge shows. A closed badge is rebuilt only when this changes (it used to be rebuilt every pass).
+  const badgeSignature=(candidate,mapped)=>{
+    const q=Number(candidate?.record?.quality);if(!Number.isFinite(q))return '';
+    const cmp=exchangeCompare({price:candidate.price,quantity:candidate.quantity},mapped.get(q));
+    return cmp?`${q}|${candidate.price}|${candidate.quantity}|${cmp.ref}|${cmp.pct}|${cmp.diff}|${cmp.verdict}`:'';
+  };
   const makeBadge=(candidate,rid,mapped)=>{
     const q=Number(candidate.record?.quality);if(!Number.isFinite(q))return null;
     const cmp=exchangeCompare({price:candidate.price,quantity:candidate.quantity},mapped.get(q));if(!cmp)return null;
@@ -1195,7 +1213,7 @@ let hookReady = false;
     const row=(k,val,cls='')=>`<div class="scx-vwap-popover-row"><span class="scx-vwap-popover-label">${k}</span><span class="scx-vwap-popover-value ${cls}">${val}</span></div>`;
     const fee=0.04; // 2.5.396 Manager exchange fee is always 4%
     pop.innerHTML=`<div class="scx-vwap-popover-title">${verdictText}</div>${row('Listing price',money(candidate.price))}${row(refLabel,money(cmp.ref))}${row('Difference',`${diff>=0?'+':''}${money(diff)} · ${pctText(pct)}`,pct<=-2?'good':pct>=2?'bad':'')}${row('Listing quantity',candidate.quantity.toLocaleString())}${row('Net after 4% fee',money(candidate.price*(1-fee)))}`;
-    host.__scmPopover=pop;host.__scmRow=candidate.row;host.__scmPrice=candidate.price;
+    host.__scmPopover=pop;host.__scmRow=candidate.row;host.__scmPrice=candidate.price;host.__scmSig=badgeSignature(candidate,mapped);
     b.addEventListener('click',e=>{
       e.preventDefault();e.stopPropagation();
       const wasOpen=pop.style.display==='block'&&host.dataset.open==='1';
@@ -1246,7 +1264,7 @@ let hookReady = false;
         matchedCount++;
         const key=`${rid}:${candidate.record?.id??`${candidate.record?.quality}:${candidate.quantity}:${candidate.price}`}`;wanted.add(key);
         let host=existingHosts.get(key)||null;
-        if(!host||host.__scmRow!==row||host.dataset.open!=='1'){
+        if(!host||host.__scmRow!==row||(host.dataset.open!=='1'&&host.__scmSig!==badgeSignature(candidate,mapped))){
           if(host)removeBadge(host);
           host=makeBadge(candidate,rid,mapped);
         }else{
@@ -1313,12 +1331,13 @@ let hookReady = false;
   let incomingCheck={at:0,path:'',value:false};
   const isIncomingPage=()=>{
     const path=String(location.pathname||''),now=Date.now();
-    if(incomingCheck.path===path&&now-incomingCheck.at<1500)return incomingCheck.value;
+    // P6: a positive answer is kept 5 s; a negative one 1.5 s so a freshly rendered page is picked up quickly.
+    if(incomingCheck.path===path&&now-incomingCheck.at<(incomingCheck.value?5000:1500))return incomingCheck.value;
     incomingCheck={at:now,path,value:isIncomingPageNow()};
     return incomingCheck.value;
   };
   const isIncomingPageNow=()=>{
-    const body=String(document.body?.innerText||'');
+    const body=scmPageTextNoLayout(); // P6: no innerText (forced layout) from mutation observers
     // v2.5.319: no trailing word boundary. Our own badge text can sit right after the Accept label
     // ("Accept25.00% above market"), which made this check fail and wipe the badges (flicker).
     return /incoming contracts/i.test(body)&&/accept/i.test(body)&&/\$\s*[0-9]/.test(body);
@@ -1647,8 +1666,9 @@ let hookReady = false;
     const path=String(location.pathname||'');
     if(/contract/i.test(path))return true;
     const now=Date.now();
-    if(contractTextCheck.path===path&&now-contractTextCheck.at<1500)return contractTextCheck.value;
-    contractTextCheck={at:now,path,value:/(?:recipient|price\s+per\s+unit|please\s+enter\s+amount|select\s+company)/i.test(String(document.body?.innerText||''))};
+    // P6: no innerText (forced layout) here; positive answers kept 5 s, negative 1.5 s.
+    if(contractTextCheck.path===path&&now-contractTextCheck.at<(contractTextCheck.value?5000:1500))return contractTextCheck.value;
+    contractTextCheck={at:now,path,value:/(?:recipient|price\s+per\s+unit|please\s+enter\s+amount|select\s+company)/i.test(scmPageTextNoLayout())};
     return contractTextCheck.value;
   };
   const scheduleContractHelper=()=>{
@@ -2241,8 +2261,13 @@ let hookReady = false;
         }catch{}
       }
     },3000);
+    // P6: the sell/contract helper checks run once per idle slot instead of on every mutation batch. The
+    // balance-card re-insert below stays synchronous so a React re-render cannot make the card flicker.
+    let helperCheckPending=false;
+    const runHelperChecks=()=>{helperCheckPending=false;try{scheduleSellHelper();if(document.getElementById('scm-game-balance-card')&&likelyContractPage())scheduleContractHelper();}catch{}};
+    const queueHelperChecks=()=>{if(helperCheckPending)return;helperCheckPending=true;if(typeof requestIdleCallback==='function')requestIdleCallback(runHelperChecks,{timeout:400});else setTimeout(runHelperChecks,150);};
     if(S.observer)S.observer.disconnect();S.observer=new MutationObserver(()=>{
-      scheduleSellHelper();
+      queueHelperChecks();
       const card=document.getElementById('scm-game-balance-card');
       if(!card){
         const pageRealm=currentRealm();
@@ -2253,7 +2278,6 @@ let hookReady = false;
         }catch{}
         return;
       }
-      if(likelyContractPage())scheduleContractHelper();
     });
     S.observer.observe(document.documentElement,{childList:true,subtree:true});window.addEventListener('resize',()=>{schedulePosition();},{passive:true});setInterval(()=>{if(!document.hidden)schedulePosition();},8000);
   };

@@ -301,8 +301,11 @@
     } catch { return null; }
   };
   let catalogCaptureBusy=false;
+  // P4: the catalog (up to ~2 MB of base64 images) is posted only when what it would contain changes:
+  // the sorted resource ids that have an image plus the constants count/size. Explicit requests force it.
+  let lastResourceCatalogSignature='';
 
-  async function emitResourceCatalog() {
+  async function emitResourceCatalog(force = false) {
     try {
       const raw = localStorage.getItem('SimcompaniesConstantsData');
       if (!raw) return false;
@@ -430,8 +433,11 @@
         }
       } catch {}
 
+      const catalogSignature = `${Object.keys(constants).length}|${raw.length}|${Object.keys(resourceImages).sort((a,b)=>Number(a)-Number(b)).join(',')}`;
+      if (force !== true && catalogSignature === lastResourceCatalogSignature) return false;
+      let imagesCaptured = false;
       if(!catalogCaptureBusy){
-        catalogCaptureBusy=true;
+        catalogCaptureBusy=true;imagesCaptured=true;
         try{
           const ids=Object.keys(resourceImages).slice(0,80);
           const captured=await Promise.all(ids.map(async id=>[id,await imageCapture(resourceImages[id])]));
@@ -443,6 +449,8 @@
         catalog: { constantsResources: constants, resourceImages, resourceNames, data: parsed?.data || null },
         receivedAt: new Date().toISOString()
       });
+      // Only a pass that also captured the image data counts as delivered.
+      if (imagesCaptured) lastResourceCatalogSignature = catalogSignature;
       return true;
     } catch { return false; }
   }
@@ -1143,7 +1151,7 @@
   });
 
   window.addEventListener('storage', (event) => {
-    if (event.key === 'SimcompaniesConstantsData') emitResourceCatalog();
+    if (event.key === 'SimcompaniesConstantsData') emitResourceCatalog(true);
     if (event.key && (/^market_all_\d+_\d+$/.test(event.key) || /^market_\d+_\d+$/.test(event.key))) emitMarketCache();
     if (event.key && /^SimcompaniesRetailCalculation_[01]$/.test(event.key)) scheduleGameStateEmit(0);
   });
@@ -1186,7 +1194,7 @@
       try { sessionStorage.removeItem('SCM_SYNC_REALM'); } catch {}
       emit('SYNC_REALM_CLEARED', {});
     }
-    if (event.data.type === 'RESOURCE_CATALOG_GET') emitResourceCatalog();
+    if (event.data.type === 'RESOURCE_CATALOG_GET') emitResourceCatalog(true);
     if (event.data.type === 'RESOURCE_IMAGE_GET') emitResourceImage(event.data.resource);
     if (event.data.type === 'MARKET_CACHE_GET') emitMarketCache();
     if (event.data.type === 'GAME_STATE_GET') { emitGameState(); emitGameLocalStorageSnapshot('game-state-request'); }
@@ -1215,10 +1223,13 @@
   setTimeout(emitResourceCatalog, 3000);
   setTimeout(emitResourceCatalog, 8000);
   try {
-    let resourceCatalogTimer=0;
+    // P4: DOM mutations re-check the catalog at most every 30 s (it walks every <img> on the page).
+    const RESOURCE_CATALOG_OBSERVER_MIN_MS=30000;
+    let resourceCatalogTimer=0,resourceCatalogLastRun=0;
     const scheduleResourceCatalog=()=>{
       if(resourceCatalogTimer)return;
-      resourceCatalogTimer=setTimeout(()=>{resourceCatalogTimer=0;emitResourceCatalog();},1000);
+      const wait=Math.max(1000,RESOURCE_CATALOG_OBSERVER_MIN_MS-(Date.now()-resourceCatalogLastRun));
+      resourceCatalogTimer=setTimeout(()=>{resourceCatalogTimer=0;resourceCatalogLastRun=Date.now();emitResourceCatalog();},wait);
     };
     const imageObserver = new MutationObserver(() => { scheduleResourceCatalog(); });
     imageObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });

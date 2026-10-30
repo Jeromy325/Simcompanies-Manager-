@@ -526,31 +526,66 @@ function withRealmStorageCommit(task){
 function storageSet(patch={}){
   return withRealmStorageCommit(()=>storageSetUnlocked(patch));
 }
+// Integration P1: realm patches are coalesced. Every captured API response used to rewrite the whole
+// scmRealmStore:N (~800 KB, ~1 MB+ onChanged payload in every open page) about once a second during Sync.
+// storageSetRealmPatch now merges patches (in order, shallow, same semantics as {...current,...patch}) into a
+// per-realm buffer and writes at most once per REALM_PATCH_COALESCE_MS. In-worker readers stay exact:
+// readPhysicalRealmStore/stateAllRealms overlay the in-flight + pending patch, and any whole-store write of
+// that realm through storageSetUnlocked (which was built from such a read) absorbs and drops the buffer.
+// flushRealmPatches() runs in the global commit lane; never await it from inside a withRealmStorageCommit task.
+const REALM_PATCH_COALESCE_MS=750;
+const pendingRealmPatches=new Map();   // realm -> {patch,timer}
+const inflightRealmPatches=new Map();  // realm -> patch being written by a flush
+function realmPatchOverlay(realm){
+  const n=validRealmNumber(realm); if(n==null)return null;
+  const inflight=inflightRealmPatches.get(n),pending=pendingRealmPatches.get(n)?.patch;
+  if(!inflight&&!pending)return null;
+  return {...(inflight||{}),...(pending||{})};
+}
+function dropPendingRealmPatch(realm){
+  const n=validRealmNumber(realm); if(n==null)return;
+  const entry=pendingRealmPatches.get(n);
+  if(entry){if(entry.timer)clearTimeout(entry.timer);pendingRealmPatches.delete(n);}
+}
+function discardAllRealmPatches(){
+  for(const n of [...pendingRealmPatches.keys()])dropPendingRealmPatch(n);
+  inflightRealmPatches.clear();
+}
+function flushRealmPatches(realm=null){
+  const only=realm==null?null:validRealmNumber(realm);
+  if(realm!=null&&only==null)return Promise.resolve({ok:false,error:'invalid-realm'});
+  // Always pass through the lane (even with nothing pending) so a caller also waits for an in-flight flush.
+  return withRealmStorageCommit(async()=>{
+    const targets=only!=null?[only]:[...pendingRealmPatches.keys()];
+    let firstError=null;const flushed=[];
+    for(const n of targets){
+      const entry=pendingRealmPatches.get(n); if(!entry)continue;
+      if(entry.timer)clearTimeout(entry.timer);
+      pendingRealmPatches.delete(n);
+      inflightRealmPatches.set(n,entry.patch);
+      try{
+        // state(n) overlays the in-flight patch (and anything buffered meanwhile, which stays pending and is
+        // simply written again by its own flush), so the merge order is preserved.
+        const current=await state(n);
+        await storageSetUnlocked({realmStores:{[realmKeyFromRealm(n)]:current}},{keepPendingRealmPatches:true});
+        flushed.push(n);
+      }catch(error){firstError=firstError||error;}
+      finally{if(inflightRealmPatches.get(n)===entry.patch)inflightRealmPatches.delete(n);}
+    }
+    if(firstError)throw firstError;
+    return {ok:true,flushed};
+  });
+}
 async function storageSetRealmPatch(realm, patch={}, onTiming=null){
   const n=validRealmNumber(realm);
   if(n==null) throw new Error('Realm-scoped write requires an explicit realm.');
   if(!patch || typeof patch!=='object') throw new TypeError('Realm-scoped patch must be an object.');
-  const queuedAt=Date.now();
-  return withRealmStorageCommit(async()=>{
-    const laneWaitMs=Date.now()-queuedAt;
-    const commitStartedAt=Date.now();
-    let stateReadMs=0,physicalWriteMs=0;
-    try{
-      const stateReadStartedAt=Date.now();
-      const current=await state(n);
-      stateReadMs=Date.now()-stateReadStartedAt;
-      const key=`realm:${n}`;
-      const next={...current,...patch};
-      const physicalWriteStartedAt=Date.now();
-      const result=await storageSetUnlocked({realmStores:{[key]:next}});
-      physicalWriteMs=Date.now()-physicalWriteStartedAt;
-      try{onTiming?.({realmCommitQueueWaitMs:laneWaitMs,realmStateReadMs:stateReadMs,physicalWriteMs,realmCommitDurationMs:Date.now()-commitStartedAt});}catch{}
-      return result;
-    }catch(error){
-      try{onTiming?.({realmCommitQueueWaitMs:laneWaitMs,realmStateReadMs:stateReadMs,physicalWriteMs,realmCommitDurationMs:Date.now()-commitStartedAt,realmCommitError:error?.message||String(error)});}catch{}
-      throw error;
-    }
-  });
+  const entry=pendingRealmPatches.get(n)||{patch:{},timer:null};
+  entry.patch={...entry.patch,...patch};
+  pendingRealmPatches.set(n,entry);
+  if(!entry.timer)entry.timer=setTimeout(()=>{entry.timer=null;flushRealmPatches(n).catch(()=>{});},REALM_PATCH_COALESCE_MS);
+  try{onTiming?.({realmCommitQueueWaitMs:0,realmStateReadMs:0,physicalWriteMs:0,realmCommitDurationMs:0,realmCommitBuffered:true});}catch{}
+  return {ok:true,buffered:true,realm:n};
 }
 // Commit a realm-local patch against the latest physical stores, not a snapshot
 // captured before an asynchronous fetch. This prevents a slow VWAP job from
@@ -576,7 +611,7 @@ async function commitLatestRealmPatch(realm, realmPatch={}, mirrorKeys=[]){
     return nextStore;
   });
 }
-async function storageSetUnlocked(patch={}){
+async function storageSetUnlocked(patch={},options={}){
   if(!patch || typeof patch!=='object') return rawStorageSet(patch);
   const hasRealmStores=Object.prototype.hasOwnProperty.call(patch,'realmStores');
   if(!hasRealmStores){
@@ -595,9 +630,18 @@ async function storageSetUnlocked(patch={}){
     const overlayKey=gameOverlaySnapshotStorageKey(active);
     const plannerKey=productionPlannerStateStorageKey(active);
     const existingRaw=await chrome.storage.local.get({[physicalKey]:{},[overlayKey]:null,[plannerKey]:null});
-    const existing=sanitizePhysicalRealmPayload(existingRaw?.[physicalKey],active);
+    // P1: this is an atomic read-modify-write in the commit lane, so absorb the realm's buffered patch here
+    // (its side-key fields are routed like the realmStores path does) and drop the buffer.
+    const buffered=options?.keepPendingRealmPatches?null:realmPatchOverlay(active);
+    const existing=sanitizePhysicalRealmPayload(buffered?{...(existingRaw?.[physicalKey]||{}),...buffered}:existingRaw?.[physicalKey],active);
     const next={...existing};
     const out={...patch};
+    if(buffered){
+      if(diagKey&&buffered.fullSyncDiagnostics!=null&&!hasDiagnostic)out[diagKey]=buffered.fullSyncDiagnostics;
+      if(overlayKey&&buffered.gameOverlaySnapshot&&!Object.prototype.hasOwnProperty.call(patch,'gameOverlaySnapshot'))out[overlayKey]=buffered.gameOverlaySnapshot;
+      if(plannerKey&&buffered.productionPlannerState&&!Object.prototype.hasOwnProperty.call(patch,'productionPlannerState'))out[plannerKey]=sanitizeProductionPlannerState(buffered.productionPlannerState,active);
+      dropPendingRealmPatch(active);
+    }
     for(const field of scoped){
       if(field==='fullSyncDiagnostics') continue;
       if(field==='gameOverlaySnapshot'){ if(overlayKey)out[overlayKey]=patch[field]; delete out[field]; continue; }
@@ -623,6 +667,9 @@ async function storageSetUnlocked(patch={}){
     if(realm==null) continue;
     out[realmStorageKey(realm)]=sanitizePhysicalRealmPayload(value,realm);
     targetRealms.push(realm);
+    // P1: a whole-store write was built from a state()/stateAllRealms() read, which overlays the buffered
+    // patch, so the buffer is now part of this write.
+    if(!options?.keepPendingRealmPatches)dropPendingRealmPatch(realm);
     const diagnostic=value?.fullSyncDiagnostics;
     const diagnosticKey=realmDiagnosticStorageKey(realm);
     const overlayKey=gameOverlaySnapshotStorageKey(realm);
@@ -653,10 +700,14 @@ async function readPhysicalRealmStore(realm){
   const overlayKey=gameOverlaySnapshotStorageKey(n);
   const plannerKey=productionPlannerStateStorageKey(n);
   const data=await chrome.storage.local.get({[key]:null,[diagnosticKey]:null,[overlayKey]:null,[plannerKey]:null});
-  const store=data?.[key];
+  const buffered=realmPatchOverlay(n); // P1: coalesced realm patch not yet written
+  const physical=data?.[key];
+  const store=buffered?{...(physical&&typeof physical==='object'?physical:{}),...buffered}:physical;
   const clean=store&&typeof store==='object'?sanitizeRealmStore(store,n):{};
   if(data?.[diagnosticKey]&&typeof data[diagnosticKey]==='object') clean.fullSyncDiagnostics=data[diagnosticKey];
   if(data?.[overlayKey]&&typeof data[overlayKey]==='object') clean.gameOverlaySnapshot=data[overlayKey];
+  if(buffered?.fullSyncDiagnostics&&typeof buffered.fullSyncDiagnostics==='object') clean.fullSyncDiagnostics=buffered.fullSyncDiagnostics;
+  if(buffered?.gameOverlaySnapshot&&typeof buffered.gameOverlaySnapshot==='object') clean.gameOverlaySnapshot=buffered.gameOverlaySnapshot;
   clean.__productionPlannerState=plannerKey?sanitizeProductionPlannerState(data?.[plannerKey],n):null;
   // A completed full-sync diagnostic is a durable proof of completion. Older
   // 2.5.168 storage can lose the denormalized lastSync field during a later
@@ -721,24 +772,36 @@ async function stateAllRealms(){
     else if(legacy?.[key]&&typeof legacy[key]==='object')stores[key]=sanitizeRealmStore(legacy[key],r);
     const diagnostic=physical[realmDiagnosticStorageKey(r)];
     if(diagnostic&&typeof diagnostic==='object') stores[key]={...(stores[key]||{}),fullSyncDiagnostics:diagnostic};
+    const buffered=realmPatchOverlay(r); // P1: coalesced realm patch not yet written
+    if(buffered)stores[key]=sanitizeRealmStore({...(stores[key]||{}),...buffered},r);
   }
   return {...DEFAULTS,...base,realmStores:stores};
 }
 
+// R2: read + write are one transaction in the global commit lane. Callers run inside an API-queue job of
+// some realm (possibly not the target realm), never inside withRealmStorageCommit, so this cannot nest the
+// lane; and it does not enqueue into the target realm's API queue (which another realm's job awaiting it
+// could deadlock against). The read overlays any coalesced realm patch, so nothing newer is reverted.
 async function appendRealmQuarantine(realm,kind,payload){
   const n=validRealmNumber(realm);
-  const s=n!=null?await state(n):await state();
-  const target=n!=null?n:realmNumberFromKey(s.activeRealmKey||identityFromAuth(s.authData));
-  const key=target!=null?realmKeyFromRealm(target):null;
-  const existing=s.realmQuarantine&&typeof s.realmQuarantine==='object'?s.realmQuarantine:{};
-  const list=Array.isArray(existing?.[kind])?existing[kind].slice(-199):[];
-  list.push({...payload,receivedAt:payload?.receivedAt||new Date().toISOString()});
-  const next={...existing,[kind]:list};
-  if(!key)return storageSet({realmQuarantine:next});
-  const store={...(s.realmStores?.[key]||{}),realmQuarantine:next};
-  const patch={realmStores:{[key]:store}};
-  if(s.activeRealmKey===key)patch.realmQuarantine=next;
-  return storageSet(patch);
+  const entry={...payload,receivedAt:payload?.receivedAt||new Date().toISOString()};
+  return withRealmStorageCommit(async()=>{
+    const s=n!=null?await state(n):await state();
+    const target=n!=null?n:realmNumberFromKey(s.activeRealmKey||identityFromAuth(s.authData));
+    const key=target!=null?realmKeyFromRealm(target):null;
+    // state() without a realm reads only the active realm; read the target's own store when it differs
+    // (writing {realmQuarantine} over an unread store would replace that whole realm store).
+    const ts=!key||n!=null||(s.activeRealmKey&&validRealmNumber(realmNumberFromKey(s.activeRealmKey))===target)?s:await state(target);
+    const existing=ts.realmQuarantine&&typeof ts.realmQuarantine==='object'?ts.realmQuarantine:{};
+    const list=Array.isArray(existing?.[kind])?existing[kind].slice(-199):[];
+    list.push(entry);
+    const next={...existing,[kind]:list};
+    if(!key)return storageSetUnlocked({realmQuarantine:next});
+    const store={...(ts.realmStores?.[key]||{}),realmQuarantine:next};
+    const patch={realmStores:{[key]:store}};
+    if(s.activeRealmKey===key)patch.realmQuarantine=next;
+    return storageSetUnlocked(patch);
+  });
 }
 
 let gameOverlayAssetsPromise=null;
@@ -1315,10 +1378,26 @@ function queueProductionCostHistory(realm,entries,opts={}){
 // 2.5.387 Analyze ledger archive: sale rows of every captured cash-flow page + the time each page proves complete.
 function ledgerArchiveKey(realm){return `scmLedgerArchive:${Number(realm)}`;}
 const ledgerArchiveQueues=new Map();
+// P2: every cash-flow response used to rewrite the ~166 KB archive key. Pages are now batched per realm for
+// LEDGER_ARCHIVE_BATCH_MS and merged in arrival order in one read/write; each caller's promise resolves with
+// the result of the write that contains its pages. flushLedgerArchive(n) writes the batch now.
+const LEDGER_ARCHIVE_BATCH_MS=2000;
+const ledgerArchivePending=new Map(); // realm -> {pages,timer,promise,resolve}
 function queueLedgerArchive(realm,pages){
   const n=validRealmNumber(realm);const list=(Array.isArray(pages)?pages:[]).filter(p=>p&&Array.isArray(p.rows)&&p.rows.length);
   if(n==null||!list.length)return Promise.resolve({ok:false});
-  const key=ledgerArchiveKey(n);
+  let batch=ledgerArchivePending.get(n);
+  if(!batch){let resolve;const promise=new Promise(r=>{resolve=r;});batch={pages:[],timer:null,promise,resolve};ledgerArchivePending.set(n,batch);}
+  batch.pages.push(...list);
+  if(!batch.timer)batch.timer=setTimeout(()=>{flushLedgerArchive(n);},LEDGER_ARCHIVE_BATCH_MS);
+  return batch.promise;
+}
+function flushLedgerArchive(realm){
+  const n=validRealmNumber(realm);
+  const batch=n==null?null:ledgerArchivePending.get(n);
+  if(!batch)return n==null?Promise.resolve({ok:false}):(ledgerArchiveQueues.get(n)||Promise.resolve()).then(()=>({ok:true,pages:0}));
+  ledgerArchivePending.delete(n);if(batch.timer)clearTimeout(batch.timer);
+  const key=ledgerArchiveKey(n),list=batch.pages;
   const run=(ledgerArchiveQueues.get(n)||Promise.resolve()).then(async()=>{
     let a=(await chrome.storage.local.get({[key]:null}))[key];
     for(const p of list)a=globalThis.SCM_ANALYZE_CORE.archiveMerge(a,p.url,p.rows,p.receivedAt);
@@ -1326,7 +1405,12 @@ function queueLedgerArchive(realm,pages){
     return {ok:true,rows:Object.keys(out.rows).length,spans:out.spans.length};
   });
   ledgerArchiveQueues.set(n,run.catch(()=>{}));
-  return run.catch(()=>({ok:false}));
+  const result=run.catch(()=>({ok:false}));
+  batch.resolve(result);
+  return result;
+}
+function discardPendingLedgerArchive(){
+  for(const [n,batch] of [...ledgerArchivePending.entries()]){if(batch.timer)clearTimeout(batch.timer);batch.resolve({ok:false,discarded:true});ledgerArchivePending.delete(n);}
 }
 // 2.5.388 Daily-walk ledger catch-up: cashflow/recent holds only the newest 30 rows, so on days without a Sync most of
 // the day's rows were never captured. Walk /cashflow/<id>/ back from the oldest row of the newest archived stretch
@@ -1334,7 +1418,7 @@ function queueLedgerArchive(realm,pages){
 const LEDGER_CATCHUP_MAX_PAGES=40;
 async function catchUpLedgerArchive(realm,reason='daily-walk'){
   const n=validRealmNumber(realm); if(n==null)return {ok:false,error:'Invalid realm.'};
-  await (ledgerArchiveQueues.get(n)||Promise.resolve()); // the refreshed recent page is archived first
+  await flushLedgerArchive(n); // the refreshed recent page is archived first (P2: including a pending batch)
   const plan=globalThis.SCM_ANALYZE_CORE.catchUpPlan((await chrome.storage.local.get({[ledgerArchiveKey(n)]:null}))[ledgerArchiveKey(n)]);
   if(!plan)return {ok:true,pages:0,caughtUp:true};
   let cursor=plan.startId,pages=0,oldest=plan.startAt;const seen=new Set();
@@ -1369,7 +1453,7 @@ async function compactLedgerPagesOnce(){
       const s=await state(n);const store=s.realmStores?.[realmKeyFromRealm(n)]||{};
       const ep=store.endpointData||{},ac=store.accountingCapture||{};
       const pages=Object.entries({...ac,...ep}).filter(([k,v])=>LEDGER_CURSOR_PAGE_RX.test(k)&&validRealmNumber(v?.captureRealm)===n&&Array.isArray(v?.data?.data)).map(([k,v])=>({url:k,rows:v.data.data,receivedAt:v.receivedAt}));
-      if(pages.length){const a=await queueLedgerArchive(n,pages);if(!a?.ok)throw new Error('Ledger archive write failed.');}
+      if(pages.length){const queued=queueLedgerArchive(n,pages);flushLedgerArchive(n);const a=await queued;if(!a?.ok)throw new Error('Ledger archive write failed.');}
       const nextEp=pruneStoredLedgerPages(ep),nextAc=withoutLedgerCursorPages(ac);
       if(nextEp===ep&&nextAc===ac)return {pages:pages.length,dropped:0};
       await storageSetRealmPatch(n,{endpointData:nextEp,accountingCapture:nextAc});
@@ -2713,7 +2797,8 @@ async function saveMarketCache(resource, value, receivedAt, capturedRealm=null){
 }
 async function saveResourceCatalog(catalog, receivedAt){
   if(!catalog||typeof catalog!=='object')return;
-  const s=await state();
+  // P4: only the realm is needed here; the full store is read once, inside the lock.
+  const s={authData:DEFAULTS.authData,...(await chrome.storage.local.get({activeRealmKey:null}))}; // same fields state() gave here
   const realm=realmNumberFromKey(s.activeRealmKey||identityFromAuth(s.authData)); if(realm==null)return;
   return withRealmWriteLock(realm,async()=>{
     const latest=await state(realm); const key=realmKeyFromRealm(realm);
@@ -3317,12 +3402,20 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   const targetRealm=captureSession?.realm??responseRealm??capturedRealm??companyRealm??buildingRealm??explicitUrlRealm??switchHint??realmNumberFromKey(before.activeRealmKey||identityFromAuth(before.authData));
   const targetKey=targetRealm!=null?realmKeyFromRealm(targetRealm):null;
   // v2.5.389 one read of the target realm store serves both the endpoint list and the patch (each read was a full store).
+  // R3: a capture with no realm tag runs in the 'unscoped' API queue, but its target realm (proven by the
+  // response, company, building, URL or switch hint) has its own queue. Building whole maps (endpointData,
+  // sellingHistory, ...) from a read taken outside that queue could overwrite a newer write made there, so the
+  // read-build-commit tail runs in the target realm's queue. Deadlock-free: only the unscoped queue waits on a
+  // realm queue here, and no realm-queue job ever waits on the unscoped queue.
+  const laneRealm=validRealmNumber(captureRealm);
+  const redispatch=laneRealm==null&&targetRealm!=null;
+  const commitTail=async()=>{
   const targetState=targetRealm!=null?await state(targetRealm):before;
   const endpointResult=await saveEndpointUnlocked(url,method,targetRealm,false,targetState);
 
   // Auth responses are stored strictly under the realm proven by the response.
   // They never switch the user's selected/active realm automatically.
-  const s2=before;
+  const s2=redispatch?await state():before;
   const activeKey=s2.activeRealmKey||identityFromAuth(s2.authData);
   const isActiveTarget=!captureSession && (!targetKey || !activeKey || targetKey===activeKey);
   // If a background capture targets the non-active realm, read ONLY that
@@ -3496,6 +3589,9 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
     {const sm=String(url||'').replace(/[?#].*$/,'').match(STATEMENT_DAY_RX);if(sm&&incomingStatus>=200&&incomingStatus<300&&data&&typeof data==='object')queueStatementHistory(targetRealm,[{kind:sm[1],data}]).catch(()=>{});}
     if(/\/api\/v2\/companies\/me\/cashflow\/(?:recent|\d+)\/?$/i.test(String(url||''))&&incomingStatus>=200&&incomingStatus<300&&Array.isArray(data?.data)) queueLedgerArchive(targetRealm,[{url:String(url).replace(/[?#].*$/,''),rows:data.data,receivedAt:endpointData[url]?.receivedAt}]).catch(()=>{});
   }
+  };
+  if(redispatch)return enqueueApiStorage(commitTail,targetRealm,{url:String(url||'')});
+  return commitTail();
 }
 async function saveData(url,data,status=200,method='GET',captureRealm=null,onTiming=null,durableOptions=null){
   const enqueuedAt=Date.now();
@@ -3568,6 +3664,9 @@ function endpointPayloadsEqual(left,right){
 async function verifyDurableEndpointWrite(realm,path,startedAtMs,expectedData=null,expectedStatus=null,allowPreserved=false){
   const n=validRealmNumber(realm);
   if(n==null||!String(path||'').startsWith('/api/'))return {ok:false,reason:'invalid-realm-or-endpoint'};
+  // P1: durability means the physical key, so write the coalesced realm patch first (commit lane; callers of
+  // this verifier are API-queue jobs or Sync, never a withRealmStorageCommit task).
+  await flushRealmPatches(n);
   const physicalKey=realmStorageKey(n);
   const snapshot=await chrome.storage.local.get({[physicalKey]:null});
   const store=snapshot?.[physicalKey];
@@ -4752,7 +4851,7 @@ async function runCriticalDataGuard(reason='scheduled'){
   return {ok:true,reason,report};
 }
 
-const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX,ACCOUNTING_DAY_WALK_ALARM_PREFIX,ACCOUNTING_WALK_DAILY_ALARM];
+const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX,ACCOUNTING_DAY_WALK_ALARM_PREFIX,ACCOUNTING_WALK_DAILY_ALARM,SYNC_AUTO_RETRY_ALARM_PREFIX];
 // v2.5.345 Chrome drops an extension's alarms when it is updated (and may on a browser restart), so the alarms that
 // carry your state are re-created from storage: building reminders (buildingAlarms) and batch-finished alerts
 // (from the stored buildings). Storage reads + alarm calls only, no network, no lock.
@@ -4799,6 +4898,8 @@ chrome.runtime.onInstalled.addListener(async()=>{
   await chrome.alarms.create('scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080});
   await restorePersistedAlarms('installed').catch(()=>{});
   await ensureAccountingWalkSchedule('installed').catch(()=>{});
+  // R4: an update restarts the worker too; a Sync interrupted by it must not stay "running" (jobs <5 min old are skipped).
+  await recoverInterruptedSyncJobs('installed').catch(()=>{});
   syncAllResourceImages({forceValidate:false}).catch(()=>{});
   const installRealmState=await state();
   const installRealm=validRealmNumber(installRealmState.activeRealmKey?.replace(/^realm:/,'')??installRealmState.selectedRealm??installRealmState.authData?.authCompany?.realmId);
@@ -5982,7 +6083,8 @@ async function syncNow(requestedRealm=null){
   }catch(e){
     const error=e?.message||String(e);
     syncTrace.push({at:Date.now(),type:'sync-exception',error});
-    const sel=validRealmNumber((await chrome.storage.local.get({selectedRealm:null})).selectedRealm);
+    // R1: mark the realm this run was syncing (the stored selectedRealm can name the other realm by now).
+    const sel=ownsSyncSession&&validRealmNumber(selected)!=null?validRealmNumber(selected):validRealmNumber((await chrome.storage.local.get({selectedRealm:null})).selectedRealm);
     if(sel!=null){
       const status=`Sync failed · ${realmDisplayNumber(sel)||'selected realm'}`;
       await withSyncTimeout(setRealmLoadStatus(sel,status,error),5000,'Sync failure status persistence').catch(()=>{});
@@ -5996,6 +6098,8 @@ async function syncNow(requestedRealm=null){
     }else await storageSet({syncStatus:'Sync failed',syncError:error,fullSyncJob:null});
     return {ok:false,error,realm:sel};
   }finally{
+    // P1: Sync end makes every coalesced realm patch physical (bounded so it cannot hold SYNC_NOW open).
+    if(ownsSyncSession && selected!=null) await withSyncTimeout(flushRealmPatches(selected),5000,'Sync end realm patch flush').catch(()=>{});
     // Page-hook cleanup is best-effort after terminal status has been written.
     // A missing content-script response must not keep SYNC_NOW pending or leave
     // the dashboard button disabled after the sync transaction has ended.
@@ -6291,7 +6395,8 @@ function scheduleGameOverlayRefreshNotification(realm,delayMs=650,{markDirty=tru
   const timer=setTimeout(()=>{
     gameOverlayNotifyTimers.delete(n);
     if(coreSyncActive()){deferUntilSyncEnds(`overlay:${n}`,()=>scheduleGameOverlayRefreshNotification(n,150,{markDirty:false}));return;}
-    notifyGameOverlayRefresh(n).catch(()=>{});
+    // P1: pages re-read after this notice; make the coalesced realm patch physical first.
+    flushRealmPatches(n).catch(()=>{}).then(()=>notifyGameOverlayRefresh(n)).catch(()=>{});
   },Math.max(150,Number(delayMs)||650));
   gameOverlayNotifyTimers.set(n,timer);
 }
@@ -6720,7 +6825,9 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const s=await state(requestedRealm);
         const inferredRealm=requestedRealm!=null?requestedRealm:(s.activeRealmKey?Number(String(s.activeRealmKey).replace('realm:','')):validRealmNumber(s.authData?.authCompany?.realmId));
         const realm=validRealmNumber(inferredRealm); if(realm==null){send({ok:false,error:'No realm.'});return;}
-        const realmState=await state(realm);
+        // P3: state(requestedRealm) / state() of the active realm already is this realm's state; read again
+        // only when the realm came from authData (no active realm, so the first read had no realm store).
+        const realmState=(requestedRealm!=null||(s.activeRealmKey&&realmNumberFromKey(s.activeRealmKey)===realm))?s:await state(realm);
         const key=realmKeyFromRealm(realm),store={...(realmState.realmStores?.[key]||{})};
         const incomingRaw=helperLatestEndpoint(store,/\/api\/v3\/contracts-incoming\/\d+\/me\/?$/i);
         const incoming=helperArray(incomingRaw,['incomingContracts','data','items','results']).map(c=>({id:Number(c?.id),kind:Number(c?.kind),quality:Number(c?.quality)||0,quantity:Number(c?.quantity)||0,price:Number(c?.price)||0,company:String(c?.seller?.company||c?.company||'Unknown seller'),datetime:c?.datetime||null})).filter(c=>Number.isFinite(c.id));
@@ -6922,8 +7029,13 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='CLEAR_EXTENSION_DATA'){
     (async()=>{
       try{
+        // R5/P1: buffered writes must not land after the clear and resurrect cleared data.
+        discardAllRealmPatches();discardPendingLedgerArchive();
         await chrome.storage.local.clear();
         await chrome.alarms.clearAll();
+        // R5: in-memory copies of cleared data would otherwise be served (and written back) until the worker restarts.
+        resourceImagesMemo=null;notifyRecipesMemo=null;gameOverlayAssetsPromise=null;
+        gameOverlaySnapshotMemo.clear();contractHelperCache.clear();
         const resetDefaults={...DEFAULTS,selectedRealm:null,activeRealmKey:null,vwapStatus:{message:'Waiting for VWAP sync.'},marketQueueStatus:{message:'Waiting for the logged-in Sim Companies tab.',updatedAt:new Date().toISOString()},resourceImageData:{}};
         await storageSet(resetDefaults);
         await chrome.alarms.create('scm-vwap-daily',{periodInMinutes:720});
@@ -6931,6 +7043,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         await chrome.alarms.create('scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15});
         await ensureVwapWatchAlarm('clear-extension-data');
         await ensureCriticalDataGuard('clear-extension-data');
+        await ensureLiveMarketRefreshAlarm('clear-extension-data'); // R5: clearAll removed it too
         send({ok:true});
       }catch(e){send({ok:false,error:e?.message||String(e)});}
     })();
@@ -7041,7 +7154,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       send({ok:true,coveredBySyncCapture:true});
       return true;
     }
-    queueEndpointSeen(url,method,m.captureRealm).then(()=>send({ok:true,queued:true}));
+    queueEndpointSeen(url,method,m.captureRealm).then(()=>send({ok:true,queued:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));
     return true;
   }
   if(m?.type==='STOCK_MUTATION_COMPLETE'){
@@ -7121,7 +7234,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='PRODUCTION_EVENTS'){saveProductionEvents(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='CAPTURE_PRODUCTION_RATE_SNAPSHOT'){saveProductionRateSnapshot(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_TEST_DAILY_SUMMARY'){fireDailySummary().then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
-  if(m?.type==='SCM_TEST_NOTIFICATION'){scmNotify(`test-${Date.now()}`,'Sim Companies Manager','Test notification — if you can read this, alerts work on this phone.').then(send);return true;}
+  if(m?.type==='SCM_TEST_NOTIFICATION'){scmNotify(`test-${Date.now()}`,'Sim Companies Manager','Test notification — if you can read this, alerts work on this phone.').then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_NOTIFY_SETTINGS'){(async()=>{try{if(m.set&&typeof m.set==='object'){const cur=await notifySettings();await rawStorageSet({[NOTIFY_SETTINGS_KEY]:{...cur,...m.set}});await scheduleDailySummary();for(const n of [0,1]){const st=(await chrome.storage.local.get({[`scmRealmStore:${n}`]:null}))[`scmRealmStore:${n}`];if(st)await scheduleProductionFinishAlarms(n,st.buildings);}}const prodfin=(await chrome.alarms.getAll()).filter(x=>String(x.name).startsWith('scm-prodfin:'));const nameStores={};for(const a of prodfin){const r=String(a.name).split(':')[1];if(!(r in nameStores))nameStores[r]=(await chrome.storage.local.get({[`scmRealmStore:${r}`]:null}))[`scmRealmStore:${r}`]||{};}
 // v2.5.345 building names for the Alerts "Next" line (the dashboard rendered it before its own state had loaded).
 const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(Array.isArray(nameStores[r]?.buildings)?nameStores[r].buildings:[]).find(y=>String(y?.id)===bid);return {name:x.name,when:x.scheduledTime,buildingName:b?.name?String(b.name):null};});const daily=await chrome.alarms.get('scm-daily-summary');send({ok:true,settings:await notifySettings(),available:!!chrome.notifications?.create,alarms,dailyAt:daily?.scheduledTime||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;}
@@ -7177,7 +7290,7 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
     })().catch(e=>send({ok:false,error:e?.message||String(e)}));
     return true;
   }
-  if(m?.type==='RESOURCE_CATALOG'){saveResourceCatalog(m.catalog,m.receivedAt).then(()=>send({ok:true}));return true}
+  if(m?.type==='RESOURCE_CATALOG'){saveResourceCatalog(m.catalog,m.receivedAt).then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='RESOURCE_IMAGE_RESULT'){(async()=>{
     if(m.resource&&m.dataUrl){
       const s=await state(); const realm=realmNumberFromKey(s.activeRealmKey||identityFromAuth(s.authData));
@@ -7191,7 +7304,7 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
   })().catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='GET_RESOURCE_IMAGE'){(async()=>{const r=await fetchAndCacheResourceImage(Number(m.resource),{forceValidate:false}); if(r.ok){send({ok:true,dataUrl:r.dataUrl,cached:r.cached,stale:r.stale||false});return;} const tab=await simTab(); if(!tab?.id){send({ok:false,error:r.error||'Sim Companies tab is not open.'});return;} try{await chrome.tabs.sendMessage(tab.id,{type:'PAGE_RESOURCE_IMAGE',resource:Number(m.resource)}); send({ok:true,queued:true,error:r.error||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true}
   if(m?.type==='SYNC_RESOURCE_IMAGES'){syncAllResourceImages({forceValidate:Boolean(m.forceValidate)}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
-  if(m?.type==='MARKET_CACHE'){saveMarketCache(m.resource,m.data,m.receivedAt,m.realm).then(()=>send({ok:true}));return true}
+  if(m?.type==='MARKET_CACHE'){saveMarketCache(m.resource,m.data,m.receivedAt,m.realm).then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='SYNC_NOW'){syncNow(m.realm).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='SET_VIEW_REALM'){
     (async()=>{
