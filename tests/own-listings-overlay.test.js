@@ -59,7 +59,7 @@ function handlerContext(storage, store) {
   const mod = slice(content, 'const Listings=(()=>{', "if(document.readyState!=='loading')Listings.start();");
   assert.ok(!/MutationObserver/.test(mod), 'the card adds no MutationObserver of its own');
   assert.ok(/'scm-listings-card':'\.scm-ls-head'/.test(content), 'minimise (scm-card-min-v1) covers the listings card');
-  assert.ok(content.includes('#scm-listings-card.scm-card-min>:not(.scm-ls-head){display:none!important}'), 'minimised card shows the header only');
+  assert.ok(content.includes('#scm-listings-card.scm-card-min>:not(.scm-ls-head),#scm-contracts-card.scm-card-min>:not(.scm-ls-head){display:none!important}'), 'minimised card shows the header only');
   assert.ok(content.includes("b.closest(Object.keys(MIN_CARDS).map(id=>'#'+id).join(','))"), 'min click handler follows MIN_CARDS');
   assert.ok(mod.includes("changes[`scmMarketOrders:${realm}`]") && mod.includes('chrome.storage?.onChanged?.addListener'), 'live update from the storage key');
   assert.ok(mod.includes("type:'GET_OWN_LISTINGS_DATA',realm,refresh"), 'asks background with this tab realm');
@@ -69,8 +69,16 @@ function handlerContext(storage, store) {
   assert.ok(mod.includes("el.dataset.scmOwned='1'"), 'card/pill marked as SCM-owned (ignored by other observers)');
   assert.ok(mod.includes('if(s===L.sig&&have)return;'), 'renders only when the data changes');
   assert.ok(mod.includes('if(r===L.realm)return;'), 'realm re-announcements do not reset the card');
+  assert.ok(mod.includes('L.refreshTimer=setInterval'), 'listing re-requests with refresh once a minute while open');
   // the background handler holds no lock and writes nothing itself
-  const block = slice(bg, "if(m?.type==='GET_OWN_LISTINGS_DATA'){", "if(m?.type==='GET_SELL_PRICE_INFO'){");
+  const block = slice(bg, "if(m?.type==='GET_OWN_LISTINGS_DATA'){", "if(m?.type==='GET_OUTGOING_CONTRACTS_DATA'){");
   assert.ok(!/withStorageLock|storageSet\(|rawStorageSet\(|fetch\(/.test(block), 'handler: no lock, no write, no direct fetch');
+  // 5. outgoing contracts: own card and pill, read-only handler, separate from listings
+  const cmod = slice(content, 'const Contracts=(()=>{', "if(document.readyState!=='loading')Contracts.start();");
+  assert.ok(cmod.includes("'scm-contracts-card'") && cmod.includes("'scm-contracts-pill'") && cmod.includes("'scmCardPos:'+"), 'own card, pill and saved position');
+  assert.ok(cmod.includes("type:'GET_OUTGOING_CONTRACTS_DATA',realm"), 'asks background with this tab realm');
+  assert.ok(!/MutationObserver|GET_OWN_LISTINGS_DATA|scmMarketOrders/.test(cmod), 'separate from listings, no observer');
+  const cblock = slice(bg, "if(m?.type==='GET_OUTGOING_CONTRACTS_DATA'){", "if(m?.type==='GET_SELL_PRICE_INFO'){");
+  assert.ok(!/withStorageLock|storageSet\(|rawStorageSet\(|fetch\(/.test(cblock), 'contracts handler: read only, no lock, no write, no fetch');
   console.log('own-listings-overlay: ok');
 })().catch(e => { console.error(e); process.exit(1); });

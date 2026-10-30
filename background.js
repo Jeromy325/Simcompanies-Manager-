@@ -6798,13 +6798,14 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   // older than 15 min is refreshed through the game tab (throttled 5 min per product, no lock held while fetching).
   // Game-page "My listings" card: your own exchange listings (scmMarketOrders:<realm>) with names, images and the
   // realm's cached VWAP. refresh:true asks refreshMarketOrders (5-min cache, no lock) at most once a minute per realm,
-  // without waiting; the card follows the storage key through chrome.storage.onChanged.
+  // without waiting; the card follows the storage key through chrome.storage.onChanged. A refresh request skips the
+  // 5-min market-order cache (maxAge 0): the card asks at most every 55 s per realm, so the listing stays current.
   if(m?.type==='GET_OWN_LISTINGS_DATA'){
     (async()=>{
       try{
         const realm=validRealmNumber(m.realm);if(realm==null){send({ok:false,error:'No realm.'});return;}
         const now=Date.now();
-        if(m.refresh&&now-(ownListingsRefreshAt.get(realm)||0)>60000){ownListingsRefreshAt.set(realm,now);refreshMarketOrders(realm).catch(()=>{});}
+        if(m.refresh&&now-(ownListingsRefreshAt.get(realm)||0)>=55000){ownListingsRefreshAt.set(realm,now);refreshMarketOrders(realm,0).catch(()=>{});}
         const k=`scmMarketOrders:${realm}`;const mo=(await chrome.storage.local.get({[k]:null}))[k];
         if(!mo||!Array.isArray(mo.orders)){send({ok:true,realm,at:null,rows:[],missing:true});return;}
         const [assets,store]=await Promise.all([gameOverlayAssets(),notifyRealmStore(realm)]);
@@ -6814,6 +6815,27 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
           return {id:o?.id??null,kind,quality,quantity,price,total:quantity*price,name:String(assets.names.get(String(kind))||o?.resource?.name||`Resource #${kind}`),image:file?`${assets.imageBase}${file}`:'',vwap,vsVwapPct:vwap&&price>0?(price-vwap)/vwap*100:null};
         }).filter(r=>r.kind>0&&r.quantity>0);
         send({ok:true,realm,at:mo.at||null,rows});
+      }catch(e){send({ok:false,error:e?.message||String(e)});}
+    })(); return true;
+  }
+  // Game-page "Outgoing contracts" card: the game's outgoing contracts as last captured for this realm
+  // (endpointData of /api/v3/contracts-outgoing/me/). Read only: nothing is fetched or written here.
+  if(m?.type==='GET_OUTGOING_CONTRACTS_DATA'){
+    (async()=>{
+      try{
+        const realm=validRealmNumber(m.realm);if(realm==null){send({ok:false,error:'No realm.'});return;}
+        const store=await notifyRealmStore(realm);
+        const hit=Object.entries(store?.endpointData||{})
+          .filter(([u,v])=>/\/api\/v3\/contracts-outgoing\/me(?:\/\d+)?\/?(?:\?.*)?$/i.test(String(u||''))&&Number(v?.status)>=200&&Number(v?.status)<300&&v?.data!=null)
+          .sort((a,b)=>Date.parse(b[1]?.receivedAt||0)-Date.parse(a[1]?.receivedAt||0))[0]?.[1];
+        if(!hit){send({ok:true,realm,at:null,rows:[],missing:true});return;}
+        const assets=await gameOverlayAssets();
+        const rows=helperArray(hit.data,['outgoingContracts','contracts','data','items','results']).map(c=>{
+          const kind=Number(c?.kind??c?.resourceId??c?.resource?.id),quality=Number(c?.quality)||0,quantity=Number(c?.quantity)||0,price=Number(c?.price)||0;
+          const file=assets.images?.[String(kind)];
+          return {id:c?.id??null,kind,quality,quantity,price,total:quantity*price,name:String(assets.names.get(String(kind))||c?.resource?.name||`Resource #${kind}`),image:file?`${assets.imageBase}${file}`:'',datetime:c?.datetime||null};
+        }).filter(r=>r.kind>0&&r.quantity>0);
+        send({ok:true,realm,at:hit.receivedAt||null,rows});
       }catch(e){send({ok:false,error:e?.message||String(e)});}
     })(); return true;
   }

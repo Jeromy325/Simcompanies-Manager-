@@ -1,3 +1,7 @@
+2.5.403 — 2026-10-30 — My listings refresh; Outgoing contracts card
+- My listings: refresh skips the 5-min market-order cache, so changes show up soon after you change them. While the card is open the listing is re-read once a minute.
+- NEW: Outgoing contracts card on the game page, separate from My listings (own card, pill and saved position). It shows the outgoing contracts captured for this realm; it fetches nothing.
+
 2.5.402 — 2026-10-30 — OVERHAUL: reliability, smoother, new look, My listings overlay
 - Sync failure is recorded on the right realm; a stuck "Sync running" is recovered after update or reload.
 - Quarantine writes can't revert other realm data.

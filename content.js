@@ -1605,11 +1605,11 @@ function scmPageTextNoLayout(){
   // v2.5.358 every game-page card can be minimised to its header (− / +); remembered per card in page localStorage.
   // (Stock After Demand & Contracts already collapses to ›, the monitor to a dot, Network capture to its bar.)
   const MIN_KEY='scm-card-min-v1';
-  const MIN_CARDS={'scm-left-copy-card':'.scm-left-copy-head','scm-contract-helper-card':'.scm-ch-head','scm-sell-qty-card':'.scm-sq-head','scm-listings-card':'.scm-ls-head'};
+  const MIN_CARDS={'scm-left-copy-card':'.scm-left-copy-head','scm-contract-helper-card':'.scm-ch-head','scm-sell-qty-card':'.scm-sq-head','scm-listings-card':'.scm-ls-head','scm-contracts-card':'.scm-ls-head'};
   const minRead=()=>{try{const v=JSON.parse(localStorage.getItem(MIN_KEY)||'{}');return v&&typeof v==='object'?v:{};}catch{return {};}};
   const applyMin=card=>{
     if(!card||!MIN_CARDS[card.id])return;
-    if(!document.getElementById('scm-min-style')){const st=document.createElement('style');st.id='scm-min-style';st.textContent='#scm-left-copy-card.scm-card-min>:not(.scm-left-copy-head),#scm-contract-helper-card.scm-card-min>:not(.scm-ch-head),#scm-sell-qty-card.scm-card-min>:not(.scm-sq-head),#scm-listings-card.scm-card-min>:not(.scm-ls-head){display:none!important}.scm-min-btn{background:#1b2633;color:#e7edf5;border:1px solid #2f4153;border-radius:6px;min-width:26px;height:24px;padding:0 6px;font:14px/1 system-ui,sans-serif;cursor:pointer;flex:0 0 auto;margin-left:auto}.scm-min-btn+button{margin-left:4px}.scm-card-min{max-height:none!important}';(document.head||document.documentElement).appendChild(st);}
+    if(!document.getElementById('scm-min-style')){const st=document.createElement('style');st.id='scm-min-style';st.textContent='#scm-left-copy-card.scm-card-min>:not(.scm-left-copy-head),#scm-contract-helper-card.scm-card-min>:not(.scm-ch-head),#scm-sell-qty-card.scm-card-min>:not(.scm-sq-head),#scm-listings-card.scm-card-min>:not(.scm-ls-head),#scm-contracts-card.scm-card-min>:not(.scm-ls-head){display:none!important}.scm-min-btn{background:#1b2633;color:#e7edf5;border:1px solid #2f4153;border-radius:6px;min-width:26px;height:24px;padding:0 6px;font:14px/1 system-ui,sans-serif;cursor:pointer;flex:0 0 auto;margin-left:auto}.scm-min-btn+button{margin-left:4px}.scm-card-min{max-height:none!important}';(document.head||document.documentElement).appendChild(st);}
     const head=card.querySelector(':scope>'+MIN_CARDS[card.id]);if(!head)return;
     let b=head.querySelector(':scope>[data-scm-min]');
     if(!b){b=document.createElement('button');b.type='button';b.className='scm-min-btn';b.dataset.scmMin='1';const close=head.querySelector(':scope>button');if(close)head.insertBefore(b,close);else head.appendChild(b);}
@@ -1674,10 +1674,10 @@ function scmPageTextNoLayout(){
     const lstyle=()=>{
       if(document.getElementById('scm-listings-style'))return;
       const st=document.createElement('style');st.id='scm-listings-style';
-      st.textContent=`#scm-listings-card{position:fixed;z-index:2147483000;box-sizing:border-box;width:min(340px,calc(100vw - 10px));max-height:55vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;touch-action:pan-y;background:rgba(10,15,21,.97);color:#e7edf5;border:1px solid #2a394b;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.30);font:12px/1.3 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:6px;pointer-events:auto}
-#scm-listings-card *{box-sizing:border-box}#scm-listings-card.scm-card-min{overflow:hidden}
+      st.textContent=`#scm-listings-card,#scm-contracts-card{position:fixed;z-index:2147483000;box-sizing:border-box;width:min(340px,calc(100vw - 10px));max-height:55vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;touch-action:pan-y;background:rgba(10,15,21,.97);color:#e7edf5;border:1px solid #2a394b;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.30);font:12px/1.3 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:6px;pointer-events:auto}
+#scm-listings-card *,#scm-contracts-card *{box-sizing:border-box}#scm-listings-card.scm-card-min,#scm-contracts-card.scm-card-min{overflow:hidden}
 .scm-ls-head{display:flex;align-items:center;gap:5px;min-height:28px;cursor:move;touch-action:none;-webkit-user-select:none;user-select:none;position:sticky;top:-6px;z-index:2;margin:-6px -6px 0;padding:6px;background:rgba(10,15,21,.98)}
-#scm-listings-card:not(.scm-card-min) .scm-ls-head{border-bottom:1px solid #26364a}
+#scm-listings-card:not(.scm-card-min) .scm-ls-head,#scm-contracts-card:not(.scm-card-min) .scm-ls-head{border-bottom:1px solid #26364a}
 .scm-ls-grip{color:#7f93a8;font-size:14px;line-height:1}.scm-ls-title{flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .scm-ls-close{width:26px;height:26px;min-width:26px;border:1px solid #3a4c62;border-radius:5px;background:#152030;color:#e7edf5;font:700 14px/1 system-ui;cursor:pointer;padding:0;display:inline-flex;align-items:center;justify-content:center}
 .scm-ls-sum{display:flex;justify-content:space-between;gap:6px;color:#9babbc;font-size:11px;margin:5px 1px 0}.scm-ls-sum b{color:#e7edf5;font-weight:600}
@@ -1686,7 +1686,7 @@ function scmPageTextNoLayout(){
 .scm-ls-total{text-align:right;white-space:nowrap;font-weight:600}.scm-ls-sub{color:#9babbc;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .scm-ls-vs{text-align:right;white-space:nowrap;font-size:11px;color:#9babbc}.scm-ls-vs.hi{color:#f0c674}.scm-ls-vs.lo{color:#7fb8ff}
 .scm-ls-none{color:#9babbc;font-size:11px;padding:10px 4px;text-align:center}
-#scm-listings-pill{position:fixed;z-index:2147483000;box-sizing:border-box;border:1px solid #3a4c62;border-radius:14px;background:rgba(21,32,48,.9);color:#dce8f5;font:700 11px/1 system-ui,-apple-system,sans-serif;padding:6px 9px;min-height:26px;cursor:pointer;touch-action:none;-webkit-user-select:none;user-select:none;box-shadow:0 3px 10px rgba(0,0,0,.3);opacity:.85}`;
+#scm-listings-pill,#scm-contracts-pill{position:fixed;z-index:2147483000;box-sizing:border-box;border:1px solid #3a4c62;border-radius:14px;background:rgba(21,32,48,.9);color:#dce8f5;font:700 11px/1 system-ui,-apple-system,sans-serif;padding:6px 9px;min-height:26px;cursor:pointer;touch-action:none;-webkit-user-select:none;user-select:none;box-shadow:0 3px 10px rgba(0,0,0,.3);opacity:.85}`;
       (document.head||document.documentElement).appendChild(st);
     };
     // Card: default top-right under the game header; pill: right edge, a little below the middle (clear of the
@@ -1753,10 +1753,83 @@ function scmPageTextNoLayout(){
     document.addEventListener('visibilitychange',()=>{if(!document.hidden&&L.open){request(true);tickAgo();}});
     // the game re-announces its realm on every state update; act only on a real change
     window.addEventListener('scm-game-realm-change',()=>{const r=currentRealm();if(r===L.realm)return;L.realm=r;L.data=null;L.seq++;paint();request(true);});
-    const start=()=>{if(L.started||!isSimCompaniesPage())return;L.started=true;L.realm=currentRealm();paint();request(true);L.agoTimer=setInterval(tickAgo,30000);};
-    return {start,render,request};
+    const start=()=>{if(L.started||!isSimCompaniesPage())return;L.started=true;L.realm=currentRealm();paint();request(true);L.agoTimer=setInterval(tickAgo,30000);L.refreshTimer=setInterval(()=>{if(!document.hidden&&L.open)request(true);},60000);};
+    return {start,render,request,style:lstyle};
   })();
   if(document.readyState!=='loading')Listings.start();else document.addEventListener('DOMContentLoaded',()=>Listings.start(),{once:true});
+  // "Outgoing contracts" card: its own card, pill and saved position, beside (not inside) My listings. Shows the game's
+  // outgoing contracts as last captured for this realm (background GET_OUTGOING_CONTRACTS_DATA). It fetches nothing:
+  // "captured X ago" says how old the capture is. Re-reads the capture once a minute while open and visible.
+  const Contracts=(()=>{
+    const CARD='scm-contracts-card',PILL='scm-contracts-pill',OPEN_KEY='scm-contracts-card-v1';
+    const C={open:true,data:null,realm:null,sig:'',seq:0,agoTimer:0,started:false,noClickUntil:0};
+    try{const v=JSON.parse(localStorage.getItem(OPEN_KEY)||'null');if(v&&typeof v.open==='boolean')C.open=v.open;}catch{}
+    const saveOpen=()=>{try{localStorage.setItem(OPEN_KEY,JSON.stringify({open:C.open}));}catch{}};
+    const readPos=id=>{try{const v=JSON.parse(localStorage.getItem('scmCardPos:'+id)||'null');return v&&Number.isFinite(v.x)&&Number.isFinite(v.y)?v:null;}catch{return null;}};
+    const ago=iso=>{const t=Date.parse(String(iso||''));if(!Number.isFinite(t))return 'not captured yet';const s=Math.max(0,Math.round((Date.now()-t)/1000));return s<60?'captured just now':s<3600?`captured ${Math.floor(s/60)} min ago`:s<86400?`captured ${Math.floor(s/3600)} h ago`:`captured ${Math.floor(s/86400)} d ago`;};
+    // Card: under My listings when that card is in its default place; pill: right edge, below the listings pill.
+    const place=(el,pos)=>{if(!el)return;el.style.right='auto';el.style.bottom='auto';placeCard(el,pos.x,pos.y);};
+    const defaultPos=el=>{
+      if(el.id===CARD){const l=document.getElementById('scm-listings-card');const top=l?l.getBoundingClientRect().bottom+6:headerBottom()+40;return {x:window.innerWidth-(el.offsetWidth||340)-5,y:Math.round(top)};}
+      return {x:window.innerWidth-(el.offsetWidth||80)-4,y:Math.round(window.innerHeight*.58)+34};
+    };
+    const placeSaved=el=>{if(el)place(el,readPos(el.id)||defaultPos(el));};
+    const ensure=(id,tag)=>{let el=document.getElementById(id);if(el&&document.documentElement.contains(el))return el;el=document.createElement(tag);el.id=id;el.dataset.scmOwned='1';document.documentElement.appendChild(el);return el;};
+    const rowHtml=r=>`<div class="scm-ls-row">${r.image?`<img src="${esc(r.image)}" alt="" loading="lazy">`:'<span class="scm-ls-noimg"></span>'}<span class="scm-ls-name">${esc(r.name)} <span class="scm-ls-q">Q${esc(r.quality)}</span></span><span class="scm-ls-total">${money(r.total)}</span><span class="scm-ls-sub">${num(r.quantity)} × ${money(r.price)}</span><span class="scm-ls-vs"></span></div>`;
+    const render=()=>{
+      Listings.style();
+      const pill=document.getElementById(PILL);
+      if(!C.open){document.getElementById(CARD)?.remove();const p=ensure(PILL,'button');p.type='button';p.setAttribute('aria-label','Show my outgoing contracts');const n=C.data?.rows?.length;p.textContent=Number.isFinite(n)&&n>0?`Contracts ${n}`:'Contracts';placeSaved(p);return;}
+      pill?.remove();
+      const card=ensure(CARD,'section');const d=C.data,realm=currentRealm();
+      const rows=Array.isArray(d?.rows)?[...d.rows].sort((a,b)=>b.total-a.total||String(a.name).localeCompare(String(b.name))||a.quality-b.quality):[];
+      const total=rows.reduce((a,r)=>a+(Number(r.total)||0),0);
+      const title=`${realm!=null?`R${realm+1}`:'Game'} · Outgoing contracts`;
+      const body=realm==null?'<div class="scm-ls-none">Checking which realm this game tab is in…</div>'
+        :!d?'<div class="scm-ls-none">Loading your contracts…</div>'
+        :d.missing?'<div class="scm-ls-none">Outgoing contracts have not been captured yet. Open your contracts in the game (or run Sync) and they appear here.</div>'
+        :`<div class="scm-ls-sum"><span><b>${rows.length}</b> contract${rows.length===1?'':'s'} · <b>${money(total)}</b></span><span class="scm-ls-ago">${esc(ago(d.at))}</span></div>${rows.length?rows.map(rowHtml).join(''):'<div class="scm-ls-none">No outgoing contracts.</div>'}`;
+      card.innerHTML=`<div class="scm-ls-head"><span class="scm-ls-grip" aria-hidden="true">⠿</span><span class="scm-ls-title">${esc(title)}</span><button type="button" class="scm-ls-close" aria-label="Close my outgoing contracts">×</button></div>${body}`;
+      applyMin(card);placeSaved(card);
+    };
+    const signature=d=>JSON.stringify([currentRealm(),d?.realm,d?.at,d?.missing,(d?.rows||[]).map(r=>[r.id,r.kind,r.quality,r.quantity,r.price])]);
+    const paint=()=>{const s=signature(C.data)+C.open;const have=document.getElementById(C.open?CARD:PILL);if(s===C.sig&&have)return;C.sig=s;render();};
+    const request=()=>{
+      if(!C.open)return;
+      const realm=currentRealm();if(realm==null){paint();return;}
+      const seq=++C.seq;
+      try{chrome.runtime.sendMessage({type:'GET_OUTGOING_CONTRACTS_DATA',realm},r=>{
+        if(chrome.runtime.lastError||seq!==C.seq||currentRealm()!==realm||!r?.ok||Number(r.realm)!==realm)return;
+        C.data=r;paint();
+      });}catch{}
+    };
+    const tickAgo=()=>{if(document.hidden||!C.open)return;const el=document.querySelector('#scm-contracts-card .scm-ls-ago');if(el&&C.data)el.textContent=ago(C.data.at);if(!document.getElementById(CARD))paint();};
+    const setOpen=open=>{C.open=open;saveOpen();C.sig='';paint();if(open)request();};
+    // drag (card header / pill), clamped; a tap on the pill reopens the card
+    let drag=null;
+    document.addEventListener('pointerdown',e=>{
+      const t=e.target;const el=t?.closest?.('#scm-contracts-pill')||(t?.closest?.('#scm-contracts-card .scm-ls-head')&&!t.closest('button')?document.getElementById(CARD):null);if(!el)return;
+      if(e.pointerType==='mouse'&&e.button!==0)return;
+      const r=el.getBoundingClientRect();drag={el,pid:e.pointerId,sx:e.clientX,sy:e.clientY,dx:e.clientX-r.left,dy:e.clientY-r.top,moved:false};
+      try{el.setPointerCapture(e.pointerId);}catch{}
+    },true);
+    document.addEventListener('pointermove',e=>{if(!drag||e.pointerId!==drag.pid)return;if(!drag.moved&&Math.hypot(e.clientX-drag.sx,e.clientY-drag.sy)<6)return;drag.moved=true;e.preventDefault();place(drag.el,{x:e.clientX-drag.dx,y:e.clientY-drag.dy});},{capture:true,passive:false});
+    const end=e=>{if(!drag||e.pointerId!==drag.pid)return;const x=drag;drag=null;try{x.el.releasePointerCapture(e.pointerId);}catch{}
+      if(x.moved){try{localStorage.setItem('scmCardPos:'+x.el.id,JSON.stringify({x:x.el.offsetLeft,y:x.el.offsetTop}));}catch{}C.noClickUntil=Date.now()+400;}};
+    document.addEventListener('pointerup',end,true);document.addEventListener('pointercancel',end,true);
+    document.addEventListener('click',e=>{
+      if(Date.now()<(C.noClickUntil||0)&&e.target.closest?.('#scm-contracts-pill,#scm-contracts-card .scm-ls-head')){e.preventDefault();e.stopPropagation();return;}
+      if(e.target.closest?.('#scm-contracts-card .scm-ls-close')){e.preventDefault();e.stopPropagation();setOpen(false);return;}
+      if(e.target.closest?.('#scm-contracts-pill')){e.preventDefault();e.stopPropagation();setOpen(true);}
+    },true);
+    window.addEventListener('resize',()=>{placeSaved(document.getElementById(CARD));placeSaved(document.getElementById(PILL));},{passive:true});
+    document.addEventListener('visibilitychange',()=>{if(!document.hidden&&C.open){request();tickAgo();}});
+    // the game re-announces its realm on every state update; act only on a real change
+    window.addEventListener('scm-game-realm-change',()=>{const r=currentRealm();if(r===C.realm)return;C.realm=r;C.data=null;C.seq++;paint();request();});
+    const start=()=>{if(C.started||!isSimCompaniesPage())return;C.started=true;C.realm=currentRealm();paint();request();C.agoTimer=setInterval(tickAgo,30000);C.refreshTimer=setInterval(()=>{if(!document.hidden&&C.open)request();},60000);};
+    return {start};
+  })();
+  if(document.readyState!=='loading')Contracts.start();else document.addEventListener('DOMContentLoaded',()=>Contracts.start(),{once:true});
   // v2.5.361 performance: this ran on every DOM mutation batch and read document.body.innerText (forces a full layout
   // of the game page). Now: the URL decides at once; the visible page text is read at most once per 1.5 s per URL.
   let contractTextCheck={at:0,path:'',value:false};
