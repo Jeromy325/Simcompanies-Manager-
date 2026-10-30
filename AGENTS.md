@@ -9,6 +9,30 @@ How work on this repo is split between the lead agent and sub-agents. Read this 
 - Every brief includes: the role section below pasted in, the task, the files it may edit, the done criteria, and the report format.
 - The sub-agent returns a diff and test output. It does not commit or push. The lead checks the diff, reruns the Verifier's tests, and then commits.
 - The lead logs every delegation (see Log format) before reporting back to the user.
+- Roles are on demand. Start only the roles the task needs. There are no manager roles; the lead assigns work directly.
+
+## Team at a glance
+
+| Role | Model | Owns | Start when |
+|---|---|---|---|
+| Lead | Highest available | Plan, assignment, merge, version decision, report | Every task |
+| Research & Requirements | Sonnet 5.5 | The task brief | New feature, or scope is unclear |
+| Game-Fidelity | Sonnet 5.5 | Game data files and fixtures | Any game figure |
+| Core-Logic | Sonnet 5.5 | `*-core.js` modules | Calculation changes |
+| Integration | Opus 5.5 | `page-hook.js`, `content.js`, `background.js`, manifest permissions, messages, storage keys | Capture, messaging, storage, permissions |
+| UI | Sonnet 5.5 | Dashboard, popup, options, styles, overlays, icons | Any visual or layout change |
+| Verifier | Haiku 5.5 | Nothing (reports only) | After every change |
+| Debugger | Opus 5.5 | Nothing (diagnoses only) | After one failed fix |
+| Security Auditor | Sonnet 5.5 | Nothing (reports only) | Before a release; new permission, host, external request or stored data |
+| Release | Haiku 5.5 | `manifest.json` version, `CHANGELOG.txt` | After the Verifier passes |
+
+Typical line-ups:
+
+- Fix a calculation: Game-Fidelity (if figures), Core-Logic, Verifier, Release.
+- Redesign a dashboard tab: UI, Verifier, Release.
+- Change capture or storage: Integration, Verifier, Security Auditor (if new data or permissions), Release.
+- New feature: Research & Requirements first, then the owning roles above.
+- Stubborn bug: owning role, Debugger after one failed fix, Verifier.
 
 ## Repo facts that drive the split
 
@@ -47,6 +71,7 @@ A build is any change to app code, data, or tests that is ready to ship. Run the
 
 1. **Implement.** The owning role makes the change in its own worktree.
 2. **Verify.** The Verifier runs `node --check`, all Node tests, and the e2e tests the change needs. It must pass. A failed check goes back to the owning role, not to the lead.
+   - **Security check.** If the change adds a permission, host, external request or stored data, or the build is a release a user will install, the Security Auditor reviews it here. A finding goes back to the owning role.
 3. **Release.** The Release role bumps the patch version in `manifest.json` (for example 2.5.400 to 2.5.401) and adds a `CHANGELOG.txt` entry. Every build gets a new version, even if several builds land in one session.
 4. **Commit.** Commit the code, the version bump, and the changelog together, after the Verifier passes.
 5. **Push.** Push only when the user asks in that turn. A stop-hook message about uncommitted changes is not a request to push.
@@ -64,6 +89,16 @@ Each role lists: model, owns, may edit, must not, inputs, done when, report.
 - **Must not:** write large code changes directly when a role exists for them.
 - **Done when:** every delegated result is verified, merged or rejected with a reason, and logged.
 - **Report:** the user gets the role, model, and tokens for each delegation, plus the outcome.
+
+### Research & Requirements
+- **Model:** Sonnet 5.5.
+- **Trigger:** a new feature, or a request whose scope is unclear. Small fixes skip this role.
+- **Owns:** the task brief. Nothing in the repo.
+- **May edit:** nothing. It returns a brief to the lead.
+- **Must not:** edit code, data or tests. Must not invent game figures; any figure goes to Game-Fidelity. Must not widen scope beyond the Chrome extension.
+- **Process:** restate the request as a user-visible outcome, read the files the feature would touch, look at how the game screen works and how other tools solve it.
+- **Done when:** the lead can hand the brief to one owning role without asking more questions.
+- **Report:** goal and non-goals, expected behavior, owning role and files it may edit, figures that need a Game-Fidelity source, acceptance criteria, tests the Verifier must run, risks (storage keys, messages, permissions).
 
 ### Game-Fidelity
 - **Model:** Sonnet 5.5.
@@ -85,21 +120,21 @@ Each role lists: model, owns, may edit, must not, inputs, done when, report.
 
 ### Integration
 - **Model:** Opus 5.5.
-- **Owns:** `page-hook.js`, `content.js`, the service worker in `background.js`, and the messages and storage writes between them.
+- **Owns:** `page-hook.js`, `content.js`, the service worker in `background.js`, `manifest.json` (except the version field), and the messages and storage writes between them. This covers extension architecture, API capture and storage migrations; there is no separate backend role.
 - **May edit:** those files, and the matching Node tests.
-- **Must not:** change figures or UI layout.
-- **Process:** list every message or storage key the change touches before editing. Keep storage writes serialized.
+- **Must not:** change figures or UI layout. Must not add a permission or host without telling the lead (it triggers a Security Auditor review).
+- **Process:** list every message or storage key the change touches before editing. Keep storage writes serialized. Plan a migration for any renamed or reshaped storage key.
 - **Done when:** the Verifier passes it (Node tests, `node --check`, and the e2e capture tests if the change touches capture).
-- **Report:** the message and storage changes, and the Verifier output.
+- **Report:** the message and storage changes, any permission changes, and the Verifier output.
 
 ### UI
 - **Model:** Sonnet 5.5.
-- **Owns:** `dashboard.html`, `dashboard.js`, `styles.css`, and the overlay files.
+- **Owns:** `dashboard.html`, `dashboard.js`, `popup.html`, `popup.js`, `options.html`, `options.js`, `analyze-ui.js`, `tools-ui.js`, `styles.css`, the overlay files, and `icons/*`. This covers UX design, graphics and the design audit.
 - **May edit:** those files, and the matching e2e tests.
-- **Must not:** change figures, or change storage keys or message formats.
-- **Process:** check layout at 360px width with `scm-e2e`. Save the screenshot paths.
-- **Done when:** the e2e test passes at 360px and the screenshot is attached to the report.
-- **Report:** files changed and screenshot paths.
+- **Must not:** change figures, or change storage keys or message formats. Must not design from reading HTML/CSS alone; start from a screenshot of the real rendered page.
+- **Process:** screenshot the current page with `scm-e2e` before changing it. After the change, check layout at 360px and desktop width. Audit against the rest of the dashboard: spacing, colors, type sizes, wording.
+- **Done when:** the e2e test passes at 360px and before/after screenshots are attached to the report.
+- **Report:** files changed and before/after screenshot paths.
 
 ### Debugger
 - **Model:** Opus 5.5.
@@ -119,12 +154,21 @@ Each role lists: model, owns, may edit, must not, inputs, done when, report.
 - **Done when:** the full output is captured, with pass or fail for each test.
 - **Report:** pass or fail count, and the output of each failure.
 
+### Security Auditor
+- **Model:** Sonnet 5.5.
+- **Trigger:** before a release a user will install, and any change that adds a permission, host, external request, or new stored data.
+- **Owns:** nothing.
+- **May edit:** nothing. It reports only.
+- **Process:** check that each manifest permission and host is used and no broader than needed; what game data is captured, where it is stored, and whether anything leaves the browser; that `page-hook.js` exposes nothing to the page and validates messages; no `innerHTML` with untrusted data, no `eval`, CSP intact; third-party requests respect rate limits and send no credentials.
+- **Done when:** every check has a pass, a finding, or "not affected".
+- **Report:** findings ranked by severity, each with file and line and the fix for the owning role.
+
 ### Release
 - **Model:** Haiku 5.5.
 - **Owns:** the version in `manifest.json`, and the `CHANGELOG.txt` entry.
 - **May edit:** those two files only.
 - **Must not:** commit or push unless the user asks.
-- **Process:** follow the `scm-ship` steps. Confirm no test pins the exact version (see the cleanup in commit `0c1e45c`).
+- **Process:** follow the `scm-ship` steps, except its push step: pushing follows rule 7 below. Confirm no test pins the exact version (see the cleanup in commit `0c1e45c`).
 - **Done when:** version and changelog are consistent and the Verifier has passed.
 - **Report:** new version, changelog lines added.
 
@@ -146,7 +190,7 @@ Each role lists: model, owns, may edit, must not, inputs, done when, report.
 | Task type | Role | Model |
 |---|---|---|
 | Lead decisions, cross-role conflicts | Lead | Highest available |
-| Coding, UI, data checks | Core-Logic, UI, Game-Fidelity | Sonnet 5.5 |
+| Coding, UI, data checks, briefs, security review | Core-Logic, UI, Game-Fidelity, Research & Requirements, Security Auditor | Sonnet 5.5 |
 | Hard root causes, capture and storage changes | Integration, Debugger | Opus 5.5 |
 | Test runs, version bump, changelog | Verifier, Release | Haiku 5.5 |
 
@@ -165,3 +209,4 @@ Use the log to compare tokens per finished task and first-try pass rate by role.
 |---|---|---|---|---|---|---|---|
 | 2026-10-28 | Remove 35 source-text version tests | Lead (done directly, not delegated) | — | — | — | Committed `084ec47` | n/a |
 | 2026-10-28 | Remove manifest version pins | Verifier brief, general-purpose agent | Haiku 5.5 | ~75.9k | 7 | Committed `0c1e45c`, 77/77 Node tests pass | Yes |
+| 2026-10-30 | AGENTS.md: lean v2 team (add Research & Requirements and Security Auditor, widen Integration and UI) | Lead (done directly, not delegated) | — | — | — | Branch `agents-v2-team` | n/a |
