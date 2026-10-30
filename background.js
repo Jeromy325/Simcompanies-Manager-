@@ -325,6 +325,7 @@ async function refreshGameConstants(force=false){
     return {ok:true};
   }catch(e){logActivity(await activeRealmNumber(),'game-constants','failure',{},String(e?.message||e));return {ok:false,error:String(e?.message||e)};}
 }
+const ownListingsRefreshAt=new Map(); // realm → last GET_OWN_LISTINGS_DATA refresh request (ms)
 async function refreshMarketOrders(realm,maxAgeMs=5*60000){
   try{
     const r=validRealmNumber(realm);if(r==null)return {ok:false};
@@ -6795,6 +6796,27 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   // v2.5.359 #4 smart sell price for the game's Sell page: cheapest competing listing (quality ≥ the lot's, your own
   // listings left out), 7-day daily VWAP range of id:quality, your warehouse cost, fee from your listings. An order book
   // older than 15 min is refreshed through the game tab (throttled 5 min per product, no lock held while fetching).
+  // Game-page "My listings" card: your own exchange listings (scmMarketOrders:<realm>) with names, images and the
+  // realm's cached VWAP. refresh:true asks refreshMarketOrders (5-min cache, no lock) at most once a minute per realm,
+  // without waiting; the card follows the storage key through chrome.storage.onChanged.
+  if(m?.type==='GET_OWN_LISTINGS_DATA'){
+    (async()=>{
+      try{
+        const realm=validRealmNumber(m.realm);if(realm==null){send({ok:false,error:'No realm.'});return;}
+        const now=Date.now();
+        if(m.refresh&&now-(ownListingsRefreshAt.get(realm)||0)>60000){ownListingsRefreshAt.set(realm,now);refreshMarketOrders(realm).catch(()=>{});}
+        const k=`scmMarketOrders:${realm}`;const mo=(await chrome.storage.local.get({[k]:null}))[k];
+        if(!mo||!Array.isArray(mo.orders)){send({ok:true,realm,at:null,rows:[],missing:true});return;}
+        const [assets,store]=await Promise.all([gameOverlayAssets(),notifyRealmStore(realm)]);
+        const rows=mo.orders.map(o=>{
+          const kind=Number(o?.kind??o?.resourceId??o?.resource?.id),quality=Number(o?.quality)||0,quantity=Number(o?.quantity??o?.amount)||0,price=Number(o?.price)||0;
+          const file=assets.images?.[String(kind)];const vwap=overlayVwap(store,kind,quality,realm);
+          return {id:o?.id??null,kind,quality,quantity,price,total:quantity*price,name:String(assets.names.get(String(kind))||o?.resource?.name||`Resource #${kind}`),image:file?`${assets.imageBase}${file}`:'',vwap,vsVwapPct:vwap&&price>0?(price-vwap)/vwap*100:null};
+        }).filter(r=>r.kind>0&&r.quantity>0);
+        send({ok:true,realm,at:mo.at||null,rows});
+      }catch(e){send({ok:false,error:e?.message||String(e)});}
+    })(); return true;
+  }
   if(m?.type==='GET_SELL_PRICE_INFO'){
     (async()=>{
       try{
