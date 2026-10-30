@@ -213,3 +213,11 @@ Use the log to compare tokens per finished task and first-try pass rate by role.
 | 2026-10-28 | Remove manifest version pins | Verifier brief, general-purpose agent | Haiku 5.5 | ~75.9k | 7 | Committed `0c1e45c`, 77/77 Node tests pass | Yes |
 | 2026-10-30 | AGENTS.md: lean v2 team (add Research & Requirements and Security Auditor, widen Integration and UI) | Lead (done directly, not delegated) | — | — | — | Branch `agents-v2-team` | n/a |
 | 2026-10-30 | AGENTS.md: add Agents and Images Drive folders, fix Scripts folder name | Lead (done directly, not delegated) | — | — | — | Pushed to main | n/a |
+| 2026-10-30 | Review: reliability bug hunt | Debugger | Opus 5.5 | ~172k | 54 | 6 findings | n/a |
+| 2026-10-30 | Review: lag/choppiness | Debugger | Opus 5.5 | ~170k | 57 | 9 causes | n/a |
+| 2026-10-30 | Review: design audit + collapse inventory | UI | Sonnet 5.5 | ~142k | 41 | Spec + proposed.css | n/a |
+| 2026-10-30 | Review: streamlining | Research & Requirements | Sonnet 5.5 | ~92k | 14 | Quick wins + restructures | n/a |
+| 2026-10-30 | Reliability + lag fixes | Integration | Opus 5.5 | ~234k | 101 | 79/79, branch integration-fixes | Yes |
+| 2026-10-30 | My listings game overlay | Integration | Opus 5.5 | ~160k | 42 | 80/80, e2e not runnable here | Yes (Node) |
+| 2026-10-30 | Collapsed cards, restyle, dashboard lag, Settings tab | UI | Sonnet 5.5 | ~180k | 71 | 80/80, branch ui-overhaul | Yes (Node) |
+| 2026-10-30 | Verify merged build + release 2.5.402 | Verifier/Release | Haiku 5.5 | ~85k+ | 13+ | 82/82 Node; e2e blocked (Chromium won't load extension on this PC) | Yes |

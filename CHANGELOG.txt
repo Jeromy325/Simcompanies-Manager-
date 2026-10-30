@@ -1,3 +1,18 @@
+2.5.402 — 2026-10-30 — OVERHAUL: reliability, smoother, new look, My listings overlay
+- Sync failure is recorded on the right realm; a stuck "Sync running" is recovered after update or reload.
+- Quarantine writes can't revert other realm data.
+- Clear Stored Data also resets caches and the hourly price alarm.
+- Message handlers always reply.
+- Store writes are batched (≤0.75 s) and ledger writes are batched (≤2 s), so pages stop re-decoding the store on every response.
+- Resource catalog is re-sent only when it changes; Exchange badges are no longer rebuilt every pass; lighter page checks.
+- Dashboard renders are throttled (max one per 2.5 s, and they wait while you scroll); warehouse patches cells in place; no big JSON compares.
+- Image data is no longer duplicated in the page.
+- All collapsible cards start collapsed (your toggles are remembered).
+- New professional look: flat cards, underline tabs, one accent colour; Analyze matches the rest.
+- Alerts and Diagnostic are merged into a Settings tab; Clear Stored Data moved from the header to Settings › Diagnostic.
+- Popup and options wording updated.
+- 16 unused functions removed.
+- NEW: My listings card on the game page: your exchange listings with quantity, price, total and vs-VWAP. Drag to move, minimise, close, and reopen from the Listings pill.
 2.5.401 — 2026-10-28 — DASHBOARD-PERFORMANCE: render only the active tab
 - Each tab builds only its own sections, so switching tabs no longer rebuilds the whole dashboard.
 - The unused recordHistory pass is removed from render().
