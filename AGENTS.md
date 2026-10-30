@@ -50,7 +50,9 @@ The user keeps non-repo files in Google Drive (connector available in sessions).
 
 - `Projects/Simcompanies-Manager/`: the extension folder, synced from GitHub `main`. Do not add, move, rename, or delete anything inside it by hand. The sync owns it.
 - `Notes/` (folder ID `1a6xHhIIuc7jga4PCbz1099Vz3yoAAdaj`): every note we write.
-- `Scripts/` (folder ID `1tecCmAzfabZHAHKor6gn1XOpJztPM3R0`): scripts we write, each in its own subfolder. The sync script is in `Scripts/Google Drive Script/`.
+- `Scripts/` (folder ID `1tecCmAzfabZHAHKor6gn1XOpJztPM3R0`): scripts we write, each in its own subfolder. The sync script is in `Scripts/Google Drive Scripts/`.
+- `Projects/SimCompanies-Manager-Agents/` (folder ID `1HJXLHbbrAelNWV_Q47IwKG_gcbPA2AE8`): the agent team. `SimCompanies-Manager-AI-Agent-Organization.md` explains it; `agents/` (folder ID `1qlkxm5ZqT65yHp1iarmhrlr-mlTY6Ai1`) holds one file per role in Claude Code sub-agent format. When a role changes in this file, update those files to match.
+- `Images/` (folder ID `1G9jJuS6pnDLKEL9sq0_Be4Mnwa0CC-Mi`): charts and screenshots, including the team chart `ChromeTeam.png`.
 
 Sync: the Apps Script project "SCM Sync" runs on each push to `main` (GitHub webhook calls `doPost`). It finds the extension folder by ID (`1oSEh3NCecTHPA6O6_xlWr-Kmtdp5Or2U`), so that folder can be moved or renamed. It finds subfolders by name, so `icons`, `tests`, and `tools` must not be renamed or moved. `syncFromGitHub` deletes its own old triggers on start. Editing `doPost` needs a new deployment version; editing `syncFromGitHub` only needs a save.
 
@@ -210,3 +212,4 @@ Use the log to compare tokens per finished task and first-try pass rate by role.
 | 2026-10-28 | Remove 35 source-text version tests | Lead (done directly, not delegated) | — | — | — | Committed `084ec47` | n/a |
 | 2026-10-28 | Remove manifest version pins | Verifier brief, general-purpose agent | Haiku 5.5 | ~75.9k | 7 | Committed `0c1e45c`, 77/77 Node tests pass | Yes |
 | 2026-10-30 | AGENTS.md: lean v2 team (add Research & Requirements and Security Auditor, widen Integration and UI) | Lead (done directly, not delegated) | — | — | — | Branch `agents-v2-team` | n/a |
+| 2026-10-30 | AGENTS.md: add Agents and Images Drive folders, fix Scripts folder name | Lead (done directly, not delegated) | — | — | — | Pushed to main | n/a |
