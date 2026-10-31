@@ -3041,15 +3041,35 @@ function renderWarehouseRunOut(s){
     el.innerHTML=plannerRunOutHtml({s,priceMap:buildMarketPriceMap(s),recipes:data.recipes,owned,runHours,bonusPct:plannerCompanyProductionModifier(s)});
   }).catch(e=>{if(token===__scmWhRunOutToken)el.innerHTML=`<div class="planner-profit-empty">Could not calculate: ${escapeHtml(String(e?.message||e))}</div>`;});
 }
+// Planner repaint guard. Background/storage-driven repaints (options.background) are queued while the user is editing
+// anywhere in the dashboard and replayed once editing ends; user-initiated repaints (onchange handlers) always run.
+function plannerRepaintBlocked(host,options){
+  if(!options?.background)return false;
+  let blocked=false;try{blocked=typeof dashboardEditorActive==='function'&&dashboardEditorActive();}catch{}
+  if(!blocked)return false;
+  host.__plannerPendingRepaint=true;
+  clearTimeout(host.__plannerPendingTimer);
+  host.__plannerPendingTimer=setTimeout(()=>plannerFlushPendingRepaint(host),400);
+  return true;
+}
+function plannerFlushPendingRepaint(host){
+  if(!host||!host.__plannerPendingRepaint||!host.isConnected)return;
+  let blocked=false;try{blocked=dashboardEditorActive();}catch{}
+  if(blocked){clearTimeout(host.__plannerPendingTimer);host.__plannerPendingTimer=setTimeout(()=>plannerFlushPendingRepaint(host),400);return;}
+  host.__plannerPendingRepaint=false;
+  const st=window.__scmState;if(!st)return;
+  try{renderBuildingPlanner(scmReactiveViewState(st),{background:true});}catch(e){console.debug('planner deferred repaint failed',e);}
+}
 function renderBuildingPlanner(s,options={}){
   const host=$('#buildingPlanner');if(!host)return;
+  if(plannerRepaintBlocked(host,options))return;
   const renderToken=String((Number(host.dataset.renderToken)||0)+1);
   host.dataset.renderToken=renderToken;
   loadBuildingPlannerData().then(async data=>{
     if(host.dataset.renderToken!==renderToken)return;
     const definitions=data.buildings, recipes=data.recipes, rates=data.rates;
     const modifierState=await ensurePlannerCompanyModifiers(s);
-    if(modifierState!==s){ renderBuildingPlanner(modifierState); return; }
+    if(modifierState!==s){ renderBuildingPlanner(modifierState,options); return; }
     const realm=Number(s?.viewRealm??s?.captureRealm??s?.authData?.authCompany?.realmId);
     let ensurePromise=null;
     if(Number.isFinite(realm)&&!options.skipEnsure){
@@ -3061,7 +3081,7 @@ function renderBuildingPlanner(s,options={}){
         ensurePromise.then(async result=>{
           if(result?.ok&&host.dataset.renderToken===renderToken&&host.dataset.rateRefreshToken!==renderToken){
             host.dataset.rateRefreshToken=renderToken;
-            try{renderBuildingPlanner(await get(),{skipEnsure:true});}catch{}
+            try{renderBuildingPlanner(await get(),{skipEnsure:true,background:true});}catch{}
           }
         }).catch(()=>{});
       }
@@ -3264,6 +3284,7 @@ function renderBuildingPlanner(s,options={}){
       selectionStart:typeof activeField.selectionStart==='number'?activeField.selectionStart:null,
       selectionEnd:typeof activeField.selectionEnd==='number'?activeField.selectionEnd:null
     }:null;
+    if(plannerRepaintBlocked(host,options))return; // user began editing while this async render was computing
     const previousBuildingsStrip=host.querySelector('.owned-buildings-strip');
     const buildingsStripScrollLeft=previousBuildingsStrip?previousBuildingsStrip.scrollLeft:0;
     host.innerHTML=`<div class="owned-buildings-heading"><h3>Your Buildings</h3><span class="owned-building-count">Total Buildings: ${owned.length}</span></div><div class="owned-buildings-strip">${buildingCards}</div><div class="planner-speed-modifiers" aria-label="Current production and sales speed modifiers"><div class="planner-speed-modifier"><span>Production Speed</span><strong>${modifierText(productionModifier)}</strong></div><div class="planner-speed-modifier"><span>Sales Speed</span><strong>${modifierText(salesModifier)}</strong></div></div><article class="planner-main-card"><div class="planner-selected-head"><div class="planner-building-hero">${plannerImage(buildingImage,building.name,'planner-building-hero-image')}<div><h3>${escapeHtml(building.name)}</h3><div class="planner-selected-category">${escapeHtml(building.category||'Resources')}</div><div class="planner-selected-line">Current Level: ${building.level} · Planning Level: ${level}</div><div class="planner-selected-line ${building.currentResource?'is-producing':''}">${busyText.replace(/·/g,'')}</div></div></div><div class="building-detail-controls"><div class="planner-kind-row"><label>Building Type<select id="buildingKind">${kindOpts}</select></label><label>Output<select id="buildingOutput" aria-label="Production output">${productOptions}</select></label></div><label>Planning Level<select id="buildingLevel">${levelOpts}</select></label><label>Production Quality<select id="buildingQuality">${qOpts}</select></label><label>Production Time<input id="buildingRunHours" type="number" min="1" max="48" step="1" value="${runHours}"><small>1–48 hours</small></label><div class="planner-reset-row">${hasPlannerChange(building)?'<button type="button" id="plannerResetBuilding">Reset to game data</button>':''}${changedCount>1||(changedCount===1&&!hasPlannerChange(building))?`<button type="button" id="plannerResetAll">Reset all (${changedCount})</button>`:''}</div></div></div><div class="planner-divider"></div><div class="planner-section-label">Production Output</div><div class="planner-output-grid${diffPerHour!=null?' has-diff':''}"><div class="planner-output-product planner-output-product-picker" title="Click to change production output">${plannerImage(productImage,product,'planner-output-image')}<div><strong>${escapeHtml(product||'No product')}</strong><span>Primary Product</span></div><select id="buildingProduct" class="planner-output-product-picker-select" aria-label="Change production output">${productOptions}</select></div><div class="planner-output-stat"><strong>${outputPerHour==null?'—':num(outputPerHour)}</strong><span>Production / hr</span></div>${diffPerHour!=null?diffStat(diffPerHour,`vs Level ${num(building.level)} / hr`):''}<div class="planner-output-stat"><strong>${outputPerPlan==null?'—':num(outputPerPlan)}</strong><span>Production / ${runHours} hr</span></div>${diffPerHour!=null?diffStat(diffPerHour*runHours,`vs Level ${num(building.level)} / ${runHours} hr`):''}</div><div class="planner-section-label">Required Inputs <span>(for ${escapeHtml(product||'selected product')} Q${quality})</span></div><div class="table-wrap planner-table-wrap"><table class="building-input-table planner-input-table mobile-cards"><thead><tr><th>Resource</th><th>Required / hr</th><th>Required / ${runHours} hr</th></tr></thead><tbody>${rows||'<tr><td colspan="3">No recipe inputs are defined for this product.</td></tr>'}</tbody></table></div><div class="planner-section-label">Profit / h / level <span>(${escapeHtml(product || 'selected product')} Q${quality} · Level ${level})</span></div><div id="plannerProfit" class="planner-profit"></div><div class="planner-section-label">Best product <span>(for this building · profit / h / level)</span></div><div id="plannerInsights" class="planner-profit planner-insights"></div><div class="planner-section-label">Upgrade payback <span>(all buildings · next level)</span></div><div id="plannerPayback" class="planner-profit planner-insights"></div><div class="planner-section-label planner-summary-label">Deficit &amp; Surplus</div><div class="planner-discount-control"><label>Buying - selected discount from VWAP<select id="plannerDiscount">${discountOpts}</select></label></div><div class="planner-summary-grid"><div class="planner-summary-card deficit-card"><div class="planner-summary-head"><span>Deficit - Total</span><strong id="plannerDeficitTotal">${deficitTotal}</strong></div><div class="planner-summary-table-scroll"><div class="planner-summary-table-head"><span>Resource</span><span>Amount</span><span>VWAP / Est. Market Cost</span></div>${summaryRows(deficitQuotes,'deficit')}</div></div><div class="planner-summary-card surplus-card"><div class="planner-summary-head"><span>Surplus - Total</span><strong id="plannerSurplusTotal">${surplusTotal}</strong></div><div class="planner-summary-table-scroll"><div class="planner-summary-table-head"><span>Resource</span><span>Amount</span><span>VWAP / Est. Market Value</span></div>${summaryRows(surplusQuotes,'surplus')}</div></div></div><div class="planner-text-grid"><div class="planner-text-card deficit-card"><div class="planner-summary-head"><span>Deficit Text</span><button type="button" class="planner-copy-btn" data-copy-target="deficitText">Copy</button></div><div id="deficitText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 BUYING -${discount}% MARKET 🔽🔽🔽</div>${deficitTextRows.html}<div class="planner-copy-heading">==============================</div></div></div><div class="planner-text-card surplus-card"><div class="planner-summary-head"><span>Selling Text</span><button type="button" class="planner-copy-btn" data-copy-target="surplusText">Copy</button></div><div id="surplusText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 SELLING -${discount}% MARKET 🔽🔽🔽</div>${surplusTextRows.html}<div class="planner-copy-heading">==============================</div></div></div></div><div class="planner-construction-card planner-text-card"><div class="planner-summary-head"><span>Construction Materials</span><strong id="plannerConstructionTotal">${plannerMoney(constructionTotalCost)}</strong><button type="button" class="planner-copy-btn" data-upgrade-projection>Upgrade View</button><button type="button" class="planner-copy-btn" data-copy-target="constructionMaterialsText">Copy</button></div><div id="constructionMaterialsText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 BUYING -${discount}% MARKET 🔽🔽🔽</div>${constructionTotalItems.length?constructionTotalItems.map(x=>`<div class="planner-copy-line"><span>${escapeHtml(`➡️ ${num(x.amount)} - ${x.name} :re-${Number(x.id)}: - ${x.price!=null?money(x.price):'—'}`)}</span></div>`).join(''):'<div class="planner-copy-empty">No additional construction materials required for the planned building levels.</div>'}<div class="planner-copy-heading">==============================</div></div></div><div class="planner-quality-footer"><div class="planner-info-dot">i</div><div><strong>Quality Note</strong><p>Inputs must be at least one quality level below the selected production quality. Higher quality inputs can also be used. Production quantity is not affected by quality level.</p><p class="planner-network-reference">Deficit and surplus are calculated from all owned buildings for the selected production time. Warehouse inventory is applied to construction-material needs by total quantity, regardless of stored quality.</p></div></div></article>`;
@@ -3333,10 +3354,11 @@ function renderBuildingPlanner(s,options={}){
       const next=Math.min(48,Math.max(1,Number($('#buildingRunHours').value)||24));
       ui.runHours=next;
       host.dataset.runHours=String(next);
-      clearTimeout(runHoursSaveTimer);
-      runHoursSaveTimer=setTimeout(()=>{applyRunHours().catch(()=>{});},250);
+      // Typing only records the value: repainting here replaced the input mid-edit and swallowed keystrokes.
+      // The repaint + save happen once the edit is committed (change/blur/Enter).
     };
     $('#buildingRunHours').onchange=()=>{clearTimeout(runHoursSaveTimer);applyRunHours().catch(()=>{});};
+    $('#buildingRunHours').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();e.target.blur?.();}};
     $('#plannerDiscount').onchange=()=>{ui.discount=plannerDiscountPercent($('#plannerDiscount').value);host.dataset.discount=String(ui.discount);queuePlannerUiPersist(s);const marketDiscount=$('#marketContractDiscount');if(marketDiscount)marketDiscount.value=String(ui.discount);if(window.__scmState)renderLiveMarketProduct(window.__scmState);renderBuildingPlanner(s);};
     host.querySelectorAll('.planner-copy-btn').forEach(btn=>btn.onclick=async()=>{const el=document.getElementById(btn.dataset.copyTarget);if(!el)return;const text=el.dataset.copyText??el.value??el.textContent??'';try{await navigator.clipboard.writeText(text);}catch{const ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();}btn.textContent='Copied';setTimeout(()=>btn.textContent='Copy',1200);});
   });
@@ -4275,27 +4297,42 @@ window.addEventListener('scroll',()=>{
     if(__renderPendingWhileEditing||__renderTimer) scheduleDashboardRender();
   },180);
 },{passive:true});
+// Global edit guard: a background/storage-driven render must never replace DOM the user is typing in. "Editing" means
+// a focused input/select/textarea/contenteditable (a focused <select> stays focused while its native list is open),
+// or any field edited within SCM_EDIT_QUIET_MS. Renders are queued and flushed once editing ends.
+const SCM_EDIT_QUIET_MS=2000;
+let __lastDashboardEditAt=0;
+const __scmEditSelector='input,textarea,select,[contenteditable="true"]';
+const __scmNoteEdit=e=>{try{if(e?.target?.matches?.(__scmEditSelector))__lastDashboardEditAt=Date.now();}catch{}};
+document.addEventListener('input',__scmNoteEdit,true);
+document.addEventListener('change',__scmNoteEdit,true);
+document.addEventListener('keydown',__scmNoteEdit,true);
 const dashboardEditorActive=()=>{
   const el=document.activeElement;
-  return !!el&&(el.matches?.('input,textarea,select,[contenteditable="true"]')||el.closest?.('#contractForm,#buildingPlanner'));
+  if(el&&(el.matches?.(__scmEditSelector)||el.closest?.('#contractForm,#buildingPlanner')))return true;
+  return Date.now()-__lastDashboardEditAt<SCM_EDIT_QUIET_MS;
 };
+let __flushRenderTimer=0;
 const flushPendingDashboardRender=()=>{
-  if(__renderPendingWhileEditing&&!dashboardEditorActive()&&!__dashboardUserScrolling){
-    __renderPendingWhileEditing=false;
-    scheduleDashboardRender();
+  if(!__renderPendingWhileEditing)return;
+  if(dashboardEditorActive()||__dashboardUserScrolling){
+    // Still editing (or inside the quiet window): re-check shortly instead of dropping the queued render.
+    clearTimeout(__flushRenderTimer);__flushRenderTimer=setTimeout(flushPendingDashboardRender,400);return;
   }
+  __renderPendingWhileEditing=false;
+  scheduleDashboardRender();
 };
 // Throttled: at most one full render per SCM_RENDER_MIN_GAP_MS with a trailing render, so storage bursts neither
 // starve the UI (old debounce kept resetting) nor re-render on every event. Deferred while editing or scrolling.
 const SCM_RENDER_MIN_GAP_MS=2500;
 let __lastDashboardRenderAt=0;
 const scheduleDashboardRender=()=>{
-  if(dashboardEditorActive()||__dashboardUserScrolling){__renderPendingWhileEditing=true;return;}
+  if(dashboardEditorActive()||__dashboardUserScrolling){__renderPendingWhileEditing=true;clearTimeout(__flushRenderTimer);__flushRenderTimer=setTimeout(flushPendingDashboardRender,400);return;}
   if(__renderTimer)return;
   const wait=Math.max(150,SCM_RENDER_MIN_GAP_MS-(Date.now()-__lastDashboardRenderAt));
   __renderTimer=setTimeout(()=>{
     __renderTimer=null;
-    if(dashboardEditorActive()||__dashboardUserScrolling){__renderPendingWhileEditing=true;return;}
+    if(dashboardEditorActive()||__dashboardUserScrolling){__renderPendingWhileEditing=true;clearTimeout(__flushRenderTimer);__flushRenderTimer=setTimeout(flushPendingDashboardRender,400);return;}
     __lastDashboardRenderAt=Date.now();
     const cached=__scmState;
     if(cached){try{render(cached);return;}catch(e){console.error('Dashboard render failed',e);}}
@@ -4417,7 +4454,7 @@ function scmHistorySignature(store){
   const history=store?.history&&typeof store.history==='object'?store.history:{};
   return Object.entries(history).map(([key,rows])=>[key,Array.isArray(rows)?rows.map(x=>[x?.date??'',x?.vwap??'']):[]]).sort(([a],[b])=>a.localeCompare(b)).map(x=>JSON.stringify(x)).join('|');
 }
-function scmProductionSignature(store){
+function scmProductionSignature(store,opts){
   const parts=[];
   const events=Array.isArray(store?.productionEvents)?store.productionEvents:[];
   parts.push('events',events.map(e=>`${e?.resourceId??''}:${e?.resourceName??''}:${e?.modifier??''}:${e?.expiresAt??''}:${e?.capturedAt??''}`).sort().join(';'));
@@ -4428,7 +4465,7 @@ function scmProductionSignature(store){
   const frozen=store?.frozenNetworkPlan;
   const frozenPlans=frozen?.buildingPlans&&typeof frozen.buildingPlans==='object'?frozen.buildingPlans:{};
   parts.push('frozen',String(frozen?.createdAt||frozen?.capturedAt||''),Object.values(frozenPlans).map(x=>`${x?.buildingId??''}:${x?.resourceId??''}:${x?.product??''}:${x?.quality??''}:${x?.plannedLevel??''}:${x?.baseRatePerLevel??''}`).sort().join(';'));
-  parts.push('hours',Number(store?.productionRunHours)||24);
+  if(!opts?.ignoreHours)parts.push('hours',Number(store?.productionRunHours)||24);
   return parts.join('|');
 }
 function scmDiagnosticSignature(store){
@@ -4718,8 +4755,11 @@ const queuePhysicalRealmStateRefresh=(previousState,changes={})=>{
            // Keep reactive updates inside the Production feature. A market/warehouse
            // refresh only changes profitability values, so update that panel alone;
            // only building/production changes require refreshing the planner itself.
-           const plannerInputsChanged=flags.buildingsChanged||flags.productionChanged;
-           if(plannerInputsChanged)renderBuildingPlanner(scmReactiveViewState(fresh));
+           // A run-hours save echoing back the value the planner already shows is not a planner input change.
+           let hoursEchoOnly=false;
+           try{hoursEchoOnly=flags.productionChanged&&!flags.buildingsChanged&&scmProductionSignature(oldStore,{ignoreHours:true})===scmProductionSignature(newStore,{ignoreHours:true})&&(Number(newStore?.productionRunHours)||24)===Number(plannerUiState(scmReactiveViewState(fresh))?.runHours);}catch{}
+           const plannerInputsChanged=flags.buildingsChanged||(flags.productionChanged&&!hoursEchoOnly);
+           if(plannerInputsChanged)renderBuildingPlanner(scmReactiveViewState(fresh),{background:true});
            else {
            }
          }else if(activeTab==='settings')scheduleDashboardRender();

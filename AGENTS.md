@@ -221,3 +221,7 @@ Use the log to compare tokens per finished task and first-try pass rate by role.
 | 2026-10-30 | My listings game overlay | Integration | Opus 5.5 | ~160k | 42 | 80/80, e2e not runnable here | Yes (Node) |
 | 2026-10-30 | Collapsed cards, restyle, dashboard lag, Settings tab | UI | Sonnet 5.5 | ~180k | 71 | 80/80, branch ui-overhaul | Yes (Node) |
 | 2026-10-30 | Verify merged build + release 2.5.402 | Verifier/Release | Haiku 5.5 | ~85k+ | 13+ | 82/82 Node; e2e blocked (Chromium won't load extension on this PC) | Yes |
+| 2026-10-31 | Faster listings/contracts cards (lead edited app code directly: rule 1 break, reported to user) | Lead | — | — | — | Handed to Integration for tests | n/a |
+| 2026-10-31 | Update overlay test + skip large store read when fresh | Integration | Opus 5.5 | ~109k | 28 | 82/82 Node | Yes (2 rounds: 2nd was a lead review request) |
+| 2026-10-31 | Dashboard: no rebuild while editing, Production run time | UI | Sonnet 5.5 | ~110k | 26 | 83/83 Node; lead review found broken regex, fixed in round 2 | No |
+| 2026-10-31 | Verify merged build + release 2.5.407 | Verifier/Release | Haiku 5.5 | ~87k | 16 | 83/83 Node, e2e not run | Yes |

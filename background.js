@@ -343,6 +343,35 @@ async function refreshMarketOrders(realm,maxAgeMs=5*60000){
     return {ok:true};
   }catch(e){logActivity(validRealmNumber(realm),'market-orders','failure',{},String(e?.message||e));return {ok:false,error:String(e?.message||e)};}
 }
+// v2.5.407 your outgoing contracts read through the game tab into a small key scmOutgoingContracts:<realm>
+// ({data,at}), so the game-page card can follow it with chrome.storage.onChanged without touching the large realm
+// store. A Manager pageGet is not captured by the page hook, so this never rewrites endpointData. No lock held.
+const OWN_LISTINGS_REFRESH_GAP_MS=12000,OUTGOING_CONTRACTS_REFRESH_GAP_MS=12000,OUTGOING_CONTRACTS_FRESH_MS=60000;
+const outgoingContractsRefreshAt=new Map(); // realm → last page read (ms)
+async function refreshOutgoingContracts(realm,minGapMs=OUTGOING_CONTRACTS_REFRESH_GAP_MS){
+  const r=validRealmNumber(realm);if(r==null)return {ok:false};
+  const now=Date.now();if(now-(outgoingContractsRefreshAt.get(r)||0)<minGapMs)return {ok:true,throttled:true};
+  outgoingContractsRefreshAt.set(r,now);
+  try{
+    const x=await pageGet('/api/v3/contracts-outgoing/me/',r,null,'outgoing-contracts-card',{timeoutMs:8000,attempts:1});
+    if(!x?.ok||x.data==null)return {ok:false,error:x?.error||`HTTP ${x?.status||0}`};
+    await rawStorageSet({[`scmOutgoingContracts:${r}`]:{data:x.data,at:new Date().toISOString()}});
+    return {ok:true};
+  }catch(e){return {ok:false,error:String(e?.message||e)};}
+}
+// After the game confirms an action (list or cancel on the exchange, send or cancel a contract, …) both cards'
+// sources are read again ~0.8 s later; a burst of actions collapses into one read.
+const ownOrdersRefreshTimers=new Map();
+function scheduleOwnOrdersRefresh(realm,delayMs=800){
+  const n=validRealmNumber(realm);if(n==null)return;
+  clearTimeout(ownOrdersRefreshTimers.get(n));
+  ownOrdersRefreshTimers.set(n,setTimeout(()=>{
+    ownOrdersRefreshTimers.delete(n);
+    ownListingsRefreshAt.set(n,Date.now());
+    refreshMarketOrders(n,0).catch(()=>{});
+    refreshOutgoingContracts(n,0).catch(()=>{});
+  },delayMs));
+}
 // v2.5.343 logged-in extras through the game tab after Sync: research, government orders + your tier, and the
 // abundance of every building whose abundance the game has shown (mines etc.). Each pageGet runs without a lock;
 // saveData takes its own lock per response.
@@ -6799,15 +6828,15 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   // listings left out), 7-day daily VWAP range of id:quality, your warehouse cost, fee from your listings. An order book
   // older than 15 min is refreshed through the game tab (throttled 5 min per product, no lock held while fetching).
   // Game-page "My listings" card: your own exchange listings (scmMarketOrders:<realm>) with names, images and the
-  // realm's cached VWAP. refresh:true asks refreshMarketOrders (5-min cache, no lock) at most once a minute per realm,
-  // without waiting; the card follows the storage key through chrome.storage.onChanged. A refresh request skips the
-  // 5-min market-order cache (maxAge 0): the card asks at most every 55 s per realm, so the listing stays current.
+  // realm's cached VWAP. refresh:true asks refreshMarketOrders (maxAge 0, no lock) at most every 12 s per realm,
+  // without waiting; the card follows the storage key through chrome.storage.onChanged. A game action also reads
+  // it at once (scheduleOwnOrdersRefresh).
   if(m?.type==='GET_OWN_LISTINGS_DATA'){
     (async()=>{
       try{
         const realm=validRealmNumber(m.realm);if(realm==null){send({ok:false,error:'No realm.'});return;}
         const now=Date.now();
-        if(m.refresh&&now-(ownListingsRefreshAt.get(realm)||0)>=55000){ownListingsRefreshAt.set(realm,now);refreshMarketOrders(realm,0).catch(()=>{});}
+        if(m.refresh&&now-(ownListingsRefreshAt.get(realm)||0)>=OWN_LISTINGS_REFRESH_GAP_MS){ownListingsRefreshAt.set(realm,now);refreshMarketOrders(realm,0).catch(()=>{});}
         const k=`scmMarketOrders:${realm}`;const mo=(await chrome.storage.local.get({[k]:null}))[k];
         if(!mo||!Array.isArray(mo.orders)){send({ok:true,realm,at:null,rows:[],missing:true});return;}
         const [assets,store]=await Promise.all([gameOverlayAssets(),notifyRealmStore(realm)]);
@@ -6821,15 +6850,22 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     })(); return true;
   }
   // Game-page "Outgoing contracts" card: the game's outgoing contracts as last captured for this realm
-  // (endpointData of /api/v3/contracts-outgoing/me/). Read only: nothing is fetched or written here.
+  // (endpointData of /api/v3/contracts-outgoing/me/, or the newer scmOutgoingContracts:<realm> read). refresh:true
+  // also starts refreshOutgoingContracts (12 s gap per realm) without waiting; the card follows that key.
   if(m?.type==='GET_OUTGOING_CONTRACTS_DATA'){
     (async()=>{
       try{
         const realm=validRealmNumber(m.realm);if(realm==null){send({ok:false,error:'No realm.'});return;}
-        const store=await notifyRealmStore(realm);
-        const hit=Object.entries(store?.endpointData||{})
+        if(m.refresh)refreshOutgoingContracts(realm).catch(()=>{});
+        const k=`scmOutgoingContracts:${realm}`;
+        const small=(await chrome.storage.local.get({[k]:null}))[k];
+        const read=small?.data!=null?{data:small.data,receivedAt:small.at}:null;
+        // a read under 60 s old is answered without loading the large realm store
+        const fresh=!!read&&Date.now()-(Date.parse(read.receivedAt||0)||0)<OUTGOING_CONTRACTS_FRESH_MS;
+        const captured=fresh?null:Object.entries((await notifyRealmStore(realm))?.endpointData||{})
           .filter(([u,v])=>/\/api\/v3\/contracts-outgoing\/me(?:\/\d+)?\/?(?:\?.*)?$/i.test(String(u||''))&&Number(v?.status)>=200&&Number(v?.status)<300&&v?.data!=null)
           .sort((a,b)=>Date.parse(b[1]?.receivedAt||0)-Date.parse(a[1]?.receivedAt||0))[0]?.[1];
+        const hit=[captured,read].filter(Boolean).sort((a,b)=>(Date.parse(b.receivedAt||0)||0)-(Date.parse(a.receivedAt||0)||0))[0];
         if(!hit){send({ok:true,realm,at:null,rows:[],missing:true});return;}
         const assets=await gameOverlayAssets();
         const rows=helperArray(hit.data,['outgoingContracts','contracts','data','items','results']).map(c=>{
@@ -7208,7 +7244,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     // refresh R1 while the player was in R2 — rejected as "not the active realm", so nothing updated.)
     (async()=>{let realm=(m.captureRealm===null||m.captureRealm===undefined||m.captureRealm==='')?null:validRealmNumber(m.captureRealm);
       if(realm==null){try{const meta=await chrome.storage.local.get({activeRealmKey:null});realm=validRealmNumber(realmNumberFromKey(meta.activeRealmKey)??meta.activeRealmKey);}catch{}}
-      if(realm!=null)scheduleWarehouseRefreshAfterStockMutation(realm,150);})();
+      if(realm!=null){scheduleWarehouseRefreshAfterStockMutation(realm,150);scheduleOwnOrdersRefresh(realm);}})();
     send({ok:true});return true}
   if(m?.type==='GET_ENDPOINT_KEYS'){state().then(s=>send({ok:true,keys:Object.keys(s.endpointData||{})})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='WAREHOUSE_COST_DETAIL'){saveWarehouseCostDetail(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}

@@ -1,3 +1,7 @@
+2.5.407 — 2026-10-31 — Faster game-page cards; dashboard no longer rebuilds while you edit
+- My listings and Outgoing contracts update ~1 s after the game confirms a listing, sale action or contract (background re-reads both after any game action); both cards also check every 15 s while the tab is visible (listings was 60 s, contracts never). Outgoing contracts are read through the game tab into a small key scmOutgoingContracts:<realm>; the card follows it and skips the large realm store while it is under 60 s old.
+- Dashboard: background/storage refreshes no longer rebuild a page while you are typing or within 2 s of an edit; they run once editing ends. Production: the run-time input no longer repaints on every keystroke (saves on change/blur/Enter), and the save's echo no longer repaints the planner.
+
 2.5.406 — 2026-10-30 — Test suite brought up to date (no app change)
 - Version checks in the tests accept this version or newer instead of pinning one number.
 - Tests that checked removed or changed code (executives sync target, Exchange badge and VWAP compare, tab order, card minimise list, timers, storage keys) now check the current code.

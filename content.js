@@ -1753,16 +1753,18 @@ function scmPageTextNoLayout(){
     document.addEventListener('visibilitychange',()=>{if(!document.hidden&&L.open){request(true);tickAgo();}});
     // the game re-announces its realm on every state update; act only on a real change
     window.addEventListener('scm-game-realm-change',()=>{const r=currentRealm();if(r===L.realm)return;L.realm=r;L.data=null;L.seq++;paint();request(true);});
-    const start=()=>{if(L.started||!isSimCompaniesPage())return;L.started=true;L.realm=currentRealm();paint();request(true);L.agoTimer=setInterval(tickAgo,30000);L.refreshTimer=setInterval(()=>{if(!document.hidden&&L.open)request(true);},60000);};
+    const start=()=>{if(L.started||!isSimCompaniesPage())return;L.started=true;L.realm=currentRealm();paint();request(true);L.agoTimer=setInterval(tickAgo,30000);L.refreshTimer=setInterval(()=>{if(!document.hidden&&L.open)request(true);},15000);};
     return {start,render,request,style:lstyle};
   })();
   if(document.readyState!=='loading')Listings.start();else document.addEventListener('DOMContentLoaded',()=>Listings.start(),{once:true});
   // "Outgoing contracts" card: its own card, pill and saved position, beside (not inside) My listings. Shows the game's
-  // outgoing contracts as last captured for this realm (background GET_OUTGOING_CONTRACTS_DATA). It fetches nothing:
-  // "captured X ago" says how old the capture is. Reads the capture when it opens, when the tab becomes visible and on realm change (no timer: the realm store is large).
+  // outgoing contracts for this realm (background GET_OUTGOING_CONTRACTS_DATA): the game's own capture or the
+  // Manager's read through the game tab (scmOutgoingContracts:<realm>), whichever is newer. It asks for a read when it
+  // opens, every 15 s while visible and when the tab becomes visible; a game action reads at once (background); it
+  // follows the small key through chrome.storage.onChanged. "captured X ago" says how old the data is.
   const Contracts=(()=>{
     const CARD='scm-contracts-card',PILL='scm-contracts-pill',OPEN_KEY='scm-contracts-card-v1';
-    const C={open:true,data:null,realm:null,sig:'',seq:0,agoTimer:0,started:false,noClickUntil:0};
+    const C={open:true,data:null,realm:null,sig:'',seq:0,changeTimer:0,agoTimer:0,refreshTimer:0,started:false,noClickUntil:0};
     try{const v=JSON.parse(localStorage.getItem(OPEN_KEY)||'null');if(v&&typeof v.open==='boolean')C.open=v.open;}catch{}
     const saveOpen=()=>{try{localStorage.setItem(OPEN_KEY,JSON.stringify({open:C.open}));}catch{}};
     const readPos=id=>{try{const v=JSON.parse(localStorage.getItem('scmCardPos:'+id)||'null');return v&&Number.isFinite(v.x)&&Number.isFinite(v.y)?v:null;}catch{return null;}};
@@ -1792,19 +1794,22 @@ function scmPageTextNoLayout(){
       card.innerHTML=`<div class="scm-ls-head"><span class="scm-ls-grip" aria-hidden="true">⠿</span><span class="scm-ls-title">${esc(title)}</span><button type="button" class="scm-ls-close" aria-label="Close my outgoing contracts">×</button></div>${body}`;
       applyMin(card);placeSaved(card);
     };
-    const signature=d=>JSON.stringify([currentRealm(),d?.realm,d?.at,d?.missing,(d?.rows||[]).map(r=>[r.id,r.kind,r.quality,r.quantity,r.price])]);
-    const paint=()=>{const s=signature(C.data)+C.open;const have=document.getElementById(C.open?CARD:PILL);if(s===C.sig&&have)return;C.sig=s;render();};
-    const request=()=>{
+    // `at` is left out of the signature: a read with the same contracts only updates the "captured X ago" text
+    const signature=d=>JSON.stringify([currentRealm(),d?.realm,d?.missing,(d?.rows||[]).map(r=>[r.id,r.kind,r.quality,r.quantity,r.price])]);
+    const paint=()=>{const s=signature(C.data)+C.open;const have=document.getElementById(C.open?CARD:PILL);
+      if(s===C.sig&&have){const el=C.open&&C.data&&have.querySelector('.scm-ls-ago');if(el)el.textContent=ago(C.data.at);return;}
+      C.sig=s;render();};
+    const request=(refresh=false)=>{
       if(!C.open)return;
       const realm=currentRealm();if(realm==null){paint();return;}
       const seq=++C.seq;
-      try{chrome.runtime.sendMessage({type:'GET_OUTGOING_CONTRACTS_DATA',realm},r=>{
+      try{chrome.runtime.sendMessage({type:'GET_OUTGOING_CONTRACTS_DATA',realm,refresh},r=>{
         if(chrome.runtime.lastError||seq!==C.seq||currentRealm()!==realm||!r?.ok||Number(r.realm)!==realm)return;
         C.data=r;paint();
       });}catch{}
     };
     const tickAgo=()=>{if(document.hidden||!C.open)return;const el=document.querySelector('#scm-contracts-card .scm-ls-ago');if(el&&C.data)el.textContent=ago(C.data.at);if(!document.getElementById(CARD))paint();};
-    const setOpen=open=>{C.open=open;saveOpen();C.sig='';paint();if(open)request();};
+    const setOpen=open=>{C.open=open;saveOpen();C.sig='';paint();if(open)request(true);};
     // drag (card header / pill), clamped; a tap on the pill reopens the card
     let drag=null;
     document.addEventListener('pointerdown',e=>{
@@ -1823,10 +1828,14 @@ function scmPageTextNoLayout(){
       if(e.target.closest?.('#scm-contracts-pill')){e.preventDefault();e.stopPropagation();setOpen(true);}
     },true);
     window.addEventListener('resize',()=>{placeSaved(document.getElementById(CARD));placeSaved(document.getElementById(PILL));},{passive:true});
-    document.addEventListener('visibilitychange',()=>{if(!document.hidden&&C.open){request();tickAgo();}});
+    chrome.storage?.onChanged?.addListener((changes,area)=>{
+      const realm=currentRealm();if(area!=='local'||realm==null||!changes[`scmOutgoingContracts:${realm}`]||!C.open)return;
+      clearTimeout(C.changeTimer);C.changeTimer=setTimeout(()=>request(false),300);
+    });
+    document.addEventListener('visibilitychange',()=>{if(!document.hidden&&C.open){request(true);tickAgo();}});
     // the game re-announces its realm on every state update; act only on a real change
-    window.addEventListener('scm-game-realm-change',()=>{const r=currentRealm();if(r===C.realm)return;C.realm=r;C.data=null;C.seq++;paint();request();});
-    const start=()=>{if(C.started||!isSimCompaniesPage())return;C.started=true;C.realm=currentRealm();paint();request();C.agoTimer=setInterval(tickAgo,30000);};
+    window.addEventListener('scm-game-realm-change',()=>{const r=currentRealm();if(r===C.realm)return;C.realm=r;C.data=null;C.seq++;paint();request(true);});
+    const start=()=>{if(C.started||!isSimCompaniesPage())return;C.started=true;C.realm=currentRealm();paint();request(true);C.agoTimer=setInterval(tickAgo,30000);C.refreshTimer=setInterval(()=>{if(!document.hidden&&C.open)request(true);},15000);};
     return {start};
   })();
   if(document.readyState!=='loading')Contracts.start();else document.addEventListener('DOMContentLoaded',()=>Contracts.start(),{once:true});
