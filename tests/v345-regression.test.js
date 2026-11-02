@@ -4,7 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/\r\n/g, '\n'); // CRLF checkouts (core.autocrlf) read as LF
 const C = require('../tools-core.js');
 require('../planner-core.js'); const P = globalThis.SCMPlannerCore;
 const manifest = JSON.parse(read('manifest.json'));

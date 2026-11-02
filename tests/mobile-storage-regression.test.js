@@ -1,7 +1,7 @@
 'use strict';
 // v2.5.327: resource images are kept out of the realm store; mobile layout rules exist.
 const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const vm=require('node:vm');
-const root=path.join(__dirname,'..');const bg=fs.readFileSync(path.join(root,'background.js'),'utf8');
+const root=path.join(__dirname,'..');const bg=fs.readFileSync(path.join(root,'background.js'),'utf8').replace(/\r\n/g,'\n');
 const a=bg.indexOf("const RESOURCE_IMAGES_KEY='scmResourceImages';"),b=bg.indexOf('async function moveResourceImagesOutOfRealmStores(');
 assert.ok(a>0&&b>a,'image routing block present');
 const J=v=>JSON.parse(JSON.stringify(v));
@@ -28,19 +28,19 @@ const J=v=>JSON.parse(JSON.stringify(v));
   assert.match(bg,/moveResourceImagesOutOfRealmStores\(\)\.catch/,'existing stores are migrated at startup');
   assert.match(bg,/const local=file\?'':/,'overlay uses the game image URL instead of embedding base64');
   assert.match(bg,/stripOverlayEmbeddedImages/,'older stored overlay snapshots are stripped before sending');
-  const dash=fs.readFileSync(path.join(root,'dashboard.js'),'utf8');
+  const dash=fs.readFileSync(path.join(root,'dashboard.js'),'utf8').replace(/\r\n/g,'\n');
   assert.match(dash,/result\.resourceImageCache=\{\.\.\.\(result\.resourceImageCache\|\|\{\}\),\.\.\.imgs\}/,'dashboard reads images from their own key');
-  const css=fs.readFileSync(path.join(root,'styles.css'),'utf8'),html=fs.readFileSync(path.join(root,'dashboard.html'),'utf8');
+  const css=fs.readFileSync(path.join(root,'styles.css'),'utf8').replace(/\r\n/g,'\n'),html=fs.readFileSync(path.join(root,'dashboard.html'),'utf8').replace(/\r\n/g,'\n');
   assert.match(css,/html\.scm-mobile \.shell>nav\{position:sticky/,'sticky one-row tab bar on phones');
   assert.match(css,/html\.scm-mobile table\.mobile-cards td::before\{content:attr\(data-label\)/,'tables become cards on phones');
   assert.match(html,/<table class="warehouse-table mobile-cards">/);
-  const content=fs.readFileSync(path.join(root,'content.js'),'utf8');
+  const content=fs.readFileSync(path.join(root,'content.js'),'utf8').replace(/\r\n/g,'\n');
   assert.match(content,/S\.refreshTimer=setInterval\(\(\)=>\{if\(!document\.hidden\)load\(\);\},10000\)/,'overlay polling pauses in hidden tabs');
   console.log('mobile-storage-regression: all assertions passed');
 })().catch(e=>{console.error(e);process.exit(1);});
 // v2.5.327 (continued): overlay rebuilds on data change, snapshot memo, job history key, card tables.
 {
-  const bg2=fs.readFileSync(path.join(root,'background.js'),'utf8'),dash2=fs.readFileSync(path.join(root,'dashboard.js'),'utf8');
+  const bg2=fs.readFileSync(path.join(root,'background.js'),'utf8').replace(/\r\n/g,'\n'),dash2=fs.readFileSync(path.join(root,'dashboard.js'),'utf8').replace(/\r\n/g,'\n');
   assert.match(bg2,/const GAME_OVERLAY_REFRESH_MS=30000;/,'timed overlay rebuild every 30 s (was 5 s, i.e. every 10 s poll)');
   assert.match(bg2,/if\(gameOverlayDirty\.has\(realm\)\|\|Date\.now\(\)-lastRefresh>=GAME_OVERLAY_REFRESH_MS\)/,'data changes trigger an immediate rebuild');
   assert.match(bg2,/function scheduleGameOverlayRefreshNotification\(realm,delayMs=650,\{markDirty=true\}=\{\}\)\{\n  const n=validRealmNumber\(realm\); if\(n==null\)return;\n  if\(markDirty\)gameOverlayDirty\.add\(n\);/,'every data-save notification marks the overlay dirty');

@@ -2,9 +2,9 @@
 // vm with a fake chrome.storage; the rest are source checks in the style of the other regression tests.
 const assert = require('assert'), fs = require('fs'), path = require('path'), vm = require('vm');
 const root = path.join(__dirname, '..');
-const bg = fs.readFileSync(path.join(root, 'background.js'), 'utf8');
-const content = fs.readFileSync(path.join(root, 'content.js'), 'utf8');
-const hook = fs.readFileSync(path.join(root, 'page-hook.js'), 'utf8');
+const bg = fs.readFileSync(path.join(root, 'background.js'), 'utf8').replace(/\r\n/g, '\n');
+const content = fs.readFileSync(path.join(root, 'content.js'), 'utf8').replace(/\r\n/g, '\n');
+const hook = fs.readFileSync(path.join(root, 'page-hook.js'), 'utf8').replace(/\r\n/g, '\n');
 const slice = (src, start, end) => { const i = src.indexOf(start); assert.ok(i >= 0, 'missing ' + start); const j = src.indexOf(end, i + start.length); assert.ok(j > i, 'missing end ' + end); return src.slice(i, j); };
 const J = v => JSON.parse(JSON.stringify(v));
 

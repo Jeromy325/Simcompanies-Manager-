@@ -228,3 +228,6 @@ Use the log to compare tokens per finished task and first-try pass rate by role.
 | 2026-11-01 | Contract surplus: "Left" contracts use stock after demand, not production | UI | Sonnet 5.5 | ~92.5k | 14 | New test passes; 80/84 Node (4 pre-existing failures) | Yes |
 | 2026-11-01 | Verify left-contract fix vs clean 2.5.407 baseline | Verifier | Haiku 5.5 | ~88.6k | 5 | No new failures; same 4 fail on baseline | Yes |
 | 2026-11-01 | Release 2.5.408 | Release | Haiku 5.5 | ~82.7k | 7 | Version + changelog | Yes |
+| 2026-11-01 | Fix 4 failing tests (CRLF checkouts, not a code regression) | Integration | Opus 5.5 | ~111k | 21 | 84/84 Node | Yes |
+| 2026-11-01 | Verify test fixes | Verifier | Haiku 5.5 | ~82.1k | 4 | 84/84 Node, e2e not run | Yes |
+| 2026-11-01 | Release 2.5.409 | Release | Haiku 5.5 | ~86.3k | 11 | Version + changelog | Yes |

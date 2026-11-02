@@ -1,3 +1,7 @@
+2.5.409 — 2026-11-01 — Tests pass on Windows (CRLF) checkouts
+- Four source-text tests (integration-reliability-lag-regression, market-pricing-regression, mobile-storage-regression, v345-regression) failed on checkouts with Windows line endings (core.autocrlf=true) because they search for text containing "\n". They now convert CRLF to LF when reading source files. No assertion was removed or weakened; no app code changed.
+- Tests: 84/84 Node tests pass. e2e not run.
+
 2.5.408 — 2026-11-01 — Contract surplus "Left" uses only stock left after demand
 - Contract page, "Surplus After Demand & Contracts" card: a saved outgoing contract set to "Left" now takes only the stock left after production demand (warehouse + saved incoming − demand − other outgoing contracts). It no longer adds the upcoming production run. Example: Chemicals Q3 with 19,271 in the warehouse and 18,035 demand now shows Contracts (net) 1,236 and Left Over 0, instead of 34,020.452.
 - Files: dashboard.js (contractSurplusAfterOutgoing). New test: tests/contract-surplus-left-stock.test.js.
