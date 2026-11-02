@@ -1,3 +1,8 @@
+2.5.410 — 2026-11-02 — Executives trainings from Sync
+- Executives tab: each executive's trainings done now come from the game's trainings-count data captured by Sync (matched by executive id). The manual Done entry is removed; if Sync has not captured a count, the cell shows —.
+- Files: dashboard.js (renderBoardRoom, planner hint text), styles.css (removed unused .exec-done), tests/exec-trainings-walk.test.js (new), tests/e2e/executives-tab.e2e.js (dropped the typed-Done step). Version: manifest.json.
+- Tests: exec-trainings-walk, sync-executives-walk, v374-regression pass. e2e not run.
+
 2.5.409 — 2026-11-01 — Tests pass on Windows (CRLF) checkouts
 - Four source-text tests (integration-reliability-lag-regression, market-pricing-regression, mobile-storage-regression, v345-regression) failed on checkouts with Windows line endings (core.autocrlf=true) because they search for text containing "\n". They now convert CRLF to LF when reading source files. No assertion was removed or weakened; no app code changed.
 - Tests: 84/84 Node tests pass. e2e not run.

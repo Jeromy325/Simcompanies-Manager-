@@ -2686,7 +2686,7 @@ function plannerGameAdmin(s){
 // v2.5.374 Executives tab: roster cards, Team Impact (game admin formula), COO ROI, training planner, apprentice vs main.
 // Salaries are $/day (confirmed by the user against the game's Salaries line); training cost and skill gain per session are user inputs (not from the game's API).
 const EXEC_PLAN_KEY='scmExecPlanner',EXEC_MAX_TRAININGS=20;
-function execPlanSettings(){try{const v=JSON.parse(localStorage.getItem(EXEC_PLAN_KEY)||'{}');return {cost:v.cost??10000,gain:v.gain??1.5,done:v.done&&typeof v.done==='object'?v.done:{}};}catch{return {cost:10000,gain:1.5,done:{}};}}
+function execPlanSettings(){try{const v=JSON.parse(localStorage.getItem(EXEC_PLAN_KEY)||'{}');return {cost:v.cost??10000,gain:v.gain??1.5};}catch{return {cost:10000,gain:1.5};}}
 // v2.5.376 Executives charts: inline SVG, no library. Colour follows the role (validated dark categorical slots 1–5
 // on the panel surface #121b25), one y-axis per chart, 2px lines, hover crosshair + tooltip, legend + direct labels.
 const EXEC_COLOR={o:'#3987e5',v:'#d95926',f:'#199e70',m:'#c98500',t:'#d55181'};
@@ -2745,8 +2745,10 @@ function renderBoardRoom(s){
   const base=Number(ep['/api/v2/companies/me/administration-overhead/']?.data);
   const blds=buildingArrayFromState(s).map(b=>({kind:String(pick(b,['kind','buildingKind','type'])??''),level:Number(pick(b,['level','lvl','buildingLevel','size']))||1,size:b?.size,position:b?.position,purchasedRecently:b?.purchasedRecently,robotsSpecialization:Boolean(b?.robotsSpecialization),busy:b?.busy||null}));
   const st=execPlanSettings();
-  // Trainings count isn't in the captured data on every account: fall back to the number the user typed (Done column).
-  const roster=C.executiveRoster(ex,{now,trainS,settleS}).map(r=>r.trainings==null&&st.done[String(r.id)]!=null&&st.done[String(r.id)]!==''?{...r,trainings:Number(st.done[String(r.id)]),typed:true}:r),suite=roster.filter(r=>!r.staff);
+  // Trainings done come from the walk-captured trainings-count endpoint of the same company, matched by executive id.
+  const companyId=exKey.match(/^\/api\/v3\/companies\/(\d+)\/executives\/$/)[1],tc=ep[`/api/v3/companies/${companyId}/executives/trainings-count/`]?.data?.trainingsCount;
+  const tcOf=id=>{const v=tc?.[String(id)];return v!=null&&Number.isFinite(Number(v))?Number(v):null;};
+  const roster=C.executiveRoster(ex,{now,trainS,settleS}).map(r=>({...r,trainings:tcOf(r.id)})),suite=roster.filter(r=>!r.staff);
   const args={base,executives:ex,buildings:blds,now,trainS,settleS};
   const ga=C.effectiveAdminOverhead(args);
   const labour=C.dailyBaseLabour(s?.gameConstants,blds);
@@ -2767,9 +2769,8 @@ function renderBoardRoom(s){
   const plan=suite.map(r=>{const left=r.trainings!=null?Math.max(0,EXEC_MAX_TRAININGS-r.trainings):null;const add=left!=null?left*Number(st.gain||0):null;
     const after=add!=null&&ga?C.executiveAdminWhatIf({...args,edit:e=>(String(e.id)===String(r.id)&&e.currentWorkHistory?.position===r.position?(e.skills={...e.skills,coo:(Number(e.skills?.coo)||0)+add},e):e)}):null;
     const gain=after&&labour>0?labour*(ga.pct-after.pct)/100:null,cost=left!=null?left*Number(st.cost||0):null;
-    const done=r.trainings!=null&&!r.typed?num(r.trainings):`<input class="exec-done" data-exec-done="${escapeHtml(String(r.id))}" type="number" min="0" max="${EXEC_MAX_TRAININGS}" inputmode="numeric" placeholder="?" value="${r.typed?escapeHtml(r.trainings):''}">`;
-    return `<tr><td>${escapeHtml(r.role)}<small>${escapeHtml(r.name||'')}</small></td><td>${done}</td><td>${left==null?'—':num(left)}</td><td>${cost==null?'—':plannerMoney(cost)}</td><td>${add==null?'—':`+${num(+add.toFixed(1))} → ${num(+(r.skills[own[r.position]]+add).toFixed(1))}`}</td><td>${after?pct(after.pct):'—'}</td><td>${gain==null?'—':plannerMoney(gain)}</td><td>${gain>0&&cost>0?`${num(+(cost/gain).toFixed(1))} d`:left===0?'maxed':'—'}</td></tr>`;}).join('');
-  const planHtml=`<div class="planner-profit-controls"><label>Cost / training $<input id="execCost" type="number" step="any" inputmode="decimal" value="${escapeHtml(st.cost)}"></label><label>Skill gain / training<input id="execGain" type="number" step="any" inputmode="decimal" value="${escapeHtml(st.gain)}"></label></div><div class="pp-hint">Training time ${Number(trainS)>0?`${num(+(trainS/3600).toFixed(1))} h (game)`:'— (open the game)'} · max ${EXEC_MAX_TRAININGS} trainings · gain is added to own skill; admin effect assumes it lands on COO.${suite.some(r=>r.trainings==null||r.typed)?' <b>Trainings done isn’t in the game data the Manager captured — type each exec’s count (the “X trainings” number in the game’s Board Room) in Done.</b>':''}</div><div class="table-wrap"><table class="exec-plan"><thead><tr><th>Exec</th><th>Done</th><th>Left</th><th>Cost</th><th>Skill</th><th>Admin after</th><th>Saved / day</th><th>Payback</th></tr></thead><tbody>${plan}</tbody></table></div>`;
+    return `<tr><td>${escapeHtml(r.role)}<small>${escapeHtml(r.name||'')}</small></td><td>${r.trainings!=null?num(r.trainings):'—'}</td><td>${left==null?'—':num(left)}</td><td>${cost==null?'—':plannerMoney(cost)}</td><td>${add==null?'—':`+${num(+add.toFixed(1))} → ${num(+(r.skills[own[r.position]]+add).toFixed(1))}`}</td><td>${after?pct(after.pct):'—'}</td><td>${gain==null?'—':plannerMoney(gain)}</td><td>${gain>0&&cost>0?`${num(+(cost/gain).toFixed(1))} d`:left===0?'maxed':'—'}</td></tr>`;}).join('');
+  const planHtml=`<div class="planner-profit-controls"><label>Cost / training $<input id="execCost" type="number" step="any" inputmode="decimal" value="${escapeHtml(st.cost)}"></label><label>Skill gain / training<input id="execGain" type="number" step="any" inputmode="decimal" value="${escapeHtml(st.gain)}"></label></div><div class="pp-hint">Training time ${Number(trainS)>0?`${num(+(trainS/3600).toFixed(1))} h (game)`:'— (open the game)'} · max ${EXEC_MAX_TRAININGS} trainings · gain is added to own skill; admin effect assumes it lands on COO.${suite.some(r=>r.trainings==null)?' <b>Trainings done isn’t in the captured data yet — run Sync with the game open to capture it.</b>':''}</div><div class="table-wrap"><table class="exec-plan"><thead><tr><th>Exec</th><th>Done</th><th>Left</th><th>Cost</th><th>Skill</th><th>Admin after</th><th>Saved / day</th><th>Payback</th></tr></thead><tbody>${plan}</tbody></table></div>`;
   // Apprentice vs main
   const main=roster.find(r=>r.position==='o'),app=roster.find(r=>r.position==='v');
   const leave=ga&&main?C.executiveAdminWhatIf({...args,edit:e=>e.currentWorkHistory?.position==='o'?null:e}):null;
@@ -2787,7 +2788,7 @@ function renderBoardRoom(s){
   const dim=r=>{let x=Math.floor(r);if(x>80)x=80+(x-80)/2;if(x>60)x=60+(x-60)/2;return Math.floor(x);};
   const curve=ga?`<h4 class="ec-title">Admin overhead vs COO points</h4>${execLineChart('aoCurve',{xLabel:'COO points',series:[{name:'Admin overhead',color:EXEC_COLOR.o,points:Array.from({length:101},(_,i)=>[i,ga.basePct*(1-dim(i)/100)])}],markers:[promote&&{x:promote.coo,y:promote.pct,label:`${first(app?.name)} ${pct(promote.pct)}`,color:EXEC_COLOR.v},leave&&{x:leave.coo,y:leave.pct,label:`None ${pct(leave.pct)}`,color:'#91a0b2'},{x:ga.coo,y:ga.pct,label:`Today ${pct(ga.pct)}`,color:EXEC_COLOR.o}].filter(Boolean)})}<div class="pp-hint">Each COO point cuts ${(ga.basePct/100).toFixed(2)}% off admin. Past 60 points each point counts half, past 80 a quarter.</div>`:'';
   const proj=ga?suite.filter(r=>r.trainings!=null&&r.trainings<EXEC_MAX_TRAININGS&&EXEC_COLOR[r.position]).map(r=>{const left=EXEC_MAX_TRAININGS-r.trainings;return {name:first(r.name),color:EXEC_COLOR[r.position],points:Array.from({length:left+1},(_,k)=>{const a=C.executiveAdminWhatIf({...args,edit:e=>(String(e.id)===String(r.id)&&e.currentWorkHistory?.position===r.position&&(e.skills={...e.skills,coo:(Number(e.skills?.coo)||0)+k*Number(st.gain||0)}),e)});return [k,a?a.pct:ga.pct];})};}):[];
-  const projHtml=ga?(proj.length?`<h4 class="ec-title">Admin overhead as each exec trains</h4>${execLineChart('trainProj',{xLabel:'Trainings from now',series:proj})}`:`<div class="pp-hint">${suite.some(r=>r.trainings==null)?'Type trainings in Done to see the projection chart.':'Everyone is at 20 trainings — nothing left to project.'}</div>`):'';
+  const projHtml=ga?(proj.length?`<h4 class="ec-title">Admin overhead as each exec trains</h4>${execLineChart('trainProj',{xLabel:'Trainings from now',series:proj})}`:`<div class="pp-hint">${suite.some(r=>r.trainings==null)?'Run Sync to capture trainings done and see the projection chart.':'Everyone is at 20 trainings — nothing left to project.'}</div>`):'';
   const at=ep[exKey]?.receivedAt;
   el.innerHTML=`<div class="exec-grid">${roster.map(card).join('')}</div>${at?`<div class="pp-hint">Captured ${escapeHtml(new Date(at).toLocaleString())}</div>`:''}
 <div class="exec-panels"><div class="panel"><h3>Team impact</h3>${impact}${cooPie}${salPie}</div><div class="panel"><h3>COO ROI / break-even</h3>${roiHtml}</div><div class="panel"><h3>Training planner</h3>${planHtml}${projHtml}</div><div class="panel"><h3>If your COO leaves</h3>${appHtml}${curve}</div></div>`;
@@ -2795,7 +2796,6 @@ function renderBoardRoom(s){
   const save=(k,v)=>{const c=execPlanSettings();c[k]=v;try{localStorage.setItem(EXEC_PLAN_KEY,JSON.stringify(c));}catch{}renderBoardRoom(s);};
   el.querySelector('#execCost')?.addEventListener('change',e=>save('cost',e.target.value));
   el.querySelector('#execGain')?.addEventListener('change',e=>save('gain',e.target.value));
-  el.querySelectorAll('[data-exec-done]').forEach(i=>i.addEventListener('change',e=>{const c=execPlanSettings(),v=e.target.value;c.done={...c.done,[e.target.dataset.execDone]:v===''?'':Math.max(0,Math.min(EXEC_MAX_TRAININGS,Math.round(Number(v))||0))};try{localStorage.setItem(EXEC_PLAN_KEY,JSON.stringify(c));}catch{}renderBoardRoom(s);}));
 }
 function renderPlannerProfit(host){
   const ctx=host.__plannerProfitCtx,el=host.querySelector('#plannerProfit'),C=globalThis.SCM_TOOLS_CORE;

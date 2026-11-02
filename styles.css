@@ -1360,7 +1360,6 @@ html.scm-mobile .contract-table.saved-contract-table.mobile-cards:not(.contract-
 .exec-panels .panel{min-width:0}
 .exec-plan td small{display:block;color:var(--muted)}
 @media (max-width:420px){.exec-grid,.exec-panels{grid-template-columns:1fr}}
-.exec-done{width:52px;padding:4px 6px}
 /* v2.5.376 Executives charts */
 .ec-title{margin:16px 0 4px;font-size:13px;font-weight:600;color:#e8edf3}
 .ec-wrap{position:relative}
