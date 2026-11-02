@@ -1,3 +1,8 @@
+2.5.408 — 2026-11-01 — Contract surplus "Left" uses only stock left after demand
+- Contract page, "Surplus After Demand & Contracts" card: a saved outgoing contract set to "Left" now takes only the stock left after production demand (warehouse + saved incoming − demand − other outgoing contracts). It no longer adds the upcoming production run. Example: Chemicals Q3 with 19,271 in the warehouse and 18,035 demand now shows Contracts (net) 1,236 and Left Over 0, instead of 34,020.452.
+- Files: dashboard.js (contractSurplusAfterOutgoing). New test: tests/contract-surplus-left-stock.test.js.
+- Tests: 80/84 Node tests pass. The 4 failures (integration-reliability-lag-regression, market-pricing-regression, mobile-storage-regression, v345-regression) already fail the same way on 2.5.407 and are not caused by this change. e2e not run.
+
 2.5.407 — 2026-10-31 — Faster game-page cards; dashboard no longer rebuilds while you edit
 - My listings and Outgoing contracts update ~1 s after the game confirms a listing, sale action or contract (background re-reads both after any game action); both cards also check every 15 s while the tab is visible (listings was 60 s, contracts never). Outgoing contracts are read through the game tab into a small key scmOutgoingContracts:<realm>; the card follows it and skips the large realm store while it is under 60 s old.
 - Dashboard: background/storage refreshes no longer rebuild a page while you are typing or within 2 s of an edit; they run once editing ends. Production: the run-time input no longer repaints on every keystroke (saves on change/blur/Enter), and the save's echo no longer repaints the planner.

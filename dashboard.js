@@ -4083,7 +4083,8 @@ function contractSurplusAfterOutgoing(s, owned, recipes, rates){
     for(const item of leftCandidates){
       const key=`${item.id}:${item.quality}`;if(assigned.has(key))continue;
       const base=coreRows.find(r=>Number(r.id)===item.id);
-      const amount=Math.max(0,Number(base?.leftover)||0);
+      // Left-mode contracts use stock after demand (plus incoming), not upcoming production.
+      const amount=Math.max(0,(Number(base?.warehouse)||0)+(Number(base?.incoming)||0)-(Number(base?.demand)||0)-(Number(base?.contracted)||0));
       if(amount>0){additions.push({id:item.id,quality:item.quality,amount});assigned.add(key);}
     }
     if(additions.length)coreRows=calcCore([...contractRows,...additions]);

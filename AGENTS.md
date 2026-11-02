@@ -225,3 +225,6 @@ Use the log to compare tokens per finished task and first-try pass rate by role.
 | 2026-10-31 | Update overlay test + skip large store read when fresh | Integration | Opus 5.5 | ~109k | 28 | 82/82 Node | Yes (2 rounds: 2nd was a lead review request) |
 | 2026-10-31 | Dashboard: no rebuild while editing, Production run time | UI | Sonnet 5.5 | ~110k | 26 | 83/83 Node; lead review found broken regex, fixed in round 2 | No |
 | 2026-10-31 | Verify merged build + release 2.5.407 | Verifier/Release | Haiku 5.5 | ~87k | 16 | 83/83 Node, e2e not run | Yes |
+| 2026-11-01 | Contract surplus: "Left" contracts use stock after demand, not production | UI | Sonnet 5.5 | ~92.5k | 14 | New test passes; 80/84 Node (4 pre-existing failures) | Yes |
+| 2026-11-01 | Verify left-contract fix vs clean 2.5.407 baseline | Verifier | Haiku 5.5 | ~88.6k | 5 | No new failures; same 4 fail on baseline | Yes |
+| 2026-11-01 | Release 2.5.408 | Release | Haiku 5.5 | ~82.7k | 7 | Version + changelog | Yes |
