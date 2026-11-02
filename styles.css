@@ -1349,8 +1349,10 @@ html.scm-mobile .contract-table.saved-contract-table.mobile-cards:not(.contract-
 .exec-card.staff{opacity:.75}
 .exec-head{display:flex;justify-content:space-between;gap:8px;align-items:baseline;flex-wrap:wrap}
 .exec-head small{color:var(--muted)}
-.exec-skills{margin:8px 0;display:grid;gap:4px}
-.exec-skill{display:grid;grid-template-columns:38px 1fr 28px;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+.exec-skills{margin:8px 0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+@media (min-width:800px){.exec-skills{grid-template-columns:repeat(4,minmax(0,1fr))}}
+.exec-skill{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"l v" "bar bar";align-items:center;gap:4px 6px;min-width:0;box-sizing:border-box;font-size:12px;color:var(--muted)}
+.exec-skill span{grid-area:l;min-width:0}.exec-skill b{grid-area:v}.exec-skill i{grid-area:bar;max-width:100%}
 .exec-skill i{display:block;height:8px;border-radius:4px;background:#3f7a3a;min-width:2px}
 .exec-skill b{text-align:right;color:#e8edf3}
 .exec-skill.own i{background:#6fbf5a}.exec-skill.own span,.exec-skill.own b{color:#9fe08a}
@@ -1723,3 +1725,130 @@ html.scm-mobile .warehouse-table.mobile-cards td{border-bottom:0}
 /* Analyze: use the shared accent instead of its own teal */
 .lu-dot.on::after{will-change:opacity,transform}
 @media (prefers-reduced-motion:reduce){.lu-dot.on::after{animation:none;opacity:0}}
+
+/* ================================================================
+   v3 FACE-LIFT (final layer). Calm neutral palette, one accent, flat surfaces.
+   Palette: bg #0f1216 / surface #161a20 #1c2128 #232932 / border #272d36 #374050
+   Text #e9ecf1 #a9b1bd #7d8696 / accent #5b9bf0 / pos #3fb37f neg #e0605e warn #d6a23f
+   Type: 12 / 13 / 14 / 16 / 20 / 24 px.  Spacing 4/8/12/16/24/32.  Radius 4 / 8.
+   ================================================================ */
+:root{
+  --bg:#0f1216; --surface-1:#161a20; --surface-2:#1c2128; --surface-3:#232932;
+  --border:#272d36; --border-strong:#374050;
+  --text:#e9ecf1; --text-2:#a9b1bd; --text-3:#7d8696;
+  --accent:#5b9bf0; --accent-text:#0b1220;
+  --pos:#3fb37f; --neg:#e0605e; --warn:#d6a23f;
+  --danger-bg:rgba(224,96,94,.10); --danger-border:rgba(224,96,94,.4);
+  --fs-xs:12px; --fs-sm:13px; --fs-base:14px; --fs-md:16px; --fs-lg:20px; --fs-xl:24px;
+  --r-sm:4px; --r-md:8px;
+  --shadow-1:none; --shadow-2:0 2px 8px rgba(0,0,0,.3);
+  --panel:var(--surface-1); --panel2:var(--surface-2); --line:var(--border); --muted:var(--text-2);
+  background:var(--bg);color:var(--text);
+}
+body{background:var(--bg);line-height:1.5}
+.shell{max-width:1280px;padding:var(--s5)}
+
+/* headings: one hierarchy */
+h2{font-size:var(--fs-xl);font-weight:600;letter-spacing:0}
+h3{font-size:var(--fs-md);font-weight:600}
+.section-head{margin:var(--s2) 0 var(--s4)}
+.section-head p,.muted{color:var(--text-2);opacity:1}
+small{color:var(--text-3);font-size:var(--fs-xs)}
+.eyebrow{letter-spacing:.06em;font-weight:600}
+
+/* header: plain bar, no logo glow */
+.topbar{background:transparent;border:0;border-bottom:1px solid var(--border);border-radius:0;padding:0 0 var(--s4);margin-bottom:var(--s3)}
+.company-logo-top{box-shadow:none;background:transparent;border:0}
+.company-meta span+span{border-left-color:var(--border-strong)}
+
+/* controls */
+button,.btn{font-weight:500;border-radius:var(--r-sm);background:var(--surface-2);border-color:var(--border-strong)}
+button:hover{border-color:var(--text-3);background:var(--surface-3)}
+button.primary,#sync{font-weight:600}
+button.primary:hover,#sync:hover{background:#7aaef4;border-color:#7aaef4}
+input,select,textarea{border-radius:var(--r-sm);background:var(--bg);border-color:var(--border-strong)}
+input:hover,select:hover,textarea:hover{border-color:var(--text-3)}
+label{color:var(--text-2);font-size:var(--fs-sm)}
+
+/* tabs */
+.tab{font-weight:500;color:var(--text-2)}
+.tab.active{color:var(--text);font-weight:600}
+
+/* surfaces: flat, single border, no gradients, no glows */
+.card,.panel,.hero,.statement-card,.finance-card,.overview-group,.overview-section,.planner-summary-card,.contract-card,.planner-main-card,.exec-card,.production-shell,.owned-building-card,.planner-quality-footer,.admin-grid>div,.market-stat,.price-preview,.market-chart,.acct-row{
+  background:var(--surface-1);background-image:none;border:1px solid var(--border);border-radius:var(--r-md);box-shadow:none}
+.panel .panel,.inset-panel,.accounting-subpanel,.statement-card,.finance-card,.acct-row,.market-stat,.owned-building-card{background:var(--surface-2)}
+.production-shell{background:var(--surface-1);padding:var(--s4)}
+.planner-quality-footer{background:var(--surface-2);border-color:var(--border-strong)}
+.owned-building-card{padding:var(--s3)}
+.owned-building-card.active,.owned-product-card.active{border-color:var(--accent);box-shadow:none;background:var(--surface-3)}
+.card strong{font-size:var(--fs-lg);font-weight:600}
+.card span,.hero span,.finance-card .finance-label{color:var(--text-2);font-size:var(--fs-sm)}
+.panel+.panel{margin-top:var(--s3)}
+
+/* accounting: scale the oversized header, indicators and arrows down */
+.accounting-title h2{font-size:var(--fs-xl);font-weight:600;letter-spacing:0;margin:0 0 var(--s2)}
+.accounting-title p{color:var(--text-2);font-size:var(--fs-base)}
+.accounting-period-badge{min-width:0;padding:var(--s2) var(--s3);border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-1);box-shadow:none}
+.accounting-period-badge strong{font-size:var(--fs-md);color:var(--text)}
+.accounting-period-badge span{font-size:var(--fs-sm);color:var(--text-2);margin-top:2px}
+.accounting-financial-panel{background:var(--surface-1);border-radius:var(--r-md);padding:var(--s4)}
+.accounting-live{height:36px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-2);font-size:var(--fs-sm);padding:0 var(--s3);gap:var(--s2);margin-bottom:var(--s3)}
+.accounting-live strong{font-size:var(--fs-xs);letter-spacing:.06em;color:var(--accent)}
+.accounting-live-dot{width:8px;height:8px;flex-basis:8px;background:var(--pos);box-shadow:none}
+.accounting-live-divider{width:1px;height:16px;background:var(--border-strong);opacity:1}
+.finance-card-grid{gap:var(--s3)}
+.finance-card{min-height:0;padding:var(--s4)}
+.finance-card .finance-value{font-size:var(--fs-lg);font-weight:600;color:var(--text)}
+.finance-change{min-height:0;gap:var(--s2);margin-top:var(--s2)}
+.finance-card .finance-change-arrow{font-size:var(--fs-lg);width:20px;flex:0 0 20px;line-height:1;font-weight:700}
+.finance-change-values strong{font-size:var(--fs-base);font-weight:600}
+.finance-change-values small{font-size:var(--fs-sm);font-weight:500;margin-top:2px}
+.finance-change.change-up .finance-change-arrow,.finance-change.change-up .finance-change-values strong,.finance-change.change-up .finance-change-values small,.acct-row-chg.change-up,.acct-row-trend.acct-good,.acct-stats b.acct-good,.change-up{color:var(--pos)}
+.finance-change.change-down .finance-change-arrow,.finance-change.change-down .finance-change-values strong,.finance-change.change-down .finance-change-values small,.acct-row-chg.change-down,.acct-row-trend.acct-bad,.acct-stats b.acct-bad,.change-down{color:var(--neg)}
+.positive,.market-stat .positive{color:var(--pos)}.negative,.market-stat .negative{color:var(--neg)}
+.acct-group-head{font-size:var(--fs-xs);letter-spacing:.06em;font-weight:600;color:var(--text-3)}
+.acct-row{padding:var(--s3) 44px var(--s3) var(--s3)}
+.acct-row-label{color:var(--text-2);font-size:var(--fs-sm)}
+.acct-row-val{font-size:var(--fs-md);font-weight:600;color:var(--text)}
+.acct-chart-open{border-color:var(--border-strong);background:var(--surface-1);border-radius:var(--r-sm)}
+.live-badge,.realm-view-status,.overview-realm-badge,.market-live-badge{border-radius:var(--r-pill);letter-spacing:0}
+.realm-view-status.live{color:var(--pos);border-color:rgba(63,179,127,.4)}
+.realm-view-status.saved{color:var(--warn);border-color:rgba(214,162,63,.4)}
+
+/* tables */
+th{font-weight:600;letter-spacing:.03em;color:var(--text-3);background:transparent}
+td{font-size:var(--fs-base)}
+tbody tr:hover td{background:var(--surface-2)}
+.panel .panel tbody tr:hover td{background:var(--surface-3)}
+.resource-icon{background:var(--surface-2);border-radius:var(--r-sm)}
+.warehouse-page .panel{background:var(--surface-1)}
+
+/* Executives */
+.exec-grid{gap:var(--s3)}
+.exec-card{padding:var(--s3) var(--s4);margin-bottom:0;background:var(--surface-1)}
+.exec-card.staff{opacity:.8}
+.exec-head{align-items:baseline;padding-bottom:var(--s2);margin-bottom:var(--s1);border-bottom:1px solid var(--border)}
+.exec-head strong{font-weight:600}
+.exec-head small{font-size:var(--fs-xs);color:var(--text-3)}
+.exec-skills{gap:var(--s2);margin:var(--s3) 0}
+.exec-skill{font-size:var(--fs-sm);color:var(--text-2)}
+.exec-skill i{height:4px;border-radius:2px;background:var(--border-strong)}
+.exec-skill b{color:var(--text);font-weight:600}
+.exec-skill.own i{background:var(--accent)}.exec-skill.own span,.exec-skill.own b{color:var(--accent)}
+.exec-foot{font-size:var(--fs-sm);color:var(--text-2)}
+.exec-status.training,.exec-status.settling-in{color:var(--warn)}.exec-status.on-strike{color:var(--neg)}
+.exec-panels{gap:var(--s3)}
+.ec-tip{box-shadow:var(--shadow-2);border-radius:var(--r-sm);background:var(--surface-2);border-color:var(--border-strong)}
+
+@media (max-width:800px){
+  .shell{padding:var(--s4)}
+  .finance-card{padding:var(--s3)}
+  .accounting-period-badge{width:100%;text-align:left}
+}
+@media (max-width:600px){
+  .shell{padding:var(--s3) var(--s4)}
+  h2{font-size:var(--fs-lg)}
+  .topbar{padding:0 0 var(--s3)}
+  .exec-card{padding:var(--s3)}
+}

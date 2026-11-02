@@ -1,3 +1,8 @@
+2.5.411 — 2026-11-02 — Dashboard face-lift: flatter, calmer, phone and desktop layout
+- Dashboard restyled: flat dark surfaces, one blue accent, smaller headers and numbers, no gradients or glows (styles.css, v3 face-lift block at the end of the file).
+- Executives skill chips fit the card on phone (2 columns) and desktop (4 columns).
+- Tests: exec-trainings-walk and sync-executives-walk pass. Browser check not run.
+
 2.5.410 — 2026-11-02 — Executives trainings from Sync
 - Executives tab: each executive's trainings done now come from the game's trainings-count data captured by Sync (matched by executive id). The manual Done entry is removed; if Sync has not captured a count, the cell shows —.
 - Files: dashboard.js (renderBoardRoom, planner hint text), styles.css (removed unused .exec-done), tests/exec-trainings-walk.test.js (new), tests/e2e/executives-tab.e2e.js (dropped the typed-Done step). Version: manifest.json.
