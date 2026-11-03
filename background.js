@@ -1817,6 +1817,7 @@ function foldHigherQualityStock(detailRows,producedKeys,keepKeys){
     const t=target&&byKey.get(`${id}:${target.q}`);
     if(!t)continue;
     for(const f of ['warehouse','produced','incoming','demand','contracted','leftover','warehouseOnlyLeft'])t[f]=(Number(t[f])||0)+(Number(r[f])||0);
+    if((Number(r.warehouse)||0)>0)t.substituteQualities=[...new Set([...(t.substituteQualities||[]),q])].sort((x,y)=>x-y);
     drop.add(r);
   }
   return out.filter(r=>!drop.has(r));

@@ -13,3 +13,9 @@ assert.equal(rows[0].warehouse,1202);assert.equal(rows[0].demand,1368);assert.eq
 const low=fold([{id:5,quality:1,warehouse:10,demand:0},{id:5,quality:2,warehouse:5,demand:0}],new Set(['5:2']),new Set());
 assert.equal(low.length,2);
 console.log('overlay-bought-quality-demand: passed');
+{const r2=core.balanceSupplyDemandContracts({warehouseRows:[{id:52,quality:2,amount:820},{id:52,quality:4,amount:382}],demandRows:[{id:52,minQuality:2,amount:1368}],includeQualityRows:true});
+const f=fold(r2.qualityRows,new Set(['52:2']),new Set());assert.deepEqual(f[0].substituteQualities,[4],'substitute quality flagged');
+const c=fs.readFileSync(path.join(__dirname,'..','content.js'),'utf8');
+assert.match(c,/scm-go-sub-neg':'scm-go-sub-pos'/,'row outlined red when short, green otherwise');
+assert.match(c,/\.scm-go-sub\{border:2px solid #5dcaa5\}.*\.scm-go-sub-neg\{border-color:#ff7b7b\}/);
+console.log('substitute outline: passed');}

@@ -1,3 +1,7 @@
+2.5.414 — 2026-11-02 — Stock overlay: outline rows that use a substitute quality
+- A row that includes higher-quality stock (e.g. Q2 engines plus bought Q4) gets a green outline, or red when Left is negative. Long-press/hover shows which qualities are included.
+- Files: background.js, content.js, tests/overlay-bought-quality-demand.test.js. Version: manifest.json.
+
 2.5.413 — 2026-11-02 — Stock overlay: higher-quality stock counts toward the produced quality
 - Replaces 2.5.412. Higher-quality stock you bought (e.g. Combustion engine Q4 when you make Q2) is added to the produced quality row: Warehouse counts all usable stock and Demand shows the full planned need. No separate row for the bought quality.
 - Files: background.js (foldHigherQualityStock), tests/overlay-bought-quality-demand.test.js. Version: manifest.json.
