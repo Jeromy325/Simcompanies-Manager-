@@ -1,14 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Sim Companies Manager",
-  "version": "2.5.416",
+  "version": "2.5.417",
   "description": "Sim Companies Manager, optimized for mobile: lighter background work, phone layouts, Tools tab and building-card profit.",
   "permissions": [
     "storage",
     "alarms",
     "tabs",
     "scripting",
-    "debugger",
     "unlimitedStorage",
     "notifications"
   ],
@@ -16,6 +15,9 @@
     "https://www.simcompanies.com/*",
     "https://simcompanies.com/*",
     "https://api.simcotools.com/*"
+  ],
+  "optional_permissions": [
+    "debugger"
   ],
   "optional_host_permissions": [
     "https://*/*"
