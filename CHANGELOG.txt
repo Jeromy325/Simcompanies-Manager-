@@ -1,3 +1,7 @@
+2.5.413 — 2026-11-02 — Stock overlay: higher-quality stock counts toward the produced quality
+- Replaces 2.5.412. Higher-quality stock you bought (e.g. Combustion engine Q4 when you make Q2) is added to the produced quality row: Warehouse counts all usable stock and Demand shows the full planned need. No separate row for the bought quality.
+- Files: background.js (foldHigherQualityStock), tests/overlay-bought-quality-demand.test.js. Version: manifest.json.
+
 2.5.412 — 2026-11-02 — Stock overlay: show bought quality that covers demand
 - Stock After Demand & Contracts now shows a bought quality (e.g. Combustion engine Q4) of a resource you produce when it covers part of planned demand. Before, that row was hidden, so the produced-quality row showed only part of the demand (986 of 1,368 engines).
 - Files: background.js, tests/overlay-bought-quality-demand.test.js. Version: manifest.json.

@@ -1805,6 +1805,24 @@ async function getRealmBuildingVwapData(realm,resourceName,quality){
   return {ok:true,realm:n,resourceId:id,resourceName:assets.names.get(String(id))||targetName,quality:Number.isFinite(q)?q:null,rows:rows.slice(0,12),selected:rows.find(r=>Number(r.quality)===q)||null,image:file?`${assets.imageBase}${file}`:''};
 }
 
+function foldHigherQualityStock(detailRows,producedKeys,keepKeys){
+  const out=detailRows.map(r=>({...r}));
+  const byKey=new Map(out.map(r=>[`${Number(r.id)}:${Number(r.quality)||0}`,r]));
+  const drop=new Set();
+  for(const r of out){
+    const id=Number(r.id),q=Number(r.quality)||0,key=`${id}:${q}`;
+    if(producedKeys.has(key)||keepKeys?.has?.(key))continue;
+    let target=null;
+    for(const k of producedKeys){const [i,pq]=k.split(':').map(Number);if(i===id&&pq<q&&(!target||pq>target.q))target={q:pq};}
+    const t=target&&byKey.get(`${id}:${target.q}`);
+    if(!t)continue;
+    for(const f of ['warehouse','produced','incoming','demand','contracted','leftover','warehouseOnlyLeft'])t[f]=(Number(t[f])||0)+(Number(r[f])||0);
+    drop.add(r);
+  }
+  return out.filter(r=>!drop.has(r));
+}
+globalThis.SCMFoldHigherQualityStock=foldHigherQualityStock;
+
 function overlayProductionRunHours(store){
   const n=Number(store?.productionRunHours);
   return Number.isFinite(n)?Math.min(48,Math.max(1,n)):24;
@@ -2196,7 +2214,10 @@ async function buildGameOverlayData(store,realm,globalState){
   // resource at Q1/Q2. The overlay must never surface those input qualities as
   // if they were company-produced outputs.
   const producedResourceQualities=new Set((productionRows||[]).map(r=>{const id=Number(r?.id),quality=Math.max(0,Number(r?.quality??r?.minQuality)||0);return Number.isFinite(id)&&id>0?`${id}:${quality}`:null;}).filter(Boolean));
-  const producedResourceIds=new Set([...producedResourceQualities].map(k=>Number(k.split(':')[0])));
+  // Bought higher-quality stock of a produced resource (e.g. Q4 engines when the
+  // company makes Q2) is folded into the nearest lower produced quality row, so
+  // that row's Warehouse counts all usable stock and Demand stays the full plan.
+  detailRows=foldHigherQualityStock(detailRows,producedResourceQualities,savedContractKeys);
   // Copy prices read the active realm's existing Market-page caches only.
   // Prefer the consolidated current-price rows, then fill missing keys from
   // the keyed per-product cache. Never issue a request or use VWAP as price.
@@ -2250,10 +2271,7 @@ async function buildGameOverlayData(store,realm,globalState){
     // Show every produced resource quality plus every resource/quality explicitly
     // referenced by a Manager-saved contract. Captured live API contracts are not
     // read for quantity, visibility, or inventory-impact calculations.
-    // Bought stock of a produced resource at another quality is shown when it
-    // absorbs that resource's planned demand; hiding it under-reports Demand.
-    const absorbsDemand=producedResourceIds.has(Number(r.id))&&Math.abs(Number(r.demand)||0)>1e-9;
-    const visibleByOwnership=producedResourceQualities.has(key)||savedContractKeys.has(key)||absorbsDemand;
+    const visibleByOwnership=producedResourceQualities.has(key)||savedContractKeys.has(key);
     const hasMaterialChange=Math.abs(Number(r.produced)||0)>1e-9||Math.abs(Number(r.demand)||0)>1e-9||Math.abs(Number(r.contracted)||0)>1e-9||Math.abs(Number(r.leftover)||0)>1e-9;
     return visibleByOwnership && hasMaterialChange;
   });
