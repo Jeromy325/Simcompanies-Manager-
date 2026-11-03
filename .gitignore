@@ -3,3 +3,8 @@ node_modules/
 test-results/
 playwright-report/
 .DS_Store
+tests/
+tools/
+*.md
+CHANGELOG.txt
+TEST_RUN_README.txt
