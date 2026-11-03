@@ -1,3 +1,7 @@
+2.5.412 — 2026-11-02 — Stock overlay: show bought quality that covers demand
+- Stock After Demand & Contracts now shows a bought quality (e.g. Combustion engine Q4) of a resource you produce when it covers part of planned demand. Before, that row was hidden, so the produced-quality row showed only part of the demand (986 of 1,368 engines).
+- Files: background.js, tests/overlay-bought-quality-demand.test.js. Version: manifest.json.
+
 2.5.411 — 2026-11-02 — Dashboard face-lift: flatter, calmer, phone and desktop layout
 - Dashboard restyled: flat dark surfaces, one blue accent, smaller headers and numbers, no gradients or glows (styles.css, v3 face-lift block at the end of the file).
 - Executives skill chips fit the card on phone (2 columns) and desktop (4 columns).

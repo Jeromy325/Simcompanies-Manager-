@@ -2196,6 +2196,7 @@ async function buildGameOverlayData(store,realm,globalState){
   // resource at Q1/Q2. The overlay must never surface those input qualities as
   // if they were company-produced outputs.
   const producedResourceQualities=new Set((productionRows||[]).map(r=>{const id=Number(r?.id),quality=Math.max(0,Number(r?.quality??r?.minQuality)||0);return Number.isFinite(id)&&id>0?`${id}:${quality}`:null;}).filter(Boolean));
+  const producedResourceIds=new Set([...producedResourceQualities].map(k=>Number(k.split(':')[0])));
   // Copy prices read the active realm's existing Market-page caches only.
   // Prefer the consolidated current-price rows, then fill missing keys from
   // the keyed per-product cache. Never issue a request or use VWAP as price.
@@ -2249,7 +2250,10 @@ async function buildGameOverlayData(store,realm,globalState){
     // Show every produced resource quality plus every resource/quality explicitly
     // referenced by a Manager-saved contract. Captured live API contracts are not
     // read for quantity, visibility, or inventory-impact calculations.
-    const visibleByOwnership=producedResourceQualities.has(key)||savedContractKeys.has(key);
+    // Bought stock of a produced resource at another quality is shown when it
+    // absorbs that resource's planned demand; hiding it under-reports Demand.
+    const absorbsDemand=producedResourceIds.has(Number(r.id))&&Math.abs(Number(r.demand)||0)>1e-9;
+    const visibleByOwnership=producedResourceQualities.has(key)||savedContractKeys.has(key)||absorbsDemand;
     const hasMaterialChange=Math.abs(Number(r.produced)||0)>1e-9||Math.abs(Number(r.demand)||0)>1e-9||Math.abs(Number(r.contracted)||0)>1e-9||Math.abs(Number(r.leftover)||0)>1e-9;
     return visibleByOwnership && hasMaterialChange;
   });
