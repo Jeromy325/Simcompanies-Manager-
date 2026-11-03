@@ -3357,7 +3357,9 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
   const freshState=await state(realm);
   const successful=paths.filter(path=>accountingEndpointFreshForRealm(freshState,path,realm,Number.MAX_SAFE_INTEGER)).length;
   const failed=results.filter(r=>!r.ok);
-  const status=successful===paths.length?`${realmDisplayNumber(realm)||'Realm'} Accounting captured · ${successful}/${paths.length} APIs`:`${realmDisplayNumber(realm)||'Realm'} Accounting partial · ${successful}/${paths.length} APIs`;
+  // Keep the Executives readout from the last Sync on the header line this refresh overwrites.
+  const executivesSummary=freshState.realmStores?.[realmKeyFromRealm(realm)]?.executivesSyncSummary||'';
+  const status=(successful===paths.length?`${realmDisplayNumber(realm)||'Realm'} Accounting captured · ${successful}/${paths.length} APIs`:`${realmDisplayNumber(realm)||'Realm'} Accounting partial · ${successful}/${paths.length} APIs`)+executivesSummary;
   await setRealmLoadStatus(realm,status,successful===paths.length?null:`${failed.length} Accounting API request(s) failed.`);
   logActivity(realm,'accounting-refresh',failed.length?(successful?'partial':'failure'):'success',{rows:successful,wanted:pending.length},failed.length?`${failed.length} of ${pending.length} statements failed`:null,Date.now(),reason);
   return {ok:successful>0,realm,reason,requested:pending.length,successful,total:paths.length,failed,results,status};
@@ -5428,6 +5430,12 @@ function executiveDetailPaths(executives,max=EXECUTIVES_SYNC_DETAIL_MAX){
   }
   return out;
 }
+// Short Executives readout for the Sync status line, e.g. " · Executives 5/5 records · trainings captured".
+function executivesSyncSuffix(row){
+  if(!row?.ok)return ' · Executives not captured';
+  const d=row.executiveDetails||{};
+  return ` · Executives ${d.saved||0}/${d.requested||0} records · ${d.trainings?.ok?'trainings captured':'trainings missing'}`;
+}
 // Sync is complete when every required target is captured and durably verified; optional targets
 // (Executives) are reported but never fail Sync.
 function syncRequiredTargetsOk(targets,results){
@@ -5663,6 +5671,14 @@ async function syncNow(requestedRealm=null){
         row.authoritativeFailures=[{path:null,status:0,error:'No authoritative API path could be resolved from the selected realm state.'}];
       }
 
+      if(target.name==='Executives' && authoritativePaths.length){
+        // Walk the game's own Executives page first, so its requests (roster, trainings count) run
+        // as they do for a player. Optional: a failed visit only skips the wait, never fails Sync.
+        const visitStartedAt=Date.now();
+        try{ row.pageVisit=await executeGameClick(currentTab.id,{name:target.name,labels:target.labels,hrefHints:target.hrefHints||[]}); }catch(e){ row.pageVisit={ok:false,error:e?.message||String(e)}; }
+        if(row.pageVisit?.ok) await waitForEndpointCapture(target.waitFor,visitStartedAt,SYNC_CAPTURE_FALLBACK_MS,selected).catch(()=>null);
+      }
+
       const directResults=[];
       if(target.name==='Accounting'){
         let accountingCursor=0;
@@ -5815,6 +5831,15 @@ async function syncNow(requestedRealm=null){
               if(ok)details.saved++;else details.failed.push({path,status:Number(response?.status)||0,error:response?.error||null});
             }catch(e){details.failed.push({path,status:0,error:e?.message||String(e)});}
           }
+          // Trainings done per executive: the Executives tab reads this company-wide count, and the game
+          // only requests it when its Executives page opens, so Sync must fetch it itself.
+          const trainingsPath=`/api/v3/companies/${Number(companyId)}/executives/trainings-count/`;
+          try{
+            trace('executive-trainings-request',{path:trainingsPath});
+            const response=await pageGet(trainingsPath,selected,null,'sync-executives');
+            const ok=await recordAuthoritative(trainingsPath,response,row);
+            details.trainings={ok:Boolean(ok),status:Number(response?.status)||0};
+          }catch(e){details.trainings={ok:false,status:0,error:e?.message||String(e)};}
         }catch(e){details.error=e?.message||String(e);}
         row.executiveDetails=details;
         row.status=`api-captured · ${details.saved}/${details.requested} executive records`;
@@ -6001,7 +6026,8 @@ async function syncNow(requestedRealm=null){
     const accountingSuffix=accountingVerification?` · Accounting ${accountingVerification.verifiedCount}/${accountingVerification.requiredCount} APIs`:'';
     const successful=successfulAfterDurability;
     const failed=failedAfterDurability;
-    const finalStatus=`${realmDisplayNumber(selected)||'Realm'} Sync ${requiredOk?'complete':'finished with errors'} · ${successful}/${targets.length} targets captured${accountingSuffix}`;
+    const executivesSummary=executivesSyncSuffix(results.find(result=>result.name==='Executives'));
+    const finalStatus=`${realmDisplayNumber(selected)||'Realm'} Sync ${requiredOk?'complete':'finished with errors'} · ${successful}/${targets.length} targets captured${accountingSuffix}${executivesSummary}`;
     const finalSyncError=requiredOk?null:`${failedAfterDurability} target(s) failed; ${missingRequiredEndpoints.length} required endpoint(s) were not durably verified.`;
 
     // Final invariant: the root view must still point at the realm that was
@@ -6039,7 +6065,7 @@ async function syncNow(requestedRealm=null){
     await withSyncTimeout(enqueueApiStorage(async()=>{
       const finalPersist=await state(selected); // v2.5.345 the synced realm's own store, even if the tab switched realms meanwhile
       const finalStores={...(finalPersist.realmStores||{})};
-      finalStores[key]={...(finalStores[key]||{}),syncStatus:finalStatus,syncError:finalSyncError,lastSync:finishedAt,fullSyncJob:null};
+      finalStores[key]={...(finalStores[key]||{}),syncStatus:finalStatus,syncError:finalSyncError,lastSync:finishedAt,fullSyncJob:null,executivesSyncSummary:executivesSummary};
       await storageSet({activeRealmKey:key,selectedRealm:selected,syncStatus:finalStatus,syncError:finalSyncError,lastSync:finishedAt,fullSyncJob:null,realmStores:finalStores});
     },selected,{priority:true}),8000,'Final Sync commit');
     if(requiredOk) await persistCriticalDataBaseline(selected,'sync-complete').catch(()=>{});
