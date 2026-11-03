@@ -1,3 +1,7 @@
+2.5.415 — 2026-11-02 — Stock overlay: show the quality split under Warehouse
+- Rows that include a substitute quality show the split under Warehouse (e.g. 820 Q2 + 382 Q4), matching the mockup.
+- Files: background.js, content.js, tests/overlay-bought-quality-demand.test.js. Version: manifest.json.
+
 2.5.414 — 2026-11-02 — Stock overlay: outline rows that use a substitute quality
 - A row that includes higher-quality stock (e.g. Q2 engines plus bought Q4) gets a green outline, or red when Left is negative. Long-press/hover shows which qualities are included.
 - Files: background.js, content.js, tests/overlay-bought-quality-demand.test.js. Version: manifest.json.

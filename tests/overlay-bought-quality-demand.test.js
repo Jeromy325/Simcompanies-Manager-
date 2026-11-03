@@ -19,3 +19,6 @@ const c=fs.readFileSync(path.join(__dirname,'..','content.js'),'utf8');
 assert.match(c,/scm-go-sub-neg':'scm-go-sub-pos'/,'row outlined red when short, green otherwise');
 assert.match(c,/\.scm-go-sub\{border:2px solid #5dcaa5\}.*\.scm-go-sub-neg\{border-color:#ff7b7b\}/);
 console.log('substitute outline: passed');}
+{const r3=core.balanceSupplyDemandContracts({warehouseRows:[{id:52,quality:2,amount:820},{id:52,quality:4,amount:382}],demandRows:[{id:52,minQuality:2,amount:1368}],includeQualityRows:true});
+const f=fold(r3.qualityRows,new Set(['52:2']),new Set());assert.deepEqual(f[0].warehouseByQuality,[{quality:2,amount:820},{quality:4,amount:382}]);
+assert.match(fs.readFileSync(path.join(__dirname,'..','content.js'),'utf8'),/scm-go-split/);console.log('warehouse split line: passed');}

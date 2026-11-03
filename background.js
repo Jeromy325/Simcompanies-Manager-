@@ -1818,6 +1818,7 @@ function foldHigherQualityStock(detailRows,producedKeys,keepKeys){
     if(!t)continue;
     for(const f of ['warehouse','produced','incoming','demand','contracted','leftover','warehouseOnlyLeft'])t[f]=(Number(t[f])||0)+(Number(r[f])||0);
     if((Number(r.warehouse)||0)>0)t.substituteQualities=[...new Set([...(t.substituteQualities||[]),q])].sort((x,y)=>x-y);
+    if((Number(r.warehouse)||0)>0){if(!t.warehouseByQuality)t.warehouseByQuality=[{quality:Number(t.quality)||0,amount:(Number(t.warehouse)||0)-(Number(r.warehouse)||0)}];t.warehouseByQuality.push({quality:q,amount:Number(r.warehouse)||0});}
     drop.add(r);
   }
   return out.filter(r=>!drop.has(r));
