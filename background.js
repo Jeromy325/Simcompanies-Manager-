@@ -3225,7 +3225,9 @@ async function recoverInterruptedSyncJobs(reason='service-worker-restart'){
         const status=`${realmDisplayNumber(realm)||'Realm'} Sync interrupted · retry required`;
         const patch={fullSyncJob:null,syncStatus:status,syncError:'The previous sync transaction was interrupted before completion.'};
         await storageSetRealmPatch(realm,patch);
-        if(latest.activeRealmKey===realmKeyFromRealm(realm)){
+        // Live progress sits in the root keys, so clear it when it belongs to this realm.
+        const rootSync=await chrome.storage.local.get({syncStatus:''});
+        if(latest.activeRealmKey===realmKeyFromRealm(realm)||String(rootSync.syncStatus||'').startsWith(`${realmDisplayNumber(realm)||'Realm'} Sync`)){
           await storageSet({syncStatus:status,syncError:patch.syncError,fullSyncJob:null});
         }
       }

@@ -1938,7 +1938,7 @@ function scmPageTextNoLayout(){
     let main,sub;
     if(e.state==='covered'){main='✓ Covered';sub=`${num(e.spare)} spare`;}
     else if(e.state==='none'){main='Not producing';sub='Buy it or start production';}
-    else if(e.state==='late'){main=`Short ${num(e.missing)} after run`;sub=`${num(e.ratePerHour)}/hr · run ends in <span data-eta-at="${e.runEndsMs}" data-eta-done="ended">${etaText(e.runEndsMs,'ended')}</span>`;}
+    else if(e.state==='late'){main=`Short ${num(e.missing)} after run`;sub=`${num(e.ratePerHour)}/hr · run left: <span data-eta-at="${e.runEndsMs}" data-eta-done="none">${etaText(e.runEndsMs,'none')}</span>`;}
     else{main=`⏱ <span data-eta-at="${e.metAtMs}" data-eta-done="due, awaiting stock update">${etaText(e.metAtMs,'due, awaiting stock update')}</span>`;sub=`${num(e.ratePerHour)}/hr · met ${esc(new Date(e.metAtMs).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'}))}`;}
     return `<span class="scm-go-eta scm-go-eta-${e.state}"><span class="scm-go-eta-top"><span class="scm-go-eta-main">${main}</span><span class="scm-go-eta-sub">${sub}</span></span><span class="scm-go-eta-bar"><i style="width:${pct.toFixed(1)}%"></i></span></span>`;
   };
@@ -2407,7 +2407,8 @@ function scmPageTextNoLayout(){
         })).sort((a,b)=>a.id-b.id||a.quality-b.quality)
       });
       S.realm=r.realm;S.data=r;
-      if(signature!==S.signature)S.etaAnchor=Date.now();
+      const stockSignature=JSON.stringify((Array.isArray(r.rows)?r.rows:[]).map(row=>[row?.id,row?.quality,row?.warehouse,row?.demand,row?.contracted]));
+      if(stockSignature!==S.stockSignature){S.stockSignature=stockSignature;S.etaAnchor=Date.now();}
       if(signature!==S.signature||!document.getElementById('scm-game-balance-card')){S.signature=signature;renderBalance();}
       if(likelyContractPage())await loadContractHelper();schedulePosition();scheduleSellHelper();
     }catch{
