@@ -426,5 +426,8 @@
     loadLog(S.ctx.realm);
     paint(false, revisit);
   }
-  globalThis.SCM_ANALYZE_UI = { render, _state: S, _go: go };
+  // Data landing in the side keys (CSV import, statement history, ledger archive) repaints the open page; the tab's
+  // ordinary render is skipped while the file input just used still counts as being edited.
+  function refresh() { if (S.s) paint(true); }
+  globalThis.SCM_ANALYZE_UI = { render, refresh, _state: S, _go: go };
 })();
