@@ -5486,7 +5486,8 @@ function findMovedEndpoint(path,captured,knownPaths=[],sinceMs=0){
     const shared=[...before.keys].filter(x=>now.keys.has(x)).length;
     return shared/new Set([...before.keys,...now.keys]).size>=0.8;
   });
-  return matches.length===1?matches[0]:null;
+  // Matching structure cannot prove it is the same data, so a rename is reported and never stored.
+  return matches.length===1?{suspected:matches[0]}:null;
 }
 globalThis.SCMFindMovedEndpoint=findMovedEndpoint;
 async function syncNow(requestedRealm=null,{fullWalk=false}={}){
@@ -5646,6 +5647,11 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const known=[...ACCOUNTING_SYNC_PATHS,...realmContractPaths(selected)];
       const walked=findMovedEndpoint(path,captured,known,walkSinceMs);
       if(!walked)return first;
+      if(walked.suspected){
+        (session.suspectedMoves||(session.suspectedMoves={}))[path]=walked.suspected;
+        trace('endpoint-suspected-move',{path,suspected:walked.suspected});
+        return first;
+      }
       trace('endpoint-walked-path',{path,walked});
       const second=await pageGet(walked.replace(/^https?:\/\/[^/]+/,''),...rest);
       return second?.ok?{...second,walkedPath:walked}:first;
@@ -6103,7 +6109,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     const failed=failedAfterDurability;
     const executivesSummary=executivesSyncSuffix(results.find(result=>result.name==='Executives'));
     const finalStatus=`${realmDisplayNumber(selected)||'Realm'} Sync ${requiredOk?'complete':'finished with errors'} · ${successful}/${targets.length} targets captured${accountingSuffix}${executivesSummary}`;
-    const finalSyncError=requiredOk?null:`${failedAfterDurability} target(s) failed; ${missingRequiredEndpoints.length} required endpoint(s) were not durably verified.`;
+    const suspectedMoveText=Object.entries(session.suspectedMoves||{}).map(([from,to])=>`${from} may have moved to ${to}`).join('; ');
+    const finalSyncError=requiredOk?null:`${failedAfterDurability} target(s) failed; ${missingRequiredEndpoints.length} required endpoint(s) were not durably verified.${suspectedMoveText?` Endpoint change detected: ${suspectedMoveText}.`:''}`;
 
     // Final invariant: the root view must still point at the realm that was
     // actually synced. This is checked before the completion record is saved.
