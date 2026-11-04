@@ -5460,6 +5460,33 @@ function syncRequiredTargetsOk(targets,results){
   if(!Array.isArray(targets)||!Array.isArray(results)||results.length!==targets.length)return false;
   return results.every(r=>r?.optional||(r?.ok&&r?.finalDurableVerification?.ok));
 }
+// Finds where a gone endpoint moved, among responses captured while walking the game. First the same address
+// under another API version; then a renamed address whose response has the same structure as this endpoint's
+// last good response. Exactly one structural match is required: a tie or no earlier data finds nothing.
+function endpointShape(data){
+  const sample=Array.isArray(data)?data[0]:data;
+  if(!sample||typeof sample!=='object'||Array.isArray(sample))return null;
+  const keys=Object.keys(sample);
+  return keys.length>=3?{list:Array.isArray(data),keys:new Set(keys)}:null;
+}
+function findMovedEndpoint(path,captured,knownPaths=[]){
+  const bare=k=>String(k).replace(/^https?:\/\/[^/]+/,'');
+  const good=k=>Number(captured?.[k]?.status)>=200&&Number(captured?.[k]?.status)<300&&captured[k]?.data!=null;
+  const others=Object.keys(captured||{}).filter(k=>bare(k)!==path&&!knownPaths.includes(bare(k))&&good(k));
+  const tail=path.replace(/^\/api\/v\d+/,'');
+  const sameTail=others.find(k=>bare(k).replace(/^\/api\/v\d+/,'')===tail);
+  if(sameTail)return sameTail;
+  const before=endpointShape(captured?.[path]?.data);
+  if(!before)return null;
+  const matches=others.filter(k=>{
+    const now=endpointShape(captured[k].data);
+    if(!now||now.list!==before.list)return false;
+    const shared=[...before.keys].filter(x=>now.keys.has(x)).length;
+    return shared/new Set([...before.keys,...now.keys]).size>=0.8;
+  });
+  return matches.length===1?matches[0]:null;
+}
+globalThis.SCMFindMovedEndpoint=findMovedEndpoint;
 async function syncNow(requestedRealm=null){
   const startedAt=Date.now();
   // Remains null during the active capture and becomes authoritative only
@@ -5613,12 +5640,12 @@ async function syncNow(requestedRealm=null){
       const first=await pageGet(path,...rest);
       if(![404,410].includes(Number(first?.status)))return first;
       const captured=endpointDataForSyncRealm(await state(selected),selected);
-      const tail=path.replace(/^\/api\/v\d+/,'');
-      const walked=Object.keys(captured).find(k=>k!==path&&k.replace(/^https?:\/\/[^/]+/,'').replace(/^\/api\/v\d+/,'')===tail&&Number(captured[k]?.status)>=200&&Number(captured[k]?.status)<300);
+      const known=[...ACCOUNTING_SYNC_PATHS,...realmContractPaths(selected)];
+      const walked=findMovedEndpoint(path,captured,known);
       if(!walked)return first;
       trace('endpoint-walked-path',{path,walked});
       const second=await pageGet(walked.replace(/^https?:\/\/[^/]+/,''),...rest);
-      return second?.ok?second:first;
+      return second?.ok?{...second,walkedPath:walked}:first;
     };
     const recordAuthoritative=async(path,response,row)=>{
     const responseRealm=validRealmNumber(response?.captureRealm);
@@ -5634,6 +5661,7 @@ async function syncNow(requestedRealm=null){
       trace('endpoint-api-rejected',{path,status:failure.status,error:failure.error});
       return false;
     }
+    if(response.walkedPath)(row.movedEndpoints||(row.movedEndpoints=[])).push({path,walkedPath:response.walkedPath});
     const persistStartedAt=Date.now();
     trace('endpoint-persist-start',{path,status:Number(response.status)||200,realm:selected});
     try{
