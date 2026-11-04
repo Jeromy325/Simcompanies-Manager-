@@ -5469,7 +5469,7 @@ function endpointShape(data){
   const keys=Object.keys(sample);
   return keys.length>=3?{list:Array.isArray(data),keys:new Set(keys)}:null;
 }
-function findMovedEndpoint(path,captured,knownPaths=[]){
+function findMovedEndpoint(path,captured,knownPaths=[],sinceMs=0){
   const bare=k=>String(k).replace(/^https?:\/\/[^/]+/,'');
   const good=k=>Number(captured?.[k]?.status)>=200&&Number(captured?.[k]?.status)<300&&captured[k]?.data!=null;
   const others=Object.keys(captured||{}).filter(k=>bare(k)!==path&&!knownPaths.includes(bare(k))&&good(k));
@@ -5478,7 +5478,9 @@ function findMovedEndpoint(path,captured,knownPaths=[]){
   if(sameTail)return sameTail;
   const before=endpointShape(captured?.[path]?.data);
   if(!before)return null;
+  // Only responses captured during this section's own page visit can stand in for its endpoint.
   const matches=others.filter(k=>{
+    if(!(Date.parse(String(captured[k]?.receivedAt||''))>=sinceMs))return false;
     const now=endpointShape(captured[k].data);
     if(!now||now.list!==before.list)return false;
     const shared=[...before.keys].filter(x=>now.keys.has(x)).length;
@@ -5636,12 +5638,13 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     };
     // If a fixed path is gone, use the same endpoint the game was captured calling under another API version.
     // The response is still stored under the fixed path, so every reader keeps working.
+    let walkSinceMs=Date.now();
     const pageGetWalked=async(path,...rest)=>{
       const first=await pageGet(path,...rest);
       if(![404,410].includes(Number(first?.status)))return first;
       const captured=endpointDataForSyncRealm(await state(selected),selected);
       const known=[...ACCOUNTING_SYNC_PATHS,...realmContractPaths(selected)];
-      const walked=findMovedEndpoint(path,captured,known);
+      const walked=findMovedEndpoint(path,captured,known,walkSinceMs);
       if(!walked)return first;
       trace('endpoint-walked-path',{path,walked});
       const second=await pageGet(walked.replace(/^https?:\/\/[^/]+/,''),...rest);
@@ -5685,6 +5688,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const target=targets[i];
       const step=i+1;
       const targetStartedAt=Date.now();
+      walkSinceMs=targetStartedAt;
       // Do not rewrite the full realm store just to persist a transient step.
       // The old per-target job/status writes caused expensive mobile storage
       // churn for large realm stores. Keep the durable job at sync start/final
