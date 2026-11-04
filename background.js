@@ -5487,7 +5487,7 @@ function findMovedEndpoint(path,captured,knownPaths=[]){
   return matches.length===1?matches[0]:null;
 }
 globalThis.SCMFindMovedEndpoint=findMovedEndpoint;
-async function syncNow(requestedRealm=null){
+async function syncNow(requestedRealm=null,{fullWalk=false}={}){
   const startedAt=Date.now();
   // Remains null during the active capture and becomes authoritative only
   // once finalization assigns the terminal completion time.
@@ -5730,7 +5730,9 @@ async function syncNow(requestedRealm=null){
         row.authoritativeFailures=[{path:null,status:0,error:'No authoritative API path could be resolved from the selected realm state.'}];
       }
 
-      if(target.name==='Executives' && authoritativePaths.length){
+      // A Sync the player clicked walks every page first, so moved endpoints are captured. Automatic runs
+      // only walk Executives here and use the page fallback below when a call fails.
+      if(fullWalk || (target.name==='Executives' && authoritativePaths.length)){
         // Walk the game's own Executives page first, so its requests (roster, trainings count) run
         // as they do for a player. Optional: a failed visit only skips the wait, never fails Sync.
         const visitStartedAt=Date.now();
@@ -7505,7 +7507,7 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
   if(m?.type==='GET_RESOURCE_IMAGE'){(async()=>{const r=await fetchAndCacheResourceImage(Number(m.resource),{forceValidate:false}); if(r.ok){send({ok:true,dataUrl:r.dataUrl,cached:r.cached,stale:r.stale||false});return;} const tab=await simTab(); if(!tab?.id){send({ok:false,error:r.error||'Sim Companies tab is not open.'});return;} try{await chrome.tabs.sendMessage(tab.id,{type:'PAGE_RESOURCE_IMAGE',resource:Number(m.resource)}); send({ok:true,queued:true,error:r.error||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true}
   if(m?.type==='SYNC_RESOURCE_IMAGES'){syncAllResourceImages({forceValidate:Boolean(m.forceValidate)}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='MARKET_CACHE'){saveMarketCache(m.resource,m.data,m.receivedAt,m.realm).then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
-  if(m?.type==='SYNC_NOW'){syncNow(m.realm).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
+  if(m?.type==='SYNC_NOW'){syncNow(m.realm,{fullWalk:true}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='SET_VIEW_REALM'){
     (async()=>{
       // Selection is a user preference only. It does not read or clone the
