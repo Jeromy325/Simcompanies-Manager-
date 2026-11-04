@@ -5642,7 +5642,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     const pageGetWalked=async(path,...rest)=>{
       const first=await pageGet(path,...rest);
       if(![404,410].includes(Number(first?.status)))return first;
-      const captured=endpointDataForSyncRealm(await state(selected),selected);
+      const captured={...endpointDataForSyncRealm(await state(selected),selected),...session.walkCaptures};
       const known=[...ACCOUNTING_SYNC_PATHS,...realmContractPaths(selected)];
       const walked=findMovedEndpoint(path,captured,known,walkSinceMs);
       if(!walked)return first;
@@ -5689,6 +5689,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const step=i+1;
       const targetStartedAt=Date.now();
       walkSinceMs=targetStartedAt;
+      session.walkCaptures={};
       // Do not rewrite the full realm store just to persist a transient step.
       // The old per-target job/status writes caused expensive mobile storage
       // churn for large realm stores. Keep the durable job at sync start/final
@@ -7465,6 +7466,8 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
       const url=String(m.url||'');
       const session=currentCaptureSyncSession();
       if(!shouldPersistPassiveApiCaptureDuringSync(session,url,m.method||'GET')){
+        // Not stored, but kept in memory for this section so Sync can spot an endpoint that moved.
+        if(validRealmNumber(m.captureRealm)===validRealmNumber(session?.realm)&&session.walkCaptures)session.walkCaptures[url]={status:m.status,data:m.data,receivedAt:new Date().toISOString()};
         replayEvent('sync-passive-api-capture-skipped',{realm:validRealmNumber(m.captureRealm),url,method:String(m.method||'GET').toUpperCase(),targetPaths:session?.capturePaths?.length||0});
         send({ok:true,skipped:true,reason:'outside-current-sync-target-paths'});
         return;
