@@ -5607,6 +5607,19 @@ async function syncNow(requestedRealm=null){
       if(target.name==='Executives')return /^\/api\/v3\/companies\/\d+\/executives\/$/.test(path);
       return false;
     };
+    // If a fixed path is gone, use the same endpoint the game was captured calling under another API version.
+    // The response is still stored under the fixed path, so every reader keeps working.
+    const pageGetWalked=async(path,...rest)=>{
+      const first=await pageGet(path,...rest);
+      if(![404,410].includes(Number(first?.status)))return first;
+      const captured=endpointDataForSyncRealm(await state(selected),selected);
+      const tail=path.replace(/^/api/vd+/,'');
+      const walked=Object.keys(captured).find(k=>k!==path&&k.replace(/^https?://[^/]+/,'').replace(/^/api/vd+/,'')===tail&&Number(captured[k]?.status)>=200&&Number(captured[k]?.status)<300);
+      if(!walked)return first;
+      trace('endpoint-walked-path',{path,walked});
+      const second=await pageGet(walked.replace(/^https?://[^/]+/,''),...rest);
+      return second?.ok?second:first;
+    };
     const recordAuthoritative=async(path,response,row)=>{
     const responseRealm=validRealmNumber(response?.captureRealm);
     if(responseRealm!==selected){
@@ -5706,7 +5719,7 @@ async function syncNow(requestedRealm=null){
             const path=authoritativePaths[i];
             try{
               trace('authoritative-request',{name:target.name,path});
-              const response=await pageGet(path,selected,null,`sync-accounting`);
+              const response=await pageGetWalked(path,selected,null,`sync-accounting`);
               const ok=await recordAuthoritative(path,response,row);
               const result={path,ok,status:Number(response?.status)||0,captureRealm:validRealmNumber(response?.captureRealm),error:response?.error||null};
               directResults.push(result);

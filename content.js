@@ -1764,7 +1764,7 @@ function scmPageTextNoLayout(){
   // follows the small key through chrome.storage.onChanged. "captured X ago" says how old the data is.
   const Contracts=(()=>{
     const CARD='scm-contracts-card',PILL='scm-contracts-pill',OPEN_KEY='scm-contracts-card-v1';
-    const C={open:true,data:null,realm:null,sig:'',seq:0,changeTimer:0,agoTimer:0,refreshTimer:0,started:false,noClickUntil:0};
+    const C={open:window.innerWidth>=768,data:null,realm:null,sig:'',seq:0,changeTimer:0,agoTimer:0,refreshTimer:0,started:false,noClickUntil:0};
     try{const v=JSON.parse(localStorage.getItem(OPEN_KEY)||'null');if(v&&typeof v.open==='boolean')C.open=v.open;}catch{}
     const saveOpen=()=>{try{localStorage.setItem(OPEN_KEY,JSON.stringify({open:C.open}));}catch{}};
     const readPos=id=>{try{const v=JSON.parse(localStorage.getItem('scmCardPos:'+id)||'null');return v&&Number.isFinite(v.x)&&Number.isFinite(v.y)?v:null;}catch{return null;}};
@@ -2066,7 +2066,7 @@ function scmPageTextNoLayout(){
       if(prev)labelTexts.push(normalizeFieldName(prev.textContent||''));
       let score=0;
       for(const w of wanted){if(!w)continue;
-        if(labelTexts.some(t=>t===w))score=Math.max(score,520+w.length);
+        if(labelTexts.some(t=>t===w))score=Math.max(score,2000+w.length);
         else if(labelTexts.some(t=>t.includes(w)&&t.length<=40))score=Math.max(score,430+w.length);
         else if(direct.some(t=>t===w))score=Math.max(score,300+w.length);
         else if(direct.some(t=>t.includes(w)))score=Math.max(score,260+w.length);
@@ -2216,7 +2216,7 @@ function scmPageTextNoLayout(){
       if(S.contractDismissedKey===matchKey){existing?.remove();return;}
       const sig=JSON.stringify({realm:S.realm,id:c.id,qty,mode:S.contractQtyMode,custom:S.contractCustomQty,price:c.price,recipient:ctx.recipient,product:ctx.product,surplus:available});
       const qtyElNow=contractInput(['amount','quantity','units'],0);const priceElNow=contractInput(['price per unit','unit price','contract price','price'],1,new Set(qtyElNow?[qtyElNow]:[]));
-      const needsFill=sig!==S.contractSignature||String(priceElNow?.value??'')!==String(c.price??'')||(qty!=null&&String(qtyElNow?.value??'')!==String(qty));
+      const needsFill=sig!==S.contractSignature||(c.price!=null&&String(priceElNow?.value??'')==='')||(qty!=null&&String(qtyElNow?.value??'')==='');
       if(needsFill){S.contractSignature=sig;fillContractForm(c,qty);}else S.contractSignature=sig;
       const card=existing||ensureCard('scm-contract-helper-card','scm-ch-card');
       const selectedSaved=S.contractQtyMode==='saved'?' selected':'';const selectedSurplus=S.contractQtyMode==='surplus'?' selected':'';const selectedCustom=S.contractQtyMode==='custom'?' selected':'';
