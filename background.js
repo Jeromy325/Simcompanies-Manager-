@@ -3229,6 +3229,7 @@ async function recoverInterruptedSyncJobs(reason='service-worker-restart'){
         const rootSync=await chrome.storage.local.get({syncStatus:''});
         if(latest.activeRealmKey===realmKeyFromRealm(realm)||String(rootSync.syncStatus||'').startsWith(`${realmDisplayNumber(realm)||'Realm'} Sync`)){
           await storageSet({syncStatus:status,syncError:patch.syncError,fullSyncJob:null});
+          await chrome.storage.local.set({syncStatus:status,syncError:patch.syncError});
         }
       }
       return {ok:true};
