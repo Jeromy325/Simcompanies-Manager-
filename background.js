@@ -5741,7 +5741,7 @@ async function syncNow(requestedRealm=null){
         await Promise.all(authoritativePaths.map(async path=>{
           try{
             trace('authoritative-request',{name:target.name,path});
-            const response=await pageGet(path,selected);
+            const response=await pageGetWalked(path,selected);
             const ok=await recordAuthoritative(path,response,row);
             directResults.push({path,ok,status:Number(response?.status)||0,captureRealm:validRealmNumber(response?.captureRealm),error:response?.error||null});
             trace(ok?'authoritative-success':'authoritative-failure',{name:target.name,path,status:Number(response?.status)||0,captureRealm:validRealmNumber(response?.captureRealm)});
@@ -5761,7 +5761,7 @@ async function syncNow(requestedRealm=null){
         for(const path of authoritativePaths){
           try{
             trace('authoritative-request',{name:target.name,path});
-            const response=await pageGet(path,selected);
+            const response=await pageGetWalked(path,selected);
             const ok=await recordAuthoritative(path,response,row);
             directResults.push({path,ok,status:Number(response?.status)||0,captureRealm:validRealmNumber(response?.captureRealm),error:response?.error||null});
             trace(ok?'authoritative-success':'authoritative-failure',{name:target.name,path,status:Number(response?.status)||0,captureRealm:validRealmNumber(response?.captureRealm)});
@@ -5899,6 +5899,15 @@ async function syncNow(requestedRealm=null){
         try{
           recovered=await waitForEndpointCapture(target.waitFor,fallbackStart,SYNC_CAPTURE_FALLBACK_MS,selected);
         }catch{}
+        if(!recovered?.ok){
+          // The page visit may have just revealed a moved endpoint, so try the paths again.
+          const saved=[];
+          for(const path of authoritativePaths){
+            try{const response=await pageGetWalked(path,selected);if(await recordAuthoritative(path,response,row))saved.push(path);}catch{}
+          }
+          const required=target.name==='Accounting'?saved.some(x=>ACCOUNTING_CORE_PATH_RE.test(x)):target.name==='Contracts'?saved.some(x=>x.includes('/contracts-incoming/')):saved.length>0;
+          if(required)recovered={ok:true,endpoint:saved[0]};
+        }
 
         if(recovered?.ok){
           if(target.name!=='Warehouse'){
