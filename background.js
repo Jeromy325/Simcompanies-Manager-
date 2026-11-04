@@ -2223,6 +2223,16 @@ async function buildGameOverlayData(store,realm,globalState){
   // company makes Q2) is folded into the nearest lower produced quality row, so
   // that row's Warehouse counts all usable stock and Demand stays the full plan.
   detailRows=foldHigherQualityStock(detailRows,producedResourceQualities,savedContractKeys);
+  // Countdown input: only buildings running this product right now, from this realm's own plan and buildings.
+  const etaRunsByKey=new Map();
+  for(const spec of activeSpecs||[]){
+    const b=buildings.find(x=>Number(x?.id)===Number(spec?.buildingId));
+    const started=Date.parse(String(b?.busy?.started||'')),duration=Number(b?.busy?.duration),rate=Number(spec?.ratePerHour);
+    if(Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId)!==Number(spec?.productId)||!Number.isFinite(started)||!(duration>0)||!(rate>0))continue;
+    const runKey=`${Number(spec.productId)}:${Math.max(0,Number(spec.quality)||0)}`;
+    if(!etaRunsByKey.has(runKey))etaRunsByKey.set(runKey,[]);
+    etaRunsByKey.get(runKey).push({ratePerHour:rate,finishMs:started+duration*1000});
+  }
   // Copy prices read the active realm's existing Market-page caches only.
   // Prefer the consolidated current-price rows, then fill missing keys from
   // the keyed per-product cache. Never issue a request or use VWAP as price.
@@ -2270,7 +2280,7 @@ async function buildGameOverlayData(store,realm,globalState){
     const vwap=overlayVwap(store,r.id,quality,realm);
     // 2.5.347 production surplus for this resource+quality (game-page Sell helper "Surplus").
     const surplus=Math.max(0,Number(productionSurplusByKey.get(key))||0);
-    return {...r,contracted:netContracts,incoming,outgoing,leftover:left,difference:left,warehouseOnlyLeft:left,surplus,name,quality,vwap,marketPrice,marketPriceQuality,marketPriceExact:marketPriceQuality===quality,image:local||(file?`${assets.imageBase}${file}`:'')};
+    return {...r,etaRuns:etaRunsByKey.get(key)||[],contracted:netContracts,incoming,outgoing,leftover:left,difference:left,warehouseOnlyLeft:left,surplus,name,quality,vwap,marketPrice,marketPriceQuality,marketPriceExact:marketPriceQuality===quality,image:local||(file?`${assets.imageBase}${file}`:'')};
   }).filter(r=>{
     const key=`${Number(r.id)}:${Number(r.quality)||0}`;
     // Show every produced resource quality plus every resource/quality explicitly
