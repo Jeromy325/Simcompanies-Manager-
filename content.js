@@ -1764,7 +1764,7 @@ function scmPageTextNoLayout(){
   // follows the small key through chrome.storage.onChanged. "captured X ago" says how old the data is.
   const Contracts=(()=>{
     const CARD='scm-contracts-card',PILL='scm-contracts-pill',OPEN_KEY='scm-contracts-card-v1';
-    const C={open:window.innerWidth>=768,data:null,realm:null,sig:'',seq:0,changeTimer:0,agoTimer:0,refreshTimer:0,started:false,noClickUntil:0};
+    const C={open:Math.min(window.innerWidth,screen.width)>=768,data:null,realm:null,sig:'',seq:0,changeTimer:0,agoTimer:0,refreshTimer:0,started:false,noClickUntil:0};
     try{const v=JSON.parse(localStorage.getItem(OPEN_KEY)||'null');if(v&&typeof v.open==='boolean')C.open=v.open;}catch{}
     const saveOpen=()=>{try{localStorage.setItem(OPEN_KEY,JSON.stringify({open:C.open}));}catch{}};
     const readPos=id=>{try{const v=JSON.parse(localStorage.getItem('scmCardPos:'+id)||'null');return v&&Number.isFinite(v.x)&&Number.isFinite(v.y)?v:null;}catch{return null;}};
