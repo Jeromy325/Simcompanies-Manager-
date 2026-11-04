@@ -83,8 +83,9 @@
       const id = Number(t?.id), q = Number(t?.q), lim = n(t?.price), op = t?.op === '>=' ? '>=' : '<=';
       if (!(id > 0) || !Number.isFinite(q) || lim == null) continue;
       const row = (rows || []).find(r => Number(r?.resourceId) === id && Number(r?.quality) === q && n(r?.price) > 0);
-      if (!row) continue;
-      const k = `${id}:${q}:${op}:${lim}`, met = op === '<=' ? row.price <= lim : row.price >= lim;
+      const k = `${id}:${q}:${op}:${lim}`;
+      if (!row) { if (state[k]) next[k] = true; continue; }
+      const met = op === '<=' ? row.price <= lim : row.price >= lim;
       if (met) {
         next[k] = true;
         if (!state[k]) fire.push({ title: `Price alert: ${nameOf(names, id)} Q${q} is now ${money(row.price)}`, message: `That's ${op === '<=' ? 'at or below' : 'at or above'} your target of ${money(lim)}.${n(row.vwap) ? ` Average trade price (VWAP): ${money(row.vwap)}.` : ''}\n${R(realm)}`, id, q });

@@ -3199,6 +3199,8 @@ async function clearFullSyncJob(realm, finalPatch={}){
   },n);
 }
 
+const SCM_WORKER_BOOT_MS=Date.now();
+setTimeout(()=>{recoverInterruptedSyncJobs('service-worker-boot').catch(()=>{});},0);
 async function recoverInterruptedSyncJobs(reason='service-worker-restart'){
   try{
     return await enqueueApiStorage(async()=>{
@@ -3211,7 +3213,7 @@ async function recoverInterruptedSyncJobs(reason='service-worker-restart'){
         const realm=realmNumberFromKey(key);
         if(realm==null||raw?.fullSyncJob?.status!=='running') continue;
         const started=Date.parse(String(raw.fullSyncJob.startedAt||''));
-        if(Number.isFinite(started)&&Date.now()-started<5*60*1000) continue;
+        if(Number.isFinite(started)&&started>=SCM_WORKER_BOOT_MS) continue;
         candidates.push(realm);
       }
       for(const realm of candidates){
@@ -3219,7 +3221,7 @@ async function recoverInterruptedSyncJobs(reason='service-worker-restart'){
         const job=latest.fullSyncJob;
         if(!job||job.status!=='running') continue;
         const started=Date.parse(String(job.startedAt||''));
-        if(Number.isFinite(started)&&Date.now()-started<5*60*1000) continue;
+        if(Number.isFinite(started)&&started>=SCM_WORKER_BOOT_MS) continue;
         const status=`${realmDisplayNumber(realm)||'Realm'} Sync interrupted · retry required`;
         const patch={fullSyncJob:null,syncStatus:status,syncError:'The previous sync transaction was interrupted before completion.'};
         await storageSetRealmPatch(realm,patch);

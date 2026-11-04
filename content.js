@@ -1903,7 +1903,7 @@ function scmPageTextNoLayout(){
     const card=ensureCard('scm-left-copy-card','scm-left-copy-card');
     const rows=leftRows();
     const title=`${S.realm!=null?`R${S.realm+1}`:'Game'} · Copy Left Resources`;
-    card.innerHTML=`<div class="scm-left-copy-head"><div><div class="scm-left-copy-title">${esc(title)}</div><div class="scm-left-copy-meta">${num(rows.length)} resources left after Demand & Contracts · current Market prices</div></div><button type="button" class="scm-left-copy-close" data-left-copy-close aria-label="Close left resources card">×</button></div><div class="scm-left-copy-controls"><label for="scm-left-copy-discount">Market discount</label><select id="scm-left-copy-discount"><option value="0">0%</option><option value="3"${S.leftCopyDiscount===3?' selected':''}>3%</option><option value="5"${S.leftCopyDiscount===5?' selected':''}>5%</option><option value="10"${S.leftCopyDiscount===10?' selected':''}>10%</option></select></div><textarea class="scm-left-copy-text" id="scm-left-copy-text" readonly aria-label="Left resources copy text"></textarea><div class="scm-left-copy-actions"><button type="button" class="scm-left-copy-close" data-left-copy-close>Close</button><button type="button" class="scm-left-copy-btn" data-left-copy-copy>📋 Copy</button></div>`;
+    card.innerHTML=`<div class="scm-left-copy-head"><div><div class="scm-left-copy-title">${esc(title)}</div><div class="scm-left-copy-meta">${num(rows.length)} resources left after Demand & Contracts · VWAP prices</div></div><button type="button" class="scm-left-copy-close" data-left-copy-close aria-label="Close left resources card">×</button></div><div class="scm-left-copy-controls"><label for="scm-left-copy-discount">Market discount</label><select id="scm-left-copy-discount"><option value="0">0%</option><option value="3"${S.leftCopyDiscount===3?' selected':''}>3%</option><option value="5"${S.leftCopyDiscount===5?' selected':''}>5%</option><option value="10"${S.leftCopyDiscount===10?' selected':''}>10%</option></select></div><textarea class="scm-left-copy-text" id="scm-left-copy-text" readonly aria-label="Left resources copy text"></textarea><div class="scm-left-copy-actions"><button type="button" class="scm-left-copy-close" data-left-copy-close>Close</button><button type="button" class="scm-left-copy-btn" data-left-copy-copy>📋 Copy</button></div>`;
     const textEl=card.querySelector('#scm-left-copy-text');
     const discountEl=card.querySelector('#scm-left-copy-discount');
     const build=()=>{S.leftCopyDiscount=Number(discountEl?.value)||0;if(textEl)textEl.value=buildLeftCopyText();S.leftCopySignature=JSON.stringify({discount:S.leftCopyDiscount,rows:leftRows().map(r=>[r.id,r.remaining??r.difference,r.vwap,r.quality])});};
@@ -1929,21 +1929,22 @@ function scmPageTextNoLayout(){
     return {state:'late',missing:short,runEndsMs:t,ratePerHour};
   };
   const etaDuration=ms=>{const s=Math.max(0,Math.floor(ms/1000)),h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?`${h}h ${String(m).padStart(2,'0')}m ${String(x).padStart(2,'0')}s`:`${m}m ${String(x).padStart(2,'0')}s`;};
+  const etaText=(at,done)=>{const ms=at-Date.now();return ms>0?etaDuration(ms):done;};
   const etaStrip=(r,left)=>{
     // Older saved snapshots have no run data, so show no timer rather than a false "Not producing".
     if(!Array.isArray(r.etaRuns))return '';
-    const now=Date.now(),e=demandEta(left,r.etaRuns,now),demand=Number(r.demand)||0;
+    const now=S.etaAnchor||Date.now(),e=demandEta(left,r.etaRuns,now),demand=Number(r.demand)||0;
     const pct=e.state==='covered'?100:e.state==='none'||!(demand>0)?0:Math.max(0,Math.min(100,(demand+left)/demand*100));
     let main,sub;
     if(e.state==='covered'){main='✓ Covered';sub=`${num(e.spare)} spare`;}
     else if(e.state==='none'){main='Not producing';sub='Buy it or start production';}
-    else if(e.state==='late'){main=`Short ${num(e.missing)} after run`;sub=`${num(e.ratePerHour)}/hr · run ends in <span data-eta-at="${e.runEndsMs}">${etaDuration(e.runEndsMs-now)}</span>`;}
-    else{main=`⏱ <span data-eta-at="${e.metAtMs}">${etaDuration(e.metAtMs-now)}</span>`;sub=`${num(e.ratePerHour)}/hr · met ${esc(new Date(e.metAtMs).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'}))}`;}
+    else if(e.state==='late'){main=`Short ${num(e.missing)} after run`;sub=`${num(e.ratePerHour)}/hr · run ends in <span data-eta-at="${e.runEndsMs}" data-eta-done="ended">${etaText(e.runEndsMs,'ended')}</span>`;}
+    else{main=`⏱ <span data-eta-at="${e.metAtMs}" data-eta-done="due, awaiting stock update">${etaText(e.metAtMs,'due, awaiting stock update')}</span>`;sub=`${num(e.ratePerHour)}/hr · met ${esc(new Date(e.metAtMs).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'}))}`;}
     return `<span class="scm-go-eta scm-go-eta-${e.state}"><span class="scm-go-eta-top"><span class="scm-go-eta-main">${main}</span><span class="scm-go-eta-sub">${sub}</span></span><span class="scm-go-eta-bar"><i style="width:${pct.toFixed(1)}%"></i></span></span>`;
   };
   const tickEta=()=>{
     if(document.hidden)return;
-    document.querySelectorAll('#scm-game-balance-card [data-eta-at]').forEach(el=>{el.textContent=etaDuration(Number(el.getAttribute('data-eta-at'))-Date.now());});
+    document.querySelectorAll('#scm-game-balance-card [data-eta-at]').forEach(el=>{el.textContent=etaText(Number(el.getAttribute('data-eta-at')),el.getAttribute('data-eta-done'));});
   };
   const renderBalance=()=>{
     if(!S.etaTimer)S.etaTimer=setInterval(tickEta,1000);
@@ -2406,6 +2407,7 @@ function scmPageTextNoLayout(){
         })).sort((a,b)=>a.id-b.id||a.quality-b.quality)
       });
       S.realm=r.realm;S.data=r;
+      if(signature!==S.signature)S.etaAnchor=Date.now();
       if(signature!==S.signature||!document.getElementById('scm-game-balance-card')){S.signature=signature;renderBalance();}
       if(likelyContractPage())await loadContractHelper();schedulePosition();scheduleSellHelper();
     }catch{

@@ -1397,7 +1397,7 @@ function updateRealmSwitcher(s){
   const status=$('#realmViewStatus');
   const capture=s.captureRealm;
   if(status){
-    status.textContent=capture==null?'No game realm detected':capture===view?'Live game realm':'Viewing saved data';
+    status.textContent=capture==null?'No game realm detected':capture===view?'Live game realm':view==null?'Viewing saved data':`R${Number(view)+1} selected. Showing R${Number(capture)+1} until the game switches`;
     status.className=`realm-view-status ${capture===view?'live':'saved'}`;
   }
 }
