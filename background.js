@@ -5613,11 +5613,11 @@ async function syncNow(requestedRealm=null){
       const first=await pageGet(path,...rest);
       if(![404,410].includes(Number(first?.status)))return first;
       const captured=endpointDataForSyncRealm(await state(selected),selected);
-      const tail=path.replace(/^/api/vd+/,'');
-      const walked=Object.keys(captured).find(k=>k!==path&&k.replace(/^https?://[^/]+/,'').replace(/^/api/vd+/,'')===tail&&Number(captured[k]?.status)>=200&&Number(captured[k]?.status)<300);
+      const tail=path.replace(/^\/api\/v\d+/,'');
+      const walked=Object.keys(captured).find(k=>k!==path&&k.replace(/^https?:\/\/[^/]+/,'').replace(/^\/api\/v\d+/,'')===tail&&Number(captured[k]?.status)>=200&&Number(captured[k]?.status)<300);
       if(!walked)return first;
       trace('endpoint-walked-path',{path,walked});
-      const second=await pageGet(walked.replace(/^https?://[^/]+/,''),...rest);
+      const second=await pageGet(walked.replace(/^https?:\/\/[^/]+/,''),...rest);
       return second?.ok?second:first;
     };
     const recordAuthoritative=async(path,response,row)=>{
