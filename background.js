@@ -1756,6 +1756,7 @@ async function fireProductionFinished(name){
   const st=await notifyRealmStore(realm);
   const b=(Array.isArray(st.buildings)?st.buildings:[]).find(x=>Number(x?.id)===bid)||{id:bid,name:`Building ${bid}`};
   const {names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE;
+  if(clearGen!==extensionClearGeneration)return;
   if(cfg.productionFinished){const r=N.batchFinishedMessage({building:b,store:st,realm,names});await scmNotify(`prodfin-${realm}-${bid}-${m[3]}`,r.title,r.message);}
   // v2.5.350 'Not enough inputs to repeat a finished batch' removed at the user's request.
   // 4 + 11: look again idleHours after the finish (idle, or still not collected).
@@ -3054,7 +3055,7 @@ function buildSyncDiagnosticCheckpoint(fields){
   };
 }
 
-async function saveFullSyncDiagnosticUnlocked(diagnostic, realm){
+async function saveFullSyncDiagnosticUnlocked(diagnostic, realm, clearGen=extensionClearGeneration){
   const n=validRealmNumber(realm);
   const s=n!=null?await state(n):await state();
   const key=n!=null?realmKeyFromRealm(n):(s.activeRealmKey||identityFromAuth(s.authData));
@@ -3065,6 +3066,7 @@ async function saveFullSyncDiagnosticUnlocked(diagnostic, realm){
   if(diagnosticRealm==null) return d;
   const diagnosticKey=realmDiagnosticStorageKey(diagnosticRealm);
   if(!diagnosticKey) return d;
+  if(clearGen!==extensionClearGeneration) return d; // begun before Clear Stored Data
   await rawStorageSet({[diagnosticKey]:d,scmRealmDiagnosticSchema:1});
   return d;
 }
@@ -3464,8 +3466,8 @@ function endpointRecordWithFailedAttempt(old,incomingStatus,realm){
 }
 async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=null,onTiming=null){
   if(!url?.startsWith('/api/'))return;
-  // Text in a successful answer is a catch-all page, from any writer (the game's own traffic too): it never replaces a record.
-  if(typeof data==='string'&&Number(status)>=200&&Number(status)<300&&String(method||'GET').toUpperCase()==='GET')return;
+  // A successful GET that is not data (text, null, a boolean, an unlisted number), from any writer: it never replaces a record.
+  if(Number(status)>=200&&Number(status)<300&&String(method||'GET').toUpperCase()==='GET'&&!endpointDataIsValid(url,data))return;
   await ensureRealmStorageMigration();
   const before=await state();
   const responseRealm=/\/api\/v3\/companies\/auth-data\//.test(url)
@@ -3743,7 +3745,9 @@ async function saveData(url,data,status=200,method='GET',captureRealm=null,onTim
   const queueKey=queueRealm!=null?`realm:${queueRealm}`:'unscoped';
   const schedulerAtEnqueue=apiStorageSchedulers.get(queueKey);
   const queuedJobsAheadAtEnqueue=schedulerAtEnqueue?(schedulerAtEnqueue.queue.length+(schedulerAtEnqueue.running?1:0)):0;
+  const clearGen=extensionClearGeneration;
   return enqueueApiStorage(async()=>{
+    if(clearGen!==extensionClearGeneration)return; // queued before Clear Stored Data: must not bring the record back
     const queueWaitMs=Date.now()-enqueuedAt;
     const schedulerAtStart=apiStorageSchedulers.get(queueKey);
     const queuedJobsBehindAtStart=schedulerAtStart?.queue?.length||0;
@@ -5442,7 +5446,7 @@ function createPageReturn(traceFn=null,{realm=null}={}){
 // A worker that died mid-run left a pending record: finish the return now, with the same rules as a live run.
 const PAGE_RETURN_PENDING_MAX_MS=10*60*1000;
 async function recoverPendingPageReturns(reason='service-worker-boot'){
-  const out=[];
+  const out=[],clearGen=extensionClearGeneration;
   for(const realm of [0,1]){
     const key=pageReturnPendingKey(realm);
     const rec=(await chrome.storage.local.get({[key]:null}))[key];
@@ -5461,6 +5465,7 @@ async function recoverPendingPageReturns(reason='service-worker-boot'){
       }
       row.tabs.push(t);
     }
+    if(clearGen!==extensionClearGeneration)return out;
     await chrome.storage.local.remove(key);
     await chrome.storage.local.set({[`scmSyncReturn:${realm}`]:{at:new Date().toISOString(),recovered:true,expired:Boolean(row.expired),tabs:row.tabs}});
     out.push(row);
@@ -5896,6 +5901,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     const trace=(type,payload={})=>syncTrace.push({at:Date.now(),type,...payload});
     let lastTracePersistAt=0;
     const persistTrace=async(force=false)=>{
+      if(session.cancelled)return false;
       if(!force && Date.now()-lastTracePersistAt<1000)return false;
       lastTracePersistAt=Date.now();
       try{
@@ -6223,6 +6229,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         }
       }
 
+      if(session.cancelled)throw new SyncCancelledByClear(); // the reads above catch it, so stop here
       const directSuccessCount=directResults.filter(x=>x.ok).length;
       const accountingCoreSuccess=target.name==='Accounting'
         ? directResults.some(x=>x.ok&&ACCOUNTING_CORE_PATH_RE.test(x.path))
