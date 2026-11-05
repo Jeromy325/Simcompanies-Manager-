@@ -1392,6 +1392,7 @@ function scmPageTextNoLayout(){
   };
   // v2.5.362 compact badge: only the % vs market price (VWAP when no market price is captured); tap it for the details popup.
   const marketLabel=record=>record?.marketPriceSource==='realm-vwap'?'VWAP':'market price';
+  const oldTag=record=>record?.marketPriceStale?' (old)':'';
   const detailLines=record=>{
     const marketPrice=Number(record?.marketPrice),p=Number(record?.price),qty=Number(record?.quantity),rk=record?._scmRank;
     if(!Number.isFinite(p)||p<=0)return [];
@@ -1402,9 +1403,10 @@ function scmPageTextNoLayout(){
     lines.push({k:'Contract',v:`${qty>0?qty.toLocaleString('en-US')+' @ ':''}${priceText(p)}${qty>0?` (${money(p*qty)})`:''}`});
     if(rk&&rk.of>1)lines.push({k:'Price rank',v:`#${rk.rank} of ${rk.of} incoming Q${Number(record?.quality)||0} (1 = cheapest)`,cls:rk.rank===1?'cheap':'flat'});
     if(!hasMarket){lines.push({k:'Market price',v:'not captured yet (no VWAP either)'});return lines;}
-    lines.push({k:label==='VWAP'?'VWAP (no market price)':'Market price',v:priceText(marketPrice)});
+    lines.push({k:label==='VWAP'?'VWAP (no market price)':'Market price',v:priceText(marketPrice)+oldTag(record)});
     lines.push({k:'Vs '+label,v:Math.abs(pct)<0.05?`At ${label}`:`${Math.abs(pct).toFixed(2)}% ${pct<0?'cheaper than':'above'} ${label}`,cls:pct< -0.0001?'cheap':pct>0.0001?'expensive':'flat'});
-    if(ex)lines.push({k:`Exchange Q${Number(record?.quality)||0}+`,v:ex.savesPerUnit>=0?`saves ${priceText(ex.savesPerUnit)}/u vs exchange ${priceText(ex.exchangePrice)} (${money(ex.savesTotal)})`:`exchange ${priceText(ex.exchangePrice)} is ${priceText(-ex.savesPerUnit)}/u cheaper (${money(-ex.savesTotal)})`,cls:ex.savesPerUnit>0.0000001?'cheap':ex.savesPerUnit< -0.0000001?'expensive':'flat'});
+    const refName=record?.marketPriceSource==='realm-vwap'?'VWAP':record?.marketPriceSource==='simcotools'?'SimcoTools':'exchange';
+    if(ex)lines.push({k:refName==='VWAP'?`VWAP Q${Number(record?.quality)||0}`:`${refName==='exchange'?'Exchange':refName} Q${Number(record?.quality)||0}+`,v:ex.savesPerUnit>=0?`saves ${priceText(ex.savesPerUnit)}/u vs ${refName} ${priceText(ex.exchangePrice)} (${money(ex.savesTotal)})`:`${refName} ${priceText(ex.exchangePrice)} is ${priceText(-ex.savesPerUnit)}/u cheaper (${money(-ex.savesTotal)})`,cls:ex.savesPerUnit>0.0000001?'cheap':ex.savesPerUnit< -0.0000001?'expensive':'flat'});
     else lines.push({k:'Exchange',v:'order book not captured yet'});
     if(v&&Number(v.stockCost)>0)lines.push({k:'Your stock',v:`${priceText(v.stockCost)}/u`});
     return lines;
@@ -1436,7 +1438,7 @@ function scmPageTextNoLayout(){
     const badge=document.createElement('span');
     const cls=!hasMarket?'flat':pct< -0.0001?'cheap':pct>0.0001?'expensive':'flat';
     badge.className='scm-contract-vwap-badge '+cls;
-    const vs=!hasMarket?'':Math.abs(pct)<0.05?`= ${label}`:`${pct<0?'▼':'▲'} ${Math.abs(pct).toFixed(2)}% ${pct<0?'below':'above'} ${label}`;
+    const vs=!hasMarket?'':Math.abs(pct)<0.05?`= ${label}${oldTag(record)}`:`${pct<0?'▼':'▲'} ${Math.abs(pct).toFixed(2)}% ${pct<0?'below':'above'} ${label}${oldTag(record)}`;
     badge.textContent=`${[rt,vs].filter(Boolean).join(' · ')} ⓘ`;
     badge.title='Tap for details';
     badge.setAttribute('role','button');
@@ -1535,7 +1537,7 @@ function scmPageTextNoLayout(){
     for(const badge of [...document.querySelectorAll('.scm-contract-vwap-badge')]){
       if(!badge.isConnected||!badge.closest('body')||!wanted.has(String(badge.dataset.contractKey||'')))badge.remove();
     }
-    lastSignature=`${data.realm}:${records.map(c=>`${c.id}:${c.kind}:${c.quality}:${c.quantity}:${c.price}:${c.marketPrice}:${c.exchangePrice}:${c.stockCost}:${c.marketPriceSource}`).join('|')}`;
+    lastSignature=`${data.realm}:${records.map(c=>`${c.id}:${c.kind}:${c.quality}:${c.quantity}:${c.price}:${c.marketPrice}:${c.exchangePrice}:${c.stockCost}:${c.marketPriceSource}:${c.marketPriceStale}`).join('|')}`;
     if(missing>0)scheduleRetry();else retryAttempt=0;
   };
   const schedule=()=>{if(scheduled)return;scheduled=setTimeout(()=>{scheduled=0;if(inflight){again=true;return;}inflight=process().catch(()=>{scheduleRetry();}).finally(()=>{inflight=null;if(again){again=false;schedule();}});},300);};

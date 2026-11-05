@@ -1,6 +1,7 @@
 import './diagnostic-core.js';
 import './planner-core.js';
 import './tools-core.js';
+import './market-core.js';
 import './notify-core.js';
 import './analyze-core.js';
 import {
@@ -1118,46 +1119,40 @@ function overlayWarehouseRows(warehouse){
   }
   return [...groups.values()].map(g=>({...g,cost:g.hasCost&&g.qty>0?g.totalCost/g.qty:null}));
 }
+// All market price and VWAP reads below go through market-core.js, the one source every screen shares.
 function overlayVwap(store,id,quality,realm){
-  // VWAP belongs to the physical realm store that produced it. Never borrow a
-  // root mirror or a neighboring quality when building a realm-specific overlay.
-  if(!Number.isInteger(Number(realm)) || ![0,1].includes(Number(realm))) return null;
-  const data=store?.vwapData;
-  if(!data || Number(data.sourceRealm)!==Number(realm)) return null;
-  const rows=Array.isArray(data.rows)?data.rows:[];
-  const hit=rows.find(x=>
-    Number(x?.resourceId??x?.id??x?.kind)===Number(id) &&
-    Number(x?.quality)===Number(quality)
-  );
-  const n=Number(hit?.value??hit?.vwap??hit?.price);
-  return Number.isFinite(n)&&n>0?n:null;
+  if(!Number.isInteger(Number(realm))||![0,1].includes(Number(realm)))return null;
+  return globalThis.SCM_MARKET_CORE.vwap(store,Number(realm),id,quality)?.value??null;
 }
-function overlayCurrentMarketPrice(store,id,quality,realm){
-  if(!Number.isInteger(Number(realm)) || ![0,1].includes(Number(realm))) return null;
-  const data=store?.liveMarketPriceData;
-  const rows=data && Number(data.realm)===Number(realm)&&Array.isArray(data.rows)?data.rows:[];
-  const hit=rows.find(x=>Number(x?.resourceId)===Number(id)&&Number(x?.quality)===Number(quality));
-  const direct=Number(hit?.price);
-  if(Number.isFinite(direct)&&direct>0) return direct;
-  const key=`${Number(id)}:${Number(quality)}`;
-  const product=store?.liveMarketProductCache?.[key];
-  if(Number(product?.resourceId)===Number(id)&&Number(product?.quality)===Number(quality)){
-    const selected=Number(product?.selected?.price);
-    if(Number.isFinite(selected)&&selected>0)return selected;
-  }
-  return null;
+function overlayCurrentMarketPrice(store,id,quality,realm,opts){
+  if(!Number.isInteger(Number(realm))||![0,1].includes(Number(realm)))return null;
+  return globalThis.SCM_MARKET_CORE.marketPrice(store,Number(realm),id,quality,{...opts,mode:'exact'})?.price??null;
 }
-function overlayIncomingContractMarketComparison(store,contract,realm){
-  // Prefer exact-quality live current-market price. If that resource/quality has
-  // not been fetched into the smaller live-price cache, use the same realm's
-  // exact-quality VWAP dataset as a deterministic fallback; never borrow a
-  // neighboring quality or another realm's data.
-  const current=overlayCurrentMarketPrice(store,contract?.kind,contract?.quality,realm);
-  const marketPrice=current!=null?current:overlayVwap(store,contract?.kind,contract?.quality,realm);
+function overlayIncomingContractMarketComparison(store,contract,realm,opts){
+  // One reference for the contract badge, savings and verdict: cheapest at the
+  // contract's quality or better, excluding your own listings.
+  const hit=Number.isInteger(Number(realm))&&[0,1].includes(Number(realm))
+    ? globalThis.SCM_MARKET_CORE.marketPrice(store,Number(realm),contract?.kind,contract?.quality,{...opts,mode:'min'}) : null;
+  const marketPrice=hit?.price??null;
   const price=Number(contract?.price);
   const savingsPct=marketPrice!=null&&marketPrice>0&&Number.isFinite(price)&&price>0
     ? (marketPrice-price)/marketPrice*100 : null;
-  return {marketPrice,savingsPct,marketPriceSource:current!=null?'current-market':'realm-vwap'};
+  return {marketPrice,savingsPct,marketPriceSource:hit?(hit.source==='vwap'?'realm-vwap':hit.source):null,marketPriceStale:!!hit?.stale};
+}
+// Same realm rule as market-core vwap(); for payloads that send whole rows.
+function vwapRowsForRealm(store,realm){
+  const d=store?.vwapData;
+  if(!d||!Array.isArray(d.rows))return [];
+  return d.sourceRealm!=null&&Number(d.sourceRealm)!==Number(realm)?[]:d.rows;
+}
+// Your own listings, so market price does not compare you with yourself. Storage read only.
+async function marketOwnOpts(store,realm){
+  const companyId=store?.authData?.authCompany?.companyId??store?.authData?.authCompany?.id??null;
+  try{
+    const k=`scmMarketOrders:${realm}`;
+    const mo=(await chrome.storage.local.get({[k]:null}))[k];
+    return {companyId,ownIds:(Array.isArray(mo?.orders)?mo.orders:[]).map(o=>o?.id).filter(v=>v!=null)};
+  }catch{return {companyId};}
 }
 function mergeSellingHistory(store){
   const current={...(store?.sellingHistory||{})};
@@ -1639,12 +1634,12 @@ async function notifyAfterPriceUpdate(realm){
   const n=validRealmNumber(realm);if(n==null)return;const cfg=await notifySettings();
   const wantTargets=Array.isArray(cfg.priceTargets)&&cfg.priceTargets.some(t=>Number(t?.realm??n)===n);
   if(!wantTargets&&!cfg.bigMove&&!cfg.unprofitable)return;
-  const st=await notifyRealmStore(n);const rows=Array.isArray(st.liveMarketPriceData?.rows)?st.liveMarketPriceData.rows:[];if(!rows.length)return;
+  const st=await notifyRealmStore(n);const rows=Array.isArray(st.liveMarketPriceData?.rows)?st.liveMarketPriceData.rows:[];if(!rows.length)return;const marketOwn=cfg.unprofitable?await marketOwnOpts(st,n):{};
   const {names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE,C=globalThis.SCM_TOOLS_CORE;
   await updateNotifyState(async state=>{
     if(wantTargets){const key=`targets:${n}`;const r=N.priceTargetHits(cfg.priceTargets.filter(t=>Number(t?.realm??n)===n),rows,state[key]||{},names,n);state[key]=r.state;for(const f of r.fire)await scmNotify(`target-${n}-${f.id}-${f.q}-${Date.now()}`,f.title,f.message);}
     if(cfg.bigMove){const key=`moves:${n}`;const mv=C.moversFromTrend(rows);const r=N.bigMoves({movers:[...mv.ranked,...mv.unranked],lots:st.warehouseResources,threshold:Number(cfg.bigMovePct)||5,lastFired:state[key]||{},names,realm:n});state[key]=r.lastFired;for(const f of r.fire)await scmNotify(`move-${n}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,f.title,f.message);}
-    if(cfg.unprofitable){const key=`unprof:${n}`;const r=N.unprofitable({buildings:st.buildings,store:st,realm:n,names,state:state[key]||{}});state[key]=r.state;for(const f of r.fire)await scmNotify(`unprof-${n}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,f.title,f.message);}
+    if(cfg.unprofitable){const key=`unprof:${n}`;const r=N.unprofitable({buildings:st.buildings,store:st,realm:n,names,state:state[key]||{},...marketOwn});state[key]=r.state;for(const f of r.fire)await scmNotify(`unprof-${n}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,f.title,f.message);}
     return state;
   });
 }
@@ -1693,7 +1688,7 @@ async function notifyOrderBook(realm,resourceId,rows){
   const own=Array.isArray(mo?.orders)?mo.orders.filter(o=>Number(o?.kind)===Number(resourceId)):null;
   await updateNotifyState(async state=>{
     if(cfg.undercut){const key=`undercut:${n}`;const r=N.undercut({rows,companyId,own,id:Number(resourceId),names,realm:n,state:state[key]||{}});state[key]=r.state;for(const f of r.fire)await scmNotify(`undercut-${n}-${resourceId}-${Date.now()}`,f.title,f.message);}
-    if(cfg.unprofitable){const key=`unprof:${n}`;const r=N.unprofitable({buildings:st.buildings,store:st,realm:n,names,state:state[key]||{}});state[key]=r.state;for(const f of r.fire)await scmNotify(`unprof-${n}-${Date.now()}`,f.title,f.message);}
+    if(cfg.unprofitable){const key=`unprof:${n}`;const r=N.unprofitable({buildings:st.buildings,store:st,realm:n,names,state:state[key]||{},companyId,ownIds:(Array.isArray(mo?.orders)?mo.orders:[]).map(o=>o?.id).filter(v=>v!=null)});state[key]=r.state;for(const f of r.fire)await scmNotify(`unprof-${n}-${Date.now()}`,f.title,f.message);}
     return state;
   });
 }
@@ -1757,7 +1752,7 @@ async function fireProductionFinished(name){
   const b=(Array.isArray(st.buildings)?st.buildings:[]).find(x=>Number(x?.id)===bid)||{id:bid,name:`Building ${bid}`};
   const {names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE;
   if(clearGen!==extensionClearGeneration)return;
-  if(cfg.productionFinished){const r=N.batchFinishedMessage({building:b,store:st,realm,names});await scmNotify(`prodfin-${realm}-${bid}-${m[3]}`,r.title,r.message);}
+  if(cfg.productionFinished){const r=N.batchFinishedMessage({building:b,store:st,realm,names,...(await marketOwnOpts(st,realm))});await scmNotify(`prodfin-${realm}-${bid}-${m[3]}`,r.title,r.message);}
   // v2.5.350 'Not enough inputs to repeat a finished batch' removed at the user's request.
   // 4 + 11: look again idleHours after the finish (idle, or still not collected).
   const st0=Date.parse(String(b?.busy?.started||''));
@@ -1851,13 +1846,13 @@ async function getRealmBuildingVwapData(realm,resourceName,quality){
   let id=null;
   for(const [sid,name] of assets.names instanceof Map?assets.names.entries():[])if(normalizeOverlayName(name)===norm){id=Number(sid);break;}
   if(id==null){
-    const hit=(Array.isArray(store.vwapData?.rows)?store.vwapData.rows:[]).find(r=>normalizeOverlayName(assets.names.get(String(r.resourceId))||'')===norm);
+    const hit=vwapRowsForRealm(store,n).find(r=>normalizeOverlayName(assets.names.get(String(r.resourceId))||'')===norm);
     if(hit)id=Number(hit.resourceId);
   }
   if(id==null){
     for(const b of Array.isArray(store.buildings)?store.buildings:[]){const rid=Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId);const name=String(b?.busy?.resource?.name||'');if(Number.isFinite(rid)&&normalizeOverlayName(name)===norm){id=rid;break;}}
   }
-  const rows=(Array.isArray(store.vwapData?.rows)&&Number(store.vwapData?.sourceRealm)===n?store.vwapData.rows:[]).filter(r=>Number(r.resourceId)===Number(id)&&Number(r.value)>0).sort((a,b)=>Number(a.quality)-Number(b.quality));
+  const rows=vwapRowsForRealm(store,n).filter(r=>Number(r.resourceId)===Number(id)).map(r=>{const v=globalThis.SCM_MARKET_CORE.vwap(store,n,id,r.quality);return v?{...r,value:v.value}:null;}).filter(Boolean).sort((a,b)=>Number(a.quality)-Number(b.quality));
   if(id==null||!rows.length)return {ok:false,realm:n,resourceId:id,resourceName:targetName,quality:Number(quality),rows:[]};
   const q=Number(quality);
   const file=assets.images[String(id)];
@@ -2289,31 +2284,8 @@ async function buildGameOverlayData(store,realm,globalState){
     if(!etaRunsByKey.has(runKey))etaRunsByKey.set(runKey,[]);
     etaRunsByKey.get(runKey).push({ratePerHour:rate,finishMs:started+duration*1000});
   }
-  // Copy prices read the active realm's existing Market-page caches only.
-  // Prefer the consolidated current-price rows, then fill missing keys from
-  // the keyed per-product cache. Never issue a request or use VWAP as price.
-  const overlayMarketRows=Array.isArray(store?.liveMarketPriceData?.rows) &&
-    Number(store?.liveMarketPriceData?.realm)===Number(realm)
-    ? store.liveMarketPriceData.rows : [];
-  const overlayMarketByKey=new Map();
-  for(const v of overlayMarketRows){
-    const id=Number(v?.resourceId), quality=Number(v?.quality), value=Number(v?.price);
-    if(!Number.isFinite(id)||id<=0||!Number.isFinite(quality)||!(value>0))continue;
-    overlayMarketByKey.set(`${id}:${quality}`,value);
-  }
-  // A product detail can be present in liveMarketProductCache before its row
-  // appears in liveMarketPriceData.rows. Use only its selected current price,
-  // with exact resource+quality validation; deliberately ignore vwap fields.
-  const overlayProductCache=store?.liveMarketProductCache&&typeof store.liveMarketProductCache==='object'
-    ? store.liveMarketProductCache : {};
-  for(const [cacheKey,product] of Object.entries(overlayProductCache)){
-    const id=Number(product?.resourceId), quality=Number(product?.quality);
-    const expectedKey=`${id}:${quality}`;
-    if(!Number.isFinite(id)||id<=0||!Number.isFinite(quality)||String(cacheKey)!==expectedKey)continue;
-    if(overlayMarketByKey.has(expectedKey))continue;
-    const value=Number(product?.selected?.price);
-    if(Number.isFinite(value)&&value>0)overlayMarketByKey.set(expectedKey,value);
-  }
+  // Market price per row comes from the shared reader at the row's exact quality. No request, no other quality.
+  const marketOwn=await marketOwnOpts(store,realm);
   const overlayImageStore=await resourceImagesStore();
   const rows=detailRows.map(r=>{
     const file=assets.images[String(r.id)];
@@ -2328,11 +2300,7 @@ async function buildGameOverlayData(store,realm,globalState){
     // Left is actual warehouse stock after full planned demand, with Manager-saved
     // incoming commitments added once. Live outgoing game contracts never affect it.
     const left=(Number(r.warehouseOnlyLeft)||0)+incoming;
-    let marketPrice=overlayMarketByKey.get(key)??null,marketPriceQuality=marketPrice!=null?quality:null;
-    if(marketPrice==null){
-      const alternatives=[...overlayMarketByKey.entries()].map(([k,price])=>{const match=k.match(/^(\d+):(\d+)$/);return match&&Number(match[1])===Number(r.id)?{quality:Number(match[2]),price:Number(price)}:null;}).filter(x=>x&&Number.isFinite(x.quality)&&x.price>0).sort((a,b)=>Math.abs(a.quality-quality)-Math.abs(b.quality-quality)||a.quality-b.quality);
-      if(alternatives.length){marketPrice=alternatives[0].price;marketPriceQuality=alternatives[0].quality;}
-    }
+    const marketPrice=overlayCurrentMarketPrice(store,r.id,quality,realm,marketOwn),marketPriceQuality=marketPrice!=null?quality:null;
     const vwap=overlayVwap(store,r.id,quality,realm);
     // 2.5.347 production surplus for this resource+quality (game-page Sell helper "Surplus").
     const surplus=Math.max(0,Number(productionSurplusByKey.get(key))||0);
@@ -4500,12 +4468,8 @@ async function fetchSimcoMarketCandles(realm,resourceId,quality){
   const data=parseSimcoResponse(resp.text);
   return simcoCandleRows(data).map(normalizeSimcoCandle).filter(Boolean);
 }
-function cachedSimcoVwapForProduct(store,resourceId,quality){
-  const rows=Array.isArray(store?.vwapData?.rows)?store.vwapData.rows:[];
-  const row=rows.find(x=>Number(x?.resourceId)===Number(resourceId)&&Number(x?.quality)===Number(quality));
-  const value=row?.value??row?.vwap??row?.price;
-  const v=value==null||value===''?null:Number(value);
-  return Number.isFinite(v)&&v>0?v:null;
+function cachedSimcoVwapForProduct(store,realm,resourceId,quality){
+  return globalThis.SCM_MARKET_CORE.vwap(store,realm,resourceId,quality)?.value??null;
 }
 function validPositiveMarketNumber(value){
   if(value==null||value==='')return null;
@@ -4564,7 +4528,7 @@ async function runLiveMarketProduct(realmArg,resourceIdArg,qualityArg){
     const currentPairKeys=new Set((Array.isArray(store.warehouseResources)?store.warehouseResources:[])
       .filter(row=>Number.isFinite(warehouseId(row))&&warehouseId(row)>0&&Number.isFinite(warehouseQuality(row))&&warehouseQuality(row)>=0&&warehouseQuantity(row)>0)
       .map(row=>vwapPairKey(warehouseId(row),warehouseQuality(row))));
-    const bulkVwap=cachedSimcoVwapForProduct(store,resourceId,quality);
+    const bulkVwap=cachedSimcoVwapForProduct(store,realm,resourceId,quality);
     const selected={...selectedRaw,vwap:validPositiveMarketNumber(selectedRaw?.vwap)??bulkVwap};
     const productKey=`${resourceId}:${quality}`;
     const productCache=Object.fromEntries(Object.entries(store.liveMarketProductCache||{}).filter(([cachedProductKey])=>currentPairKeys.has(cachedProductKey)));
@@ -4584,7 +4548,7 @@ async function runLiveMarketProduct(realmArg,resourceIdArg,qualityArg){
       .map(row=>({
         resourceId:Number(row.resourceId),quality:Number(row.quality),price:validPositiveMarketNumber(row.price),
         lastTrade:row.lastTrade||null,
-        vwap:validPositiveMarketNumber(row.vwap)??cachedSimcoVwapForProduct(store,row.resourceId,row.quality)
+        vwap:validPositiveMarketNumber(row.vwap)??cachedSimcoVwapForProduct(store,realm,row.resourceId,row.quality)
       }))
       .sort((a,b)=>a.quality-b.quality);
     data={...existingProduct,resourceId,quality,selected,qualities:qualityRows,vwap:selected.vwap??bulkVwap,failures:[],fetchedAt:checkedAt,updatedAt:checkedAt,source:'SimcoTools'};
@@ -7521,21 +7485,22 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const key=realmKeyFromRealm(realm),store={...(realmState.realmStores?.[key]||{})};
         const incomingRaw=helperLatestEndpoint(store,/\/api\/v3\/contracts-incoming\/\d+\/me\/?$/i);
         const incoming=helperArray(incomingRaw,['incomingContracts','data','items','results']).map(c=>({id:Number(c?.id),kind:Number(c?.kind),quality:Number(c?.quality)||0,quantity:Number(c?.quantity)||0,price:Number(c?.price)||0,company:String(c?.seller?.company||c?.company||'Unknown seller'),datetime:c?.datetime||null})).filter(c=>Number.isFinite(c.id));
-        // v2.5.359 #6 verdict: cheapest exchange listing at quality ≥ the contract's (captured order book, < 6 h; refreshed
+        // v2.5.359 #6 verdict: same reference as the badge, market-core at quality ≥ the contract's (order book < 6 h first; refreshed
         // through the game tab when older than 15 min, ≤ 3 products per pass, throttled 5 min each) and your warehouse cost.
         const C=globalThis.SCM_TOOLS_CORE,lots=Array.isArray(store.warehouseResources)?store.warehouseResources:[];let asked=0;
+        const marketOwn=await marketOwnOpts(store,realm);
         for(const c of incoming){
-          const comparison=overlayIncomingContractMarketComparison(store,c,realm);
+          const comparison=overlayIncomingContractMarketComparison(store,c,realm,marketOwn);
           c.marketPrice=comparison.marketPrice;
           c.savingsPct=comparison.savingsPct;
           c.marketPriceSource=comparison.marketPriceSource;
+          c.marketPriceStale=comparison.marketPriceStale;
           try{
             const ep=store.endpointData?.[`/api/v3/market/${realm}/${c.kind}/`],at=Date.parse(String(ep?.receivedAt||''));
             const book=Array.isArray(ep?.data)&&Number.isFinite(at)&&Date.now()-at<6*3600e3?ep.data:null;
             if((!book||Date.now()-at>15*60e3)&&asked<3&&c.kind>0){asked++;fetchExchangeOrderBookForRealm(realm,c.kind).catch(()=>{});}
-            const comp=(book||[]).filter(r=>Number(r?.price)>0&&Number(r?.quality)>=c.quality);
-            c.exchangePrice=comp.length?Math.min(...comp.map(r=>Number(r.price))):null;
-            c.exchangeAt=book?ep.receivedAt:null;
+            c.exchangePrice=c.marketPrice;
+            c.exchangeAt=c.marketPriceSource==='exchange'?ep.receivedAt:null;
             c.stockCost=C?.warehouseUnitCostAsGame?C.warehouseUnitCostAsGame(lots,c.kind)?.unitCost??null:null;
             c.verdict=C?.contractVerdict?C.contractVerdict({price:c.price,quantity:c.quantity,exchangePrice:c.exchangePrice,stockCost:c.stockCost}):null;
           }catch{}
@@ -7583,6 +7548,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const savedQuantityByContract=plannerCore?.resolveSavedContractQuantities
           ?plannerCore.resolveSavedContractQuantities({savedContracts:saved,baseBalanceByKey,surplusByKey})
           :new Map();
+        const marketOwn=await marketOwnOpts(store,realm);
         const helperContracts=saved.map(c=>{
           let productId=Number(c?.productId), quality=Number(c?.quality);
           const keyMatch=String(c?.product||'').match(/^(\d+):(\d+)$/);
@@ -7598,7 +7564,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
           const resolvedQuantity=savedQuantityByContract.has(c)?Math.max(0,Number(savedQuantityByContract.get(c))||0):null;
           const savedEffectiveQuantity=resolvedQuantity!=null?resolvedQuantity:quantityMode==='surplus'?surplus:quantityMode==='left'?0:Math.max(0,Number(c?.quantity)||0);
           const left=quantityMode==='left'?savedEffectiveQuantity:baseLeft;
-          return {...c,price:plannerCore?.savedContractCurrentPrice?plannerCore.savedContractCurrentPrice(c,overlayCurrentMarketPrice(store,productId,quality,realm)):c?.price,productId:Number.isFinite(productId)?productId:null,productName,quality:Number.isFinite(quality)?quality:null,available:surplus,warehouseAvailable,surplus,left,quantityMode,savedEffectiveQuantity};
+          return {...c,price:plannerCore?.savedContractCurrentPrice?plannerCore.savedContractCurrentPrice(c,overlayCurrentMarketPrice(store,productId,quality,realm,marketOwn)):c?.price,productId:Number.isFinite(productId)?productId:null,productName,quality:Number.isFinite(quality)?quality:null,available:surplus,warehouseAvailable,surplus,left,quantityMode,savedEffectiveQuantity};
         });
         const value={ok:true,realm,contracts:helperContracts,incomingContracts:incoming,warehouse:stock};
         contractHelperCache.set(realm,{at:now,value});
@@ -7659,14 +7625,8 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const resourceId=Number(m.resourceId),quality=Number(m.quality);
         if(realm==null||!Number.isFinite(resourceId)||resourceId<=0||!Number.isFinite(quality)){send({ok:false,price:null,error:'Valid realm, resource and quality required.'});return;}
         const key=realmKeyFromRealm(realm),store=s.realmStores?.[key]||{};
-        const rows=Number(store.liveMarketPriceData?.realm)===realm&&Array.isArray(store.liveMarketPriceData?.rows)?store.liveMarketPriceData.rows:[];
-        let row=rows.find(x=>Number(x?.resourceId)===resourceId&&Number(x?.quality)===quality);
-        if(!row){
-          const cache=store.liveMarketProductCache?.[`${resourceId}:${quality}`];
-          if(Number(cache?.resourceId)===resourceId&&Number(cache?.quality)===quality&&Number(cache?.selected?.price)>0)row={price:cache.selected.price};
-        }
-        const price=Number(row?.price);
-        send({ok:true,realm,resourceId,quality,price:Number.isFinite(price)&&price>0?price:null,source:row?'captured-market':'unavailable'});
+        const hit=globalThis.SCM_MARKET_CORE.marketPrice(store,realm,resourceId,quality,{mode:'exact'});
+        send({ok:true,realm,resourceId,quality,price:hit?.price??null,source:hit?hit.source:'unavailable'});
       }catch(e){send({ok:false,price:null,error:e?.message||String(e)});}
     })();return true;
   }
@@ -7686,7 +7646,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
           return m?{id:Number(m[1]),at:Date.parse(String(endpointMap[url]?.receivedAt||''))||0}:null;
         }).filter(Boolean).sort((a,b)=>b.at-a.at);
         const requestedResourceIdRaw=validRealmNumber(m.resourceId); const requestedResourceId=(requestedResourceIdRaw!=null&&Number(requestedResourceIdRaw)>0)?Number(requestedResourceIdRaw):null; const inferredResourceId=requestedResourceId!=null?requestedResourceId:(endpointMarketIds[0]?.id??null);
-        const cachedRows=Array.isArray(store.vwapData?.rows)&&Number(store.vwapData?.sourceRealm)===realm?store.vwapData.rows:[];
+        const cachedRows=vwapRowsForRealm(store,realm);
         const cachedAt=Date.parse(String(store.vwapData?.fetchedAt||''));
         const fresh=Number.isFinite(cachedAt)&&vwapCacheFresh(store.vwapData)&&!store.vwapData?.stale&&!store.vwapData?.fallback;
         let rows=cachedRows,sourceRealm=store.vwapData?.sourceRealm??null,fetchedAt=store.vwapData?.fetchedAt||null;

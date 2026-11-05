@@ -525,61 +525,10 @@ function warehouseAlertUnitCost(s,r){
   return r?._unitCost!==null&&r?._unitCost!==undefined&&Number.isFinite(fallback)&&fallback>=0?fallback:null;
 }
 
-function marketArray(data){
-  if(Array.isArray(data)) return data;
-  if(!data || typeof data!=='object') return [];
-  const directKeys=['data','orders','market','results','items','entries','sellOrders','buyOrders','offers','list'];
-  for(const k of directKeys){ if(Array.isArray(data[k])) return data[k]; }
-  // Some Sim Companies responses are nested by quality/side. Find the first
-  // meaningful array of order-like objects instead of assuming one shape.
-  const candidates=[];
-  const walk=(v)=>{
-    if(Array.isArray(v)){
-      if(v.some(x=>x&&typeof x==='object' && ('price' in x || 'quality' in x))) candidates.push(v);
-      return;
-    }
-    if(v&&typeof v==='object') Object.values(v).forEach(walk);
-  };
-  walk(data);
-  return candidates.sort((a,b)=>b.length-a.length)[0]||[];
-}
-
 function simcoVwapRows(s,id,q){
-  const rows=Array.isArray(s.vwapData?.rows)?s.vwapData.rows:[];
-  const n=Number(id), qual=Number(q);
-  return rows.filter(x=>Number(x.resourceId)===n && Number(x.quality)===qual).map(x=>({quality:qual,price:Number(x.value),quantity:1,source:'SimcoTools'}));
+  const v=cachedMarketVwap(s,id,q);
+  return v!=null?[{quality:Number(q),price:v,quantity:1,source:'SimcoTools'}]:[];
 }
-function marketPaths(s,id){
-  const n=Number(id);
-  return Object.keys(s.endpointData||{}).filter(k=>{const m=String(k).match(/^\/api\/v3\/market(?:\/all)?\/(\d+)\/(\d+)\/?(?:\?.*)?$/);return m&&Number(m[2])===n;}).sort((a,b)=>new Date(s.endpointData[b]?.receivedAt||0)-new Date(s.endpointData[a]?.receivedAt||0));
-}
-function marketRows(s,id,q=null){
-  if(q!=null){const vw=simcoVwapRows(s,id,q);if(vw.length)return vw;}
-  for(const path of marketPaths(s,id)){
-    const rows=marketArray(s.endpointData?.[path]?.data);
-    if(rows.length) return rows;
-  }
-  return marketArray(s.marketCache?.[String(id)]?.data);
-}
-function marketSource(s,id,q=null){
-  if(q!=null && cachedMarketPrice(s,id,q)!=null) return 'Current market price';
-  return 'Market price not captured';
-}
-function marketStats(rows,q){
-  const usable=rows.map(o=>({
-    q:Number(pick(o,['quality','q'])),
-    p:Number(pick(o,['price','unitPrice','amountPrice'])),
-    a:Number(pick(o,['amount','quantity','units','volume','available','count']))||0
-  })).filter(o=>Number.isFinite(o.p)&&o.p>0&&Number.isFinite(o.q));
-  const exact=usable.filter(o=>o.q===q);
-  const eligible=usable.filter(o=>o.q>=q);
-  const pool=exact.length?exact:eligible;
-  const best=pool.length?Math.min(...pool.map(o=>o.p)):null;
-  const weighted=pool.filter(o=>o.a>0);
-  const vwap=weighted.length?weighted.reduce((s,o)=>s+o.p*o.a,0)/weighted.reduce((s,o)=>s+o.a,0):null;
-  return {best,vwap,quality:exact.length?q:(pool.length?Math.min(...pool.map(o=>o.q)):null),fallback:!exact.length&&pool.length,orderCount:usable.length};
-}
-
 function labelize(k){
   return String(k||'').replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/[_-]+/g,' ').replace(/\s+/g,' ').replace(/^./,c=>c.toUpperCase());
 }
@@ -1472,46 +1421,54 @@ function marketWarehouseOptions(s){
 }
 function marketNumeric(v){if(v===null||v===undefined||v==='')return null;const n=Number(v);return Number.isFinite(n)?n:null;}
 function marketMoney(v){const n=marketNumeric(v);return n==null?'—':money(n);}
-function cachedMarketVwap(s,resourceId,quality){const rows=Array.isArray(s?.vwapData?.rows)?s.vwapData.rows:[];const row=rows.find(r=>Number(r?.resourceId)===Number(resourceId)&&Number(r?.quality)===Number(quality));const v=marketNumeric(row?.value??row?.vwap??row?.price);return v!=null&&v>0?v:null;}
-// Perf: first-matching direct price row per "id:quality", built once per live price rows array (was a linear find per call).
-const __scmDirectPriceMemo=new WeakMap();
-function directPriceIndex(rows){
-  let m=__scmDirectPriceMemo.get(rows);if(m)return m;
-  m=new Map();for(const r of rows){const k=`${Number(r?.resourceId)}:${Number(r?.quality)}`;if(!m.has(k))m.set(k,r);}
-  __scmDirectPriceMemo.set(rows,m);return m;
-}
-function cachedMarketPrice(s,resourceId,quality){
-  const id=Number(resourceId),q=Number(quality),rows=Array.isArray(s?.liveMarketPriceData?.rows)?s.liveMarketPriceData.rows:[];
-  const row=Number.isNaN(id)||Number.isNaN(q)?undefined:directPriceIndex(rows).get(`${id}:${q}`);
-  const direct=marketNumeric(row?.price);if(direct!=null&&direct>0)return direct;
-  const key=`${id}:${q}`,product=s?.liveMarketProductCache?.[key];
-  const selected=Number(product?.resourceId)===id&&Number(product?.quality)===q?marketNumeric(product?.selected?.price):null;
-  return selected!=null&&selected>0?selected:null;
-}
-function buildMarketPriceMap(s){
-  const map=new Map(),rows=Array.isArray(s?.liveMarketPriceData?.rows)?s.liveMarketPriceData.rows:[];
-  for(const row of rows){const id=Number(row?.resourceId),q=Number(row?.quality),price=marketNumeric(row?.price);if(Number.isFinite(id)&&id>0&&Number.isFinite(q)&&price!=null&&price>0)map.set(`${id}:${q}`,price);}
-  for(const [key,product] of Object.entries(s?.liveMarketProductCache||{})){const id=Number(product?.resourceId),q=Number(product?.quality),price=marketNumeric(product?.selected?.price);if(Number.isFinite(id)&&id>0&&Number.isFinite(q)&&price!=null&&price>0&&key===`${id}:${q}`&&!map.has(key))map.set(key,price);}
-  return map;
-}
-function exactMarketPrice(map,id,quality){const value=marketNumeric(map instanceof Map?map.get(`${Number(id)}:${Number(quality)}`):null);return value!=null&&value>0?value:null;}
-function marketPriceReference(map,id,quality){
-  const exact=exactMarketPrice(map,id,quality);
-  if(exact!=null)return {price:exact,quality:Number(quality),exact:true};
-  if(!(map instanceof Map))return null;
-  const targetId=Number(id),targetQ=Number(quality);
-  if(!Number.isFinite(targetId)||!Number.isFinite(targetQ))return null;
-  const candidates=[];
-  for(const [key,value] of map){
-    const match=String(key).match(/^(\d+):(\d+)$/);
-    if(!match||Number(match[1])!==targetId||!(Number(value)>0))continue;
-    candidates.push({price:Number(value),quality:Number(match[2]),distance:Math.abs(Number(match[2])-targetQ)});
+// Single source for market price and VWAP: market-core.js (SCM_MARKET_CORE). Modes: 'exact' quality, 'min' quality or better,
+// 'any' cheapest listing of any quality (the game calculator rule). Never borrows a neighbouring quality.
+// Memoised per state object (warehouse tables call this once per row); the memo expires after 5 s so ages stay honest.
+const __scmMarketMemo=new WeakMap();
+function scmMarketCtx(s){
+  if(!s||typeof s!=='object')return null;
+  const now=Date.now();let m=__scmMarketMemo.get(s);
+  if(!m||now-m.t>5000){
+    const ac=s.authData?.authCompany,cid=Number(ac?.companyId??ac?.id);
+    const realm=validRealmNumber(s.viewRealm??s.captureRealm??s.selectedRealm??ac?.realmId);
+    // A realm sub-store has no marketOrders: read the root state's, only when the root views the same realm.
+    let mo=s.marketOrders;
+    if(!mo){const root=typeof window!=='undefined'?window.__scmState:null;if(realm!=null&&root&&root!==s&&validRealmNumber(root.viewRealm??root.captureRealm??root.selectedRealm)===realm)mo=root.marketOrders;}
+    const orders=Array.isArray(mo?.orders)?mo.orders:[];
+    const cid2=cid>0?cid:Number(mo?.companyId);
+    m={t:now,realm:realm==null?-1:realm,companyId:cid2>0?cid2:null,ownIds:new Set(orders.map(o=>o?.id).filter(v=>v!=null).map(String)),prices:new Map(),vwaps:new Map()};
+    __scmMarketMemo.set(s,m);
   }
-  candidates.sort((a,b)=>a.distance-b.distance||a.quality-b.quality);
-  return candidates.length?{price:candidates[0].price,quality:candidates[0].quality,exact:false}:null;
+  return m;
 }
-
-function marketDate(v){if(v==null)return '—';if(typeof v==='object'){v=v.timestamp??v.time??v.date??v.at??v.value??null;}const d=new Date(v);return Number.isNaN(d.getTime())?String(v):d.toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}
+// The realm is never taken from the price data being validated. A realm sub-store that carries no realm field of its own
+// gets the view realm stamped on a shallow copy (null realm: returned as is, so market-core finds no price).
+function scmStoreWithRealm(store,realm){
+  if(!store||typeof store!=='object'||realm==null)return store;
+  if(validRealmNumber(store.viewRealm??store.captureRealm??store.selectedRealm??store.authData?.authCompany?.realmId)!=null)return store;
+  return {...store,viewRealm:realm};
+}
+function scmMarketPrice(s,id,quality,mode='exact'){
+  const core=globalThis.SCM_MARKET_CORE,m=scmMarketCtx(s);if(!core||!m)return null;
+  const key=`${mode}|${Number(id)}|${Number(quality)}`;
+  if(m.prices.has(key))return m.prices.get(key);
+  const r=core.marketPrice(s,m.realm,id,quality,{mode,now:m.t,companyId:m.companyId,ownIds:m.ownIds});
+  m.prices.set(key,r);return r;
+}
+function cachedMarketVwap(s,resourceId,quality){
+  const core=globalThis.SCM_MARKET_CORE,m=scmMarketCtx(s);if(!core||!m)return null;
+  const key=`${Number(resourceId)}|${Number(quality)}`;
+  if(!m.vwaps.has(key))m.vwaps.set(key,core.vwap(s,m.realm,resourceId,quality,m.t));
+  return m.vwaps.get(key)?.value??null;
+}
+function cachedMarketPrice(s,resourceId,quality){return scmMarketPrice(s,resourceId,quality,'exact')?.price??null;}
+// Short origin text for a shared-source price: where it came from, how old, and "old" when it is stale.
+function scmMarketSourceText(p){
+  if(!p)return 'Market price not captured';
+  const age=p.ageMs!=null?plannerAge(p.ageMs):'';
+  const base=p.source==='exchange'?'Exchange listing':p.source==='simcotools'?'Current market price':'VWAP (no current price)';
+  return `${base}${age?` · ${age}`:''}${p.stale?' · old':''}`;
+}
 function renderWarehouseMarketTimestamp(s){ensureLiveMarketTimer(s);const el=$('#warehouseMarketUpdated');if(!el)return;const data=s?.liveMarketPriceData;const realm=Number(s?.viewRealm??s?.captureRealm??s?.authData?.authCompany?.realmId);const valid=Number(data?.realm)===realm;const stamp=valid?(data?.updatedAt||data?.fetchedAt):null;const rows=valid&&Array.isArray(data?.rows)?data.rows:[];const pairs=new Set(warehouseRows(s).filter(r=>Number(r?._qty||0)>0&&Number.isFinite(Number(r?._id))&&Number(r?._id)>0&&Number.isFinite(Number(r?._q))&&Number(r?._q)>=0).map(r=>`${Number(r._id)}:${Number(r._q)}`));const captured=new Set(rows.filter(r=>Number(r?.price)>0&&pairs.has(`${Number(r?.resourceId)}:${Number(r?.quality)}`)).map(r=>`${Number(r.resourceId)}:${Number(r.quality)}`));const completeness=pairs.size?` · ${captured.size}/${pairs.size} warehouse prices captured`:'';el.textContent=stamp?`Market prices last updated: ${marketDate(stamp)}${completeness}`:'Market prices last updated: not captured for this realm';}
 function marketSnapshotCandle(m){
   const c=m?.selected||{};
@@ -1526,12 +1483,12 @@ function resolveLiveMarketProductView(activeStore,s,item){
   const priceData=activeStore?.liveMarketPriceData||s?.liveMarketPriceData||{};
   const allPriceRows=Array.isArray(priceData.rows)?priceData.rows:[];
   const currentPriceRow=allPriceRows.find(r=>Number(r?.resourceId)===item.id&&Number(r?.quality)===item.quality&&marketNumeric(r?.price)!=null&&Number(r.price)>0)||null;
-  const vwap=cachedMarketVwap(activeStore,item.id,item.quality)??marketNumeric(fullProduct?.vwap)??marketNumeric(fullProduct?.selected?.vwap)??marketNumeric(currentPriceRow?.vwap);
+  const vwap=cachedMarketVwap(activeStore,item.id,item.quality);
   // Use the cached row while detail/candle fetch is pending; a different
   // selected-product pointer must never blank an already-known product price.
   const quickView=!fullProduct&&currentPriceRow?{
     resourceId:item.id,quality:item.quality,fetchedAt:currentPriceRow.fetchedAt||priceData.updatedAt||null,
-    vwap,qualities:allPriceRows.filter(r=>Number(r?.resourceId)===item.id).map(r=>({resourceId:Number(r.resourceId),quality:Number(r.quality),price:marketNumeric(r.price),lastTrade:r.lastTrade||null,vwap:marketNumeric(r.vwap)??cachedMarketVwap(activeStore,r.resourceId,r.quality)})),
+    vwap,qualities:allPriceRows.filter(r=>Number(r?.resourceId)===item.id).map(r=>({resourceId:Number(r.resourceId),quality:Number(r.quality),price:marketNumeric(r.price),lastTrade:r.lastTrade||null,vwap:cachedMarketVwap(activeStore,r.resourceId,r.quality)})),
     selected:{resourceId:item.id,quality:item.quality,price:marketNumeric(currentPriceRow.price),volume:null,lastTrade:currentPriceRow.lastTrade||null,open:null,close:null,high:null,low:null,candleVolume:null},candles:[]
   }:null;
   return {fullProduct,currentPriceRow,vwap,selected:fullProduct||quickView};
@@ -1547,7 +1504,7 @@ function renderLiveMarketProduct(s){
   const selectedKey=select.value||'';
   const item=options.find(x=>x.key===selectedKey);
   if(!item){host.innerHTML='<div class="market-empty-state">No warehouse resources with quantity greater than zero were captured for this realm.</div>';return;}
-  const activeStore=s?.realmStores?.[`realm:${realm}`]||s||{};
+  const activeStore=scmStoreWithRealm(s?.realmStores?.[`realm:${realm}`]||s||{},realm);
   const {fullProduct,currentPriceRow,vwap,selected}=resolveLiveMarketProductView(activeStore,s,item);
   const liveStatus=$('#marketLiveStatus'),liveUpdated=$('#marketLiveUpdated'),realmEl=$('#marketSiteRealm');
   if(realmEl)realmEl.textContent=realm===1?'R2':'R1';
@@ -1560,15 +1517,15 @@ function renderLiveMarketProduct(s){
   const discountInput=$('#marketContractDiscount');
   if(discountInput){discountInput.max='10';discountInput.value=String(plannerDiscount);}
   const discount=plannerDiscount;
-  const currentMarketPrice=marketNumeric(selected?.selected?.price)??marketNumeric(currentPriceRow?.price)??cachedMarketPrice(activeStore,item.id,item.quality);const contract=currentMarketPrice==null?null:roundCurrencyUp(currentMarketPrice*(1-discount/100));
+  const sharedPrice=scmMarketPrice(activeStore,item.id,item.quality,'exact'),currentMarketPrice=sharedPrice?.price??null;const contract=currentMarketPrice==null?null:roundCurrencyUp(currentMarketPrice*(1-discount/100));
   const qualityRows=Array.isArray(selected?.qualities)?selected.qualities:[];
   const info=resourceInfo(item,s),src=(s.resourceImageCache?.[String(item.id)]||s.resourceImageData?.[String(item.id)]||info.imageCandidates?.[0]||'');
   const img=src?`<img class="market-resource-icon" src="${escapeHtml(src)}" alt="">`:'';
   const change=marketNumeric(candle.open)!=null&&candle.open!==0&&marketNumeric(candle.close)!=null?(candle.close-candle.open)/candle.open*100:null;
-  const tableRows=qualityRows.map(q=>{const price=marketNumeric(q.price),qv=marketNumeric(q.vwap)??cachedMarketVwap(activeStore,item.id,q.quality);const discounted=price==null?null:roundCurrencyUp(price*(1-discount/100));return `<tr><td>Q${q.quality}</td><td><strong>${marketMoney(price)}</strong>${qv!=null?`<small class="market-inline-vwap">VWAP ${marketMoney(qv)}</small>`:''}</td><td>${marketMoney(discounted)}</td><td>${marketDate(q.lastTrade)}</td></tr>`;}).join('')||'<tr><td colspan="4">Waiting for exchange data…</td></tr>';
+  const tableRows=qualityRows.map(q=>{const qp=scmMarketPrice(activeStore,item.id,q.quality,'exact'),price=qp?.price??null,qv=cachedMarketVwap(activeStore,item.id,q.quality);const discounted=price==null?null:roundCurrencyUp(price*(1-discount/100));return `<tr><td>Q${q.quality}</td><td><strong>${marketMoney(price)}</strong>${qp?.stale?'<small class="market-inline-vwap">old</small>':''}${qv!=null?`<small class="market-inline-vwap">VWAP ${marketMoney(qv)}</small>`:''}</td><td>${marketMoney(discounted)}</td><td>${marketDate(q.lastTrade)}</td></tr>`;}).join('')||'<tr><td colspan="4">Waiting for exchange data…</td></tr>';
   const candles=Array.isArray(selected?.selected?.candles)?selected.selected.candles.slice(-36):[];
   const volume=marketNumeric(snap.volume)??marketNumeric(snap.candleVolume)??marketNumeric(selected?.volume)??marketNumeric(selected?.raw?.summary?.fiveMinutesCandlestick?.volume)??marketNumeric(selected?.raw?.summary?.volume);
-  host.innerHTML=`<div class="market-product-head"><div class="market-product-title">${img}<div><h2>${escapeHtml(item.name)} Q${item.quality}</h2><p>${num(item.qty)} units in warehouse · Your cost ${cost==null?'—':money(cost)}</p></div></div><span class="market-follow">★</span></div><div class="market-primary-grid"><div class="market-primary-price"><small>LAST TRADE / MARKET PRICE</small><strong>${marketMoney(snap.price??currentPriceRow?.price)}</strong><span>${change==null?'':`${change>=0?'+':''}${change.toFixed(2)}%`} · Last trade ${marketDate(snap.lastTrade??currentPriceRow?.lastTrade)}</span></div><div class="market-primary-stat"><span>Volume</span><strong>${volume==null?'—':num(volume)}</strong><small>${escapeHtml(selected?.volumePeriod||'Current market')}</small></div><div class="market-primary-stat"><span>VWAP</span><strong>${marketMoney(vwap)}</strong><small>${contract==null?'':`Contract ${money(contract)} at ${discount.toFixed(1)}% off`}</small></div></div><div class="market-five"><div><strong>5 minutes</strong><span>Open ${marketMoney(candle.open)}</span><span>Close ${marketMoney(candle.close)}</span><span>Range ${marketMoney(candle.low)} – ${marketMoney(candle.high)}</span><span>Volume ${candle.volume==null?'—':num(candle.volume)}</span></div></div><div class="market-contract-table"><div class="market-contract-table-head"><strong>EXCHANGE / CONTRACT DATA</strong><span>Discount ${discount.toFixed(1)}%</span></div><div class="table-wrap"><table class="mobile-cards"><thead><tr><th>QUALITY</th><th>MARKET DATA</th><th>CONTRACT PRICE</th><th>LAST TRADE</th></tr></thead><tbody>${tableRows}</tbody></table></div></div><div class="market-candle-wrap"><div class="market-candle-head"><strong>MARKET CHART</strong><span>${candles.length?`${candles.length} recent candles`:'Waiting for chart data'}</span></div><div id="marketLiveCandleChart" class="market-live-candle-chart">${renderLiveCandleChart(candles)}</div></div><div class="market-product-footer"><span>Live SimcoTools market data</span><span>${selected?.fetchedAt?`Updated ${marketDate(selected.fetchedAt)}`:'Waiting for update…'}</span></div>`;
+  host.innerHTML=`<div class="market-product-head"><div class="market-product-title">${img}<div><h2>${escapeHtml(item.name)} Q${item.quality}</h2><p>${num(item.qty)} units in warehouse · Your cost ${cost==null?'—':money(cost)}</p></div></div><span class="market-follow">★</span></div><div class="market-primary-grid"><div class="market-primary-price"><small>MARKET PRICE</small><strong>${marketMoney(currentMarketPrice)}</strong><span>${change==null?'':`${change>=0?'+':''}${change.toFixed(2)}%`} · Last trade ${marketDate(snap.lastTrade??currentPriceRow?.lastTrade)}${sharedPrice?` · ${escapeHtml(scmMarketSourceText(sharedPrice))}`:''}</span></div><div class="market-primary-stat"><span>Volume</span><strong>${volume==null?'—':num(volume)}</strong><small>${escapeHtml(selected?.volumePeriod||'Current market')}</small></div><div class="market-primary-stat"><span>VWAP</span><strong>${marketMoney(vwap)}</strong><small>${contract==null?'':`Contract ${money(contract)} at ${discount.toFixed(1)}% off`}</small></div></div><div class="market-five"><div><strong>5 minutes</strong><span>Open ${marketMoney(candle.open)}</span><span>Close ${marketMoney(candle.close)}</span><span>Range ${marketMoney(candle.low)} – ${marketMoney(candle.high)}</span><span>Volume ${candle.volume==null?'—':num(candle.volume)}</span></div></div><div class="market-contract-table"><div class="market-contract-table-head"><strong>EXCHANGE / CONTRACT DATA</strong><span>Discount ${discount.toFixed(1)}%</span></div><div class="table-wrap"><table class="mobile-cards"><thead><tr><th>QUALITY</th><th>MARKET DATA</th><th>CONTRACT PRICE</th><th>LAST TRADE</th></tr></thead><tbody>${tableRows}</tbody></table></div></div><div class="market-candle-wrap"><div class="market-candle-head"><strong>MARKET CHART</strong><span>${candles.length?`${candles.length} recent candles`:'Waiting for chart data'}</span></div><div id="marketLiveCandleChart" class="market-live-candle-chart">${renderLiveCandleChart(candles)}</div></div><div class="market-product-footer"><span>Live SimcoTools market data</span><span>${selected?.fetchedAt?`Updated ${marketDate(selected.fetchedAt)}`:'Waiting for update…'}</span></div>`;
   if(!select.dataset.bound){
     select.addEventListener('change',()=>{__selectedMarketKey=select.value;const [id,q]=select.value.split(':').map(Number);const currentRealm=marketRealmFromState(window.__scmState);if(Number.isFinite(id)&&Number.isFinite(q)&&currentRealm!=null)requestLiveMarketProduct(currentRealm,id,q,true);if(window.__scmState)renderLiveMarketProduct(window.__scmState);});
     $('#marketContractDiscount')?.addEventListener('input',()=>{
@@ -2424,7 +2381,7 @@ function constructionCostUnits(s,building){const k=String(building?.raw?.kind??b
 function constructionWarehouseStock(s,id){
   return warehouseRows(s).filter(row=>Number(row?._id)===Number(id)).reduce((sum,row)=>sum+(Number(row?._qty)||0),0);
 }
-function constructionMaterialPlan(s,building,currentLevel,targetLevel,discount,vwapMap){
+function constructionMaterialPlan(s,building,currentLevel,targetLevel,discount){
   const current=Math.min(20,Math.max(1,Number(currentLevel)||1));
   const target=Math.min(20,Math.max(1,Number(targetLevel)||current));
   if(target<=current) return {current,target,stepFactor:0,items:[],deficitItems:[],totalCost:0};
@@ -2433,7 +2390,6 @@ function constructionMaterialPlan(s,building,currentLevel,targetLevel,discount,v
   if(costUnits==null&&(!Number.isFinite(baseCost)||baseCost<=0)) return {current,target,stepFactor:0,items:[],deficitItems:[],totalCost:0,unavailable:true};
   const stepFactor=((target-current)*(current+target-1))/2;
   const scale=costUnits!=null?null:baseCost/10350;
-  const map=vwapMap instanceof Map?vwapMap:buildMarketPriceMap(s);
   const items=CONSTRUCTION_MATERIALS.map(mat=>{
     const required=roundResourceDown(costUnits!=null?mat.perCostUnit*costUnits*stepFactor:mat.baseQty*scale*stepFactor,3);
     // Warehouse coverage is quality-agnostic. Every stored unit counts toward
@@ -2442,19 +2398,23 @@ function constructionMaterialPlan(s,building,currentLevel,targetLevel,discount,v
     // full requirement before warehouse stock is applied once.
     const warehouseQty=constructionWarehouseStock(s,mat.id);
     const amount=Math.max(0,roundResourceDown(required-warehouseQty,3));
-    const marketPrice=exactMarketPrice(map,mat.id,0);
+    const marketPrice=scmMarketPrice(s,mat.id,0,'exact')?.price??null;
     const rawPrice=marketPrice!=null?Number(marketPrice):null;
     const pct=globalThis.SCMPlannerCore?.clampDiscount?globalThis.SCMPlannerCore.clampDiscount(discount):Math.min(10,Math.max(0,Number(discount)||0));
-    const price=globalThis.SCMPlannerCore?.discountedUnitPrice?globalThis.SCMPlannerCore.discountedUnitPrice(rawPrice,pct):roundCurrencyUp(rawPrice*(1-pct/100));
-    const lineTotal=Number.isFinite(price)?roundCurrencyUp(price*amount):null;
+    const price=rawPrice==null?null:(globalThis.SCMPlannerCore?.discountedUnitPrice?globalThis.SCMPlannerCore.discountedUnitPrice(rawPrice,pct):roundCurrencyUp(rawPrice*(1-pct/100)));
+    const lineTotal=price!=null&&Number.isFinite(price)?roundCurrencyUp(price*amount):null;
     return {...mat,required,warehouseQty,amount,quality:0,marketPrice,price,lineTotal};
   });
   const deficitItems=items.filter(x=>x.amount>0);
-  const totalCost=roundCurrencyUp(deficitItems.reduce((sum,x)=>sum+(Number(x.lineTotal)||0),0));
-  return {current,target,stepFactor,items,deficitItems,totalCost,costUnits,source:costUnits!=null?'game-constants':'cost-estimate'};
+  const totalCost=roundCurrencyUp(deficitItems.reduce((sum,x)=>sum+(x.lineTotal!=null?Number(x.lineTotal)||0:0),0));
+  const missingPrice=deficitItems.filter(x=>x.price==null).length;
+  return {current,target,stepFactor,items,deficitItems,totalCost,missingPrice,costUnits,source:costUnits!=null?'game-constants':'cost-estimate'};
 }
+// Construction totals never count a missing price as $0: priced lines are summed, unpriced lines are counted and flagged.
+function constructionMissingCount(items){return (items||[]).filter(x=>Number(x?.amount??x?.buy)>0&&!(Number(x?.price)>=0&&x?.price!=null)).length;}
+function constructionMissingText(n){return n>0?`${n} material price${n===1?'':'s'} missing, total incomplete`:'';}
 function plannerDiscountPercent(value){return globalThis.SCMPlannerCore?.clampDiscount?globalThis.SCMPlannerCore.clampDiscount(value):Math.min(10,Math.max(0,Number(value)||0));}
-function plannerDiscountQuote(s,x,type,discount,marketPriceMap){const q=qualityForPlannerResource(x,type);const amount=type==='deficit'?Number(x.deficit)||0:Number(x.surplus)||0;const reference=marketPriceReference(marketPriceMap instanceof Map?marketPriceMap:buildMarketPriceMap(s),x.id,q);const marketPrice=reference?.price??null;const pct=plannerDiscountPercent(discount);const unitPrice=marketPrice!=null?roundCurrencyUp(marketPrice*(1-pct/100)):null;const total=unitPrice!=null&&amount>0?roundCurrencyUp(unitPrice*amount):null;return {id:Number(x.id),name:x.name,quality:q,amount,marketPrice,marketPriceQuality:reference?.quality??null,marketPriceExact:reference?.exact??false,discount:pct,unitPrice,total,type,key:`${Number(x.id)}:${Number(q)}`};}
+function plannerDiscountQuote(s,x,type,discount){const q=qualityForPlannerResource(x,type);const amount=type==='deficit'?Number(x.deficit)||0:Number(x.surplus)||0;const reference=scmMarketPrice(s,x.id,q,'exact');const marketPrice=reference?.price??null;const pct=plannerDiscountPercent(discount);const unitPrice=marketPrice!=null?roundCurrencyUp(marketPrice*(1-pct/100)):null;const total=unitPrice!=null&&amount>0?roundCurrencyUp(unitPrice*amount):null;return {id:Number(x.id),name:x.name,quality:q,amount,marketPrice,marketPriceQuality:reference?.quality??null,marketPriceExact:reference?.exact??false,marketPriceStale:Boolean(reference?.stale),discount:pct,unitPrice,total,type,key:`${Number(x.id)}:${Number(q)}`};}
 function qualityForPlannerResource(x,type){if(Number.isFinite(Number(x?.quality)))return Number(x.quality);if(type==='deficit'){const qs=Array.isArray(x?.minQuality)?x.minQuality.map(Number).filter(Number.isFinite):[];return qs.length?Math.max(...qs):0;}const qs=(x?.productionByQuality||[]).map(v=>Number(v?.quality)).filter(Number.isFinite);return qs.length?Math.max(...qs):0;}
 async function ensurePlannerCompanyModifiers(s){
   const company=plannerCompanyAuthData(s)||{};
@@ -2500,7 +2460,7 @@ function requestPlannerBuildingHistory(building,s){
 function showBuildingUpgradeProjection(host,ctx){
   const existing=document.getElementById('scm-upgrade-projection');
   if(existing) existing.remove();
-  const {building,plan,discount,vwapMap}=ctx||{};
+  const {building,plan,discount}=ctx||{};
   if(!building||!plan)return;
   const current=Number(plan.current)||Number(building.level)||1;
   const target=Number(plan.target)||current;
@@ -2512,18 +2472,19 @@ function showBuildingUpgradeProjection(host,ctx){
     const warehouse=constructionWarehouseStock(ctx.state,mat.id);
     const buy=Math.max(0,roundResourceDown(required-warehouse,3));
     const item=plan.items.find(x=>Number(x.id)===Number(mat.id));
-    const marketPrice=item?.marketPrice!=null?Number(item.marketPrice):exactMarketPrice(vwapMap,mat.id,0);
+    const marketPrice=item?.marketPrice!=null?Number(item.marketPrice):null;
     const pct=globalThis.SCMPlannerCore?.clampDiscount?globalThis.SCMPlannerCore.clampDiscount(discount):Math.min(10,Math.max(0,Number(discount)||0));
     const price=marketPrice!=null&&Number.isFinite(marketPrice)?roundCurrencyUp(marketPrice*(1-pct/100)):null;
     return {...mat,required,warehouse,buy,marketPrice,price,lineTotal:Number.isFinite(price)?roundCurrencyUp(price*buy):null};
   });
   const buyRows=materials.filter(x=>x.buy>0);
-  const total=roundCurrencyUp(buyRows.reduce((a,x)=>a+(Number(x.lineTotal)||0),0));
+  const total=roundCurrencyUp(buyRows.reduce((a,x)=>a+(x.lineTotal!=null?Number(x.lineTotal)||0:0),0));
+  const missingN=buyRows.filter(x=>x.price==null).length,missingMsg=constructionMissingText(missingN);
   const esc2=escapeHtml;
   const num2=v=>Number.isFinite(Number(v))?Number(v).toLocaleString(undefined,{maximumFractionDigits:0}):'—';
   const money2=v=>Number.isFinite(Number(v))?money(Number(v)):'—';
   const buyText=buyRows.length?`==============================\n🔽🔽🔽 BUYING -${Math.min(10,Math.max(0,Number(discount)||0))}% MARKET 🔽🔽🔽\n\n${buyRows.map(x=>`➡️ ${num2(x.buy)} - ${x.name} :re-${Number(x.id)}: - ${money2(x.price)}`).join('\n')}\n\n==============================`:'==============================\nNo additional construction materials required.\n==============================' ;
-  const overlay=document.createElement('div');overlay.id='scm-upgrade-projection';overlay.className='scm-upgrade-projection';overlay.innerHTML=`<div class="scm-upgrade-backdrop" data-close-upgrade></div><section class="scm-upgrade-dialog" role="dialog" aria-modal="true" aria-label="Building upgrade projection"><header class="scm-upgrade-head"><div><div class="scm-upgrade-kicker">BUILDING UPGRADE PROJECTION</div><h3>${esc2(building.name||'Building')}</h3><div class="scm-upgrade-level">Current Level: ${current} <span>→</span> Upgrade to Level ${target}</div></div><button type="button" class="scm-upgrade-close" data-close-upgrade aria-label="Close">×</button></header><div class="scm-upgrade-rule"></div><div class="scm-upgrade-grid"><div class="scm-upgrade-panel"><div class="scm-upgrade-label">Level Change</div><strong>${current} → ${target}</strong><small>Construction projection for this building</small></div><div class="scm-upgrade-panel"><div class="scm-upgrade-label">Estimated Material Cost</div><strong id="scm-upgrade-total">${money2(total)}</strong><small>Buying ${Math.min(10,Math.max(0,Number(discount)||0))}% below Market Price</small></div></div><div class="scm-upgrade-section"><div class="scm-upgrade-section-title">Materials Needed</div><div class="scm-upgrade-materials">${materials.map(x=>`<div class="scm-upgrade-row"><span>➡️ ${num2(x.required)} - ${esc2(x.name)} :re-${Number(x.id)}:</span><strong>${num2(x.required)}</strong></div>`).join('')}</div></div><div class="scm-upgrade-section"><div class="scm-upgrade-section-title">Warehouse Coverage</div><div class="scm-upgrade-materials">${materials.map(x=>`<div class="scm-upgrade-row"><span>${esc2(x.name)}</span><strong>${num2(Math.min(x.warehouse,x.required))} / ${num2(x.required)} ${x.warehouse>=x.required?'✓':''}</strong></div>`).join('')}</div></div><div class="scm-upgrade-section"><div class="scm-upgrade-section-title">Remaining to Buy</div><div class="scm-upgrade-materials">${buyRows.length?buyRows.map(x=>`<div class="scm-upgrade-row"><span>➡️ ${num2(x.buy)} - ${esc2(x.name)} :re-${Number(x.id)}: - ${money2(x.price)}</span><strong>${money2(x.lineTotal)}</strong></div>`).join(''):'<div class="scm-upgrade-empty">Warehouse covers all required construction materials.</div>'}</div></div><div class="scm-upgrade-rule"></div><div class="scm-upgrade-actions"><button type="button" class="planner-copy-btn" data-copy-upgrade>📋 Copy Buy Message</button><button type="button" class="planner-copy-btn" data-close-upgrade>Close</button></div></section>`;
+  const overlay=document.createElement('div');overlay.id='scm-upgrade-projection';overlay.className='scm-upgrade-projection';overlay.innerHTML=`<div class="scm-upgrade-backdrop" data-close-upgrade></div><section class="scm-upgrade-dialog" role="dialog" aria-modal="true" aria-label="Building upgrade projection"><header class="scm-upgrade-head"><div><div class="scm-upgrade-kicker">BUILDING UPGRADE PROJECTION</div><h3>${esc2(building.name||'Building')}</h3><div class="scm-upgrade-level">Current Level: ${current} <span>→</span> Upgrade to Level ${target}</div></div><button type="button" class="scm-upgrade-close" data-close-upgrade aria-label="Close">×</button></header><div class="scm-upgrade-rule"></div><div class="scm-upgrade-grid"><div class="scm-upgrade-panel"><div class="scm-upgrade-label">Level Change</div><strong>${current} → ${target}</strong><small>Construction projection for this building</small></div><div class="scm-upgrade-panel"><div class="scm-upgrade-label">Estimated Material Cost</div><strong id="scm-upgrade-total">${money2(total)}</strong><small>Buying ${Math.min(10,Math.max(0,Number(discount)||0))}% below Market Price</small>${missingMsg?`<small class="planner-missing-prices" id="scm-upgrade-missing" role="status">${esc2(missingMsg)}</small>`:''}</div></div><div class="scm-upgrade-section"><div class="scm-upgrade-section-title">Materials Needed</div><div class="scm-upgrade-materials">${materials.map(x=>`<div class="scm-upgrade-row"><span>➡️ ${num2(x.required)} - ${esc2(x.name)} :re-${Number(x.id)}:</span><strong>${num2(x.required)}</strong></div>`).join('')}</div></div><div class="scm-upgrade-section"><div class="scm-upgrade-section-title">Warehouse Coverage</div><div class="scm-upgrade-materials">${materials.map(x=>`<div class="scm-upgrade-row"><span>${esc2(x.name)}</span><strong>${num2(Math.min(x.warehouse,x.required))} / ${num2(x.required)} ${x.warehouse>=x.required?'✓':''}</strong></div>`).join('')}</div></div><div class="scm-upgrade-section"><div class="scm-upgrade-section-title">Remaining to Buy</div><div class="scm-upgrade-materials">${buyRows.length?buyRows.map(x=>`<div class="scm-upgrade-row"><span>➡️ ${num2(x.buy)} - ${esc2(x.name)} :re-${Number(x.id)}: - ${money2(x.price)}</span><strong>${money2(x.lineTotal)}</strong></div>`).join(''):'<div class="scm-upgrade-empty">Warehouse covers all required construction materials.</div>'}</div></div><div class="scm-upgrade-rule"></div><div class="scm-upgrade-actions"><button type="button" class="planner-copy-btn" data-copy-upgrade>📋 Copy Buy Message</button><button type="button" class="planner-copy-btn" data-close-upgrade>Close</button></div></section>`;
   document.body.appendChild(overlay);
   const close=()=>overlay.remove();
   overlay.querySelectorAll('[data-close-upgrade]').forEach(x=>x.addEventListener('click',close));
@@ -2545,27 +2506,17 @@ function savePlannerProfitSettings(v){try{localStorage.setItem(PLANNER_PROFIT_KE
 // at that quality or better when buying inputs), then captured current market prices, then VWAP.
 // Warehouse: your actual sourcing cost per unit for the lowest stocked quality that satisfies the input.
 function plannerAge(ms){const m=Math.round(ms/60000);return m<1?'just now':m<60?`${m} min ago`:m<1440?`${Math.round(m/60)} h ago`:`${Math.round(m/1440)} d ago`;}
-function plannerMarketPrice(s,map,id,q,mode){
-  id=Number(id);q=Number(q);
-  const realm=validRealmNumber(s?.viewRealm??s?.captureRealm??s?.authData?.authCompany?.realmId);
-  const ep=realm!=null?s?.endpointData?.[`/api/v3/market/${realm}/${id}/`]:null;
-  const at=Date.parse(String(ep?.receivedAt||''));
-  if(Array.isArray(ep?.data)&&Number.isFinite(at)&&Date.now()-at<6*3600000){
-    const ok=ep.data.filter(r=>Number(r?.price)>0&&Number.isFinite(Number(r?.quality))&&(mode==='sell'?Number(r.quality)===q:(mode==='buy-any'||mode==='sell-any')?true:Number(r.quality)>=q));
-    if(ok.length){const best=ok.reduce((a,b)=>Number(b.price)<Number(a.price)?b:a);return {price:Number(best.price),quality:Number(best.quality),source:mode==='sell-any'?`cheapest exchange listing, any quality (as game) · ${plannerAge(Date.now()-at)}`:`exchange listing · ${plannerAge(Date.now()-at)}`};}
-  }
-  if(mode==='sell-any'&&map instanceof Map){
-    let best=null;for(const [k,v] of map){const mm=String(k).match(/^(\d+):(\d+)$/);if(mm&&Number(mm[1])===id&&Number(v)>0&&(!best||Number(v)<best.price))best={price:Number(v),quality:Number(mm[2])};}
-    if(best){const row=(Array.isArray(s?.liveMarketPriceData?.rows)?s.liveMarketPriceData.rows:[]).find(r=>Number(r?.resourceId)===id&&Number(r?.quality)===best.quality);const t=Date.parse(String(row?.fetchedAt||s?.liveMarketPriceData?.updatedAt||''));return {...best,source:`SimcoTools, cheapest captured quality${Number.isFinite(t)?` · ${plannerAge(Date.now()-t)}`:''} — open the game to load the exchange`};}
-  }
-  if(map instanceof Map){
-    if(map.has(`${id}:${q}`)){const row=(Array.isArray(s?.liveMarketPriceData?.rows)?s.liveMarketPriceData.rows:[]).find(r=>Number(r?.resourceId)===id&&Number(r?.quality)===q);const t=Date.parse(String(row?.fetchedAt||s?.liveMarketPriceData?.updatedAt||''));return {price:Number(map.get(`${id}:${q}`)),quality:q,source:`SimcoTools current price${Number.isFinite(t)?` · ${plannerAge(Date.now()-t)}`:''}`};}
-    if(mode!=='sell'){let best=null;for(const [k,v] of map){const m=String(k).match(/^(\d+):(\d+)$/);if(m&&Number(m[1])===id&&(mode==='buy-any'||Number(m[2])>=q)&&Number(v)>0&&(!best||Number(v)<best.price))best={price:Number(v),quality:Number(m[2]),source:'market'};}if(best)return best;}
-  }
-  const rows=Array.isArray(s?.vwapData?.rows)?s.vwapData.rows:[];
-  const v=rows.find(r=>Number(r?.resourceId)===id&&Number(r?.quality)===q&&Number(r?.value)>0);
-  if(v)return {price:Number(v.value),quality:q,source:'VWAP'};
-  return null;
+// Shared source (market-core): mode 'any' = cheapest listing of any quality (the game calculator rule), 'min' = required quality or
+// better (bought inputs, make-or-buy, run-out, transport), 'exact' = that quality only. Returns {price,quality,source:text,stale}.
+function plannerMarketPrice(s,id,q,mode){
+  const p=scmMarketPrice(s,id,q,mode==='any'||mode==='min'?mode:'exact');
+  if(!p)return null;
+  const age=p.ageMs!=null?plannerAge(p.ageMs):'',old=p.stale?' · old':'';
+  const where=p.source==='exchange'?(mode==='any'?'cheapest exchange listing, any quality (as game)':'exchange listing')
+    :p.source==='simcotools'?(mode==='any'?'SimcoTools, cheapest captured quality':'SimcoTools current price')
+    :'VWAP';
+  const hint=p.source==='simcotools'&&mode==='any'?' — open the game to load the exchange':'';
+  return {price:p.price,quality:p.quality,source:`${where}${age?` · ${age}`:''}${old}${hint}`,stale:p.stale,origin:p.source};
 }
 function plannerProfitWageKey(building){return String(building?.raw?.kind||building?.kind||building?.category||building?.name||'building');}
 // v2.5.324 Labour and admin come from the game's own cost records, never hard-coded:
@@ -2819,14 +2770,14 @@ function renderPlannerProfit(host){
     const overhead=setNum(c.adminOverheadPct)?Number(c.adminOverheadPct):(autoAdmin??0);
     const feePct=setNum(c.exchangeFeePct)?Number(c.exchangeFeePct):(C.EXCHANGE_FEE_PCT??4); // 2.5.396 always 4% unless typed
     const productId=Number(ctx.productId);
-    const sale=Number.isFinite(productId)?plannerMarketPrice(ctx.s,ctx.priceMap,productId,ctx.quality,'sell-any'):null;
+    const sale=Number.isFinite(productId)?plannerMarketPrice(ctx.s,productId,ctx.quality,'any'):null;
     plannerRequestOrderBook(ctx,host,productId);
-    const transport=plannerMarketPrice(ctx.s,ctx.priceMap,13,0,'buy');
+    const transport=plannerMarketPrice(ctx.s,13,0,'min');
     const isMarket=c.inputSource==='market'||c.inputSource==='market-any';
     // v2.5.348 warehouse inputs as the game: cheapest lot of that resource, any quality, Σ cost ÷ amount, not rounded
     // (Water Q0 $0.347, not the Q1 lot $0.37); not in the warehouse → cheapest listing of any quality, as the game.
     const lotsAll=plannerWarehouseLots(ctx.s);
-    const inputs=(ctx.plannedInputs||[]).map(x=>{let p=null;if(!isMarket&&C.warehouseUnitCostAsGame){const w=C.warehouseUnitCostAsGame(lotsAll,x.id);if(w)p={price:w.unitCost,quality:w.quality,lot:true,source:`warehouse, cheapest lot (as game) · ${num(w.amount)} in stock`};}if(!p){p=plannerMarketPrice(ctx.s,ctx.priceMap,x.id,x.minQuality,c.inputSource==='market'?'buy':'buy-any');if(p&&!isMarket)p={...p,source:`${p.source} (not in warehouse)`};}return {id:x.id,name:x.name,quality:x.minQuality,qtyPerUnit:Number(x.perOutput)||0,unitPrice:p?.price??null,priceQuality:p?.quality??null,lot:Boolean(p?.lot),source:p?.source||null};});
+    const inputs=(ctx.plannedInputs||[]).map(x=>{let p=null;if(!isMarket&&C.warehouseUnitCostAsGame){const w=C.warehouseUnitCostAsGame(lotsAll,x.id);if(w)p={price:w.unitCost,quality:w.quality,lot:true,source:`warehouse, cheapest lot (as game) · ${num(w.amount)} in stock`};}if(!p){p=plannerMarketPrice(ctx.s,x.id,x.minQuality,c.inputSource==='market'?'min':'any');if(p&&!isMarket)p={...p,source:`${p.source} (not in warehouse)`};}return {id:x.id,name:x.name,quality:x.minQuality,qtyPerUnit:Number(x.perOutput)||0,unitPrice:p?.price??null,priceQuality:p?.quality??null,lot:Boolean(p?.lot),source:p?.source||null};});
     const wageOverride=setNum(c.wages?.[wageKey])?Number(c.wages[wageKey]):null;
     let lab=wageOverride==null&&Number.isFinite(productId)?plannerLabourFromLots(ctx.s,productId,ctx.quality):null;
     const eco=plannerEconomy(ctx),lvl=Math.max(1,Number(ctx.level)||1),ownUnitsPerHour=eco.rate||ctx.outputPerHour;
@@ -2913,25 +2864,25 @@ function plannerInsightsData(ctx){
   const cfg=plannerProfitSettings(),setNum=v=>v!==''&&v!=null&&Number.isFinite(Number(v));
   const gameAdmin=plannerGameAdmin(s),lotAdmin=plannerAdminOverheadFromLots(s);
   const adminPct=setNum(cfg.adminOverheadPct)?Number(cfg.adminOverheadPct):(gameAdmin?.pct??lotAdmin?.pct??0);
-  const isMarket=cfg.inputSource==='market'||cfg.inputSource==='market-any',lots=plannerWarehouseLots(s),map=ctx.priceMap;
-  const inputCostOf=id=>{if(!isMarket){const w=C.warehouseUnitCostAsGame(lots,id);if(w)return w.unitCost;}const p=plannerMarketPrice(s,map,id,0,cfg.inputSource==='market'?'buy':'buy-any');return p?p.price:null;};
+  const isMarket=cfg.inputSource==='market'||cfg.inputSource==='market-any',lots=plannerWarehouseLots(s);
+  const inputCostOf=id=>{if(!isMarket){const w=C.warehouseUnitCostAsGame(lots,id);if(w)return w.unitCost;}const p=plannerMarketPrice(s,id,0,cfg.inputSource==='market'?'min':'any');return p?p.price:null;};
   const recipes=Array.isArray(ctx.recipes)?ctx.recipes:[];
   const nameOf=id=>{try{return plannerResourceNameById(recipes,id,s)||`#${id}`;}catch{return `#${id}`;}};
   const eventPctOf=id=>{try{return plannerActiveProductionEvent(s,nameOf(id),recipes,id)||0;}catch{return 0;}};
-  return {ok:true,C,s,gc,economyState,adminPct,bonusPct:Number(ctx.bonusPct)||0,inputCostOf,nameOf,eventPctOf,map};
+  return {ok:true,C,s,gc,economyState,adminPct,bonusPct:Number(ctx.bonusPct)||0,inputCostOf,nameOf,eventPctOf};
 }
 // v2.5.383 Analyze tab context: the same price, warehouse and game-calculator helpers the Production cards use, so
 // Analyze numbers match them. Reads stored state only (no network); products by resource id + quality.
 function analyzeContext(s){
-  const map=buildMarketPriceMap(s),lots=plannerWarehouseLots(s),realm=validRealmNumber(s?.viewRealm??s?.selectedRealm??s?.authData?.authCompany?.realmId);
-  let d=null;try{d=plannerInsightsData({s,priceMap:map,recipes:[],bonusPct:plannerCompanyProductionModifier(s)});}catch{}
+  const lots=plannerWarehouseLots(s),realm=validRealmNumber(s?.viewRealm??s?.selectedRealm??s?.authData?.authCompany?.realmId);
+  let d=null;try{d=plannerInsightsData({s,recipes:[],bonusPct:plannerCompanyProductionModifier(s)});}catch{}
   const owned=Array.isArray(s?.buildings)?s.buildings:[];
   const maker=id=>owned.find(b=>Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId)===Number(id))||null;
   return {realm,lots,buildingIds:owned.map(b=>Number(b?.id)).filter(id=>id>0),companyName:s?.authData?.authCompany?.company||'',
     nameOf:id=>resourceName({_id:Number(id),kind:Number(id)},s),
     // 2.5.393 CSV import: the background stores it (realm-keyed queues; captured data wins).
     importCsv:msg=>chrome.runtime.sendMessage(msg),
-    priceOf:(id,q)=>{const p=plannerMarketPrice(s,map,id,q,'sell');return p&&Number(p.price)>0?{price:Number(p.price),source:p.source||''}:null;},
+    priceOf:(id,q)=>{const p=plannerMarketPrice(s,id,q,'exact');return p&&Number(p.price)>0?{price:Number(p.price),source:p.source||''}:null;},
     // 2.5.394 transport units per unit sold: game constants (.transportation), else the bundled recipes.
     transportOf:id=>{const gv=s?.gameConstants?.resources?.[String(id)]?.transportation,g=gv==null||gv===''?NaN:Number(gv);if(Number.isFinite(g)&&g>=0)return g;const r=(window.__scmBuildingPlannerRaw?.recipes||[]).find(x=>Number(x?.id)===Number(id));const t=Number(r?.transport);return Number.isFinite(t)&&t>=0?t:null;},
     calcOf:(id,q,salePrice)=>{
@@ -2945,12 +2896,12 @@ function renderPlannerInsights(host){
   if(!el||!ctx)return;
   const d=plannerInsightsData(ctx);
   if(!d.ok){el.innerHTML=`<div class="planner-profit-empty">${escapeHtml(d.reason)}</div>`;return;}
-  const {C,s,gc,economyState,adminPct,bonusPct,inputCostOf,nameOf,eventPctOf,map}=d;
+  const {C,s,gc,economyState,adminPct,bonusPct,inputCostOf,nameOf,eventPctOf}=d;
   const row=(label,value,note='',cls='')=>`<div class="pp-row ${cls}"><div class="pp-label">${label}${note?`<small>${note}</small>`:''}</div><div class="pp-value">${value}</div></div>`;
   const tone=v=>v>0.0001?'si-good':v<-0.0001?'si-bad':'';
   // (1) Best product for the selected building.
   const kind=String(ctx.buildingKind||''),lvl=Math.max(1,Number(ctx.level)||1);
-  const ranked=C.rankBuildingProducts({c:gc,buildingKind:kind,economyState,bonusPct,adminPct,robots:Boolean(ctx.robots),eventPctOf,priceOf:id=>plannerMarketPrice(s,map,id,0,'sell-any'),inputCostOf});
+  const ranked=C.rankBuildingProducts({c:gc,buildingKind:kind,economyState,bonusPct,adminPct,robots:Boolean(ctx.robots),eventPctOf,priceOf:id=>plannerMarketPrice(s,id,0,'any'),inputCostOf});
   const curId=Number(ctx.productId),cur=ranked.find(x=>x.resourceId===curId),best=ranked.find(x=>x.profitPerHourPerLevel!=null&&x.complete);
   let verdict='';
   if(best&&cur&&cur.profitPerHourPerLevel!=null&&best.resourceId!==curId){const gain=best.profitPerHourPerLevel-cur.profitPerHourPerLevel,pct=cur.profitPerHourPerLevel>0?gain/cur.profitPerHourPerLevel*100:null;verdict=gain>0.005?`Switching to <b>${escapeHtml(nameOf(best.resourceId))}</b> earns ${plannerMoney(gain*lvl)}/h more at level ${num(lvl)}${pct!=null?` (+${num(+pct.toFixed(1))}%)`:''}.`:'';}
@@ -2977,7 +2928,7 @@ function renderPlannerPayback(host,d){
   const el=host?.querySelector?.('#plannerPayback'),ctx=host?.__plannerProfitCtx;
   if(!el||!ctx)return;
   if(!d?.ok){el.innerHTML=`<div class="planner-profit-empty">${escapeHtml(d?.reason||'')}</div>`;return;}
-  const {C,s,gc,economyState,adminPct,bonusPct,inputCostOf,nameOf,eventPctOf,map}=d;
+  const {C,s,gc,economyState,adminPct,bonusPct,inputCostOf,nameOf,eventPctOf}=d;
   const owned=Array.isArray(ctx.owned)?ctx.owned:[];
   const dur=h=>h==null?'—':h<48?`${num(+h.toFixed(1))} h`:`${num(+(h/24).toFixed(1))} d`;
   const rows=[];
@@ -2991,10 +2942,10 @@ function renderPlannerPayback(host,d){
     if(lvl>=20){rows.push({b,lvl,max:true});continue;}
     const bd=Number(gc.buildings?.[String(b.kind||'')]?.buildDuration),upHours=bd>0?lvl*bd/3600:0;
     const extraAdmin=(wageAll+(Number(C.gameWagePerLevel(gc,String(b.kind||''),Boolean(b.robotsSpecialization)))||0))*dAdmin;
-    const sale=plannerMarketPrice(s,map,pid,0,'sell-any');
+    const sale=plannerMarketPrice(s,pid,0,'any');
     const res=C.gameCalcProduct({c:gc,resourceId:pid,economyState,eventPct:eventPctOf(pid),bonusPct,adminPct,robots:Boolean(b.robotsSpecialization),salePrice:sale?.price??null,inputCostOf,abundancePct:plannerAbundancePct(s,b.raw?.id??b.id,pid)});
-    let plan=null;try{plan=constructionMaterialPlan(s,b,lvl,lvl+1,0,map);}catch{}
-    const items=(plan?.items||[]).map(it=>{const p=plannerMarketPrice(s,map,it.id,0,'buy-any');const price=p?.price??(Number(it.marketPrice)>0?Number(it.marketPrice):null);return {...it,price};});
+    let plan=null;try{plan=constructionMaterialPlan(s,b,lvl,lvl+1,0);}catch{}
+    const items=(plan?.items||[]).map(it=>{const p=plannerMarketPrice(s,it.id,0,'any');const price=p?.price??null;return {...it,price};});
     const missing=items.filter(it=>it.price==null).map(it=>it.name);
     const cost=items.length&&!missing.length?items.reduce((a,it)=>a+Number(it.required)*it.price,0):null;
     const gain=res.ok&&res.complete?res.profitPerHourPerLevel:null;
@@ -3011,12 +2962,12 @@ function renderPlannerPayback(host,d){
   }).join('');
   el.innerHTML=rows.length?`<div class="pp-list">${html}</div><div class="pp-basis">Payback from the start of the upgrade = upgrade time (level × build time; the building doesn't produce) + (materials at the cheapest market price + profit lost while upgrading) ÷ (extra profit / h − extra admin / h). Extra admin: one more level adds 1/170 to the base overhead${coo?`, ${num(coo)}% less with your COO`:''}, on the wages of every producing building (game formula). Upgrade-speed boosts are not counted. Green &lt; 3 days, orange &lt; 2 weeks.</div>`:'<div class="planner-profit-empty">No building is producing anything right now.</div>';
 }
-// v2.5.358 inputs run-out & make or buy lives on the Warehouse tab (all buildings). ctx: {s, priceMap, recipes,
+// v2.5.358 inputs run-out & make or buy lives on the Warehouse tab (all buildings). ctx: {s, recipes,
 // owned, runHours, bonusPct}. Returns HTML.
 function plannerRunOutHtml(ctx){
   const d=plannerInsightsData(ctx);
   if(!d.ok)return `<div class="planner-profit-empty">${escapeHtml(d.reason)}</div>`;
-  const {C,s,gc,economyState,adminPct,bonusPct,inputCostOf,nameOf,eventPctOf,map}=d;
+  const {C,s,gc,economyState,adminPct,bonusPct,inputCostOf,nameOf,eventPctOf}=d;
   const row=(label,value,note='',cls='')=>`<div class="pp-row ${cls}"><div class="pp-label">${label}${note?`<small>${note}</small>`:''}</div><div class="pp-value">${value}</div></div>`;
   const owned=Array.isArray(ctx.owned)?ctx.owned:[];
   const specs=owned.map(b=>({id:b.id,name:b.name,kind:String(b.kind||''),level:Number(b.level)||1,productId:Number(b.currentResourceId),quality:Number(b.currentQuality)||0,raw:b.raw})).filter(b=>b.productId>0);
@@ -3026,7 +2977,7 @@ function plannerRunOutHtml(ctx){
   const lasts=h=>h==null?'covered':h<1?`${num(Math.round(h*60))} min`:h<48?`${num(+h.toFixed(1))} h`:`${num(+(h/24).toFixed(1))} d`;
   const lastCls=h=>h==null?'si-good':h<6?'si-bad':h<hours?'si-warn':'si-good';
   const runRows=runout.map(r=>{
-    const mk=plannerMarketPrice(s,map,r.id,r.minQuality,'buy');
+    const mk=plannerMarketPrice(s,r.id,r.minQuality,'min');
     const maker=ownedKinds.get(String(gc.resources[String(r.id)]?.producedAt??''));
     let own=null,ownMissing='';if(maker){const res=C.gameCalcProduct({c:gc,resourceId:r.id,economyState,eventPct:eventPctOf(r.id),bonusPct,adminPct,robots:Boolean(maker.robotsSpecialization),inputCostOf,abundancePct:plannerAbundancePct(s,maker.raw?.id??maker.id,r.id)});if(res.ok&&res.complete)own=res.sourcingCostPerUnit;else if(res.ok)ownMissing=res.missing.map(nameOf).join(', ');}
     const mob=C.makeOrBuy(own,mk?.price);
@@ -3046,7 +2997,7 @@ function renderWarehouseRunOut(s){
     let ui=null;try{ui=plannerUiState(s);}catch{}
     const runHours=Math.min(48,Math.max(1,Number(ui?.runHours)||Number(s?.productionRunHours)||24));
     const owned=ownedPlannerBuildings(s,data.buildings);
-    el.innerHTML=plannerRunOutHtml({s,priceMap:buildMarketPriceMap(s),recipes:data.recipes,owned,runHours,bonusPct:plannerCompanyProductionModifier(s)});
+    el.innerHTML=plannerRunOutHtml({s,recipes:data.recipes,owned,runHours,bonusPct:plannerCompanyProductionModifier(s)});
   }).catch(e=>{if(token===__scmWhRunOutToken)el.innerHTML=`<div class="planner-profit-empty">Could not calculate: ${escapeHtml(String(e?.message||e))}</div>`;});
 }
 // Planner repaint guard. Background/storage-driven repaints (options.background) are queued while the user is editing
@@ -3205,10 +3156,8 @@ function renderBuildingPlanner(s,options={}){
     // Freeze the captured resource-id + quality market-price mapping for this render.
     // Discount changes operate only on these frozen quotes; the mapping itself
     // is never recomputed by the selector.
-    const frozenVwapMap=buildMarketPriceMap(s);
-    host.__plannerVwapMap=frozenVwapMap;
-    const deficitBase=network.deficits.map(x=>plannerDiscountQuote(s,x,'deficit',0,frozenVwapMap));
-    const surplusBase=network.surpluses.map(x=>plannerDiscountQuote(s,x,'surplus',0,frozenVwapMap));
+    const deficitBase=network.deficits.map(x=>plannerDiscountQuote(s,x,'deficit',0));
+    const surplusBase=network.surpluses.map(x=>plannerDiscountQuote(s,x,'surplus',0));
     const applyDiscount=(quote,pct)=>({...quote,discount:pct,unitPrice:quote.marketPrice!=null?roundCurrencyUp(quote.marketPrice*(1-pct/100)):null,total:quote.marketPrice!=null&&quote.amount>0?roundCurrencyUp(roundCurrencyUp(quote.marketPrice*(1-pct/100))*quote.amount):null});
     const deficitQuotes=deficitBase.map(q=>applyDiscount(q,discount));
     const surplusQuotes=surplusBase.map(q=>applyDiscount(q,discount));
@@ -3235,7 +3184,7 @@ function renderBuildingPlanner(s,options={}){
     const surplusCopyText=`${textHeader('surplus')}\n${surplusTextRows.plain}\n==============================`;
     const constructionPlans=owned.map(b=>{
       const target=Math.min(20,Math.max(1,Number(planningLevels[String(b.id)])||b.level||1));
-      return {building:b,plan:constructionMaterialPlan(s,b,b.level,target,discount,frozenVwapMap)};
+      return {building:b,plan:constructionMaterialPlan(s,b,b.level,target,discount)};
     }).filter(x=>Number(x.plan.stepFactor||0)>0);
     // Aggregate requirements across all planned buildings first, then apply
     // warehouse stock once per material. Quality is intentionally ignored:
@@ -3257,7 +3206,8 @@ function renderBuildingPlanner(s,options={}){
       return {...item,warehouseQty,amount,quality:0,lineTotal};
     });
     const constructionTotalItems=constructionRequirementItems.filter(x=>x.amount>0);
-    const constructionTotalCost=roundCurrencyUp(constructionTotalItems.reduce((sum,x)=>sum+(Number(x.lineTotal)||0),0));
+    const constructionTotalCost=roundCurrencyUp(constructionTotalItems.reduce((sum,x)=>sum+(x.lineTotal!=null?Number(x.lineTotal)||0:0),0));
+    const constructionMissing=constructionMissingCount(constructionTotalItems);
     const constructionTextRows=constructionTotalItems.length?{
       plain:`${textHeader('deficit')}\n${constructionTotalItems.map(x=>`➡️ ${num(x.amount)} - ${x.name} :re-${Number(x.id)}: - ${x.price!=null?money(x.price):'—'}`).join('\n')}\n==============================`,
       html:`${constructionTotalItems.map(x=>`<div class="planner-copy-line"><span>${escapeHtml(`➡️ ${num(x.amount)} - ${x.name} :re-${Number(x.id)}: - ${x.price!=null?money(x.price):'—'}`)}</span></div>`).join('')}`
@@ -3273,7 +3223,7 @@ function renderBuildingPlanner(s,options={}){
     host.__plannerDiscountSnapshot=discountSnapshot;
     host.__plannerConstructionRequirements=constructionRequirementItems;
     host.__plannerConstructionItems=constructionTotalItems;
-    host.__plannerConstructionTotal=constructionTotalCost;
+    host.__plannerConstructionTotal=constructionTotalCost;host.__plannerConstructionMissing=constructionMissing;
     const totalQuotes=quotes=>roundCurrencyUp(quotes.reduce((sum,q)=>sum+(q.total!=null?q.total:0),0));
     const deficitHasValue=deficitQuotes.some(q=>q.total!=null);
     const surplusHasValue=surplusQuotes.some(q=>q.total!=null);
@@ -3295,18 +3245,18 @@ function renderBuildingPlanner(s,options={}){
     if(plannerRepaintBlocked(host,options))return; // user began editing while this async render was computing
     const previousBuildingsStrip=host.querySelector('.owned-buildings-strip');
     const buildingsStripScrollLeft=previousBuildingsStrip?previousBuildingsStrip.scrollLeft:0;
-    host.innerHTML=`<div class="owned-buildings-heading"><h3>Your Buildings</h3><span class="owned-building-count">Total Buildings: ${owned.length}</span></div><div class="owned-buildings-strip">${buildingCards}</div><div class="planner-speed-modifiers" aria-label="Current production and sales speed modifiers"><div class="planner-speed-modifier"><span>Production Speed</span><strong>${modifierText(productionModifier)}</strong></div><div class="planner-speed-modifier"><span>Sales Speed</span><strong>${modifierText(salesModifier)}</strong></div></div><article class="planner-main-card"><div class="planner-selected-head"><div class="planner-building-hero">${plannerImage(buildingImage,building.name,'planner-building-hero-image')}<div><h3>${escapeHtml(building.name)}</h3><div class="planner-selected-category">${escapeHtml(building.category||'Resources')}</div><div class="planner-selected-line">Current Level: ${building.level} · Planning Level: ${level}</div><div class="planner-selected-line ${building.currentResource?'is-producing':''}">${busyText.replace(/·/g,'')}</div></div></div><div class="building-detail-controls"><div class="planner-kind-row"><label>Building Type<select id="buildingKind">${kindOpts}</select></label><label>Output<select id="buildingOutput" aria-label="Production output">${productOptions}</select></label></div><label>Planning Level<select id="buildingLevel">${levelOpts}</select></label><label>Production Quality<select id="buildingQuality">${qOpts}</select></label><label>Production Time<input id="buildingRunHours" type="number" min="1" max="48" step="1" value="${runHours}"><small>1–48 hours</small></label><div class="planner-reset-row">${hasPlannerChange(building)?'<button type="button" id="plannerResetBuilding">Reset to game data</button>':''}${changedCount>1||(changedCount===1&&!hasPlannerChange(building))?`<button type="button" id="plannerResetAll">Reset all (${changedCount})</button>`:''}</div></div></div><div class="planner-divider"></div><div class="planner-section-label">Production Output</div><div class="planner-output-grid${diffPerHour!=null?' has-diff':''}"><div class="planner-output-product planner-output-product-picker" title="Click to change production output">${plannerImage(productImage,product,'planner-output-image')}<div><strong>${escapeHtml(product||'No product')}</strong><span>Primary Product</span></div><select id="buildingProduct" class="planner-output-product-picker-select" aria-label="Change production output">${productOptions}</select></div><div class="planner-output-stat"><strong>${outputPerHour==null?'—':num(outputPerHour)}</strong><span>Production / hr</span></div>${diffPerHour!=null?diffStat(diffPerHour,`vs Level ${num(building.level)} / hr`):''}<div class="planner-output-stat"><strong>${outputPerPlan==null?'—':num(outputPerPlan)}</strong><span>Production / ${runHours} hr</span></div>${diffPerHour!=null?diffStat(diffPerHour*runHours,`vs Level ${num(building.level)} / ${runHours} hr`):''}</div><div class="planner-section-label">Required Inputs <span>(for ${escapeHtml(product||'selected product')} Q${quality})</span></div><div class="table-wrap planner-table-wrap"><table class="building-input-table planner-input-table mobile-cards"><thead><tr><th>Resource</th><th>Required / hr</th><th>Required / ${runHours} hr</th></tr></thead><tbody>${rows||'<tr><td colspan="3">No recipe inputs are defined for this product.</td></tr>'}</tbody></table></div><div class="planner-section-label">Profit / h / level <span>(${escapeHtml(product || 'selected product')} Q${quality} · Level ${level})</span></div><div id="plannerProfit" class="planner-profit"></div><div class="planner-section-label">Best product <span>(for this building · profit / h / level)</span></div><div id="plannerInsights" class="planner-profit planner-insights"></div><div class="planner-section-label">Upgrade payback <span>(all buildings · next level)</span></div><div id="plannerPayback" class="planner-profit planner-insights"></div><div class="planner-section-label planner-summary-label">Deficit &amp; Surplus</div><div class="planner-discount-control"><label>Buying - selected discount from VWAP<select id="plannerDiscount">${discountOpts}</select></label></div><div class="planner-summary-grid"><div class="planner-summary-card deficit-card"><div class="planner-summary-head"><span>Deficit - Total</span><strong id="plannerDeficitTotal">${deficitTotal}</strong></div><div class="planner-summary-table-scroll"><div class="planner-summary-table-head"><span>Resource</span><span>Amount</span><span>VWAP / Est. Market Cost</span></div>${summaryRows(deficitQuotes,'deficit')}</div></div><div class="planner-summary-card surplus-card"><div class="planner-summary-head"><span>Surplus - Total</span><strong id="plannerSurplusTotal">${surplusTotal}</strong></div><div class="planner-summary-table-scroll"><div class="planner-summary-table-head"><span>Resource</span><span>Amount</span><span>VWAP / Est. Market Value</span></div>${summaryRows(surplusQuotes,'surplus')}</div></div></div><div class="planner-text-grid"><div class="planner-text-card deficit-card"><div class="planner-summary-head"><span>Deficit Text</span><button type="button" class="planner-copy-btn" data-copy-target="deficitText">Copy</button></div><div id="deficitText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 BUYING -${discount}% MARKET 🔽🔽🔽</div>${deficitTextRows.html}<div class="planner-copy-heading">==============================</div></div></div><div class="planner-text-card surplus-card"><div class="planner-summary-head"><span>Selling Text</span><button type="button" class="planner-copy-btn" data-copy-target="surplusText">Copy</button></div><div id="surplusText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 SELLING -${discount}% MARKET 🔽🔽🔽</div>${surplusTextRows.html}<div class="planner-copy-heading">==============================</div></div></div></div><div class="planner-construction-card planner-text-card"><div class="planner-summary-head"><span>Construction Materials</span><strong id="plannerConstructionTotal">${plannerMoney(constructionTotalCost)}</strong><button type="button" class="planner-copy-btn" data-upgrade-projection>Upgrade View</button><button type="button" class="planner-copy-btn" data-copy-target="constructionMaterialsText">Copy</button></div><div id="constructionMaterialsText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 BUYING -${discount}% MARKET 🔽🔽🔽</div>${constructionTotalItems.length?constructionTotalItems.map(x=>`<div class="planner-copy-line"><span>${escapeHtml(`➡️ ${num(x.amount)} - ${x.name} :re-${Number(x.id)}: - ${x.price!=null?money(x.price):'—'}`)}</span></div>`).join(''):'<div class="planner-copy-empty">No additional construction materials required for the planned building levels.</div>'}<div class="planner-copy-heading">==============================</div></div></div><div class="planner-quality-footer"><div class="planner-info-dot">i</div><div><strong>Quality Note</strong><p>Inputs must be at least one quality level below the selected production quality. Higher quality inputs can also be used. Production quantity is not affected by quality level.</p><p class="planner-network-reference">Deficit and surplus are calculated from all owned buildings for the selected production time. Warehouse inventory is applied to construction-material needs by total quantity, regardless of stored quality.</p></div></div></article>`;
+    host.innerHTML=`<div class="owned-buildings-heading"><h3>Your Buildings</h3><span class="owned-building-count">Total Buildings: ${owned.length}</span></div><div class="owned-buildings-strip">${buildingCards}</div><div class="planner-speed-modifiers" aria-label="Current production and sales speed modifiers"><div class="planner-speed-modifier"><span>Production Speed</span><strong>${modifierText(productionModifier)}</strong></div><div class="planner-speed-modifier"><span>Sales Speed</span><strong>${modifierText(salesModifier)}</strong></div></div><article class="planner-main-card"><div class="planner-selected-head"><div class="planner-building-hero">${plannerImage(buildingImage,building.name,'planner-building-hero-image')}<div><h3>${escapeHtml(building.name)}</h3><div class="planner-selected-category">${escapeHtml(building.category||'Resources')}</div><div class="planner-selected-line">Current Level: ${building.level} · Planning Level: ${level}</div><div class="planner-selected-line ${building.currentResource?'is-producing':''}">${busyText.replace(/·/g,'')}</div></div></div><div class="building-detail-controls"><div class="planner-kind-row"><label>Building Type<select id="buildingKind">${kindOpts}</select></label><label>Output<select id="buildingOutput" aria-label="Production output">${productOptions}</select></label></div><label>Planning Level<select id="buildingLevel">${levelOpts}</select></label><label>Production Quality<select id="buildingQuality">${qOpts}</select></label><label>Production Time<input id="buildingRunHours" type="number" min="1" max="48" step="1" value="${runHours}"><small>1–48 hours</small></label><div class="planner-reset-row">${hasPlannerChange(building)?'<button type="button" id="plannerResetBuilding">Reset to game data</button>':''}${changedCount>1||(changedCount===1&&!hasPlannerChange(building))?`<button type="button" id="plannerResetAll">Reset all (${changedCount})</button>`:''}</div></div></div><div class="planner-divider"></div><div class="planner-section-label">Production Output</div><div class="planner-output-grid${diffPerHour!=null?' has-diff':''}"><div class="planner-output-product planner-output-product-picker" title="Click to change production output">${plannerImage(productImage,product,'planner-output-image')}<div><strong>${escapeHtml(product||'No product')}</strong><span>Primary Product</span></div><select id="buildingProduct" class="planner-output-product-picker-select" aria-label="Change production output">${productOptions}</select></div><div class="planner-output-stat"><strong>${outputPerHour==null?'—':num(outputPerHour)}</strong><span>Production / hr</span></div>${diffPerHour!=null?diffStat(diffPerHour,`vs Level ${num(building.level)} / hr`):''}<div class="planner-output-stat"><strong>${outputPerPlan==null?'—':num(outputPerPlan)}</strong><span>Production / ${runHours} hr</span></div>${diffPerHour!=null?diffStat(diffPerHour*runHours,`vs Level ${num(building.level)} / ${runHours} hr`):''}</div><div class="planner-section-label">Required Inputs <span>(for ${escapeHtml(product||'selected product')} Q${quality})</span></div><div class="table-wrap planner-table-wrap"><table class="building-input-table planner-input-table mobile-cards"><thead><tr><th>Resource</th><th>Required / hr</th><th>Required / ${runHours} hr</th></tr></thead><tbody>${rows||'<tr><td colspan="3">No recipe inputs are defined for this product.</td></tr>'}</tbody></table></div><div class="planner-section-label">Profit / h / level <span>(${escapeHtml(product || 'selected product')} Q${quality} · Level ${level})</span></div><div id="plannerProfit" class="planner-profit"></div><div class="planner-section-label">Best product <span>(for this building · profit / h / level)</span></div><div id="plannerInsights" class="planner-profit planner-insights"></div><div class="planner-section-label">Upgrade payback <span>(all buildings · next level)</span></div><div id="plannerPayback" class="planner-profit planner-insights"></div><div class="planner-section-label planner-summary-label">Deficit &amp; Surplus</div><div class="planner-discount-control"><label>Buying - selected discount from VWAP<select id="plannerDiscount">${discountOpts}</select></label></div><div class="planner-summary-grid"><div class="planner-summary-card deficit-card"><div class="planner-summary-head"><span>Deficit - Total</span><strong id="plannerDeficitTotal">${deficitTotal}</strong></div><div class="planner-summary-table-scroll"><div class="planner-summary-table-head"><span>Resource</span><span>Amount</span><span>VWAP / Est. Market Cost</span></div>${summaryRows(deficitQuotes,'deficit')}</div></div><div class="planner-summary-card surplus-card"><div class="planner-summary-head"><span>Surplus - Total</span><strong id="plannerSurplusTotal">${surplusTotal}</strong></div><div class="planner-summary-table-scroll"><div class="planner-summary-table-head"><span>Resource</span><span>Amount</span><span>VWAP / Est. Market Value</span></div>${summaryRows(surplusQuotes,'surplus')}</div></div></div><div class="planner-text-grid"><div class="planner-text-card deficit-card"><div class="planner-summary-head"><span>Deficit Text</span><button type="button" class="planner-copy-btn" data-copy-target="deficitText">Copy</button></div><div id="deficitText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 BUYING -${discount}% MARKET 🔽🔽🔽</div>${deficitTextRows.html}<div class="planner-copy-heading">==============================</div></div></div><div class="planner-text-card surplus-card"><div class="planner-summary-head"><span>Selling Text</span><button type="button" class="planner-copy-btn" data-copy-target="surplusText">Copy</button></div><div id="surplusText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 SELLING -${discount}% MARKET 🔽🔽🔽</div>${surplusTextRows.html}<div class="planner-copy-heading">==============================</div></div></div></div><div class="planner-construction-card planner-text-card"><div class="planner-summary-head"><span>Construction Materials</span><strong id="plannerConstructionTotal">${plannerMoney(constructionTotalCost)}</strong><button type="button" class="planner-copy-btn" data-upgrade-projection>Upgrade View</button><button type="button" class="planner-copy-btn" data-copy-target="constructionMaterialsText">Copy</button></div><div class="planner-missing-prices" id="plannerConstructionMissing" role="status">${escapeHtml(constructionMissingText(constructionMissing))}</div><div id="constructionMaterialsText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 BUYING -${discount}% MARKET 🔽🔽🔽</div>${constructionTotalItems.length?constructionTotalItems.map(x=>`<div class="planner-copy-line"><span>${escapeHtml(`➡️ ${num(x.amount)} - ${x.name} :re-${Number(x.id)}: - ${x.price!=null?money(x.price):'—'}`)}</span></div>`).join(''):'<div class="planner-copy-empty">No additional construction materials required for the planned building levels.</div>'}<div class="planner-copy-heading">==============================</div></div></div><div class="planner-quality-footer"><div class="planner-info-dot">i</div><div><strong>Quality Note</strong><p>Inputs must be at least one quality level below the selected production quality. Higher quality inputs can also be used. Production quantity is not affected by quality level.</p><p class="planner-network-reference">Deficit and surplus are calculated from all owned buildings for the selected production time. Warehouse inventory is applied to construction-material needs by total quantity, regardless of stored quality.</p></div></div></article>`;
 
     const deficitTextEl=$('#deficitText'); if(deficitTextEl) deficitTextEl.dataset.copyText=deficitCopyText;
     const surplusTextEl=$('#surplusText'); if(surplusTextEl) surplusTextEl.dataset.copyText=surplusCopyText;
     const constructionTextEl=$('#constructionMaterialsText'); if(constructionTextEl) constructionTextEl.dataset.copyText=constructionCopyText;
-    host.__upgradeProjectionContext={state:s,building,plan:constructionMaterialPlan(s,building,building.level,level,discount,frozenVwapMap),discount,vwapMap:frozenVwapMap};
+    host.__upgradeProjectionContext={state:s,building,plan:constructionMaterialPlan(s,building,building.level,level,discount),discount};
   // v2.5.338 economy phase: the measured rate belongs to the running batch's phase; also pass the
   // normal-economy reference rate (× the same game modifiers) for when the phase has changed since.
   let referenceRate=null;try{const rb=plannerRate(product,recipes,rates,s);const ev=1+plannerActiveProductionEvent(s,product,recipes,Number(productRecipe?.id))/100;const cf=plannerCompanyProductionFactor(s);if(Number(rb?.rate)>0&&ev>0&&cf>0)referenceRate=Number(rb.rate)*level*ev*cf;}catch{}
   let ctxEventPct=0;try{ctxEventPct=plannerActiveProductionEvent(s,product,recipes,Number(productRecipe?.id))||0;}catch{}
   const busyRaw=building?.raw?.busy;const rateFromBatch=Boolean(busyRaw?.started)&&Number(busyRaw?.resource?.kind)===Number(productRecipe?.id)&&!/reference/i.test(String(productRate?.source||''));
-  host.__plannerProfitCtx={s,building,product,productId:Number(productRecipe?.id),quality,level,outputPerHour,eventPct:ctxEventPct,abundancePct:plannerAbundancePct(s,building?.raw?.id??building?.id,Number(productRecipe?.id)),bonusPct:plannerCompanyProductionModifier(s),buildingKind:String(building?.raw?.kind??building?.kind??''),robots:Boolean(building?.raw?.robotsSpecialization),rateSource:productRate?.source||null,rateFromBatch,batchStarted:rateFromBatch?String(busyRaw.started):null,referenceRate,plannedInputs,transportUnits:Number(productRecipe?.transport)||0,priceMap:frozenVwapMap,owned,recipes,runHours};
+  host.__plannerProfitCtx={s,building,product,productId:Number(productRecipe?.id),quality,level,outputPerHour,eventPct:ctxEventPct,abundancePct:plannerAbundancePct(s,building?.raw?.id??building?.id,Number(productRecipe?.id)),bonusPct:plannerCompanyProductionModifier(s),buildingKind:String(building?.raw?.kind??building?.kind??''),robots:Boolean(building?.raw?.robotsSpecialization),rateSource:productRate?.source||null,rateFromBatch,batchStarted:rateFromBatch?String(busyRaw.started):null,referenceRate,plannedInputs,transportUnits:Number(productRecipe?.transport)||0,owned,recipes,runHours};
   try{renderPlannerProfit(host);}catch(e){console.error('Planner profit render failed',e);}
     host.querySelector('[data-upgrade-projection]')?.addEventListener('click',()=>showBuildingUpgradeProjection(host,host.__upgradeProjectionContext));
     const restorePlannerScroll=()=>{
@@ -3371,7 +3321,7 @@ function renderBuildingPlanner(s,options={}){
     host.querySelectorAll('.planner-copy-btn').forEach(btn=>btn.onclick=async()=>{const el=document.getElementById(btn.dataset.copyTarget);if(!el)return;const text=el.dataset.copyText??el.value??el.textContent??'';try{await navigator.clipboard.writeText(text);}catch{const ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();}btn.textContent='Copied';setTimeout(()=>btn.textContent='Copy',1200);});
   });
 }
-function renderMarketAlerts(s){const host=$('#marketAlerts');if(!host)return;const alerts=[];for(const r of warehouseRows(s)){const marketPrice=exactMarketPrice(buildMarketPriceMap(s),r._id,r._quality);const alertCost=warehouseAlertUnitCost(s,r);if(marketPrice==null||!Number.isFinite(alertCost)||alertCost<=0)continue;const pct=(marketPrice-alertCost)/alertCost*100;if(Math.abs(pct)>=5)alerts.push({name:resourceName(r,s),quality:r._quality,cost:alertCost,marketPrice,pct});}alerts.sort((a,b)=>Math.abs(b.pct)-Math.abs(a.pct));host.innerHTML=alerts.length?`<div class="market-alert-list">${alerts.slice(0,10).map(a=>`<div class="market-alert-row"><div><strong>${escapeHtml(a.name)}</strong><small>Q${escapeHtml(String(a.quality))}</small></div><div>${money(a.cost)} → ${money(a.marketPrice)}</div><strong class="${a.pct>=0?'positive':'negative'}">${a.pct>=0?'+':''}${a.pct.toFixed(1)}%</strong></div>`).join('')}</div><p class="muted">Warehouse sourcing cost compared with captured current SimcoTools Market price (not VWAP). Alerts trigger at 5% or more.</p>`:'<p class="muted">No warehouse Market alerts at the current 5% threshold.</p>';}
+function renderMarketAlerts(s){const host=$('#marketAlerts');if(!host)return;const alerts=[];for(const r of warehouseRows(s)){const mp=scmMarketPrice(s,r._id,r._quality,'exact'),marketPrice=mp?.price??null;const alertCost=warehouseAlertUnitCost(s,r);if(marketPrice==null||!Number.isFinite(alertCost)||alertCost<=0)continue;const pct=(marketPrice-alertCost)/alertCost*100;if(Math.abs(pct)>=5)alerts.push({name:resourceName(r,s),quality:r._quality,cost:alertCost,marketPrice,pct,old:Boolean(mp?.stale),vwap:mp?.source==='vwap'});}alerts.sort((a,b)=>Math.abs(b.pct)-Math.abs(a.pct));host.innerHTML=alerts.length?`<div class="market-alert-list">${alerts.slice(0,10).map(a=>`<div class="market-alert-row"><div><strong>${escapeHtml(a.name)}</strong><small>Q${escapeHtml(String(a.quality))}</small></div><div>${money(a.cost)} → ${money(a.marketPrice)}${a.old?' <small>old</small>':''}${a.vwap?' <small>VWAP</small>':''}</div><strong class="${a.pct>=0?'positive':'negative'}">${a.pct>=0?'+':''}${a.pct.toFixed(1)}%</strong></div>`).join('')}</div><p class="muted">Warehouse sourcing cost compared with the shared market price (exchange or SimcoTools; VWAP only when no current price is captured; "old" = stale). Alerts trigger at 5% or more.</p>`:'<p class="muted">No warehouse Market alerts at the current 5% threshold.</p>';}
 
 document.querySelector('#saveJson')?.addEventListener('click',async()=>{try{const s=await get();const manifestVersion=chrome.runtime.getManifest()?.version||BUILD_VERSION;const payload={exportedAt:new Date().toISOString(),page:'simcompanies-manager',version:manifestVersion,manifestVersion,buildVersion:BUILD_VERSION,activeRealmKey:s.activeRealmKey??null,selectedRealm:s.selectedRealm??null,captureRealm:s.captureRealm??null,realmStores:s.realmStores??{},activeState:{authData:s.authData??null,companyData:s.companyData??null,warehouseResources:s.warehouseResources??[],gameState:s.gameState??null,endpointData:s.endpointData??{},apiEndpoints:s.apiEndpoints??[],contracts:s.contracts??[],savedContracts:s.savedContracts??[],contractEvents:s.contractEvents??[],gameLocalStorageSnapshot:s.gameLocalStorageSnapshot??null,vwapData:s.vwapData??null,history:s.history??{},marketCache:s.marketCache??{},marketDebug:s.marketDebug??{},vwapStatus:s.vwapStatus??null,vwapWatch:s.vwapWatch??null,productionEvents:s.productionEvents??[],syncStatus:s.syncStatus??null,syncError:s.syncError??null,fullSyncDiagnostics:s.fullSyncDiagnostics??null,warehouseCostDetails:s.warehouseCostDetails??{},javascriptDiagnostic:s.javascriptDiagnostic??null,javascriptDiagnosticHistory:s.javascriptDiagnosticHistory??[]}};const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`simcompanies-manager-diagnostic-${realmDisplayNumber(payload.captureRealm)}-${new Date().toISOString().replace(/[:.]/g,'-')}.json`;document.body.appendChild(a);a.click();a.remove();scmDownloadToast(a.download,blob.size);setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){alert('Unable to save diagnostic JSON: '+(e?.message||String(e)));}});
 document.querySelector('#downloadStorage')?.addEventListener('click',async()=>{try{const storage=await chrome.storage.local.get(null);const manifestVersion=chrome.runtime.getManifest()?.version||BUILD_VERSION;const payload={exportedAt:new Date().toISOString(),page:'simcompanies-manager-storage',version:manifestVersion,manifestVersion,buildVersion:BUILD_VERSION,storage:storage};const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`simcompanies-manager-storage-${manifestVersion}-${new Date().toISOString().replace(/[:.]/g,'-')}.json`;document.body.appendChild(a);a.click();a.remove();scmDownloadToast(a.download,blob.size);setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){alert('Unable to download stored data: '+(e?.message||String(e)));}});
@@ -3885,8 +3835,8 @@ function normalizeContract(c,direction,s){
   const totalN=totalRaw!=null?contractNumber({x:totalRaw},['x']):null;
   const total=totalN!=null?totalN:(price!=null&&quantity!=null?price*quantity:0);
   const discount=contractNumber(c,['discount','discountPercent','discountPercentage']);
-  // Contract comparison uses the captured current market price for the exact
-  // resource and quality. Never substitute VWAP or a stale contract quote.
+  // Contract comparison uses the shared market price (market-core, exact quality; VWAP only when no
+  // current price is captured). Never a neighbouring quality or a stale contract quote.
   const mwap=Number.isFinite(Number(id))&&Number.isFinite(Number(quality))
     ? contractMarketPrice({productId:id,quality},s) : null;
   return {direction,company,product,productId:id,quantity:quantity??0,quality:quality!=null?quality:'—',mwap,discount:discount,price:price,total};
@@ -4002,13 +3952,18 @@ async function saveRealmField(field,value,s){
     return result?.ok===true;
   }catch{return false;}
 }
-function contractMarketPrice(c,s){
+// Shared price record for a contract's product (market-core, exact quality); contractMarketPrice keeps the numeric callers.
+function contractMarketInfo(c,s){
   const parsed=String(c?.product??'').trim().match(/^(\d+)(?::(\d+))?$/);
   const id=Number(c?.productId!=null?c.productId:(parsed?parsed[1]:NaN));
   const quality=Number(c?.quality!=null?c.quality:(parsed?parsed[2]??0:NaN));
   if(!Number.isFinite(id)||id<=0||!Number.isFinite(quality))return null;
-  return exactMarketPrice(buildMarketPriceMap(s),id,quality);
+  return scmMarketPrice(s,id,quality,'exact');
 }
+function contractMarketPrice(c,s){return contractMarketInfo(c,s)?.price??null;}
+// "VWAP" when the price is the VWAP fallback, "old" when stale; empty for a fresh current price.
+function contractPriceNote(info){return info?[info.source==='vwap'?'VWAP':'',info.stale?'old':''].filter(Boolean).join(' · '):'';}
+function setContractMwapNote(text){const el=$('#contractMwapNote');if(el)el.textContent=text||'';}
 function savedContractPrice(c,s){const core=globalThis.SCMPlannerCore;return core?.savedContractCurrentPrice?core.savedContractCurrentPrice(c,contractMarketPrice(c,s)):c?.price;}
 function contractMarketDiscount(c,s){const price=Number(c?.price),marketPrice=contractMarketPrice(c,s);if(!Number.isFinite(price)||!Number.isFinite(marketPrice)||marketPrice<=0)return null;return (price-marketPrice)/marketPrice*100;}
 function contractDiscountHtml(c,s,saved){
@@ -4022,7 +3977,7 @@ function contractDiscountHtml(c,s,saved){
   const sign=!saved&&value>0?'+':'';
   return `<span class="${cls}">${sign}${value.toFixed(2)}%</span>`;
 }
-function contractRow(c,s, saved=false, includeDirection=true){const effectiveQty=saved?savedContractEffectiveQuantity(c,s):Number(c.quantity)||0;const qtyText=saved?savedContractQuantityLabel(c,s):num(c.quantity);const qtyLabel=c.count>1?`${qtyText} (${c.count} contracts)`:qtyText;const displayPrice=saved?savedContractPrice(c,s):c.price;const rowTotal=saved?roundCurrencyUp((Number(displayPrice)||0)*effectiveQty):(Number(c.total)||0);const productParts=String(c.product||'').match(/^(\d+)(?::(\d+))?$/);const pid=Number.isFinite(Number(c.productId))?Number(c.productId):(productParts?Number(productParts[1]):null);const pq=Number.isFinite(Number(c.quality))?Number(c.quality):(productParts?Number(productParts[2]):null);const info=pid!=null?resourceInfo({kind:pid,quality:pq},s||{}):{imageCandidates:[]};const src=(info.imageCandidates||[])[0]||'';const image=src?`<img class="contract-product-icon" src="${escapeHtml(src)}" alt="" loading="lazy">`:'';const productLabel=saved&&pid!=null?resourceName({kind:pid,quality:pq},s||{}):(c.productName||c.product||'—');return `<tr>${includeDirection?`<td>${escapeHtml(c.direction||'—')}</td>`:''}<td>${escapeHtml(c.company||'—')}</td><td class="contract-product-cell">${image}<span>${escapeHtml(productLabel)}</span></td><td>${qtyLabel}</td><td>${c.quality??'—'}</td><td>${contractMarketPrice(c,s)==null?'—':money(contractMarketPrice(c,s))}</td><td>${contractDiscountHtml(c,s,saved)}</td><td>${contractPriceMoney(displayPrice)}</td><td>${money(rowTotal)}</td>${saved?`<td><button class="saved-edit" data-id="${escapeHtml(c.id||'')}">Edit</button> <button class="danger saved-delete" data-id="${escapeHtml(c.id||'')}">Delete</button></td>`:''}</tr>`}
+function contractRow(c,s, saved=false, includeDirection=true){const effectiveQty=saved?savedContractEffectiveQuantity(c,s):Number(c.quantity)||0;const qtyText=saved?savedContractQuantityLabel(c,s):num(c.quantity);const qtyLabel=c.count>1?`${qtyText} (${c.count} contracts)`:qtyText;const displayPrice=saved?savedContractPrice(c,s):c.price;const rowTotal=saved?roundCurrencyUp((Number(displayPrice)||0)*effectiveQty):(Number(c.total)||0);const productParts=String(c.product||'').match(/^(\d+)(?::(\d+))?$/);const pid=Number.isFinite(Number(c.productId))?Number(c.productId):(productParts?Number(productParts[1]):null);const pq=Number.isFinite(Number(c.quality))?Number(c.quality):(productParts?Number(productParts[2]):null);const info=pid!=null?resourceInfo({kind:pid,quality:pq},s||{}):{imageCandidates:[]};const src=(info.imageCandidates||[])[0]||'';const image=src?`<img class="contract-product-icon" src="${escapeHtml(src)}" alt="" loading="lazy">`:'';const productLabel=saved&&pid!=null?resourceName({kind:pid,quality:pq},s||{}):(c.productName||c.product||'—');return `<tr>${includeDirection?`<td>${escapeHtml(c.direction||'—')}</td>`:''}<td>${escapeHtml(c.company||'—')}</td><td class="contract-product-cell">${image}<span>${escapeHtml(productLabel)}</span></td><td>${qtyLabel}</td><td>${c.quality??'—'}</td><td>${(()=>{const mi=contractMarketInfo(c,s);if(mi==null)return '—';const nt=contractPriceNote(mi);return `${money(mi.price)}${nt?` <small class="market-inline-vwap">${nt}</small>`:''}`;})()}</td><td>${contractDiscountHtml(c,s,saved)}</td><td>${contractPriceMoney(displayPrice)}</td><td>${money(rowTotal)}</td>${saved?`<td><button class="saved-edit" data-id="${escapeHtml(c.id||'')}">Edit</button> <button class="danger saved-delete" data-id="${escapeHtml(c.id||'')}">Delete</button></td>`:''}</tr>`}
 function renderApiList(s){
   const el=$('#apiList');
   if(!el)return;
@@ -4223,17 +4178,17 @@ function populateContractProducts(s){
   const el=$('#contractProduct'); if(!el)return;
   const current=el.value;
   const rows=warehouseRows(s); const seen=new Set(); const options=[];
-  rows.forEach(r=>{const key=`${r._id}:${r._quality}`;if(seen.has(key))return;seen.add(key);const marketPrice=exactMarketPrice(buildMarketPriceMap(s),r._id,r._quality);const mwap=marketPrice;options.push({key,id:r._id,quality:r._quality,mwap,name:resourceName(r,s)});});
-  const signature=options.map(o=>`${o.key}|${o.mwap??''}|${o.name}`).join('||');
+  rows.forEach(r=>{const key=`${r._id}:${r._quality}`;if(seen.has(key))return;seen.add(key);const marketPrice=scmMarketPrice(s,r._id,r._quality,'exact')?.price??null;const mwap=marketPrice;options.push({key,id:r._id,quality:r._quality,mwap,note:contractPriceNote(scmMarketPrice(s,r._id,r._quality,'exact')),name:resourceName(r,s)});});
+  const signature=options.map(o=>`${o.key}|${o.mwap??''}|${o.note}|${o.name}`).join('||');
   if(el.dataset.optionsSig!==signature){
-    const html=['<option value="">Select warehouse product</option>',...options.map(o=>`<option value="${escapeHtml(o.key)}" data-id="${o.id}" data-quality="${o.quality}" data-mwap="${o.mwap??''}">${escapeHtml(o.name)} · Q${o.quality}</option>`)].join('');
+    const html=['<option value="">Select warehouse product</option>',...options.map(o=>`<option value="${escapeHtml(o.key)}" data-id="${o.id}" data-quality="${o.quality}" data-mwap="${o.mwap??''}" data-mwap-note="${escapeHtml(o.note||'')}">${escapeHtml(o.name)} · Q${o.quality}</option>`)].join('');
     el.innerHTML=html;
     el.dataset.optionsSig=signature;
   }
   if(current&&[...el.options].some(o=>o.value===current))el.value=current;
   // Keep an open form on the live market; updateContractPrice leaves a custom price alone.
   const liveMwap=el.selectedOptions[0]?.dataset?.mwap;
-  if(liveMwap&&$('#contractMwap')&&!$('#contractForm')?.classList.contains('hidden')){$('#contractMwap').value=liveMwap;updateContractPrice(false);}
+  if(liveMwap&&$('#contractMwap')&&!$('#contractForm')?.classList.contains('hidden')){$('#contractMwap').value=liveMwap;setContractMwapNote(el.selectedOptions[0]?.dataset?.mwapNote);updateContractPrice(false);}
 }
 function syncContractQuantityUI(){
   const modeEl=$('#contractQuantityMode');const qtyEl=$('#contractQuantity');if(!modeEl||!qtyEl)return;
@@ -4243,19 +4198,19 @@ function getContractQuantityMode(){return String($('#contractQuantityMode')?.val
 function getContractDiscountValue(){const select=$('#contractDiscount');const raw=String(select?.value??'');if(raw==='custom'){const custom=Number($('#contractDiscountCustom')?.value);return Number.isFinite(custom)&&custom>=0&&custom<=100?custom:null;}const value=Number(raw);return Number.isFinite(value)&&value>=0&&value<=10?value:null;}
 function syncContractDiscountUI(){const custom=$('#contractDiscountCustom');if(!custom)return;const isCustom=String($('#contractDiscount')?.value)==='custom';custom.classList.toggle('hidden',!isCustom);if(!isCustom)custom.value='';}
 function updateContractPrice(force=false){syncContractDiscountUI();const mwap=Number($('#contractMwap')?.value), discount=getContractDiscountValue();const price=$('#contractPrice');if(!price)return;const calculated=Number.isFinite(mwap)&&mwap>0&&Number.isFinite(discount)?mwap*(1-discount/100):null;if(force||price.dataset.manual!=='1')price.value=calculated!=null?roundCurrencyUp(calculated).toFixed(2):'';}
-function resetContractEditor(){const f=$('#contractForm');if(!f)return;f.reset();if(f.elements.price)delete f.elements.price.dataset.manual;delete f.dataset.editId;const save=f.querySelector('button[type="submit"]');if(save)save.textContent='Save Contract';const cancel=$('#cancelContractEdit');if(cancel)cancel.classList.add('hidden');$('#contractDiscount').value='';$('#contractDiscountCustom').value='';$('#contractQuantityMode').value='';$('#contractQuantity').value='';syncContractQuantityUI();syncContractDiscountUI();updateContractPrice();}
+function resetContractEditor(){const f=$('#contractForm');if(!f)return;f.reset();setContractMwapNote('');if(f.elements.price)delete f.elements.price.dataset.manual;delete f.dataset.editId;const save=f.querySelector('button[type="submit"]');if(save)save.textContent='Save Contract';const cancel=$('#cancelContractEdit');if(cancel)cancel.classList.add('hidden');$('#contractDiscount').value='';$('#contractDiscountCustom').value='';$('#contractQuantityMode').value='';$('#contractQuantity').value='';syncContractQuantityUI();syncContractDiscountUI();updateContractPrice();}
 function startContractEdit(c){
   const f=$('#contractForm');if(!f)return;f.classList.remove('hidden');f.dataset.editId=String(c.id||'');
   const product=$('#contractProduct');product.value=String(c.product||'');
   const o=product.selectedOptions[0];
-  $('#contractQuality').value=c.quality??o?.dataset?.quality??'';$('#contractMwap').value=o?.dataset?.mwap||(c.mwap??'');const savedDiscount=Number(c.discount);if(Number.isFinite(savedDiscount)&&savedDiscount>=0&&savedDiscount<=10){$('#contractDiscount').value=String(savedDiscount);$('#contractDiscountCustom').value='';}else{const custom=Number.isFinite(savedDiscount)&&savedDiscount>=0&&savedDiscount<=100?savedDiscount:0;$('#contractDiscount').value='custom';$('#contractDiscountCustom').value=String(custom);}syncContractDiscountUI();$('#contractDirection').value=c.direction||'Outgoing';if(globalThis.SCMPlannerCore?.savedContractIsCustomPrice?.(c)){f.elements.price.value=c.price??'';f.elements.price.dataset.manual='1';}else{delete f.elements.price.dataset.manual;updateContractPrice(true);if(!f.elements.price.value)f.elements.price.value=c.price??'';}
+  $('#contractQuality').value=c.quality??o?.dataset?.quality??'';$('#contractMwap').value=o?.dataset?.mwap||(c.mwap??'');setContractMwapNote(o?.dataset?.mwap?o.dataset.mwapNote:'');const savedDiscount=Number(c.discount);if(Number.isFinite(savedDiscount)&&savedDiscount>=0&&savedDiscount<=10){$('#contractDiscount').value=String(savedDiscount);$('#contractDiscountCustom').value='';}else{const custom=Number.isFinite(savedDiscount)&&savedDiscount>=0&&savedDiscount<=100?savedDiscount:0;$('#contractDiscount').value='custom';$('#contractDiscountCustom').value=String(custom);}syncContractDiscountUI();$('#contractDirection').value=c.direction||'Outgoing';if(globalThis.SCMPlannerCore?.savedContractIsCustomPrice?.(c)){f.elements.price.value=c.price??'';f.elements.price.dataset.manual='1';}else{delete f.elements.price.dataset.manual;updateContractPrice(true);if(!f.elements.price.value)f.elements.price.value=c.price??'';}
   f.elements.company.value=c.company||'';const mode=savedContractQuantityMode(c);$('#contractQuantityMode').value=mode;$('#contractQuantity').value=mode==='custom'?(c.quantity||''):'';syncContractQuantityUI();
   const save=f.querySelector('button[type="submit"]');if(save)save.textContent='Update Contract';$('#cancelContractEdit')?.classList.remove('hidden');f.scrollIntoView({behavior:'smooth',block:'center'});
 }
 $('#newContract').onclick=()=>{const f=$('#contractForm');if(f.classList.contains('hidden')){resetContractEditor();f.classList.remove('hidden');}else f.classList.add('hidden');};
 $('#cancelContractEdit').onclick=()=>{resetContractEditor();$('#contractForm').classList.add('hidden');};
 $('#contractQuantityMode').onchange=()=>syncContractQuantityUI();
-$('#contractProduct').onchange=()=>{const o=$('#contractProduct').selectedOptions[0];$('#contractQuality').value=o?.dataset?.quality||'';$('#contractMwap').value=o?.dataset?.mwap||'';const price=$('#contractPrice');if(price)delete price.dataset.manual;updateContractPrice(true);};
+$('#contractProduct').onchange=()=>{const o=$('#contractProduct').selectedOptions[0];$('#contractQuality').value=o?.dataset?.quality||'';$('#contractMwap').value=o?.dataset?.mwap||'';setContractMwapNote(o?.dataset?.mwap?o.dataset.mwapNote:'');const price=$('#contractPrice');if(price)delete price.dataset.manual;updateContractPrice(true);};
 $('#contractDiscount').onchange=()=>{syncContractDiscountUI();updateContractPrice(false);};
 $('#contractDiscountCustom').oninput=()=>updateContractPrice(false);
 $('#contractPrice').oninput=()=>{const price=$('#contractPrice');if(!price)return;if(String(price.value).trim()==='')delete price.dataset.manual;else price.dataset.manual='1';};
@@ -4406,6 +4361,12 @@ function scmWarehouseSignature(store){
     }
     out+=`cd:${costParts.sort().join(',')}`;
   }else out+='cd:';
+  return out;
+}
+// Order books (/api/v3/market/<realm>/<id>/) feed scmMarketPrice. Signature = those keys and their receivedAt only (no data walk).
+function scmMarketBookSignature(store){
+  const ep=store?.endpointData;if(!ep||typeof ep!=='object')return '';
+  let out='';for(const k in ep){if(k.startsWith('/api/v3/market/'))out+=`${k}@${ep[k]?.receivedAt||''};`;}
   return out;
 }
 function scmVwapSignature(store){
@@ -4611,15 +4572,14 @@ function patchWarehouseCells(state){
   const wanted=[];
   for(const r of rows){
     const key=`${Number(r._id)}:${Number(r._quality)}`;
-    const st=marketStats(marketRows(state,r._id,r._quality),r._quality);
-    const currentMarketPrice=exactMarketPrice(buildMarketPriceMap(state),r._id,r._quality);const margin=currentMarketPrice!=null&&r._unitCost>0?(currentMarketPrice-r._unitCost)/r._unitCost*100:null;
+    const priceInfo=scmMarketPrice(state,r._id,r._quality,'exact');const currentMarketPrice=priceInfo?.price??null;const margin=currentMarketPrice!=null&&r._unitCost>0?(currentMarketPrice-r._unitCost)/r._unitCost*100:null;
     const ri=resourceInfo(r,state); const imgs=ri.imageCandidates||[];
     const localImage=state.resourceImageCache?.[String(r._id)]||state.resourceImageData?.[String(r._id)]||null;
     if(!localImage) requestResourceImage(r._id);
     const srcs=localImage?[localImage,...imgs]:imgs;
     const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';
     let tr=existing.get(key);
-    const activeCost=activeProductionCostCells(state,r);const html=[`<td><div class="product-cell">${img}<span><strong>${escapeHtml(resourceName(r,state))}</strong><small>#${r._id}</small></span></div>${warehouseHeadCost(r)}</td>`, `<td data-cell="qty">${num(r._qty)}</td>`, `<td data-cell="quality">${r._quality??'—'}</td>`, `<td data-cell="cost">${r._unitCost==null?'—':money(r._unitCost)}</td>`, `<td data-cell="active-production-cost">${activeCost.costHtml}</td>`, `<td data-cell="production-stock-diff">${activeCost.diffHtml}</td>`, `<td data-cell="prod-cost-history">${productionCostHistoryCell(state,r)}</td>`, `<td data-cell="vwap"><span class="cell-stack">${currentMarketPrice==null?'—':money(currentMarketPrice)}<small class="market-source">${marketSource(state,r._id,r._quality)}</small></span></td>`, `<td data-cell="margin" class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td>`];
+    const activeCost=activeProductionCostCells(state,r);const html=[`<td><div class="product-cell">${img}<span><strong>${escapeHtml(resourceName(r,state))}</strong><small>#${r._id}</small></span></div>${warehouseHeadCost(r)}</td>`, `<td data-cell="qty">${num(r._qty)}</td>`, `<td data-cell="quality">${r._quality??'—'}</td>`, `<td data-cell="cost">${r._unitCost==null?'—':money(r._unitCost)}</td>`, `<td data-cell="active-production-cost">${activeCost.costHtml}</td>`, `<td data-cell="production-stock-diff">${activeCost.diffHtml}</td>`, `<td data-cell="prod-cost-history">${productionCostHistoryCell(state,r)}</td>`, `<td data-cell="vwap"><span class="cell-stack">${currentMarketPrice==null?'—':money(currentMarketPrice)}<small class="market-source">${escapeHtml(scmMarketSourceText(priceInfo))}</small></span></td>`, `<td data-cell="margin" class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td>`];
     if(!tr){tr=document.createElement('tr');tr.dataset.warehouseKey=key;tr.innerHTML=html.join('');}
     else {
       const cells=tr.children;
@@ -4669,12 +4629,16 @@ function patchConstructionMaterials(state){
   const updated=requirements.map(item=>{
     const warehouseQty=constructionWarehouseStock(state,item.id);
     const amount=Math.max(0,roundResourceDown(Number(item.required||0)-warehouseQty,3));
-    const price=item.price!=null?Number(item.price):null;
-    const lineTotal=Number.isFinite(price)?roundCurrencyUp(price*amount):null;
-    return {...item,warehouseQty,amount,quality:0,lineTotal};
+    // Prices are re-read from the shared source (market or order-book change); quantities stay as planned.
+    const raw=scmMarketPrice(state,item.id,0,'exact')?.price??null;
+    const pct=plannerDiscountPercent(discount);
+    const price=raw==null?null:(globalThis.SCMPlannerCore?.discountedUnitPrice?globalThis.SCMPlannerCore.discountedUnitPrice(raw,pct):roundCurrencyUp(raw*(1-pct/100)));
+    const lineTotal=price!=null&&Number.isFinite(price)?roundCurrencyUp(price*amount):null;
+    return {...item,warehouseQty,amount,quality:0,marketPrice:raw,price,lineTotal};
   });
   const items=updated.filter(x=>x.amount>0);
-  const total=roundCurrencyUp(items.reduce((sum,x)=>sum+(Number(x.lineTotal)||0),0));
+  const total=roundCurrencyUp(items.reduce((sum,x)=>sum+(x.lineTotal!=null?Number(x.lineTotal)||0:0),0));
+  const missing=constructionMissingCount(items);
   const body=items.length
     ?items.map(x=>`<div class="planner-copy-line"><span>${escapeHtml(`➡️ ${num(x.amount)} - ${x.name} :re-${Number(x.id)}: - ${x.price!=null?money(x.price):'—'}`)}</span></div>`).join('')
     :'<div class="planner-copy-empty">No additional construction materials required for the planned building levels.</div>';
@@ -4684,6 +4648,8 @@ function patchConstructionMaterials(state){
   textEl.innerHTML=`<div class="planner-copy-heading">==============================<br>🔽🔽🔽 BUYING -${discount}% MARKET 🔽🔽🔽</div>${body}<div class="planner-copy-heading">==============================</div>`;
   textEl.dataset.copyText=copyText;
   if(totalEl)totalEl.textContent=plannerMoney(total);
+  const missEl=$('#plannerConstructionMissing');if(missEl)missEl.textContent=constructionMissingText(missing);
+  host.__plannerConstructionMissing=missing;
   host.__plannerConstructionItems=items;
   host.__plannerConstructionTotal=total;
 }
@@ -4702,16 +4668,16 @@ function patchContractTables(state){
   if($('#outgoingContractTotal'))$('#outgoingContractTotal').textContent=money(total('Outgoing'));
 }
 function patchReactiveData(state, flags){
-  if(flags.warehouseChanged||flags.vwapChanged) patchWarehouseCells(state);
+  if(flags.warehouseChanged||flags.vwapChanged||flags.liveMarketPriceDataChanged) patchWarehouseCells(state);
   if(flags.vwapChanged){
     renderVwapDiagnostics(state);
     patchOverviewOperations(state);
   }
   if(flags.accountingChanged){ patchOverviewGrossResources(state); }
-  if(flags.contractsChanged||flags.vwapChanged){
+  if(flags.contractsChanged||flags.vwapChanged||flags.liveMarketPriceDataChanged){
     if($('#incomingContractRows')||$('#outgoingContractRows')) patchContractTables(state);
   }
-  if(flags.warehouseChanged){
+  if(flags.warehouseChanged||flags.liveMarketPriceDataChanged){
     try{patchConstructionMaterials(state);}catch(e){console.debug('Reactive construction-material patch failed',e);}
   }
   if((flags.warehouseChanged||flags.contractsChanged) && activeTab==='contracts'){
@@ -4757,7 +4723,7 @@ const queuePhysicalRealmStateRefresh=(previousState,changes={})=>{
       __physicalStateRefreshRealmChangePending=false;
       const realm=Number(fresh?.viewRealm??fresh?.captureRealm??fresh?.selectedRealm);const viewKey=Number.isFinite(realm)?`realm:${realm}`:fresh?.activeRealmKey||null;
       const oldStore=previous?.realmStores?.[viewKey]||{};const newStore=fresh?.realmStores?.[viewKey]||{};
-      const flags={buildingsChanged:scmBuildingsSignature(oldStore)!==scmBuildingsSignature(newStore),warehouseChanged:scmWarehouseSignature(oldStore)!==scmWarehouseSignature(newStore),vwapChanged:scmVwapSignature(oldStore)!==scmVwapSignature(newStore),contractsChanged:scmContractSignature(oldStore)!==scmContractSignature(newStore),accountingChanged:scmAccountingSignature(oldStore)!==scmAccountingSignature(newStore),productionChanged:scmProductionSignature(oldStore)!==scmProductionSignature(newStore),historyChanged:scmHistorySignature(oldStore)!==scmHistorySignature(newStore),diagnosticChanged:scmDiagnosticSignature(oldStore)!==scmDiagnosticSignature(newStore),liveMarketProductChanged:JSON.stringify(oldStore?.liveMarketProduct||null)!==JSON.stringify(newStore?.liveMarketProduct||null),liveMarketProductCacheChanged:JSON.stringify(oldStore?.liveMarketProductCache||{})!==JSON.stringify(newStore?.liveMarketProductCache||{}),liveMarketPriceDataChanged:JSON.stringify(oldStore?.liveMarketPriceData||null)!==JSON.stringify(newStore?.liveMarketPriceData||null)};
+      const flags={buildingsChanged:scmBuildingsSignature(oldStore)!==scmBuildingsSignature(newStore),warehouseChanged:scmWarehouseSignature(oldStore)!==scmWarehouseSignature(newStore),vwapChanged:scmVwapSignature(oldStore)!==scmVwapSignature(newStore),contractsChanged:scmContractSignature(oldStore)!==scmContractSignature(newStore),accountingChanged:scmAccountingSignature(oldStore)!==scmAccountingSignature(newStore),productionChanged:scmProductionSignature(oldStore)!==scmProductionSignature(newStore),historyChanged:scmHistorySignature(oldStore)!==scmHistorySignature(newStore),diagnosticChanged:scmDiagnosticSignature(oldStore)!==scmDiagnosticSignature(newStore),liveMarketProductChanged:JSON.stringify(oldStore?.liveMarketProduct||null)!==JSON.stringify(newStore?.liveMarketProduct||null),liveMarketProductCacheChanged:JSON.stringify(oldStore?.liveMarketProductCache||{})!==JSON.stringify(newStore?.liveMarketProductCache||{}),liveMarketPriceDataChanged:JSON.stringify(oldStore?.liveMarketPriceData||null)!==JSON.stringify(newStore?.liveMarketPriceData||null)||scmMarketBookSignature(oldStore)!==scmMarketBookSignature(newStore)};
       if(!commitDashboardState(fresh))return;
       if(__realmHydrationPending){
         const hydratedStore=fresh?.realmStores?.[viewKey]||{};

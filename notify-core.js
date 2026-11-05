@@ -16,30 +16,26 @@
   const R = realm => `R${Number(realm) + 1}`;
 
   // Cheapest market price for a product at quality >= minQ (minQ 0 = any quality, the game's calculator rule).
-  // Order book /api/v3/market/<realm>/<id>/ when younger than maxAgeMs, else SimcoTools current prices.
-  function cheapestListing(store, realm, id, minQ = 0, now = Date.now(), maxAgeMs = 6 * 3600e3, exactQ = false) {
-    id = Number(id); minQ = Number(minQ) || 0;
-    const okQ = q => (exactQ ? Number(q) === minQ : Number(q) >= minQ);
-    const ep = store?.endpointData?.[`/api/v3/market/${realm}/${id}/`];
-    const at = Date.parse(String(ep?.receivedAt || ''));
-    if (Array.isArray(ep?.data) && Number.isFinite(at) && now - at < maxAgeMs) {
-      const ok = ep.data.filter(r => n(r?.price) > 0 && n(r?.quality) != null && okQ(r.quality));
-      if (ok.length) { const b = ok.reduce((a, c) => (Number(c.price) < Number(a.price) ? c : a)); return { price: Number(b.price), quality: Number(b.quality), source: `exchange, ${ago(now - at)}` }; }
-    }
-    const rows = Array.isArray(store?.liveMarketPriceData?.rows) ? store.liveMarketPriceData.rows : [];
-    let best = null;
-    for (const r of rows) if (Number(r?.resourceId) === id && okQ(r?.quality) && n(r?.price) > 0 && (!best || Number(r.price) < best.price)) best = { price: Number(r.price), quality: Number(r.quality), at: Date.parse(String(r.fetchedAt || store.liveMarketPriceData.updatedAt || '')) };
-    return best ? { price: best.price, quality: best.quality, source: `SimcoTools${Number.isFinite(best.at) ? ', ' + ago(now - best.at) : ''}` } : null;
+  // Delegates to market-core marketPrice (the single market-price source): order book younger than maxAgeMs, else
+  // SimcoTools current prices. No VWAP step here: a notification says 'cheapest on the market', not an average.
+  // market-core is loaded by the service worker (import './market-core.js' before notify-core.js) or required in Node.
+  const marketCore = () => root.SCM_MARKET_CORE || (typeof require === 'function' ? require('./market-core.js') : null);
+  function cheapestListing(store, realm, id, minQ = 0, now = Date.now(), maxAgeMs = 6 * 3600e3, exactQ = false, own = {}) {
+    minQ = Number(minQ) || 0;
+    const mc = marketCore(); if (!mc) return null;
+    const r = mc.marketPrice(store, realm, id, minQ, { mode: exactQ ? 'exact' : minQ > 0 ? 'min' : 'any', now, bookMaxAgeMs: maxAgeMs, noVwap: true, companyId: own?.companyId, ownIds: own?.ownIds });
+    if (!r) return null;
+    return { price: r.price, quality: r.quality, source: r.source === 'exchange' ? `exchange, ${ago(r.ageMs)}` : `SimcoTools${r.ageMs != null ? ', ' + ago(r.ageMs) : ''}` };
   }
   const batchName = (r, names) => `${n(r?.amount) != null ? int(r.amount) + ' ' : ''}${r?.name || nameOf(names, r?.kind ?? r?.resourceId)}${n(r?.quality) != null ? ' Q' + r.quality : ''}`;
 
   // 1. Batch finished, with what it is worth at today's market (game basis: cheapest listing, any quality).
-  function batchFinishedMessage({ building, store, realm, names, now = Date.now() }) {
+  function batchFinishedMessage({ building, store, realm, names, now = Date.now(), companyId, ownIds }) {
     const r = building?.busy?.resource || {};
     const id = Number(r.kind ?? r.resourceId), amount = n(r.amount), cost = n(r.unitCost), q = n(r.quality);
     const title = `${building?.name || 'Building ' + building?.id} finished ${batchName(r, names)}`;
     const lines = ['Ready to collect.'];
-    const mk = id > 0 ? cheapestListing(store, realm, id, 0, now) : null;
+    const mk = id > 0 ? cheapestListing(store, realm, id, 0, now, undefined, false, { companyId, ownIds }) : null;
     if (cost != null) lines.push(`They cost you ${money(cost)} each.`);
     if (mk) lines.push(`Cheapest on the market now: ${money(mk.price)} (Q${mk.quality} listing, ${mk.source}).`);
     if (cost != null && mk) {
@@ -55,7 +51,7 @@
 
   // 3. Inputs short to repeat the same batch: recipe quantity × finished batch size vs warehouse stock at
   //    quality >= production quality − 1 (the game's input rule shown on the building card).
-  function inputShortage({ building, recipe, lots, store, realm, names, now = Date.now() }) {
+  function inputShortage({ building, recipe, lots, store, realm, names, now = Date.now(), companyId, ownIds }) {
     const r = building?.busy?.resource || {};
     const amount = n(r.amount), q = n(r.quality) ?? 0;
     if (!recipe || !Array.isArray(recipe.materials) || !recipe.materials.length || !(amount > 0)) return null;
@@ -65,7 +61,7 @@
       const need = Number(m.quantity) * amount; if (!(need > 0)) continue;
       const have = stockOf(lots, m.id, minQ);
       if (have + 1e-9 < need) {
-        const mk = cheapestListing(store, realm, m.id, minQ, now);
+        const mk = cheapestListing(store, realm, m.id, minQ, now, undefined, false, { companyId, ownIds });
         short.push({ id: Number(m.id), name: nameOf(names, m.id), need, have, missing: need - have, price: mk?.price ?? null, priceQ: mk?.quality ?? null, cost: mk ? mk.price * (need - have) : null });
       }
     }
@@ -260,12 +256,12 @@
 
   // 8. A product you are producing is worth less than its running batch cost (game basis price). Re-arms when
   //    it is profitable again.
-  function unprofitable({ buildings, store, realm, names, state = {}, now = Date.now() }) {
+  function unprofitable({ buildings, store, realm, names, state = {}, now = Date.now(), companyId, ownIds }) {
     const fire = [], next = {};
     for (const b of Array.isArray(buildings) ? buildings : []) {
       const r = b?.busy?.resource; const id = Number(r?.kind), cost = n(r?.unitCost);
       if (!(id > 0) || !(cost > 0)) continue;
-      const mk = cheapestListing(store, realm, id, 0, now); if (!mk) continue;
+      const mk = cheapestListing(store, realm, id, 0, now, undefined, false, { companyId, ownIds }); if (!mk) continue;
       const key = `${b.id}:${id}:${r.quality}`;
       if (mk.price < cost) {
         next[key] = true;
@@ -276,7 +272,7 @@
   }
 
   // 10. Warehouse running low: inputs that all running batches together would need to repeat once, vs stock.
-  function lowStock({ buildings, recipes, lots, store, realm, names, state = {}, now = Date.now() }) {
+  function lowStock({ buildings, recipes, lots, store, realm, names, state = {}, now = Date.now(), companyId, ownIds }) {
     const need = new Map();
     for (const b of Array.isArray(buildings) ? buildings : []) {
       const r = b?.busy?.resource; const rec = recipes?.get ? recipes.get(Number(r?.kind)) : null; const amount = n(r?.amount);
@@ -293,7 +289,7 @@
       const missing = g.qty - have;
       next[k] = state[k] && missing <= state[k] * 1.1 ? state[k] : missing;
       if (state[k] && missing <= state[k] * 1.1) continue; // already told; only again if it gets >10% worse
-      const mk = cheapestListing(store, realm, g.id, g.minQ, now);
+      const mk = cheapestListing(store, realm, g.id, g.minQ, now, undefined, false, { companyId, ownIds });
       fire.push({ title: `Running low: ${nameOf(names, g.id)} (Q${g.minQ} or better)`, message: `You have ${int(have)}; your next batches need ${int(g.qty)} (${g.users.join(', ')}).\nShort ${int(missing)}${mk ? `, about ${total(mk.price * missing)} at ${money(mk.price)} each` : ''}.\n${R(realm)}` });
     }
     return { fire, state: next };

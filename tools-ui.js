@@ -37,12 +37,6 @@
     }).catch(() => { S.log = null; }).finally(() => { S.logLoading = false; if (S.state && isActive()) paint(); });
   }
   const isActive = () => $('#tools')?.classList.contains('active');
-  function priceMap(s) {
-    const m = new Map();
-    const v = s?.vwapData;
-    for (const r of Array.isArray(v?.rows) ? v.rows : []) { const val = Number(r?.value); if (val > 0) m.set(`${Number(r.resourceId)}:${Number(r.quality)}`, val); }
-    return m;
-  }
   const nameOf = id => S.names.get(String(id))?.name || (S.data?.recipes || []).find(r => Number(r.id) === Number(id))?.name || `Resource #${id}`;
 
   /* ------------------------------------------------------------ shell */
