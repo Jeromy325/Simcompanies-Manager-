@@ -5800,6 +5800,13 @@ function syncExtraWalkPages(realm){
     {name:'Government orders',labels:['Government orders','Government'],hrefHints:['/government-orders/'],expects:[/\/api\/v\d+\/government-orders\//i],paths:[`/api/v3/government-orders/${realm}/`,'/api/v3/government-orders/tier/']},
   ];
 }
+// An unreachable extra page matters only when nothing else proved its data still works: every direct read must have
+// returned valid data at its own address. A page with no direct reads has no such proof, so it still warns.
+function extraPageVisitNeedsWarning(page,extra){
+  if(extra?.pageVisit?.ok||extra?.pageVisit?.skipped)return false;
+  const paths=page?.paths||[],reads=extra?.paths||[];
+  return !(paths.length>0&&reads.length===paths.length&&reads.every(r=>r.ok&&r.valid&&!r.walkedPath));
+}
 // One readable line per problem for the Sync status; the full list goes in the diagnostic.
 function syncWarningsSuffix(warnings){
   if(!warnings?.length)return '';
@@ -6446,17 +6453,17 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
           extra.pageVisit=await visitWalkPage(extraTab.id,page,session);
           const urls=Object.keys(session.walkCaptures||{});
           extra.seen=[...new Set(urls.map(u=>safeWalkText(u.split('?')[0])).filter(u=>page.expects.some(rx=>rx.test(u))))];
-          if(!extra.pageVisit?.ok&&!extra.pageVisit?.skipped)session.warnings.push(`${page.name} page not reached: ${extra.pageVisit?.error||'no navigation'}`);
           for(const path of page.paths){
             const r=await pageGetWalked(path,selected,null,'sync-walk-check',{timeoutMs:5000,attempts:1}).catch(e=>({ok:false,status:0,error:e?.message||String(e)}));
-            extra.paths.push({path,ok:Boolean(r?.ok),status:Number(r?.status)||0,walkedPath:r?.walkedPath||null});
+            extra.paths.push({path,ok:Boolean(r?.ok),status:Number(r?.status)||0,walkedPath:r?.walkedPath||null,valid:Boolean(r?.ok)&&!endpointFailureSuggestsMove(r,path)});
             if(r?.walkedPath)session.warnings.push(`${path} moved to ${r.walkedPath}`);
             else if(!r?.ok&&!endpointFailureSuggestsMove(r,path))session.warnings.push(`${path} failed (HTTP ${Number(r?.status)||0})`);
           }
         }catch(e){extra.error=e?.message||String(e);session.warnings.push(`${page.name} walk failed: ${extra.error}`);}
+        if(extra.pageVisit&&extraPageVisitNeedsWarning(page,extra))session.warnings.push(`${page.name} page not reached: ${extra.pageVisit.error||'no navigation'}`);
         extra.durationMs=Date.now()-rowStart;
         walkReport.push(extra);
-        trace('walk-extra-page',{name:page.name,ok:Boolean(extra.pageVisit?.ok),seen:extra.seen.length,durationMs:extra.durationMs});
+        trace('walk-extra-page',{name:page.name,ok:Boolean(extra.pageVisit?.ok),error:extra.pageVisit?.ok?undefined:safeWalkText(extra.pageVisit?.error||''),reads:`${extra.paths.filter(r=>r.valid).length}/${page.paths.length}`,seen:extra.seen.length,durationMs:extra.durationMs});
       }
       session.walkCaptures=null;
     }
