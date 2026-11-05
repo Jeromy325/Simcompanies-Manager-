@@ -444,7 +444,10 @@ async function refreshAbundanceIfStale(realm,trigger='game-buildings'){
     return {ok:true,saved,wanted:ids.length};
   }finally{abundanceAutoState.set(r,{running:false,at:Date.now()});}
 }
-async function refreshExtraGameData(realm){
+// movedReads: {fixed path: same address under another API version}, found by this Sync's walk. Read from there, stored
+// under the fixed path every reader uses. Renames are never in it, and a read that is not data is not saved.
+function extraReadPath(path,movedReads){const m=movedReads?.[path];return typeof m==='string'&&/^\/api\/v\d+\//.test(m)&&m.replace(/^\/api\/v\d+/,'')===path.replace(/^\/api\/v\d+/,'')?m:path;}
+async function refreshExtraGameData(realm,{movedReads=null}={}){
   const r=validRealmNumber(realm);if(r==null)return {ok:false};
   const st=await notifyRealmStore(r);const ep=st?.endpointData||{};
   const ab=new Set(Object.keys(ep).map(k=>(k.match(/^\/api\/v2\/companies\/buildings\/(\d+)\/abundance\/$/)||[])[1]).filter(Boolean));
@@ -455,7 +458,7 @@ async function refreshExtraGameData(realm){
   for(const id of await abundanceBuildingIds(st))ab.add(id);
   const paths=['/api/v3/players/research/',`/api/v3/government-orders/${r}/`,'/api/v3/government-orders/tier/',...[...ab].map(id=>`/api/v2/companies/buildings/${id}/abundance/`)];
   const out=[],errs=[],t0=Date.now();
-  for(const p of paths){try{const x=await pageGet(p,r);if(x?.ok){await saveData(p,x.data,x.status,'GET',r);out.push(p);}else errs.push(`${p.replace('/api/','')}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){errs.push(`${p.replace('/api/','')}: ${e?.message||e}`);}}
+  for(const p of paths){try{const x=await pageGet(extraReadPath(p,movedReads),r);if(x?.ok&&endpointDataIsValid(p,x.data)){await saveData(p,x.data,x.status,'GET',r);out.push(p);}else errs.push(`${p.replace('/api/','')}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){errs.push(`${p.replace('/api/','')}: ${e?.message||e}`);}}
   const abN=paths.filter(p=>/abundance/.test(p)).length,abOk=out.filter(p=>/abundance/.test(p)).length;
   logActivity(r,'extra-game-data',errs.length?(out.length?'partial':'failure'):'success',{rows:out.length,wanted:paths.length,abundance:`${abOk}/${abN}`},errs.slice(0,4).join(' · ')||null,t0,'after-sync');
   return {ok:true,saved:out};
@@ -1649,14 +1652,16 @@ chrome.alarms.onAlarm.addListener(a=>{if(a?.name==='scm-daily-summary')fireDaily
 // v2.5.335 follow-up after a finished batch: idle or not collected. Decided only from building data captured
 // after the finish time; if none yet, look again in an hour (up to 3 times).
 async function fireFollowUp(name){
+  const clearGen=extensionClearGeneration;
   const m=String(name).match(/^scm-followup:(\d+):(\d+):(\d+):(\d+):(\d+)$/);if(!m)return;
   const realm=Number(m[1]),bid=Number(m[2]),startedMs=Number(m[3]),finishMs=Number(m[4]),attempt=Number(m[5]);
   const cfg=await notifySettings();if(!cfg.idle)return;
   const st=await notifyRealmStore(realm);const {names}=await notifyRecipes();
+  if(clearGen!==extensionClearGeneration)return;
   const b=(Array.isArray(st.buildings)?st.buildings:[]).find(x=>Number(x?.id)===bid);if(!b)return;
   const seenAt=Date.parse(String(st.endpointData?.['/api/v2/companies/me/buildings/']?.receivedAt||''));
   const r=globalThis.SCM_NOTIFY_CORE.followUp({building:b,startedMs,finishMs,seenAt,names,realm});
-  if(r.kind==='unknown'){if(attempt<3)await createFollowupAlarm(`scm-followup:${realm}:${bid}:${startedMs}:${finishMs}:${attempt+1}`,Date.now()+3600e3);return;}
+  if(r.kind==='unknown'){if(attempt<3)await createFollowupAlarm(`scm-followup:${realm}:${bid}:${startedMs}:${finishMs}:${attempt+1}`,Date.now()+3600e3,clearGen);return;}
   if(r.title)await scmNotify(`followup-${realm}-${bid}-${finishMs}`,r.title,r.message);
 }
 chrome.alarms.onAlarm.addListener(a=>{if(String(a?.name||'').startsWith('scm-followup:')){forgetFollowupAlarm(a.name).catch(()=>{});fireFollowUp(a.name).catch(()=>{});}});
@@ -1726,6 +1731,7 @@ async function scheduleProductionFinishAlarms(realm,buildings){
   return {ok:true,created,total:wanted.length};
 }
 async function fireProductionFinished(name){
+  const clearGen=extensionClearGeneration;
   const m=String(name).match(/^scm-prodfin:(\d+):(\d+):(\d+)$/);if(!m)return;
   const realm=Number(m[1]),bid=Number(m[2]);
   const cfg=await notifySettings();if(!cfg.productionFinished)return;
@@ -1736,7 +1742,7 @@ async function fireProductionFinished(name){
   // v2.5.350 'Not enough inputs to repeat a finished batch' removed at the user's request.
   // 4 + 11: look again idleHours after the finish (idle, or still not collected).
   const st0=Date.parse(String(b?.busy?.started||''));
-  if(cfg.idle&&Number.isFinite(st0)){const h=Math.max(0.25,Number(cfg.idleHours)||1);await createFollowupAlarm(`scm-followup:${realm}:${bid}:${st0}:${m[3]}:0`,Number(m[3])+h*3600e3>Date.now()?Number(m[3])+h*3600e3:Date.now()+60000);}
+  if(cfg.idle&&Number.isFinite(st0)){const h=Math.max(0.25,Number(cfg.idleHours)||1);await createFollowupAlarm(`scm-followup:${realm}:${bid}:${st0}:${m[3]}:0`,Number(m[3])+h*3600e3>Date.now()?Number(m[3])+h*3600e3:Date.now()+60000,clearGen);}
 }
 chrome.alarms.onAlarm.addListener(a=>{if(String(a?.name||'').startsWith('scm-prodfin:'))fireProductionFinished(a.name).catch(()=>{});});
 try{chrome.notifications?.onClicked?.addListener(id=>{if(String(id).startsWith('prodfin-'))chrome.tabs.create({url:'https://www.simcompanies.com/'}).catch(()=>{});try{chrome.notifications.clear(id);}catch{}});}catch{}
@@ -3286,7 +3292,7 @@ const ACCOUNTING_DAY_WALK_ALARM_PREFIX='scm-accounting-day-walk-r';
 const ACCOUNTING_DAY_WALK_DAYS=7;
 const ACCOUNTING_DAY_WALK_WAIT_MS=45000;
 const accountingDayWalkRunning=new Set();
-let dayWalkPageReturn=null; // the page an Accounting day walk moved the tab away from
+const dayWalkPageReturns=new Map(); // realm -> the page its Accounting day walk moved the tab away from
 // v2.5.371 Daily scheduled Accounting walk (user setting scmAccountingWalkSchedule {enabled, offsetMin, realm}).
 // Runs offsetMin after the time the game last finished the daily statements (the captured current income
 // statement's `date`), so it follows the game's rollover (and daylight-saving changes) instead of a fixed clock.
@@ -3431,6 +3437,8 @@ async function noteRealmSwitch(realm){
 
 async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=null,onTiming=null){
   if(!url?.startsWith('/api/'))return;
+  // Text in a successful answer is a catch-all page, from any writer (the game's own traffic too): it never replaces a record.
+  if(typeof data==='string'&&Number(status)>=200&&Number(status)<300&&String(method||'GET').toUpperCase()==='GET')return;
   await ensureRealmStorageMigration();
   const before=await state();
   const responseRealm=/\/api\/v3\/companies\/auth-data\//.test(url)
@@ -4966,8 +4974,9 @@ const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:
 const FOLLOWUP_ALARMS_KEY='scmFollowupAlarms';
 // Follow-ups exist only as alarms (their whole state is in the name), so they are also listed in storage to survive a
 // lost alarm. Serialized through the commit lane; removed as they fire.
-function createFollowupAlarm(name,when){
+function createFollowupAlarm(name,when,clearGen=extensionClearGeneration){
   return withRealmStorageCommit(async()=>{
+    if(clearGen!==extensionClearGeneration)return; // started before Clear Stored Data: must not bring anything back
     const cur=(await chrome.storage.local.get({[FOLLOWUP_ALARMS_KEY]:{}}))[FOLLOWUP_ALARMS_KEY]||{};
     await rawStorageSet({[FOLLOWUP_ALARMS_KEY]:{...cur,[name]:when}});
     await chrome.alarms.create(name,{when});
@@ -5298,6 +5307,7 @@ async function confirmGameNavigation(tabId,beforeUrl,hrefHints){
 }
 async function executeGameClick(tabId,target,depth=0){
   const clicked=await executeGameClickRaw(tabId,target);
+  if(clicked?.element)for(const k of ['text','href','aria','title'])if(clicked.element[k]!=null)clicked.element[k]=safeWalkText(clicked.element[k]);
   const after=clicked?.ok&&!clicked.alreadyThere?await confirmGameNavigation(tabId,clicked.beforeUrl,target?.hrefHints):clicked?.urlAfterClick;
   const outcome=gamePageVisitOutcome({...clicked,target:target?.name},clicked?.beforeUrl,after,target?.hrefHints);
   // A label such as Headquarters can open the parent page first; the real link is on it.
@@ -5335,36 +5345,50 @@ async function spaNavigateGameTab(tabId,url){
   },args:[url]}).then(r=>r?.[0]?.result||{ok:false,error:'No result from the game page.'},e=>({ok:false,error:e?.message||String(e)}));
   return Promise.race([run,new Promise(r=>setTimeout(()=>r({ok:false,error:'SPA navigation did not return.'}),2500))]);
 }
-function createPageReturn(traceFn=null){
+function pageReturnPendingKey(realm){return `scmSyncReturnPending:${realm}`;}
+function createPageReturn(traceFn=null,{realm=null}={}){
   const tabs=new Map();
   const note=(type,payload)=>{try{traceFn?.(type,payload);}catch{}};
+  const clearGen=extensionClearGeneration;
+  let writes=Promise.resolve();
+  // The record survives a worker restart, so the page can still be put back. Writes keep their order.
+  const persist=()=>{
+    if(realm==null)return writes;
+    writes=writes.then(async()=>{
+      if(clearGen!==extensionClearGeneration)return;
+      await chrome.storage.local.set({[pageReturnPendingKey(realm)]:{at:Date.now(),realm,tabs:Object.fromEntries([...tabs].map(([id,e])=>[id,{startUrl:e.startUrl,walkUrl:e.walkUrl}]))}});
+    }).catch(()=>{});
+    return writes;
+  };
   const api={
     tabs,
+    forget(){if(realm==null)return writes;writes=writes.then(()=>chrome.storage.local.remove(pageReturnPendingKey(realm))).catch(()=>{});return writes;},
     async remember(tabId,seedUrl=null){
       if(tabId==null||tabs.has(tabId))return tabs.get(tabId)||null;
       const url=await gameTabUrl(tabId);
       const entry={startUrl:seedUrl||url,walkUrl:url,userMoved:false};
       tabs.set(tabId,entry);note('page-return-remembered',{tabId,startUrl:entry.startUrl});
+      await persist();
       return entry;
     },
     // A player who moved during the run keeps that page: it becomes the place to return to, and walking stops.
     async checkUser(tabId){
       const e=await api.remember(tabId);if(!e)return false;
       const now=await gameTabUrl(tabId);
-      if(now&&now!==e.walkUrl&&GAME_URL_RX.test(now)){e.userMoved=true;e.startUrl=now;e.walkUrl=now;note('page-return-user-navigated',{tabId,url:now});}
+      if(now&&now!==e.walkUrl&&GAME_URL_RX.test(now)){e.userMoved=true;e.startUrl=now;e.walkUrl=now;note('page-return-user-navigated',{tabId,url:now});await persist();}
       return e.userMoved;
     },
     async walkClick(tabId,target){
       await api.checkUser(tabId);
       const r=await executeGameClick(tabId,target);
       const e=tabs.get(tabId);const now=r?.urlAfterClick||await gameTabUrl(tabId);
-      if(e&&now)e.walkUrl=now;
+      if(e&&now){e.walkUrl=now;await persist();}
       return r;
     },
     async walkTo(tabId,url){
       await api.checkUser(tabId);
       const r=await spaNavigateGameTab(tabId,url);
-      const e=tabs.get(tabId);if(e&&r?.url)e.walkUrl=r.url;
+      const e=tabs.get(tabId);if(e&&r?.url){e.walkUrl=r.url;await persist();}
       return r;
     },
     async restore(){
@@ -5387,6 +5411,35 @@ function createPageReturn(traceFn=null){
   };
   return api;
 }
+// A worker that died mid-run left a pending record: finish the return now, with the same rules as a live run.
+const PAGE_RETURN_PENDING_MAX_MS=10*60*1000;
+async function recoverPendingPageReturns(reason='service-worker-boot'){
+  const out=[];
+  for(const realm of [0,1]){
+    const key=pageReturnPendingKey(realm);
+    const rec=(await chrome.storage.local.get({[key]:null}))[key];
+    if(!rec)continue;
+    if(realmSyncSessions.has(realm)||dayWalkPageReturns.has(realm))continue; // a live run owns it
+    const row={realm,reason,tabs:[]};
+    if(!(Date.now()-Number(rec.at)<PAGE_RETURN_PENDING_MAX_MS)){row.expired=true;}
+    else for(const [id,e] of Object.entries(rec.tabs||{})){
+      const tabId=Number(id);
+      let currentUrl=null;try{currentUrl=(await chrome.tabs.get(tabId))?.url||null;}catch{}
+      const decision=pageReturnDecision({startUrl:e?.startUrl,walkUrl:e?.walkUrl,currentUrl});
+      const t={tabId,decision,how:null};
+      if(decision==='restore'){
+        const spa=await spaNavigateGameTab(tabId,e.startUrl);t.how='spa';
+        if(!spa?.ok){try{await chrome.tabs.update(tabId,{url:e.startUrl});t.how='tab-update';}catch{t.how='failed';}}
+      }
+      row.tabs.push(t);
+    }
+    await chrome.storage.local.remove(key);
+    await chrome.storage.local.set({[`scmSyncReturn:${realm}`]:{at:new Date().toISOString(),recovered:true,expired:Boolean(row.expired),tabs:row.tabs}});
+    out.push(row);
+  }
+  return out;
+}
+setTimeout(()=>{recoverPendingPageReturns().catch(()=>{});},0);
 async function restoreGamePageBounded(pageReturn,label='Return to the starting page'){
   if(!pageReturn)return null;
   try{return await withSyncTimeout(pageReturn.restore(),SYNC_RETURN_TIMEOUT_MS,label);}
@@ -5589,8 +5642,8 @@ async function runAccountingDayWalk(realm,reason='scheduled'){
     await waitForBridge(tab.id,10000);
     let probe=await accountingPeriodStep(tab.id,'probe');
     if(!probe.found){
-      dayWalkPageReturn=createPageReturn();await dayWalkPageReturn.remember(tab.id);
-      const click=await dayWalkPageReturn.walkClick(tab.id,{name:'Accounting',labels:['Accounting','Financials','Finance'],hrefHints:['/headquarters/accounting']}).catch(e=>({ok:false,error:e?.message||String(e)}));
+      const walkReturn=createPageReturn(null,{realm:n});dayWalkPageReturns.set(n,walkReturn);await walkReturn.remember(tab.id);
+      const click=await walkReturn.walkClick(tab.id,{name:'Accounting',labels:['Accounting','Financials','Finance'],hrefHints:['/headquarters/accounting']}).catch(e=>({ok:false,error:e?.message||String(e)}));
       for(let i=0;i<40&&!probe.found;i++){await new Promise(r=>setTimeout(r,500));probe=await accountingPeriodStep(tab.id,'probe');}
       if(!probe.found)return await finish('failed',`Accounting period buttons not found (${click?.error||'page did not show them'}).`);
     }
@@ -5620,8 +5673,8 @@ async function runAccountingDayWalk(realm,reason='scheduled'){
   finally{
     accountingDayWalkRunning.delete(n);
     // Put the page back unless a Sync took over; that Sync has taken this start page as its own.
-    const back=dayWalkPageReturn;dayWalkPageReturn=null;
-    if(back&&!coreSyncActive())await restoreGamePageBounded(back,'Accounting walk return to page');
+    const back=dayWalkPageReturns.get(n);dayWalkPageReturns.delete(n);
+    if(back&&!coreSyncActive()){await restoreGamePageBounded(back,'Accounting walk return to page');await back.forget();}
   }
 }
 async function yieldSyncStep(ms=SYNC_STEP_YIELD_MS){
@@ -5693,13 +5746,14 @@ function syncRequiredTargetsOk(targets,results){
 }
 // Which failed reads mean the address itself moved. 401/403/429/5xx say nothing about the address (session, rate
 // limit, outage) and 400/422 mean the route exists but rejected the request, so none of those trigger a search.
-// A 200 that returns a web page instead of JSON is the site's catch-all for an unknown address, and is not data.
+// A success whose body is not data (see endpointDataIsValid) is the site's catch-all for an unknown address.
 const ENDPOINT_MOVED_STATUSES=new Set([301,302,303,307,308,404,405,410]);
-function endpointResponseIsHtml(response){
-  return typeof response?.data==='string'&&/^\s*<(?:!doctype|html|head|body|script|div)\b/i.test(response.data);
+function endpointResponseRejected(path,response){
+  const status=Number(response?.status);
+  return status>=200&&status<300&&!endpointDataIsValid(path,response?.data);
 }
-function endpointFailureSuggestsMove(response){
-  return ENDPOINT_MOVED_STATUSES.has(Number(response?.status))||(Number(response?.status)===200&&endpointResponseIsHtml(response));
+function endpointFailureSuggestsMove(response,path=''){
+  return ENDPOINT_MOVED_STATUSES.has(Number(response?.status))||endpointResponseRejected(path,response);
 }
 // Extra pages for a clicked Sync: each is the game page behind data the Manager reads outside the required targets.
 // They are visited so their traffic is seen, and their fixed addresses checked, but never affect Sync success.
@@ -5719,9 +5773,10 @@ function syncWarningsSuffix(warnings){
   const shown=warnings.slice(0,3).join('; ');
   return ` · ${warnings.length} endpoint warning${warnings.length===1?'':'s'}: ${shown}${warnings.length>3?`; +${warnings.length-3} more in the diagnostic`:''}`;
 }
+// Text from a page or a response, going into stored diagnostics: bounded, one line. Display escapes it as usual.
+function safeWalkText(v,max=200){const t=String(v??'').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g,' ').trim();return t.length>max?`${t.slice(0,max)}…`:t;}
 function endpointIsScalar(item){return item&&item.data!=null&&typeof item.data!=='object';}
-// Known single-number endpoints. The record cannot be relied on: the page's own failed request may have replaced it just before the check.
-const SCALAR_ENDPOINT_RX=/\/administration-overhead\/$/;
+
 // Finds where a gone endpoint moved, among responses captured while walking the game. First the same address
 // under another API version; then a renamed address whose response has the same structure as this endpoint's
 // last good response. Exactly one structural match is required: a tie or no earlier data finds nothing.
@@ -5731,9 +5786,17 @@ function endpointShape(data){
   const keys=Object.keys(sample);
   return keys.length>=3?{list:Array.isArray(data),keys:new Set(keys)}:null;
 }
+// Game API answers are objects or arrays. Anything else (a page, text, a BOM, a comment) is not data, whatever it starts
+// with. Known single-number endpoints are listed; their record cannot be relied on to tell, since the page's own failed
+// request may just have replaced it.
+const SCALAR_ENDPOINT_RX=/\/administration-overhead\/(?:\?.*)?$/;
+function endpointDataIsValid(path,data){
+  if(data!==null&&typeof data==='object')return true;
+  return typeof data==='number'&&Number.isFinite(data)&&SCALAR_ENDPOINT_RX.test(String(path||''));
+}
 function findMovedEndpoint(path,captured,knownPaths=[],sinceMs=0){
   const bare=k=>String(k).replace(/^https?:\/\/[^/]+/,'');
-  const good=k=>Number(captured?.[k]?.status)>=200&&Number(captured?.[k]?.status)<300&&captured[k]?.data!=null;
+  const good=k=>Number(captured?.[k]?.status)>=200&&Number(captured?.[k]?.status)<300&&endpointDataIsValid(bare(k),captured[k]?.data);
   const others=Object.keys(captured||{}).filter(k=>bare(k)!==path&&!knownPaths.includes(bare(k))&&good(k));
   const tail=path.replace(/^\/api\/v\d+/,'');
   const sameTail=others.find(k=>bare(k).replace(/^\/api\/v\d+/,'')===tail);
@@ -5797,6 +5860,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     // at a time. Background VWAP jobs do not use this capture lock.
     const session={realm:selected,startedAt,phase:'preflight'};
     realmSyncSessions.set(selected,session);
+    // Whatever this key says from now on is about this run.
+    chrome.storage.local.remove(`scmSyncReturn:${selected}`).catch(()=>{});
     syncCaptureRealm=selected;
     ownsSyncSession=true;
     chrome.alarms.clear(`${SYNC_AUTO_RETRY_ALARM_PREFIX}${selected}`).catch(()=>{});
@@ -5846,8 +5911,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     if(!bridgeReady) throw new Error('Sim Companies page bridge could not be established. Keep the logged-in game tab open and try Sync again.');
     trace('bridge-ready',{tabId:tab.id});
     // The page to come back to. An Accounting walk this Sync interrupted has already moved the tab: use its start.
-    pageReturn=createPageReturn(trace);
-    await pageReturn.remember(tab.id,dayWalkPageReturn?.tabs.get(tab.id)?.startUrl||null);
+    pageReturn=createPageReturn(trace,{realm:selected});
+    await pageReturn.remember(tab.id,dayWalkPageReturns.get(selected)?.tabs.get(tab.id)?.startUrl||null);
     session.warnings=[];
     try{
       const sr=await chrome.tabs.sendMessage(tab.id,{type:'SET_SYNC_REALM',realm:selected,ttlMs:120000});
@@ -5909,9 +5974,9 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     let walkSinceMs=Date.now();
     const pageGetWalked=async(path,...rest)=>{
       const raw=await pageGet(path,...rest);
-      if(!endpointFailureSuggestsMove(raw))return raw;
-      // The site's page for an unknown address is never stored as this endpoint's data.
-      const first=endpointResponseIsHtml(raw)?{...raw,ok:false,data:null,error:'The address returned a web page, not data.'}:raw;
+      if(!endpointFailureSuggestsMove(raw,path))return raw;
+      // A success that is not data is never stored as this endpoint's data.
+      const first=endpointResponseRejected(path,raw)?{...raw,ok:false,data:null,error:'The address did not return data.'}:raw;
       const stored=endpointDataForSyncRealm(await state(selected),selected);
       const captured={...stored,...session.walkCaptures};
       const known=[...ACCOUNTING_SYNC_PATHS,...realmContractPaths(selected)];
@@ -5919,7 +5984,10 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       if(walked&&!walked.suspected){
         trace('endpoint-walked-path',{path,walked});
         const second=await pageGet(walked.replace(/^https?:\/\/[^/]+/,''),...rest);
-        if(second?.ok&&!endpointResponseIsHtml(second))return {...second,walkedPath:walked};
+        if(second?.ok&&endpointDataIsValid(path,second.data)){
+          (session.movedReads||(session.movedReads={}))[path]=walked.replace(/^https?:\/\/[^/]+/,'');
+          return {...second,walkedPath:walked};
+        }
       }
       const status=Number(first?.status)||0;
       if(walked?.suspected){
@@ -5957,6 +6025,13 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     };
     const recordAuthoritative=async(path,response,row)=>{
     if(session.cancelled)throw new SyncCancelledByClear();
+    if(endpointResponseRejected(path,response)){
+      // Every read path ends here (retries use pageGet directly), so nothing that is not data replaces the stored record.
+      (row.authoritativeFailures||(row.authoritativeFailures=[])).push({path,status:Number(response?.status)||0,error:'The address did not return data.'});
+      session.warnings?.push(`${path} (HTTP ${Number(response?.status)||0}) did not return data; kept the stored record`);
+      trace('endpoint-not-data-rejected',{path,status:Number(response?.status)||0});
+      return false;
+    }
     const responseRealm=validRealmNumber(response?.captureRealm);
     if(responseRealm!==selected){
       const failure={path,status:Number(response?.status)||0,error:responseRealm==null?'Response had no realm capture stamp.':'Response came from the wrong realm.'};
@@ -6335,13 +6410,13 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
           if(!extraTab?.id)throw new Error('The game tab is no longer available.');
           extra.pageVisit=await visitWalkPage(extraTab.id,page,session);
           const urls=Object.keys(session.walkCaptures||{});
-          extra.seen=urls.filter(u=>page.expects.some(rx=>rx.test(u.split('?')[0])));
+          extra.seen=[...new Set(urls.map(u=>safeWalkText(u.split('?')[0])).filter(u=>page.expects.some(rx=>rx.test(u))))];
           if(!extra.pageVisit?.ok&&!extra.pageVisit?.skipped)session.warnings.push(`${page.name} page not reached: ${extra.pageVisit?.error||'no navigation'}`);
           for(const path of page.paths){
             const r=await pageGetWalked(path,selected,null,'sync-walk-check',{timeoutMs:5000,attempts:1}).catch(e=>({ok:false,status:0,error:e?.message||String(e)}));
             extra.paths.push({path,ok:Boolean(r?.ok),status:Number(r?.status)||0,walkedPath:r?.walkedPath||null});
             if(r?.walkedPath)session.warnings.push(`${path} moved to ${r.walkedPath}`);
-            else if(!r?.ok&&!endpointFailureSuggestsMove(r))session.warnings.push(`${path} failed (HTTP ${Number(r?.status)||0})`);
+            else if(!r?.ok&&!endpointFailureSuggestsMove(r,path))session.warnings.push(`${path} failed (HTTP ${Number(r?.status)||0})`);
           }
         }catch(e){extra.error=e?.message||String(e);session.warnings.push(`${page.name} walk failed: ${extra.error}`);}
         extra.durationMs=Date.now()-rowStart;
@@ -6442,7 +6517,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     const successful=successfulAfterDurability;
     const failed=failedAfterDurability;
     const executivesSummary=executivesSyncSuffix(results.find(result=>result.name==='Executives'));
-    const endpointWarnings=[...new Set(session.warnings||[])];
+    const endpointWarnings=[...new Set((session.warnings||[]).map(w=>safeWalkText(w)))];
     if(endpointWarnings.length)trace('endpoint-warnings',{count:endpointWarnings.length,warnings:endpointWarnings});
     const finalStatus=`${realmDisplayNumber(selected)||'Realm'} Sync ${requiredOk?'complete':'finished with errors'} · ${successful}/${targets.length} targets captured${accountingSuffix}${executivesSummary}${syncWarningsSuffix(endpointWarnings)}`;
     const finalSyncError=requiredOk?null:`${failedAfterDurability} target(s) failed; ${missingRequiredEndpoints.length} required endpoint(s) were not durably verified.${endpointWarnings.length?` Endpoint problems: ${endpointWarnings.join('; ')}.`:''}`;
@@ -6515,7 +6590,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const committedStore=committed.realmStores?.[key]||{};
       trace('realm-store-commit',{realm:selected,endpointCount:Object.keys(committedStore.endpointData||{}).length,warehouseRows:Array.isArray(committedStore.warehouseResources)?committedStore.warehouseResources.length:0,fullSyncStatus:committedStore.syncStatus||null});
       trace('sync-complete',{ok:true,successful,failed,total,elapsedMs:Date.now()-startedAt});
-      refreshMarketOrders(selected,0).catch(()=>{});refreshGameConstants().catch(()=>{});refreshExtraGameData(selected).catch(()=>{});
+      refreshMarketOrders(selected,0).catch(()=>{});refreshGameConstants().catch(()=>{});refreshExtraGameData(selected,{movedReads:session.movedReads||null}).catch(()=>{});
       const bridgeState=await state();
       if(bridgeState.liveBridge?.enabled && bridgeState.liveBridge?.pushOnSync) pushLiveBridge(selected,true).catch(()=>{});
 
@@ -6634,7 +6709,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     // Back to the page the player started on: last, once status and lock are done, and bounded.
     if(ownsSyncSession&&pageReturn){
       const back=await restoreGamePageBounded(pageReturn,'Sync return to page');
-      if(selected!=null&&Array.isArray(back)&&!clearedDuringRun)await rawStorageSet({[`scmSyncReturn:${selected}`]:{at:new Date().toISOString(),tabs:back.map(({tabId,decision,how})=>({tabId,decision,how:how||null}))}}).catch(()=>{});
+      if(selected!=null&&!clearedDuringRun)await rawStorageSet({[`scmSyncReturn:${selected}`]:Array.isArray(back)?{at:new Date().toISOString(),tabs:back.map(({tabId,decision,how})=>({tabId,decision,how:how||null}))}:{at:new Date().toISOString(),tabs:[],timedOut:true,error:safeWalkText(back?.error)}}).catch(()=>{});
+      await pageReturn.forget();
     }
     if(ownsSyncSession)resumeSyncDeferredWork();
   }
@@ -6647,7 +6723,7 @@ async function postSyncBuildingUiRefresh(realm, traceFn=null, pageReturnArg=null
   const note=(type,payload={})=>{try{traceFn?.(type,payload);}catch{}};
   const key=realmKeyFromRealm(selected);
   // Called on its own (the alarm path) it must also put the page back; inside Sync the run does that.
-  const pageReturn=pageReturnArg||createPageReturn(note);
+  const pageReturn=pageReturnArg||createPageReturn(note,{realm:selected});
   try{
     let current=await state(selected);
     let store=current.realmStores?.[key]||{};
@@ -6695,7 +6771,7 @@ async function postSyncBuildingUiRefresh(realm, traceFn=null, pageReturnArg=null
     note('building-enrichment-failed',{realm:selected,count:0,source:'all-building-paths',elapsedMs:Date.now()-started,warehouseClickOk:Boolean(warehouseClick?.ok),mapClickOk:Boolean(mapClick?.ok)});
     return {ok:false,count:0,error:'No building snapshot was captured by API or game-page enrichment.',elapsedMs:Date.now()-started};
   }catch(e){ note('building-enrichment-error',{realm:selected,error:e?.message||String(e),elapsedMs:Date.now()-started}); return {ok:false,count:0,error:e?.message||String(e),elapsedMs:Date.now()-started}; }
-  finally{ if(!pageReturnArg)await restoreGamePageBounded(pageReturn,'Building refresh return to page'); }
+  finally{ if(!pageReturnArg){await restoreGamePageBounded(pageReturn,'Building refresh return to page');await pageReturn.forget();} }
 }
 function bridgeSafeEndpointMap(store){
   const out={};
@@ -7599,6 +7675,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         for(const session of realmSyncSessions.values())session.cancelled=true;
         await chrome.alarms.clearAll();
         syncDeferredWork.clear();
+        dayWalkPageReturns.clear();
         for(const timers of [ownOrdersRefreshTimers,gameOverlayNotifyTimers,warehouseMutationRefreshTimers]){for(const t of timers.values())clearTimeout(t);timers.clear();}
         // Bounded: writes already queued get a moment to finish, but a stuck one cannot hold the clear up.
         const drains=[0,1].map(r=>apiStorageQueueForRealm(r));

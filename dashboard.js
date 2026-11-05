@@ -4304,7 +4304,8 @@ window.addEventListener('scroll',()=>{
 const SCM_EDIT_QUIET_MS=2000;
 let __lastDashboardEditAt=0;
 const __scmEditSelector='input,textarea,select,[contenteditable="true"]';
-const __scmNoteEdit=e=>{try{if(e?.target?.matches?.(__scmEditSelector))__lastDashboardEditAt=Date.now();}catch{}};
+// A file input holds no text to protect, so choosing a file does not start the edit-quiet window that defers renders.
+const __scmNoteEdit=e=>{try{if(e?.target?.matches?.(__scmEditSelector)&&e.target.type!=='file')__lastDashboardEditAt=Date.now();}catch{}};
 document.addEventListener('input',__scmNoteEdit,true);
 document.addEventListener('change',__scmNoteEdit,true);
 document.addEventListener('keydown',__scmNoteEdit,true);
