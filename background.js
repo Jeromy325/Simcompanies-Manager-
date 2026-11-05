@@ -439,7 +439,7 @@ async function refreshAbundanceIfStale(realm,trigger='game-buildings'){
     const ids=staleAbundanceIds(info.ids,st?.endpointData||{});
     if(!info.ids.length){logActivity(r,'abundance-refresh','skipped',{buildings:info.buildings,sources:info.sources.join(', ')},'No mine, oil rig or quarry found in your buildings',t0,trigger);return {ok:true,saved,wanted:0};}
     if(!ids.length){logActivity(r,'abundance-refresh','skipped',{mines:info.ids.length},'all fresh (under 1 h)',t0,trigger);return {ok:true,saved,wanted:0};}
-    for(const id of ids){const p=`/api/v2/companies/buildings/${id}/abundance/`;try{const x=await pageGet(p,r);if(x?.ok){await saveData(p,x.data,x.status,'GET',r);saved.push(id);}else errors.push(`#${id}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){errors.push(`#${id}: ${e?.message||e}`);}}
+    for(const id of ids){const p=`/api/v2/companies/buildings/${id}/abundance/`;try{const x=await readFollowingMoves(p,r,{captured:st?.endpointData||null});if(x?.ok){await saveData(p,x.data,x.status,'GET',r);saved.push(id);}else errors.push(`#${id}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){errors.push(`#${id}: ${e?.message||e}`);}}
     logActivity(r,'abundance-refresh',saved.length===ids.length?'success':saved.length?'partial':'failure',{rows:saved.length,wanted:ids.length,sources:info.sources.join(', ')},errors.join(' · ')||null,t0,trigger);
     return {ok:true,saved,wanted:ids.length};
   }finally{abundanceAutoState.set(r,{running:false,at:Date.now()});}
@@ -447,7 +447,24 @@ async function refreshAbundanceIfStale(realm,trigger='game-buildings'){
 // movedReads: {fixed path: same address under another API version}, found by this Sync's walk. Read from there, stored
 // under the fixed path every reader uses. Renames are never in it, and a read that is not data is not saved.
 function extraReadPath(path,movedReads){const m=movedReads?.[path];return typeof m==='string'&&/^\/api\/v\d+\//.test(m)&&m.replace(/^\/api\/v\d+/,'')===path.replace(/^\/api\/v\d+/,'')?m:path;}
-async function refreshExtraGameData(realm,{movedReads=null}={}){
+// One read that follows a version-only move: one this Sync's walk found, or the same address under another version in
+// captured traffic. Anything else that only looks alike is reported, never read. A sibling building's abundance is not a candidate.
+async function readFollowingMoves(path,realm,{movedReads=null,captured=null}={}){
+  const from=extraReadPath(path,movedReads);
+  const x=await pageGet(from,realm);
+  if(x?.ok&&endpointDataIsValid(path,x.data))return {ok:true,data:x.data,status:x.status,walkedPath:from!==path?from:null};
+  const status=Number(x?.status)||0,failed={ok:false,status,error:x?.error||`HTTP ${status}`};
+  if(!endpointFailureSuggestsMove(x,path))return failed;
+  const pool={};
+  for(const [k,v] of Object.entries(captured||{})){const b=String(k).replace(/^https?:\/\/[^/]+/,'');if(b===path||!/\/buildings\/\d+\/abundance\//.test(b)||b.replace(/^\/api\/v\d+/,'')===path.replace(/^\/api\/v\d+/,''))pool[k]=v;}
+  const found=findMovedEndpoint(path,pool,[],0);
+  if(found?.suspected)return {...failed,suspected:found.suspected};
+  const to=found?String(found).replace(/^https?:\/\/[^/]+/,''):null;
+  if(!to||extraReadPath(path,{[path]:to})===path||to===from)return failed;
+  const y=await pageGet(to,realm);
+  return y?.ok&&endpointDataIsValid(path,y.data)?{ok:true,data:y.data,status:y.status,walkedPath:to}:failed;
+}
+async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
   const r=validRealmNumber(realm);if(r==null)return {ok:false};
   const st=await notifyRealmStore(r);const ep=st?.endpointData||{};
   const ab=new Set(Object.keys(ep).map(k=>(k.match(/^\/api\/v2\/companies\/buildings\/(\d+)\/abundance\/$/)||[])[1]).filter(Boolean));
@@ -457,11 +474,12 @@ async function refreshExtraGameData(realm,{movedReads=null}={}){
   // even when its abundance was never captured or the record was lost.
   for(const id of await abundanceBuildingIds(st))ab.add(id);
   const paths=['/api/v3/players/research/',`/api/v3/government-orders/${r}/`,'/api/v3/government-orders/tier/',...[...ab].map(id=>`/api/v2/companies/buildings/${id}/abundance/`)];
-  const out=[],errs=[],t0=Date.now();
-  for(const p of paths){try{const x=await pageGet(extraReadPath(p,movedReads),r);if(x?.ok&&endpointDataIsValid(p,x.data)){await saveData(p,x.data,x.status,'GET',r);out.push(p);}else errs.push(`${p.replace('/api/','')}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){errs.push(`${p.replace('/api/','')}: ${e?.message||e}`);}}
+  const out=[],errs=[],warnings=[],t0=Date.now();
+  const pool={...ep,...(captured||{})};
+  for(const p of paths){try{const x=await readFollowingMoves(p,r,{movedReads,captured:pool});if(x.ok&&x.walkedPath)warnings.push(`${p} moved to ${x.walkedPath}`);if(!x.ok){const ab=/\/abundance\/$/.test(p);if(x.suspected)warnings.push(`${p} (HTTP ${x.status}) may have moved to ${x.suspected}; not adopted`);else if(ab)warnings.push(`${p} failed (HTTP ${x.status}); kept the stored record`);}if(x.ok){await saveData(p,x.data,x.status,'GET',r);out.push(p);}else errs.push(`${p.replace('/api/','')}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){errs.push(`${p.replace('/api/','')}: ${e?.message||e}`);if(/\/abundance\/$/.test(p))warnings.push(`${p} not read: ${e?.message||e}`);}}
   const abN=paths.filter(p=>/abundance/.test(p)).length,abOk=out.filter(p=>/abundance/.test(p)).length;
   logActivity(r,'extra-game-data',errs.length?(out.length?'partial':'failure'):'success',{rows:out.length,wanted:paths.length,abundance:`${abOk}/${abN}`},errs.slice(0,4).join(' · ')||null,t0,'after-sync');
-  return {ok:true,saved:out};
+  return {ok:true,saved:out,warnings};
 }
 chrome.alarms.onAlarm.addListener(a=>{if(a?.name===GAME_CONSTANTS_ALARM)refreshGameConstants().catch(()=>{});});
 async function ensureGameConstantsAlarm(){try{await chrome.alarms.create(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});}catch{}refreshGameConstants().catch(()=>{});}
@@ -3435,6 +3453,15 @@ async function noteRealmSwitch(realm){
   return true;
 }
 
+// A failed answer never replaces a good record. Its status, receivedAt and data stay as they were, so nothing counts it as
+// freshly captured; the failure is kept apart in lastAttempt, and the next success replaces the whole record.
+function endpointFailureKeepsRecord(old,incomingStatus){
+  const n=Number(incomingStatus);
+  return !(n>=200&&n<300)&&Boolean(old)&&Number(old.status)>=200&&Number(old.status)<300&&old.data!=null;
+}
+function endpointRecordWithFailedAttempt(old,incomingStatus,realm){
+  return {...old,lastAttempt:{status:Number(incomingStatus)||0,receivedAt:new Date().toISOString(),captureRealm:realm}};
+}
 async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=null,onTiming=null){
   if(!url?.startsWith('/api/'))return;
   // Text in a successful answer is a catch-all page, from any writer (the game's own traffic too): it never replaces a record.
@@ -3560,7 +3587,7 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   const incomingStatus=Number(status)||0;
   const old=working.endpointData?.[url];
   const keepOldMarket=midForPreserve && hasUsableMarketRows(old?.data) && !hasUsableMarketRows(data);
-  const preserveSuccessful=Number(incomingStatus)>=400 && old && Number(old.status)>=200 && Number(old.status)<300 && old.data!=null;
+  const preserveSuccessful=endpointFailureKeepsRecord(old,incomingStatus);
   // Sim Companies rolls the aggregate cash-flow statement at the daily
   // accounting boundary. The new period can be returned as isComputed:false
   // with all zero totals. Never let that placeholder overwrite the last
@@ -3574,7 +3601,8 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   const preservedEntry=oldComputed?old:(savedEntry?{status:200,data:savedEntry.data,receivedAt:savedEntry.receivedAt,captureRealm:savedEntry.captureRealm}:null);
   const endpointData={...(working.endpointData||{}),[url]:
     keepOldMarket?old:
-    (preserveSuccessful||preserveCompletedStatement
+    preserveSuccessful?endpointRecordWithFailedAttempt(old,incomingStatus,targetRealm):
+    (preserveCompletedStatement
       ?{...preservedEntry,lastAttempt:{status:incomingStatus,receivedAt:new Date().toISOString(),captureRealm:targetRealm}}
       :{status,data,receivedAt:new Date().toISOString(),captureRealm:targetRealm})};
   // v2.5.389 ledger cursor pages: endpointData keeps only recent ones; accountingCapture never keeps them (rows are archived).
@@ -6519,7 +6547,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     const executivesSummary=executivesSyncSuffix(results.find(result=>result.name==='Executives'));
     const endpointWarnings=[...new Set((session.warnings||[]).map(w=>safeWalkText(w)))];
     if(endpointWarnings.length)trace('endpoint-warnings',{count:endpointWarnings.length,warnings:endpointWarnings});
-    const finalStatus=`${realmDisplayNumber(selected)||'Realm'} Sync ${requiredOk?'complete':'finished with errors'} · ${successful}/${targets.length} targets captured${accountingSuffix}${executivesSummary}${syncWarningsSuffix(endpointWarnings)}`;
+    const finalStatusBase=`${realmDisplayNumber(selected)||'Realm'} Sync ${requiredOk?'complete':'finished with errors'} · ${successful}/${targets.length} targets captured${accountingSuffix}${executivesSummary}`;
+    let finalStatus=`${finalStatusBase}${syncWarningsSuffix(endpointWarnings)}`;
     const finalSyncError=requiredOk?null:`${failedAfterDurability} target(s) failed; ${missingRequiredEndpoints.length} required endpoint(s) were not durably verified.${endpointWarnings.length?` Endpoint problems: ${endpointWarnings.join('; ')}.`:''}`;
 
     // Final invariant: the root view must still point at the realm that was
@@ -6590,7 +6619,13 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const committedStore=committed.realmStores?.[key]||{};
       trace('realm-store-commit',{realm:selected,endpointCount:Object.keys(committedStore.endpointData||{}).length,warehouseRows:Array.isArray(committedStore.warehouseResources)?committedStore.warehouseResources.length:0,fullSyncStatus:committedStore.syncStatus||null});
       trace('sync-complete',{ok:true,successful,failed,total,elapsedMs:Date.now()-startedAt});
-      refreshMarketOrders(selected,0).catch(()=>{});refreshGameConstants().catch(()=>{});refreshExtraGameData(selected,{movedReads:session.movedReads||null}).catch(()=>{});
+      refreshMarketOrders(selected,0).catch(()=>{});refreshGameConstants().catch(()=>{});
+      // Awaited (bounded) so its failures can reach this run's status; the final status is written again after the tail.
+      try{
+        const extra=await withSyncTimeout(refreshExtraGameData(selected,{movedReads:session.movedReads||null,captured:session.abundanceCaptures||null}),15000,'After-Sync reads');
+        for(const w of extra?.warnings||[]){const t=safeWalkText(w);if(!endpointWarnings.includes(t))endpointWarnings.push(t);}
+      }catch(e){endpointWarnings.push(safeWalkText(e?.message||e));}
+      finalStatus=`${finalStatusBase}${syncWarningsSuffix(endpointWarnings)}`;
       const bridgeState=await state();
       if(bridgeState.liveBridge?.enabled && bridgeState.liveBridge?.pushOnSync) pushLiveBridge(selected,true).catch(()=>{});
 
@@ -7913,7 +7948,7 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
       const session=currentCaptureSyncSession();
       // Every response in a walked page's traffic is kept in memory for this section: Sync times the page by it
       // and uses it to spot an endpoint that moved. Stored or not is decided next.
-      if(session?.walkCaptures&&validRealmNumber(m.captureRealm)===validRealmNumber(session.realm))session.walkCaptures[url]={status:m.status,data:m.data,receivedAt:new Date().toISOString(),at:Date.now()};
+      if(session?.walkCaptures&&validRealmNumber(m.captureRealm)===validRealmNumber(session.realm)){session.walkCaptures[url]={status:m.status,data:m.data,receivedAt:new Date().toISOString(),at:Date.now()};if(/\/buildings\/\d+\/abundance\//.test(url)&&Number(m.status)>=200&&Number(m.status)<300)(session.abundanceCaptures||(session.abundanceCaptures={}))[url]=session.walkCaptures[url];}
       if(!shouldPersistPassiveApiCaptureDuringSync(session,url,m.method||'GET')){
         replayEvent('sync-passive-api-capture-skipped',{realm:validRealmNumber(m.captureRealm),url,method:String(m.method||'GET').toUpperCase(),targetPaths:session?.capturePaths?.length||0});
         send({ok:true,skipped:true,reason:'outside-current-sync-target-paths'});
