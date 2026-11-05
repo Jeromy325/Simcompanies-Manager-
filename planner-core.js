@@ -405,6 +405,31 @@
   // This is deliberately independent of the previous overlay snapshot: using a prior
   // `difference` as the next `Left` quantity makes a contract consume its own output
   // and oscillate between zero and the available balance.
+  // A saved contract follows the market unless its price was typed by hand.
+  // Contracts saved before customPrice existed count as custom only when their
+  // price differs from what their own saved market price and discount produce.
+  function savedContractRoundUp(value) {
+    const scaled = Number(value) * 100;
+    const result = Math.ceil(scaled - Number.EPSILON * Math.max(1, Math.abs(scaled))) / 100;
+    return result === 0 ? 0 : result;
+  }
+  function savedContractHasDiscount(contract) {
+    const raw = contract?.discount;
+    const discount = Number(raw);
+    return raw != null && raw !== '' && Number.isFinite(discount) && discount >= 0 && discount <= 100;
+  }
+  function savedContractIsCustomPrice(contract) {
+    if (typeof contract?.customPrice === 'boolean') return contract.customPrice;
+    const mwap = Number(contract?.mwap), price = Number(contract?.price);
+    if (!savedContractHasDiscount(contract) || !(mwap > 0) || !(price > 0)) return true;
+    return Math.abs(price - savedContractRoundUp(mwap * (1 - Number(contract.discount) / 100))) >= 0.005;
+  }
+  function savedContractCurrentPrice(contract, marketPrice) {
+    const market = Number(marketPrice);
+    if (savedContractIsCustomPrice(contract) || !(market > 0) || !savedContractHasDiscount(contract)) return contract?.price;
+    return savedContractRoundUp(market * (1 - Number(contract.discount) / 100));
+  }
+
   function resolveSavedContractQuantities({savedContracts = [], baseBalanceByKey = new Map(), surplusByKey = new Map()} = {}) {
     const readMap = (source, key, fallback = 0) => {
       let value;
@@ -508,5 +533,7 @@
     productionBalance,
     balanceSupplyDemandContracts,
     resolveSavedContractQuantities,
+    savedContractIsCustomPrice,
+    savedContractCurrentPrice,
   });
 })();

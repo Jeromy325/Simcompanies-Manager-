@@ -7598,7 +7598,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
           const resolvedQuantity=savedQuantityByContract.has(c)?Math.max(0,Number(savedQuantityByContract.get(c))||0):null;
           const savedEffectiveQuantity=resolvedQuantity!=null?resolvedQuantity:quantityMode==='surplus'?surplus:quantityMode==='left'?0:Math.max(0,Number(c?.quantity)||0);
           const left=quantityMode==='left'?savedEffectiveQuantity:baseLeft;
-          return {...c,productId:Number.isFinite(productId)?productId:null,productName,quality:Number.isFinite(quality)?quality:null,available:surplus,warehouseAvailable,surplus,left,quantityMode,savedEffectiveQuantity};
+          return {...c,price:plannerCore?.savedContractCurrentPrice?plannerCore.savedContractCurrentPrice(c,overlayCurrentMarketPrice(store,productId,quality,realm)):c?.price,productId:Number.isFinite(productId)?productId:null,productName,quality:Number.isFinite(quality)?quality:null,available:surplus,warehouseAvailable,surplus,left,quantityMode,savedEffectiveQuantity};
         });
         const value={ok:true,realm,contracts:helperContracts,incomingContracts:incoming,warehouse:stock};
         contractHelperCache.set(realm,{at:now,value});
