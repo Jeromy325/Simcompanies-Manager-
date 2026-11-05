@@ -2671,13 +2671,21 @@ function plannerWage(ctx,lab){
   if(cache[key]&&Number(cache[key].wage)>0)return {wage:Number(cache[key].wage),fresh:false,at:cache[key].at};
   return measured>0?{wage:lab.workersPerUnit*measured/level,fresh:false,at:lab.at}:null;
 }
+// v2.5.421 the player's OWN executives roster. endpointData also holds rosters of other companies viewed in the game
+// (no skills/salary/trainings), so never pick "any" roster; with no own id or no own roster return null.
+function ownExecutivesKey(s){
+  const ac=s?.authData?.authCompany,id=Number(ac?.companyId??ac?.id);
+  if(!(id>0))return null;
+  const k=`/api/v3/companies/${id}/executives/`;
+  return s?.endpointData&&s.endpointData[k]?k:null;
+}
 // v2.5.341 current admin overhead exactly as the game computes it: captured base (/administration-overhead/) and
 // executives, plus the game page's executive timing config (scmGameConfig). Null when anything is missing.
 function plannerGameAdmin(s){
   try{
     const C=globalThis.SCM_TOOLS_CORE,ep=s?.endpointData||{},cfg=s?.gameConfig||{};
     const base=Number(ep['/api/v2/companies/me/administration-overhead/']?.data);
-    const exKey=Object.keys(ep).find(k=>/^\/api\/v3\/companies\/\d+\/executives\/$/.test(k));
+    const exKey=ownExecutivesKey(s);
     const ex=exKey?ep[exKey]?.data?.executives:null;
     const r=C?.effectiveAdminOverhead?C.effectiveAdminOverhead({base,executives:ex,buildings:s?.buildings,trainS:cfg.executivesTimeToTrainS,settleS:cfg.executivesTimeToSettleInS}):null;
     return r?{...r,at:ep[exKey]?.receivedAt||null}:null;
@@ -2738,7 +2746,7 @@ function wireExecCharts(root){
 function renderBoardRoom(s){
   const el=$('#execBody'),C=globalThis.SCM_TOOLS_CORE;if(!el||!C?.executiveRoster)return;
   const ep=s?.endpointData||{},cfg=s?.gameConfig||{};
-  const exKey=Object.keys(ep).find(k=>/^\/api\/v3\/companies\/\d+\/executives\/$/.test(k));
+  const exKey=ownExecutivesKey(s);
   const ex=exKey?ep[exKey]?.data?.executives:null;
   if(!Array.isArray(ex)||!ex.length){el.innerHTML='<div class="planner-profit-empty">No executives captured yet. Open the Executives page in the game once, then come back.</div>';return;}
   const trainS=cfg.executivesTimeToTrainS,settleS=cfg.executivesTimeToSettleInS,now=Date.now();
@@ -2746,7 +2754,7 @@ function renderBoardRoom(s){
   const blds=buildingArrayFromState(s).map(b=>({kind:String(pick(b,['kind','buildingKind','type'])??''),level:Number(pick(b,['level','lvl','buildingLevel','size']))||1,size:b?.size,position:b?.position,purchasedRecently:b?.purchasedRecently,robotsSpecialization:Boolean(b?.robotsSpecialization),busy:b?.busy||null}));
   const st=execPlanSettings();
   // Trainings done come from the walk-captured trainings-count endpoint of the same company, matched by executive id.
-  const companyId=exKey.match(/^\/api\/v3\/companies\/(\d+)\/executives\/$/)[1],tc=ep[`/api/v3/companies/${companyId}/executives/trainings-count/`]?.data?.trainingsCount;
+  const companyId=exKey.match(/\/companies\/(\d+)\//)[1],tc=ep[`/api/v3/companies/${companyId}/executives/trainings-count/`]?.data?.trainingsCount;
   const tcOf=id=>{const v=tc?.[String(id)];return v!=null&&Number.isFinite(Number(v))?Number(v):null;};
   const roster=C.executiveRoster(ex,{now,trainS,settleS}).map(r=>({...r,trainings:tcOf(r.id)})),suite=roster.filter(r=>!r.staff);
   const args={base,executives:ex,buildings:blds,now,trainS,settleS};
