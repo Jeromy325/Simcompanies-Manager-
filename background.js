@@ -5720,6 +5720,8 @@ function syncWarningsSuffix(warnings){
   return ` · ${warnings.length} endpoint warning${warnings.length===1?'':'s'}: ${shown}${warnings.length>3?`; +${warnings.length-3} more in the diagnostic`:''}`;
 }
 function endpointIsScalar(item){return item&&item.data!=null&&typeof item.data!=='object';}
+// Known single-number endpoints. The record cannot be relied on: the page's own failed request may have replaced it just before the check.
+const SCALAR_ENDPOINT_RX=/\/administration-overhead\/$/;
 // Finds where a gone endpoint moved, among responses captured while walking the game. First the same address
 // under another API version; then a renamed address whose response has the same structure as this endpoint's
 // last good response. Exactly one structural match is required: a tie or no earlier data finds nothing.
@@ -5925,7 +5927,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         (session.suspectedMoves||(session.suspectedMoves={}))[path]=walked.suspected;
         trace('endpoint-suspected-move',{path,suspected:walked.suspected});
         session.warnings?.push(`${path} (HTTP ${status}) may have moved to ${walked.suspected}; not adopted`);
-      }else if(endpointIsScalar(stored[path])){
+      }else if(endpointIsScalar(stored[path])||SCALAR_ENDPOINT_RX.test(path)){
         // A single number has no structure to compare, so a rename cannot be traced. Say so; never guess.
         (session.untraceable||(session.untraceable={}))[path]=status;
         trace('endpoint-untraceable',{path,status,reason:'scalar-response'});
