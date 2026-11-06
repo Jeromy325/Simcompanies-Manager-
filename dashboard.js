@@ -1421,6 +1421,7 @@ function marketWarehouseOptions(s){
 }
 function marketNumeric(v){if(v===null||v===undefined||v==='')return null;const n=Number(v);return Number.isFinite(n)?n:null;}
 function marketMoney(v){const n=marketNumeric(v);return n==null?'—':money(n);}
+function marketDate(v){if(v==null)return '—';if(typeof v==='object'){v=v.timestamp??v.time??v.date??v.at??v.value??null;}const d=new Date(v);return Number.isNaN(d.getTime())?String(v):d.toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}
 // Single source for market price and VWAP: market-core.js (SCM_MARKET_CORE). Modes: 'exact' quality, 'min' quality or better,
 // 'any' cheapest listing of any quality (the game calculator rule). Never borrows a neighbouring quality.
 // Memoised per state object (warehouse tables call this once per row); the memo expires after 5 s so ages stay honest.
