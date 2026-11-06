@@ -566,10 +566,6 @@ let hookReady = false;
       safeRuntimeSend({ type: 'STOCK_MUTATION_COMPLETE', method: d.method, url: d.url, status: d.status, captureRealm: d.captureRealm });
       return;
     }
-    if (d.type === 'BUILDING_COLLECT_SEEN') {
-      safeRuntimeSend({ type: 'BUILDING_COLLECT_SEEN', url: String(d.url || ''), buildingId: Number(d.buildingId), captureRealm: d.captureRealm });
-      return;
-    }
     if (d.type === 'API_DATA') {
       if (/\/api\/v3\/companies\/auth-data\//.test(String(d.url||''))) { const a=d.data?.authCompany||{}; const r=Number(a.realmId??a.realm??d.data?.realmId??d.data?.realm); if(Number.isFinite(r)) publishGameRealm(r,'auth-data'); }
       safeRuntimeSend({ type: 'API_DATA', url: d.url, status: d.status, data: d.data, captureRealm: d.captureRealm });

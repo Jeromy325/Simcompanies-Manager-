@@ -2275,10 +2275,13 @@ async function buildGameOverlayData(store,realm,globalState){
   // that row's Warehouse counts all usable stock and Demand stays the full plan.
   detailRows=foldHigherQualityStock(detailRows,producedResourceQualities,savedContractKeys);
   // Countdown input: only plan buildings running this product right now, from this realm's own plan and buildings.
-  // The game run data says what reaches the warehouse: busy.resource.amount is the total output of this run, and
-  // amountAvailableNow/canFetch what can be collected now. Output is collected by the player, never credited from
-  // the planner rate or from a collect time.
-  const etaRunsByKey=new Map(),etaBuildings=new Set();
+  // The game run data says what reaches the warehouse: amountAvailableNow is produced and not collected, amount is what
+  // the run still makes (as of the last collect). A collect seen after the buildings snapshot (collect stamp) leaves only
+  // the output from that collect to the finish; see collectAdjustedRun.
+  const etaRunsByKey=new Map(),etaBuildings=new Set(),etaBuildingList=Array.isArray(buildings)?buildings:[];
+  let collectStamps={};
+  try{const raw=(await chrome.storage.local.get({[buildingCollectsKey(realm)]:{}}))[buildingCollectsKey(realm)]||{};collectStamps=liveCollectStamps(raw,etaBuildingList);if(Object.keys(collectStamps).length!==Object.keys(raw).length)pruneBuildingCollects(realm,etaBuildingList);}catch{}
+  const etaSnapshotMs=buildingsSnapshotMs(store);
   for(const spec of activeSpecs||[]){
     const b=(Array.isArray(buildings)?buildings:[]).find(x=>Number(x?.id)===Number(spec?.buildingId)),res=b?.busy?.resource;
     // A run without a usable amount is still passed on (amount null), so the strip shows nothing instead of "Not producing".
@@ -2288,7 +2291,7 @@ async function buildGameOverlayData(store,realm,globalState){
     const busyQuality=res?.quality==null?NaN:Number(res.quality),runQuality=Number.isFinite(busyQuality)?Math.max(0,busyQuality):Math.max(0,Number(spec.quality)||0);
     const runKey=`${Number(spec.productId)}:${runQuality}`,availableNow=Number(res?.amountAvailableNow);
     if(!etaRunsByKey.has(runKey))etaRunsByKey.set(runKey,[]);
-    etaRunsByKey.get(runKey).push({amount,amountAvailableNow:Number.isFinite(availableNow)&&availableNow>0?availableNow:0,canFetch:b.busy.canFetch===true,finishMs:started+duration*1000,ratePerHour:Number(spec?.ratePerHour)||0});
+    etaRunsByKey.get(runKey).push(collectAdjustedRun({amount,amountAvailableNow:Number.isFinite(availableNow)&&availableNow>0?availableNow:0,canFetch:b.busy.canFetch===true,finishMs:started+duration*1000,ratePerHour:Number(spec?.ratePerHour)||0},collectStamps[String(b.id)],etaSnapshotMs));
   }
   // Market price per row comes from the shared reader at the row's exact quality. No request, no other quality.
   const marketOwn=await marketOwnOpts(store,realm);
@@ -2457,56 +2460,91 @@ function realmStoredBuildings(store, globalState, realm){
   if(rootRealm===Number(realm)&&Array.isArray(globalState?.buildings)&&globalState.buildings.length)return globalState.buildings;
   return [];
 }
-// The game collects a building with POST /api/v2/order/take/<buildingId>/. After it, the stored busy snapshot can lag
-// (the warehouse refreshes, building data may not), so its amountAvailableNow would be counted twice. Clear it in the
-// stored copies; the next real buildings capture replaces them.
-// Display only: a script in the game page can post any bridge message, so a forged collect cannot be ruled out. It
-// needs the page realm tag, a BUILDING_COLLECT_SEEN (collect-shaped reply) and a building that is collectable now, and it changes only
-// this countdown figure until the next buildings capture corrects it.
+// Collect stamps. The game collects a building with POST /api/v2/order/take/<buildingId>/ (the same path shape is not
+// known to be used for anything else; an id that is not a stored building writes nothing). busy.resource.amount is what
+// the run still has to make as of the last collect, so a buildings snapshot taken before a collect still holds output
+// that is now in the warehouse. One key per realm, scmBuildingCollects:<realm> = {buildingId: collectMs}, so it
+// survives service worker restarts. Display only: a script in the game page can post any bridge message, so a forged
+// stamp cannot be ruled out; it only lowers this countdown until the building data is captured again.
+const buildingCollectsKey=realm=>`scmBuildingCollects:${realm}`;
 const collectTakeBuildingIdFromUrl=url=>{const m=String(url||'').match(/^(?:https?:\/\/[^/]+)?\/api\/v2\/order\/take\/(\d+)\/?(?:[?#]|$)/);return m?Number(m[1]):null;};
-// Collectable now, as the game decides it: canFetch, output available, or the run is over.
-function buildingCollectableNow(b,now){
-  const busy=b?.busy;if(!busy||typeof busy!=='object')return false;
-  const end=Date.parse(String(busy.started||''))+Number(busy.duration)*1000;
-  return busy.canFetch===true||Number(busy.resource?.amountAvailableNow)>0||(Number.isFinite(end)&&end<=now);
+// Owner realm per collected id: the tagged realm first, then the other (a tag can be wrong; building ids are unique).
+function collectStampsByRealm(batch,idsByRealm){
+  const out={0:{},1:{}};
+  for(const [id,{at,tagged}] of batch){
+    const order=tagged===0||tagged===1?[tagged,1-tagged]:[0,1];
+    const owner=order.find(r=>idsByRealm?.[r]?.has(String(id)));
+    if(owner!=null)out[owner][String(id)]=at;
+  }
+  return out;
 }
-function clearCollectedBuildingRows(rows,buildingId,now=Date.now()){
-  if(!Array.isArray(rows))return null;
-  const i=rows.findIndex(b=>Number(b?.id)===Number(buildingId)&&b?.busy&&typeof b.busy==='object');
-  if(i<0||!buildingCollectableNow(rows[i],now))return null;
-  const b=rows[i],res=b.busy.resource&&typeof b.busy.resource==='object'?{...b.busy.resource,amountAvailableNow:0}:b.busy.resource;
-  const next=rows.slice();next[i]={...b,busy:{...b.busy,canFetch:false,resource:res}};
-  return next;
-}
-function clearCollectedBuildingInStore(store,buildingId,now=Date.now()){
-  if(!store||typeof store!=='object')return null;
-  let next=null;
-  const rows=clearCollectedBuildingRows(store.buildings,buildingId,now);
-  if(rows)next={...store,buildings:rows};
-  const endpointData=store.endpointData&&typeof store.endpointData==='object'?store.endpointData:null;
-  if(endpointData){
-    let ep=null;
-    for(const [url,entry] of Object.entries(endpointData)){
-      if(!/\/api\/v2\/companies\/(?:me|\d+)\/buildings\/?$/i.test(String(url||''))||!entry||typeof entry!=='object')continue;
-      const data=entry.data,listKey=Array.isArray(data)?null:['buildings','data','items','results'].find(k=>Array.isArray(data?.[k]));
-      const cleared=clearCollectedBuildingRows(listKey?data[listKey]:data,buildingId,now);
-      if(!cleared)continue;
-      ep=ep||{...endpointData};ep[url]={...entry,data:listKey?{...data,[listKey]:cleared}:cleared};
-    }
-    if(ep)next={...(next||store),endpointData:ep};
+// A stamp ends with its run: drop it once the building is gone or idle, or a later run started.
+function liveCollectStamps(stamps,buildings){
+  const next={};
+  for(const [id,at] of Object.entries(stamps&&typeof stamps==='object'?stamps:{})){
+    const b=(Array.isArray(buildings)?buildings:[]).find(x=>String(x?.id)===id),started=Date.parse(String(b?.busy?.started||''));
+    if(Number.isFinite(started)&&Number(at)>0&&started<=Number(at))next[id]=Number(at);
   }
   return next;
 }
-function markBuildingCollected(realm,buildingId){
-  const n=validRealmNumber(realm),key=realmKeyFromRealm(n);
-  if(n==null||!key||!(Number(buildingId)>0))return Promise.resolve(false);
+// When the buildings snapshot was received (latest buildings capture), NaN when unknown.
+function buildingsSnapshotMs(store){
+  let at=NaN;
+  for(const [url,entry] of Object.entries(store?.endpointData&&typeof store.endpointData==='object'?store.endpointData:{})){
+    if(!/\/api\/v2\/companies\/(?:me|\d+)\/buildings\/?$/i.test(String(url||'')))continue;
+    const t=Date.parse(String(entry?.receivedAt||''));if(Number.isFinite(t)&&!(t<=at))at=t;
+  }
+  return at;
+}
+// A collect after the snapshot: nothing is collectable, and only what the run makes from the collect to its finish is
+// still to come (capped by the snapshot amount). A buildings capture after the collect supersedes the stamp.
+function collectAdjustedRun(run,stampMs,snapshotMs){
+  const at=Number(stampMs);
+  if(!(at>0)||(Number.isFinite(snapshotMs)&&snapshotMs>=at))return run;
+  const rate=Number(run?.ratePerHour),amount=run?.amount;
+  const left=amount!=null&&rate>0?Math.min(Number(amount),Math.max(0,rate*(Number(run.finishMs)-at)/3600000)):amount;
+  return {...run,amount:left,amountAvailableNow:0,canFetch:false,collectedAtMs:at};
+}
+const pendingBuildingCollects=new Map(); // buildingId -> {at, tagged}
+let buildingCollectFlushTimer=null;
+function noteBuildingTake(url,taggedRealm){
+  const id=collectTakeBuildingIdFromUrl(url);if(id==null||!(id>0))return;
+  pendingBuildingCollects.set(id,{at:Date.now(),tagged:taggedRealm===0||taggedRealm===1?taggedRealm:null});
+  // Collect all sends one POST per building: one read of both realms per burst.
+  if(!buildingCollectFlushTimer)buildingCollectFlushTimer=setTimeout(()=>{buildingCollectFlushTimer=null;flushBuildingCollects().catch(()=>{});},300);
+}
+async function flushBuildingCollects(){
+  const batch=[...pendingBuildingCollects];pendingBuildingCollects.clear();
+  if(!batch.length)return;
+  const gen=extensionClearGeneration,idsByRealm={},buildingsByRealm={};
+  for(const r of [0,1]){
+    const fresh=await state(r),store=fresh.realmStores?.[realmKeyFromRealm(r)]||{};
+    buildingsByRealm[r]=realmStoredBuildings(store,fresh,r);
+    idsByRealm[r]=new Set(buildingsByRealm[r].map(b=>String(b?.id)));
+  }
+  const byRealm=collectStampsByRealm(batch,idsByRealm);
+  for(const r of [0,1]){
+    if(!Object.keys(byRealm[r]).length)continue;
+    const key=buildingCollectsKey(r);
+    await withRealmWriteLock(r,async()=>{
+      if(gen!==extensionClearGeneration)return;
+      const cur=(await chrome.storage.local.get({[key]:{}}))[key]||{};
+      await rawStorageSet({[key]:{...liveCollectStamps(cur,buildingsByRealm[r]),...byRealm[r]}});
+    });
+  }
+  for(const r of [0,1])if(Object.keys(byRealm[r]).length)scheduleGameOverlayRefreshNotification(r,150);
+}
+// Not awaited by its callers (the overlay build may already hold a realm lane).
+function pruneBuildingCollects(realm,buildings){
+  const n=validRealmNumber(realm);if(n==null)return Promise.resolve();
+  const key=buildingCollectsKey(n),gen=extensionClearGeneration;
   return withRealmWriteLock(n,async()=>{
-    const fresh=await state(n),existing=fresh.realmStores?.[key];
-    const next=clearCollectedBuildingInStore(existing,buildingId);
-    if(!next)return false;
-    await storageSet({realmStores:{...(fresh.realmStores||{}),[key]:next}});
-    return true;
-  });
+    if(gen!==extensionClearGeneration)return;
+    const cur=(await chrome.storage.local.get({[key]:null}))[key];if(!cur||typeof cur!=='object')return;
+    const next=liveCollectStamps(cur,buildings);
+    if(Object.keys(next).length===Object.keys(cur).length)return;
+    if(Object.keys(next).length)await rawStorageSet({[key]:next});else await chrome.storage.local.remove(key);
+  }).catch(()=>{});
 }
 
 function sanitizeRealmStore(store, realm){
@@ -5153,10 +5191,6 @@ async function restorePersistedAlarms(reason='restore'){
   }
   return out;
 }
-// The collect-stamp countdown (2.5.426) is gone; drop its per-realm stamps. Writes only when a stamp key is present.
-async function dropBuildingCollectStamps(){
-  try{const keys=['scmBuildingCollects:0','scmBuildingCollects:1'],cur=await chrome.storage.local.get(keys),present=keys.filter(k=>Object.prototype.hasOwnProperty.call(cur,k));if(present.length)await chrome.storage.local.remove(present);}catch{}
-}
 chrome.runtime.onInstalled.addListener(async()=>{
   const current=await chrome.storage.local.get(null);
   // Preserve existing physical realm containers and global settings, but do
@@ -5170,7 +5204,6 @@ chrome.runtime.onInstalled.addListener(async()=>{
   globalPatch.activeRealmKey=current.activeRealmKey??null;
   await storageSet(globalPatch);
   await ensureRealmStorageMigration();
-  await dropBuildingCollectStamps();
   // v2.5.345 an update used to clear every alarm, dropping the building reminders you set, batch-finished
   // alerts, follow-ups, the daily summary and the constants refresh. Only the scheduler alarms re-created below
   // (and retired legacy ones) are cleared now.
@@ -5194,8 +5227,6 @@ chrome.runtime.onInstalled.addListener(async()=>{
   if(installRealm!=null) scheduleMarketCycle(installRealm,'install-complete').catch(()=>{});
 });
 chrome.runtime.onStartup.addListener(async()=>{
-  // First, so a later startup step that throws cannot skip it.
-  try{await dropBuildingCollectStamps();}catch{}
   await ensureLiveMarketRefreshAlarm('service-worker-startup');
   await ensureOrderBookRefreshAlarm();
   await ensureStandingAlarms().catch(()=>{});
@@ -7850,6 +7881,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         // R5/P1: buffered writes must not land after the clear and resurrect cleared data.
         discardAllRealmPatches();discardPendingLedgerArchive();
         pendingEndpointSeen.clear();
+        pendingBuildingCollects.clear();if(buildingCollectFlushTimer){clearTimeout(buildingCollectFlushTimer);buildingCollectFlushTimer=null;} // collect stamps (scmBuildingCollects:N) go with the clear below
         await withRealmStorageCommit(()=>chrome.storage.local.clear());
         await scmNetClearAllEvents().catch(()=>{});
         // R5: in-memory copies of cleared data would otherwise be served (and written back) until the worker restarts.
@@ -7982,15 +8014,10 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     // v2.5.328: an untagged action belongs to the active realm. (validRealmNumber(null) is 0, which used to
     // refresh R1 while the player was in R2 — rejected as "not the active realm", so nothing updated.)
     (async()=>{let realm=(m.captureRealm===null||m.captureRealm===undefined||m.captureRealm==='')?null:validRealmNumber(m.captureRealm);
+      // A building collect is stamped at once (no reply is read); an id that is not a stored building writes nothing.
+      if(String(m.method||'').toUpperCase()==='POST'&&collectTakeBuildingIdFromUrl(m.url)!=null){try{noteBuildingTake(m.url,realm);}catch{}}
       if(realm==null){try{const meta=await chrome.storage.local.get({activeRealmKey:null});realm=validRealmNumber(realmNumberFromKey(meta.activeRealmKey)??meta.activeRealmKey);}catch{}}
       if(realm!=null){scheduleWarehouseRefreshAfterStockMutation(realm,150);scheduleOwnOrdersRefresh(realm);}})();
-    send({ok:true});return true}
-  if(m?.type==='BUILDING_COLLECT_SEEN'){
-    // A collect-shaped reply to POST /api/v2/order/take/<id>/, only on a realm the page tagged: the stored building
-    // would otherwise count its collected output again. Repaint the overlay after the clear (it can land after the
-    // warehouse refresh that STOCK_MUTATION_COMPLETE started).
-    const realm=(m.captureRealm===0||m.captureRealm===1)?m.captureRealm:null,id=collectTakeBuildingIdFromUrl(m.url);
-    if(realm!=null&&id!=null&&id===Number(m.buildingId))markBuildingCollected(realm,id).then(changed=>{if(changed)scheduleGameOverlayRefreshNotification(realm,150);}).catch(()=>{});
     send({ok:true});return true}
   if(m?.type==='GET_ENDPOINT_KEYS'){state().then(s=>send({ok:true,keys:Object.keys(s.endpointData||{})})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='WAREHOUSE_COST_DETAIL'){saveWarehouseCostDetail(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}

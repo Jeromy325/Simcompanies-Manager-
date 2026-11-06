@@ -842,39 +842,6 @@
   const networkCaptureEmit=(event)=>{if(!networkCaptureEnabled)return;if(networkCaptureCount>=NETWORK_CAPTURE_MAX_EVENTS){networkCaptureEnabled=false;try{emit('NETWORK_CAPTURE_EVENT',{captureId:networkCaptureId,event:{capturedAt:new Date().toISOString(),realm:pageRealm(),kind:'capture-limit',limit:NETWORK_CAPTURE_MAX_EVENTS,note:'Page recorder stopped at its 100,000-event cap; export this capture and start a new one.'}});}catch{}return;}networkCaptureCount++;try{emit('NETWORK_CAPTURE_EVENT',{captureId:networkCaptureId,event:{capturedAt:new Date().toISOString(),realm:pageRealm(),...event}});}catch{}};
   const captureResponseBody=async(response)=>{try{const type=String(response.headers?.get('content-type')||'');if(!/json|text|javascript|xml/i.test(type))return null;const text=await response.clone().text();if(!text)return null;if(text.length>NETWORK_CAPTURE_MAX_BODY)return {truncated:true,originalLength:text.length,preview:text.slice(0,NETWORK_CAPTURE_MAX_BODY)};try{return JSON.parse(text);}catch{return text;}}catch{return null;}};
   const snapshotResourceTiming=()=>{try{const entries=performance.getEntriesByType('resource').filter(e=>/simcompanies\.com/i.test(e.name)).slice(-300).map(e=>({url:safeNetworkUrl(e.name)||new URL(e.name,location.href).pathname,initiatorType:e.initiatorType,durationMs:Math.round(e.duration*100)/100,transferSize:e.transferSize||0}));networkCaptureEmit({kind:'resource-timing-snapshot',resources:entries});}catch{}};
-  // The game collects a building with POST /api/v2/order/take/<buildingId>/; its handler reads moneyUpdate, achievements,
-  // levelInfo and newBusy from the reply. The normal STOCK_MUTATION_COMPLETE goes out at once for it, like any POST.
-  // Separately and best-effort, a reply shaped like a collect adds BUILDING_COLLECT_SEEN, so another action on a similar
-  // path cannot clear a building. It only steers a display figure (see background.js). The game's response is never
-  // altered or held: the check reads a clone, small bodies only, and drops a body that stalls.
-  const BUILDING_TAKE_PATH = /^\/api\/v2\/order\/take\/(\d+)\/?$/;
-  const BUILDING_COLLECT_MAX_BYTES = 50000, BUILDING_COLLECT_READ_MS = 2000;
-  const looksLikeBuildingCollect = (data) => !!data && typeof data === 'object' && !Array.isArray(data) && (Object.prototype.hasOwnProperty.call(data, 'newBusy') || Object.prototype.hasOwnProperty.call(data, 'levelInfo'));
-  const parseCollectReply = (text) => { try { const t = typeof text === 'string' ? text : ''; return t.length > 0 && t.length <= BUILDING_COLLECT_MAX_BYTES ? looksLikeBuildingCollect(JSON.parse(t)) : false; } catch { return false; } };
-  const emitBuildingCollectSeen = (pathname, captureRealm) => {
-    try { const m = BUILDING_TAKE_PATH.exec(pathname); if (m) emitRealmScoped('BUILDING_COLLECT_SEEN', { url: pathname, buildingId: Number(m[1]), captureRealm }); } catch {}
-  };
-  const checkFetchCollectReply = (response, pathname, captureRealm) => {
-    try {
-      const length = Number(response.headers?.get('content-length'));
-      if (Number.isFinite(length) && length > BUILDING_COLLECT_MAX_BYTES) return;
-      const clone = response.clone();
-      let timer = null;
-      const stalled = new Promise(resolve => { timer = setTimeout(() => resolve(null), BUILDING_COLLECT_READ_MS); });
-      Promise.race([clone.text().catch(() => null), stalled])
-        .then(text => { clearTimeout(timer); if (text != null && parseCollectReply(text)) emitBuildingCollectSeen(pathname, captureRealm); })
-        .catch(() => {});
-    } catch {}
-  };
-  const checkXhrCollectReply = (xhr, pathname, captureRealm) => {
-    try {
-      const type = xhr.responseType;
-      let seen = false;
-      if (type === '' || type === 'text') seen = parseCollectReply(xhr.responseText);
-      else if (type === 'json') seen = looksLikeBuildingCollect(xhr.response);
-      if (seen) emitBuildingCollectSeen(pathname, captureRealm);
-    } catch {}
-  };
   const originalFetch = window.fetch;
   window.fetch = async function(input, init) {
     let url = '', method = 'GET', captureRealm = null, explicitManagerApiGet = false;
@@ -899,10 +866,7 @@
     if (isStockMutationUrl(url, method)) {
       try {
         const u = new URL(url, location.href);
-        if (response.ok) {
-          emitRealmScoped('STOCK_MUTATION_COMPLETE', { method, url: u.pathname + u.search, status: response.status, captureRealm });
-          if (method === 'POST' && BUILDING_TAKE_PATH.test(u.pathname)) checkFetchCollectReply(response, u.pathname, captureRealm);
-        }
+        if (response.ok) emitRealmScoped('STOCK_MUTATION_COMPLETE', { method, url: u.pathname + u.search, status: response.status, captureRealm });
       } catch {}
     }
     if (!explicitManagerApiGet && isApi(url) && (method === 'GET' || /\/api\/(?:v2|v3)\/.*contracts/i.test(url))) {
@@ -943,10 +907,7 @@
       this.addEventListener('load', () => {
         try {
           const u = new URL(this.__scmUrl, location.href);
-          if (this.status >= 200 && this.status < 300) {
-            emitRealmScoped('STOCK_MUTATION_COMPLETE', { method: this.__scmMethod, url: u.pathname + u.search, status: this.status, captureRealm: this.__scmCaptureRealm });
-            if (this.__scmMethod === 'POST' && BUILDING_TAKE_PATH.test(u.pathname)) checkXhrCollectReply(this, u.pathname, this.__scmCaptureRealm);
-          }
+          if (this.status >= 200 && this.status < 300) emitRealmScoped('STOCK_MUTATION_COMPLETE', { method: this.__scmMethod, url: u.pathname + u.search, status: this.status, captureRealm: this.__scmCaptureRealm });
         } catch {}
       });
     }
