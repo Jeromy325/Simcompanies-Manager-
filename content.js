@@ -1921,36 +1921,37 @@ function scmPageTextNoLayout(){
     applyMin(card);
     schedulePosition();
   };
-  // When collectable output covers Left (need = -Left). Only the game's own run data counts. amount is all output
-  // outstanding since the last collect and includes the collectable part: amountAvailableNow is a part of amount, not
-  // extra (engines: amount 736, available 15; (736-15)/hours to finish = 48.7/hr, the real rate). Output reaches the
-  // warehouse only on collect: the available part is ready now, the rest of amount is ready to collect at the finish.
-  // A finished run not collected yet has all of it ready now.
+  // When stock covers Left (need = -Left). Output is collectable all through a run, so it reaches the warehouse at the
+  // run rate. amount is all output outstanding since the last collect (already cut by a newer collect stamp), so the
+  // part produced and not collected yet is amount minus what the rest of the run still makes (rate x time to finish):
+  // engines amount 736, 14.81 h left at 48.67/hr => 720.8 to come, 15.2 ready now (the game's amountAvailableNow 15).
+  // The whole amount is in the warehouse by the run end. A finished run not collected yet has all of it ready now.
   const demandEta=(left,runs,now)=>{
-    const list=Array.isArray(runs)?runs:[],pending=[];
-    let ready=0,missingData=false,active=false;
+    const list=Array.isArray(runs)?runs:[],accrue=[];
+    let ready=0,total=0,ratePerHour=0,lastFinish=0;
     for(const x of list){
-      const amount=x?.amount==null?NaN:Number(x.amount),avail=Math.max(0,Number(x?.amountAvailableNow)||0),fin=Number(x?.finishMs);
-      if(!Number.isFinite(amount)||!Number.isFinite(fin)){missingData=true;continue;}
-      if(fin<=now){ready+=Math.max(amount,avail);continue;}
-      // Still running: the collectable part counts now; the rest of amount is ready at the finish.
-      active=true;
-      const now0=x?.canFetch===true?Math.min(avail,Math.max(0,amount)):0,rest=Math.max(0,amount-now0);
-      ready+=now0;
-      if(rest>0)pending.push({amount:rest,finishMs:fin});
+      const amount=x?.amount==null?NaN:Number(x.amount),fin=Number(x?.finishMs),rate=Number(x?.ratePerHour);
+      // A run without the game's amount or a rate (older snapshot, missing field): show no strip rather than a guess.
+      if(!Number.isFinite(amount)||!Number.isFinite(fin))return {state:'nodata'};
+      const a=Math.max(0,amount);total+=a;
+      if(fin<=now){ready+=a;continue;}
+      if(!(rate>0))return {state:'nodata'};
+      const future=Math.min(a,rate*(fin-now)/3600000);
+      ready+=a-future;ratePerHour+=rate;lastFinish=Math.max(lastFinish,fin);
+      if(future>0)accrue.push({rate,endMs:now+future/rate*3600000});
     }
-    // A run without the game's amount (older snapshot, missing field): show no strip rather than a guess.
-    if(missingData)return {state:'nodata'};
-    if(left+ready>=0)return {state:'covered',spare:left+ready,ready};
-    pending.sort((p,q)=>p.finishMs-q.finishMs);
-    let stock=left+ready;
-    for(const run of pending){
-      stock+=run.amount;
-      if(stock>=0)return {state:'running',metAtMs:run.finishMs,runAmount:run.amount,spare:stock,ready};
+    const spare=left+total;
+    if(left+ready>=0)return {state:'covered',ready,spare,active:ratePerHour>0};
+    if(!(ratePerHour>0))return ready>0?{state:'late',missing:-(left+ready),runEndsMs:null,ratePerHour:0,ready}:{state:'none',ready};
+    // Stock grows at the sum of the rates, each run stopping at its own end.
+    accrue.sort((p,q)=>p.endMs-q.endMs);
+    let short=-(left+ready),rate=accrue.reduce((s,x)=>s+x.rate,0),t=now;
+    for(const run of accrue){
+      const made=rate*(run.endMs-t)/3600000;
+      if(made>=short)return {state:'running',metAtMs:t+short/rate*3600000,ratePerHour,ready,spare};
+      short-=made;t=run.endMs;rate-=run.rate;
     }
-    if(pending.length)return {state:'late',missing:-stock,runEndsMs:pending[pending.length-1].finishMs,runAmount:pending.reduce((sum,x)=>sum+x.amount,0),runCount:pending.length,ready};
-    if(ready>0||active)return {state:'late',missing:-stock,runEndsMs:null,runAmount:0,runCount:0,ready,active};
-    return {state:'none',ready};
+    return {state:'late',missing:-spare,runEndsMs:lastFinish,ratePerHour,ready};
   };
   const etaDuration=ms=>{const s=Math.max(0,Math.floor(ms/1000)),h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?`${h}h ${String(m).padStart(2,'0')}m ${String(x).padStart(2,'0')}s`:`${m}m ${String(x).padStart(2,'0')}s`;};
   const etaText=(at,done,pre='')=>{const ms=at-Date.now();return ms>0?pre+etaDuration(ms):done;};
@@ -1962,13 +1963,16 @@ function scmPageTextNoLayout(){
     const need=demand+(Number(r.contracted)||0),held=(Number(r.warehouse)||0)+(Number(e.ready)||0);
     const pct=e.state==='covered'?100:e.state==='none'||!(need>0)?0:Math.max(0,Math.min(100,held/need*100));
     let main,sub;
-    if(e.state==='covered'){main='✓ Covered';sub=e.ready>0?`${num(e.spare)} spare · ${num(e.ready)} ready to collect`:`${num(e.spare)} spare`;}
+    if(e.state==='covered'){
+      main=left>=0?'✓ Covered':'✓ Ready to collect';
+      sub=`${e.ready>0&&left<0?`${num(e.ready)} ready now · `:''}${num(e.spare)} spare${e.active?' at run end':''}`;
+    }
     else if(e.state==='none'){main='Not producing';sub='Buy it or start production';}
     else if(e.state==='late'){
       main=`Short ${num(e.missing)} after run`;
-      sub=e.runEndsMs?`${e.runCount>1?'Runs make':'Run makes'} ${num(e.runAmount)} · <span data-eta-at="${e.runEndsMs}" data-eta-pre="ready to collect in " data-eta-done="ready to collect">${etaText(e.runEndsMs,'ready to collect','ready to collect in ')}</span>`:e.active?`${num(e.ready)} ready to collect · run finishing`:`${num(e.ready)} ready to collect · not producing`;
+      sub=e.runEndsMs?`${num(e.ratePerHour)}/hr · run left: <span data-eta-at="${e.runEndsMs}" data-eta-done="none">${etaText(e.runEndsMs,'none')}</span>`:`${num(e.ready)} ready to collect · not producing`;
     }
-    else{main=`⏱ <span data-eta-at="${e.metAtMs}" data-eta-done="ready to collect">${etaText(e.metAtMs,'ready to collect')}</span>`;sub=e.ready>0?`${num(e.ready)} ready now · Run makes ${num(e.runAmount)} · ${num(e.spare)} spare after run`:`Ready to collect · Run makes ${num(e.runAmount)} · ${num(e.spare)} spare after run`;}
+    else{main=`⏱ <span data-eta-at="${e.metAtMs}" data-eta-done="met, collect to stock">${etaText(e.metAtMs,'met, collect to stock')}</span>`;sub=`${num(e.ratePerHour)}/hr · met ${esc(new Date(e.metAtMs).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'}))} · ${num(e.spare)} spare at run end`;}
     return `<span class="scm-go-eta scm-go-eta-${e.state}" data-eta-row="${esc(`${r.id}:${Number(r.quality)||0}`)}"><span class="scm-go-eta-top"><span class="scm-go-eta-main">${main}</span><span class="scm-go-eta-sub">${sub}</span></span><span class="scm-go-eta-bar"><i style="width:${pct.toFixed(1)}%"></i></span></span>`;
   };
   const tickEta=()=>{
