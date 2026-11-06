@@ -566,6 +566,10 @@ let hookReady = false;
       safeRuntimeSend({ type: 'STOCK_MUTATION_COMPLETE', method: d.method, url: d.url, status: d.status, captureRealm: d.captureRealm });
       return;
     }
+    if (d.type === 'BUILDING_COLLECT_SEEN') {
+      safeRuntimeSend({ type: 'BUILDING_COLLECT_SEEN', url: String(d.url || ''), buildingId: Number(d.buildingId), captureRealm: d.captureRealm });
+      return;
+    }
     if (d.type === 'API_DATA') {
       if (/\/api\/v3\/companies\/auth-data\//.test(String(d.url||''))) { const a=d.data?.authCompany||{}; const r=Number(a.realmId??a.realm??d.data?.realmId??d.data?.realm); if(Number.isFinite(r)) publishGameRealm(r,'auth-data'); }
       safeRuntimeSend({ type: 'API_DATA', url: d.url, status: d.status, data: d.data, captureRealm: d.captureRealm });
@@ -1916,38 +1920,53 @@ function scmPageTextNoLayout(){
     applyMin(card);
     schedulePosition();
   };
-  // Time until production brings Left up to 0. Each run stops adding stock at its own finish time.
-  // Output since the last collect (accruesFromMs) is in neither the warehouse nor the time still to run.
+  // When collectable output covers Left (need = -Left). Only the game's own run data counts. The two figures are
+  // disjoint: amountAvailableNow is produced but not yet collected, amount is what the run still has to produce (as of
+  // the last buildings fetch), so their sum stays the same until the player collects. Output reaches the warehouse only
+  // on collect: available output is ready now, the rest is ready to collect at the finish. A finished run not collected
+  // yet has both ready now.
   const demandEta=(left,runs,now)=>{
-    if(left>=0)return {state:'covered',spare:left};
-    const list=Array.isArray(runs)?runs:[];
-    const uncollected=list.reduce((sum,x)=>{const rate=Number(x?.ratePerHour),from=Number(x?.accruesFromMs),end=Math.min(Number(x?.finishMs),now);return rate>0&&from>0&&end>from?sum+rate*(end-from)/3600000:sum;},0);
-    if(left+uncollected>=0)return {state:'covered',spare:left+uncollected,uncollected};
-    const active=list.filter(x=>Number(x?.ratePerHour)>0&&Number(x?.finishMs)>now).sort((a,b)=>a.finishMs-b.finishMs);
-    if(!active.length)return {state:'none',uncollected};
-    const ratePerHour=active.reduce((sum,x)=>sum+Number(x.ratePerHour),0);
-    const endSpare=left+uncollected+active.reduce((sum,x)=>sum+Number(x.ratePerHour)*(x.finishMs-now)/3600000,0);
-    let short=-left-uncollected,rate=ratePerHour,t=now;
-    for(const run of active){
-      const made=rate*(run.finishMs-t)/3600000;
-      if(made>=short)return {state:'running',metAtMs:t+short/rate*3600000,ratePerHour,uncollected,endSpare};
-      short-=made;t=run.finishMs;rate-=Number(run.ratePerHour);
+    const list=Array.isArray(runs)?runs:[],pending=[];
+    let ready=0,missingData=false,active=false;
+    for(const x of list){
+      const amount=x?.amount==null?NaN:Number(x.amount),avail=Math.max(0,Number(x?.amountAvailableNow)||0),fin=Number(x?.finishMs);
+      if(!Number.isFinite(amount)||!Number.isFinite(fin)){missingData=true;continue;}
+      if(fin<=now){ready+=avail+Math.max(0,amount);continue;}
+      // Still running: what can be collected now counts now; amount (still to produce) is ready at the finish.
+      active=true;
+      if(x?.canFetch===true)ready+=avail;
+      if(amount>0)pending.push({amount,finishMs:fin});
     }
-    return {state:'late',missing:short,runEndsMs:t,ratePerHour,uncollected};
+    // A run without the game's amount (older snapshot, missing field): show no strip rather than a guess.
+    if(missingData)return {state:'nodata'};
+    if(left+ready>=0)return {state:'covered',spare:left+ready,ready};
+    pending.sort((p,q)=>p.finishMs-q.finishMs);
+    let stock=left+ready;
+    for(const run of pending){
+      stock+=run.amount;
+      if(stock>=0)return {state:'running',metAtMs:run.finishMs,runAmount:run.amount,spare:stock,ready};
+    }
+    if(pending.length)return {state:'late',missing:-stock,runEndsMs:pending[pending.length-1].finishMs,runAmount:pending.reduce((sum,x)=>sum+x.amount,0),runCount:pending.length,ready};
+    if(ready>0||active)return {state:'late',missing:-stock,runEndsMs:null,runAmount:0,runCount:0,ready,active};
+    return {state:'none',ready};
   };
   const etaDuration=ms=>{const s=Math.max(0,Math.floor(ms/1000)),h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?`${h}h ${String(m).padStart(2,'0')}m ${String(x).padStart(2,'0')}s`:`${m}m ${String(x).padStart(2,'0')}s`;};
-  const etaText=(at,done)=>{const ms=at-Date.now();return ms>0?etaDuration(ms):done;};
+  const etaText=(at,done,pre='')=>{const ms=at-Date.now();return ms>0?pre+etaDuration(ms):done;};
   const etaStrip=(r,left)=>{
     // Older saved snapshots have no run data, so show no timer rather than a false "Not producing".
     if(!Array.isArray(r.etaRuns))return '';
-    const now=Date.now(),e=demandEta(left,r.etaRuns,now),demand=Number(r.demand)||0,balanced=e.state==='late'&&Number(r.surplus)>0;
-    const pct=e.state==='covered'?100:e.state==='none'||!(demand>0)?0:Math.max(0,Math.min(100,(demand+left+(Number(e.uncollected)||0))/demand*100));
+    const now=Date.now(),e=demandEta(left,r.etaRuns,now),demand=Number(r.demand)||0;
+    if(e.state==='nodata')return '';
+    const pct=e.state==='covered'?100:e.state==='none'||!(demand>0)?0:Math.max(0,Math.min(100,(demand+left+(Number(e.ready)||0))/demand*100));
     let main,sub;
-    if(e.state==='covered'){main=e.uncollected>0?'Covered once collected':'✓ Covered';sub=e.uncollected>0?`${num(e.spare)} spare · ${num(e.uncollected)} uncollected`:`${num(e.spare)} spare`;}
+    if(e.state==='covered'){main='✓ Covered';sub=e.ready>0?`${num(e.spare)} spare · ${num(e.ready)} ready to collect`:`${num(e.spare)} spare`;}
     else if(e.state==='none'){main='Not producing';sub='Buy it or start production';}
-    else if(e.state==='late'){main=balanced?`Balanced for the full run, about ${num(e.missing)} tight right now`:`Short ${num(e.missing)} after run`;sub=`${num(e.ratePerHour)}/hr · run left: <span data-eta-at="${e.runEndsMs}" data-eta-done="none">${etaText(e.runEndsMs,'none')}</span>`;}
-    else{main=`⏱ <span data-eta-at="${e.metAtMs}" data-eta-done="due, awaiting stock update">${etaText(e.metAtMs,'due, awaiting stock update')}</span>`;sub=`${num(e.ratePerHour)}/hr · met ${esc(new Date(e.metAtMs).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'}))} · ${num(e.endSpare)} spare at run end`;}
-    return `<span class="scm-go-eta scm-go-eta-${e.state}${balanced?' scm-go-eta-none':''}" data-eta-row="${esc(`${r.id}:${Number(r.quality)||0}`)}"><span class="scm-go-eta-top"><span class="scm-go-eta-main">${main}</span><span class="scm-go-eta-sub">${sub}</span></span><span class="scm-go-eta-bar"><i style="width:${pct.toFixed(1)}%"></i></span></span>`;
+    else if(e.state==='late'){
+      main=`Short ${num(e.missing)} after run`;
+      sub=e.runEndsMs?`${e.runCount>1?'Runs make':'Run makes'} ${num(e.runAmount)} · <span data-eta-at="${e.runEndsMs}" data-eta-pre="ready to collect in " data-eta-done="ready to collect">${etaText(e.runEndsMs,'ready to collect','ready to collect in ')}</span>`:e.active?`${num(e.ready)} ready to collect · run finishing`:`${num(e.ready)} ready to collect · not producing`;
+    }
+    else{main=`⏱ <span data-eta-at="${e.metAtMs}" data-eta-done="ready to collect">${etaText(e.metAtMs,'ready to collect')}</span>`;sub=e.ready>0?`${num(e.ready)} ready now · Run makes ${num(e.runAmount)} · ${num(e.spare)} spare after run`:`Ready to collect · Run makes ${num(e.runAmount)} · ${num(e.spare)} spare after run`;}
+    return `<span class="scm-go-eta scm-go-eta-${e.state}" data-eta-row="${esc(`${r.id}:${Number(r.quality)||0}`)}"><span class="scm-go-eta-top"><span class="scm-go-eta-main">${main}</span><span class="scm-go-eta-sub">${sub}</span></span><span class="scm-go-eta-bar"><i style="width:${pct.toFixed(1)}%"></i></span></span>`;
   };
   const tickEta=()=>{
     if(document.hidden)return;
@@ -1961,7 +1980,7 @@ function scmPageTextNoLayout(){
         if(t.content.firstElementChild)el.replaceWith(t.content.firstElementChild);
       });
     }
-    document.querySelectorAll('#scm-game-balance-card [data-eta-at]').forEach(el=>{el.textContent=etaText(Number(el.getAttribute('data-eta-at')),el.getAttribute('data-eta-done'));});
+    document.querySelectorAll('#scm-game-balance-card [data-eta-at]').forEach(el=>{el.textContent=etaText(Number(el.getAttribute('data-eta-at')),el.getAttribute('data-eta-done'),el.getAttribute('data-eta-pre')||'');});
   };
   const refreshGameOverlay=()=>{
     if(S.refreshBusy||(S.realm!==0&&S.realm!==1))return;

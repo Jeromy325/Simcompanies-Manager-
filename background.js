@@ -2139,31 +2139,6 @@ async function ensureFrozenProductionRatesForRealm(realm){
   return promise;
 }
 
-// Last seen collect per building, one key per realm, so it survives service worker restarts. The buildings data has
-// no known collected amount or last-collect field. Absent stamp: the countdown assumes output accrues from run start.
-const buildingCollectsKey=realm=>`scmBuildingCollects:${realm}`;
-let buildingCollectWrites=Promise.resolve();
-const queueBuildingCollects=job=>{const run=buildingCollectWrites.then(job);buildingCollectWrites=run.catch(()=>{});return run;};
-const collectBuildingIdFromUrl=url=>{const m=String(url||'').match(/\/buildings\/(\d+)\/collect\/?(?:[?#]|$)/);return m?Number(m[1]):null;};
-function recordBuildingCollect(realm,buildingId,atMs){
-  const key=buildingCollectsKey(realm);
-  return queueBuildingCollects(async()=>{const cur=(await chrome.storage.local.get({[key]:{}}))[key]||{};await chrome.storage.local.set({[key]:{...cur,[buildingId]:atMs}});});
-}
-// A stamp ends with its run: drop it once the building is gone or idle, or a later run started. A stale building row that
-// still shows the collected run keeps its stamp, so that run is not credited again.
-function liveBuildingCollects(realm,buildings){
-  const key=buildingCollectsKey(realm);
-  return queueBuildingCollects(async()=>{
-    const cur=(await chrome.storage.local.get({[key]:{}}))[key]||{},next={};
-    if(!buildings.length)return cur;
-    for(const [id,at] of Object.entries(cur)){
-      const b=buildings.find(x=>String(x?.id)===id),started=Date.parse(String(b?.busy?.started||''));
-      if(Number.isFinite(started)&&started<=Number(at))next[id]=at;
-    }
-    if(Object.keys(next).length!==Object.keys(cur).length)await chrome.storage.local.set({[key]:next});
-    return next;
-  }).catch(()=>({}));
-}
 async function buildGameOverlayData(store,realm,globalState){
   // The production page can have a valid building payload while the realm
   // mirror has not yet materialized `buildings`. Bootstrap the realm-local
@@ -2299,16 +2274,21 @@ async function buildGameOverlayData(store,realm,globalState){
   // company makes Q2) is folded into the nearest lower produced quality row, so
   // that row's Warehouse counts all usable stock and Demand stays the full plan.
   detailRows=foldHigherQualityStock(detailRows,producedResourceQualities,savedContractKeys);
-  // Countdown input: only buildings running this product right now, from this realm's own plan and buildings.
-  const etaRunsByKey=new Map();
-  const buildingCollects=await liveBuildingCollects(realm,Array.isArray(buildings)?buildings:[]);
+  // Countdown input: only plan buildings running this product right now, from this realm's own plan and buildings.
+  // The game run data says what reaches the warehouse: busy.resource.amount is the total output of this run, and
+  // amountAvailableNow/canFetch what can be collected now. Output is collected by the player, never credited from
+  // the planner rate or from a collect time.
+  const etaRunsByKey=new Map(),etaBuildings=new Set();
   for(const spec of activeSpecs||[]){
-    const b=buildings.find(x=>Number(x?.id)===Number(spec?.buildingId));
-    const started=Date.parse(String(b?.busy?.started||'')),duration=Number(b?.busy?.duration),rate=Number(spec?.ratePerHour);
-    if(Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId)!==Number(spec?.productId)||!Number.isFinite(started)||!(duration>0)||!(rate>0))continue;
-    const runKey=`${Number(spec.productId)}:${Math.max(0,Number(spec.quality)||0)}`;
+    const b=(Array.isArray(buildings)?buildings:[]).find(x=>Number(x?.id)===Number(spec?.buildingId)),res=b?.busy?.resource;
+    // A run without a usable amount is still passed on (amount null), so the strip shows nothing instead of "Not producing".
+    const started=Date.parse(String(b?.busy?.started||'')),duration=Number(b?.busy?.duration),rawAmount=res?.amount==null?NaN:Number(res.amount),amount=Number.isFinite(rawAmount)&&rawAmount>=0?rawAmount:null;
+    if(!b||etaBuildings.has(String(b.id))||Number(res?.kind??res?.resourceId)!==Number(spec?.productId)||!Number.isFinite(started)||!(duration>0))continue;
+    etaBuildings.add(String(b.id));
+    const busyQuality=res?.quality==null?NaN:Number(res.quality),runQuality=Number.isFinite(busyQuality)?Math.max(0,busyQuality):Math.max(0,Number(spec.quality)||0);
+    const runKey=`${Number(spec.productId)}:${runQuality}`,availableNow=Number(res?.amountAvailableNow);
     if(!etaRunsByKey.has(runKey))etaRunsByKey.set(runKey,[]);
-    etaRunsByKey.get(runKey).push({ratePerHour:rate,finishMs:started+duration*1000,accruesFromMs:Math.max(started,Number(buildingCollects[String(b.id)])||0)});
+    etaRunsByKey.get(runKey).push({amount,amountAvailableNow:Number.isFinite(availableNow)&&availableNow>0?availableNow:0,canFetch:b.busy.canFetch===true,finishMs:started+duration*1000,ratePerHour:Number(spec?.ratePerHour)||0});
   }
   // Market price per row comes from the shared reader at the row's exact quality. No request, no other quality.
   const marketOwn=await marketOwnOpts(store,realm);
@@ -2476,6 +2456,57 @@ function realmStoredBuildings(store, globalState, realm){
   const rootRealm=validRealmNumber(globalState?.activeRealmKey!=null?String(globalState.activeRealmKey).replace('realm:',''):globalState?.selectedRealm);
   if(rootRealm===Number(realm)&&Array.isArray(globalState?.buildings)&&globalState.buildings.length)return globalState.buildings;
   return [];
+}
+// The game collects a building with POST /api/v2/order/take/<buildingId>/. After it, the stored busy snapshot can lag
+// (the warehouse refreshes, building data may not), so its amountAvailableNow would be counted twice. Clear it in the
+// stored copies; the next real buildings capture replaces them.
+// Display only: a script in the game page can post any bridge message, so a forged collect cannot be ruled out. It
+// needs the page realm tag, a BUILDING_COLLECT_SEEN (collect-shaped reply) and a building that is collectable now, and it changes only
+// this countdown figure until the next buildings capture corrects it.
+const collectTakeBuildingIdFromUrl=url=>{const m=String(url||'').match(/^(?:https?:\/\/[^/]+)?\/api\/v2\/order\/take\/(\d+)\/?(?:[?#]|$)/);return m?Number(m[1]):null;};
+// Collectable now, as the game decides it: canFetch, output available, or the run is over.
+function buildingCollectableNow(b,now){
+  const busy=b?.busy;if(!busy||typeof busy!=='object')return false;
+  const end=Date.parse(String(busy.started||''))+Number(busy.duration)*1000;
+  return busy.canFetch===true||Number(busy.resource?.amountAvailableNow)>0||(Number.isFinite(end)&&end<=now);
+}
+function clearCollectedBuildingRows(rows,buildingId,now=Date.now()){
+  if(!Array.isArray(rows))return null;
+  const i=rows.findIndex(b=>Number(b?.id)===Number(buildingId)&&b?.busy&&typeof b.busy==='object');
+  if(i<0||!buildingCollectableNow(rows[i],now))return null;
+  const b=rows[i],res=b.busy.resource&&typeof b.busy.resource==='object'?{...b.busy.resource,amountAvailableNow:0}:b.busy.resource;
+  const next=rows.slice();next[i]={...b,busy:{...b.busy,canFetch:false,resource:res}};
+  return next;
+}
+function clearCollectedBuildingInStore(store,buildingId,now=Date.now()){
+  if(!store||typeof store!=='object')return null;
+  let next=null;
+  const rows=clearCollectedBuildingRows(store.buildings,buildingId,now);
+  if(rows)next={...store,buildings:rows};
+  const endpointData=store.endpointData&&typeof store.endpointData==='object'?store.endpointData:null;
+  if(endpointData){
+    let ep=null;
+    for(const [url,entry] of Object.entries(endpointData)){
+      if(!/\/api\/v2\/companies\/(?:me|\d+)\/buildings\/?$/i.test(String(url||''))||!entry||typeof entry!=='object')continue;
+      const data=entry.data,listKey=Array.isArray(data)?null:['buildings','data','items','results'].find(k=>Array.isArray(data?.[k]));
+      const cleared=clearCollectedBuildingRows(listKey?data[listKey]:data,buildingId,now);
+      if(!cleared)continue;
+      ep=ep||{...endpointData};ep[url]={...entry,data:listKey?{...data,[listKey]:cleared}:cleared};
+    }
+    if(ep)next={...(next||store),endpointData:ep};
+  }
+  return next;
+}
+function markBuildingCollected(realm,buildingId){
+  const n=validRealmNumber(realm),key=realmKeyFromRealm(n);
+  if(n==null||!key||!(Number(buildingId)>0))return Promise.resolve(false);
+  return withRealmWriteLock(n,async()=>{
+    const fresh=await state(n),existing=fresh.realmStores?.[key];
+    const next=clearCollectedBuildingInStore(existing,buildingId);
+    if(!next)return false;
+    await storageSet({realmStores:{...(fresh.realmStores||{}),[key]:next}});
+    return true;
+  });
 }
 
 function sanitizeRealmStore(store, realm){
@@ -5122,6 +5153,10 @@ async function restorePersistedAlarms(reason='restore'){
   }
   return out;
 }
+// The collect-stamp countdown (2.5.426) is gone; drop its per-realm stamps. Writes only when a stamp key is present.
+async function dropBuildingCollectStamps(){
+  try{const keys=['scmBuildingCollects:0','scmBuildingCollects:1'],cur=await chrome.storage.local.get(keys),present=keys.filter(k=>Object.prototype.hasOwnProperty.call(cur,k));if(present.length)await chrome.storage.local.remove(present);}catch{}
+}
 chrome.runtime.onInstalled.addListener(async()=>{
   const current=await chrome.storage.local.get(null);
   // Preserve existing physical realm containers and global settings, but do
@@ -5135,6 +5170,7 @@ chrome.runtime.onInstalled.addListener(async()=>{
   globalPatch.activeRealmKey=current.activeRealmKey??null;
   await storageSet(globalPatch);
   await ensureRealmStorageMigration();
+  await dropBuildingCollectStamps();
   // v2.5.345 an update used to clear every alarm, dropping the building reminders you set, batch-finished
   // alerts, follow-ups, the daily summary and the constants refresh. Only the scheduler alarms re-created below
   // (and retired legacy ones) are cleared now.
@@ -5158,6 +5194,8 @@ chrome.runtime.onInstalled.addListener(async()=>{
   if(installRealm!=null) scheduleMarketCycle(installRealm,'install-complete').catch(()=>{});
 });
 chrome.runtime.onStartup.addListener(async()=>{
+  // First, so a later startup step that throws cannot skip it.
+  try{await dropBuildingCollectStamps();}catch{}
   await ensureLiveMarketRefreshAlarm('service-worker-startup');
   await ensureOrderBookRefreshAlarm();
   await ensureStandingAlarms().catch(()=>{});
@@ -7945,9 +7983,14 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     // refresh R1 while the player was in R2 — rejected as "not the active realm", so nothing updated.)
     (async()=>{let realm=(m.captureRealm===null||m.captureRealm===undefined||m.captureRealm==='')?null:validRealmNumber(m.captureRealm);
       if(realm==null){try{const meta=await chrome.storage.local.get({activeRealmKey:null});realm=validRealmNumber(realmNumberFromKey(meta.activeRealmKey)??meta.activeRealmKey);}catch{}}
-      const collectedBuilding=collectBuildingIdFromUrl(m.url);
-      if(realm!=null&&collectedBuilding!=null){try{await recordBuildingCollect(realm,collectedBuilding,Date.now());}catch{}}
       if(realm!=null){scheduleWarehouseRefreshAfterStockMutation(realm,150);scheduleOwnOrdersRefresh(realm);}})();
+    send({ok:true});return true}
+  if(m?.type==='BUILDING_COLLECT_SEEN'){
+    // A collect-shaped reply to POST /api/v2/order/take/<id>/, only on a realm the page tagged: the stored building
+    // would otherwise count its collected output again. Repaint the overlay after the clear (it can land after the
+    // warehouse refresh that STOCK_MUTATION_COMPLETE started).
+    const realm=(m.captureRealm===0||m.captureRealm===1)?m.captureRealm:null,id=collectTakeBuildingIdFromUrl(m.url);
+    if(realm!=null&&id!=null&&id===Number(m.buildingId))markBuildingCollected(realm,id).then(changed=>{if(changed)scheduleGameOverlayRefreshNotification(realm,150);}).catch(()=>{});
     send({ok:true});return true}
   if(m?.type==='GET_ENDPOINT_KEYS'){state().then(s=>send({ok:true,keys:Object.keys(s.endpointData||{})})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='WAREHOUSE_COST_DETAIL'){saveWarehouseCostDetail(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
