@@ -1957,7 +1957,8 @@ function scmPageTextNoLayout(){
     if(!Array.isArray(r.etaRuns))return '';
     const now=Date.now(),e=demandEta(left,r.etaRuns,now),demand=Number(r.demand)||0;
     if(e.state==='nodata')return '';
-    const pct=e.state==='covered'?100:e.state==='none'||!(demand>0)?0:Math.max(0,Math.min(100,(demand+left+(Number(e.ready)||0))/demand*100));
+    const need=demand+(Number(r.contracted)||0),held=(Number(r.warehouse)||0)+(Number(e.ready)||0);
+    const pct=e.state==='covered'?100:e.state==='none'||!(need>0)?0:Math.max(0,Math.min(100,held/need*100));
     let main,sub;
     if(e.state==='covered'){main='✓ Covered';sub=e.ready>0?`${num(e.spare)} spare · ${num(e.ready)} ready to collect`:`${num(e.spare)} spare`;}
     else if(e.state==='none'){main='Not producing';sub='Buy it or start production';}
