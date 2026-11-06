@@ -1916,22 +1916,23 @@ function scmPageTextNoLayout(){
     applyMin(card);
     schedulePosition();
   };
-  // When collectable output covers Left (need = -Left). Only the game's own run data counts. The two figures are
-  // disjoint: amountAvailableNow is produced but not yet collected, amount is what the run still has to produce (as of
-  // the last buildings fetch), so their sum stays the same until the player collects. Output reaches the warehouse only
-  // on collect: available output is ready now, the rest is ready to collect at the finish. A finished run not collected
-  // yet has both ready now.
+  // When collectable output covers Left (need = -Left). Only the game's own run data counts. amount is all output
+  // outstanding since the last collect and includes the collectable part: amountAvailableNow is a part of amount, not
+  // extra (engines: amount 736, available 15; (736-15)/hours to finish = 48.7/hr, the real rate). Output reaches the
+  // warehouse only on collect: the available part is ready now, the rest of amount is ready to collect at the finish.
+  // A finished run not collected yet has all of it ready now.
   const demandEta=(left,runs,now)=>{
     const list=Array.isArray(runs)?runs:[],pending=[];
     let ready=0,missingData=false,active=false;
     for(const x of list){
       const amount=x?.amount==null?NaN:Number(x.amount),avail=Math.max(0,Number(x?.amountAvailableNow)||0),fin=Number(x?.finishMs);
       if(!Number.isFinite(amount)||!Number.isFinite(fin)){missingData=true;continue;}
-      if(fin<=now){ready+=avail+Math.max(0,amount);continue;}
-      // Still running: what can be collected now counts now; amount (still to produce) is ready at the finish.
+      if(fin<=now){ready+=Math.max(amount,avail);continue;}
+      // Still running: the collectable part counts now; the rest of amount is ready at the finish.
       active=true;
-      if(x?.canFetch===true)ready+=avail;
-      if(amount>0)pending.push({amount,finishMs:fin});
+      const now0=x?.canFetch===true?Math.min(avail,Math.max(0,amount)):0,rest=Math.max(0,amount-now0);
+      ready+=now0;
+      if(rest>0)pending.push({amount:rest,finishMs:fin});
     }
     // A run without the game's amount (older snapshot, missing field): show no strip rather than a guess.
     if(missingData)return {state:'nodata'};
