@@ -2139,6 +2139,31 @@ async function ensureFrozenProductionRatesForRealm(realm){
   return promise;
 }
 
+// Last seen collect per building, one key per realm, so it survives service worker restarts. The buildings data has
+// no known collected amount or last-collect field. Absent stamp: the countdown assumes output accrues from run start.
+const buildingCollectsKey=realm=>`scmBuildingCollects:${realm}`;
+let buildingCollectWrites=Promise.resolve();
+const queueBuildingCollects=job=>{const run=buildingCollectWrites.then(job);buildingCollectWrites=run.catch(()=>{});return run;};
+const collectBuildingIdFromUrl=url=>{const m=String(url||'').match(/\/buildings\/(\d+)\/collect\/?(?:[?#]|$)/);return m?Number(m[1]):null;};
+function recordBuildingCollect(realm,buildingId,atMs){
+  const key=buildingCollectsKey(realm);
+  return queueBuildingCollects(async()=>{const cur=(await chrome.storage.local.get({[key]:{}}))[key]||{};await chrome.storage.local.set({[key]:{...cur,[buildingId]:atMs}});});
+}
+// A stamp ends with its run: drop it once the building is gone or idle, or a later run started. A stale building row that
+// still shows the collected run keeps its stamp, so that run is not credited again.
+function liveBuildingCollects(realm,buildings){
+  const key=buildingCollectsKey(realm);
+  return queueBuildingCollects(async()=>{
+    const cur=(await chrome.storage.local.get({[key]:{}}))[key]||{},next={};
+    if(!buildings.length)return cur;
+    for(const [id,at] of Object.entries(cur)){
+      const b=buildings.find(x=>String(x?.id)===id),started=Date.parse(String(b?.busy?.started||''));
+      if(Number.isFinite(started)&&started<=Number(at))next[id]=at;
+    }
+    if(Object.keys(next).length!==Object.keys(cur).length)await chrome.storage.local.set({[key]:next});
+    return next;
+  }).catch(()=>({}));
+}
 async function buildGameOverlayData(store,realm,globalState){
   // The production page can have a valid building payload while the realm
   // mirror has not yet materialized `buildings`. Bootstrap the realm-local
@@ -2276,13 +2301,14 @@ async function buildGameOverlayData(store,realm,globalState){
   detailRows=foldHigherQualityStock(detailRows,producedResourceQualities,savedContractKeys);
   // Countdown input: only buildings running this product right now, from this realm's own plan and buildings.
   const etaRunsByKey=new Map();
+  const buildingCollects=await liveBuildingCollects(realm,Array.isArray(buildings)?buildings:[]);
   for(const spec of activeSpecs||[]){
     const b=buildings.find(x=>Number(x?.id)===Number(spec?.buildingId));
     const started=Date.parse(String(b?.busy?.started||'')),duration=Number(b?.busy?.duration),rate=Number(spec?.ratePerHour);
     if(Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId)!==Number(spec?.productId)||!Number.isFinite(started)||!(duration>0)||!(rate>0))continue;
     const runKey=`${Number(spec.productId)}:${Math.max(0,Number(spec.quality)||0)}`;
     if(!etaRunsByKey.has(runKey))etaRunsByKey.set(runKey,[]);
-    etaRunsByKey.get(runKey).push({ratePerHour:rate,finishMs:started+duration*1000});
+    etaRunsByKey.get(runKey).push({ratePerHour:rate,finishMs:started+duration*1000,accruesFromMs:Math.max(started,Number(buildingCollects[String(b.id)])||0)});
   }
   // Market price per row comes from the shared reader at the row's exact quality. No request, no other quality.
   const marketOwn=await marketOwnOpts(store,realm);
@@ -7919,6 +7945,8 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     // refresh R1 while the player was in R2 — rejected as "not the active realm", so nothing updated.)
     (async()=>{let realm=(m.captureRealm===null||m.captureRealm===undefined||m.captureRealm==='')?null:validRealmNumber(m.captureRealm);
       if(realm==null){try{const meta=await chrome.storage.local.get({activeRealmKey:null});realm=validRealmNumber(realmNumberFromKey(meta.activeRealmKey)??meta.activeRealmKey);}catch{}}
+      const collectedBuilding=collectBuildingIdFromUrl(m.url);
+      if(realm!=null&&collectedBuilding!=null){try{await recordBuildingCollect(realm,collectedBuilding,Date.now());}catch{}}
       if(realm!=null){scheduleWarehouseRefreshAfterStockMutation(realm,150);scheduleOwnOrdersRefresh(realm);}})();
     send({ok:true});return true}
   if(m?.type==='GET_ENDPOINT_KEYS'){state().then(s=>send({ok:true,keys:Object.keys(s.endpointData||{})})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}

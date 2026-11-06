@@ -1917,35 +1917,50 @@ function scmPageTextNoLayout(){
     schedulePosition();
   };
   // Time until production brings Left up to 0. Each run stops adding stock at its own finish time.
+  // Output since the last collect (accruesFromMs) is in neither the warehouse nor the time still to run.
   const demandEta=(left,runs,now)=>{
     if(left>=0)return {state:'covered',spare:left};
-    const active=(Array.isArray(runs)?runs:[]).filter(x=>Number(x?.ratePerHour)>0&&Number(x?.finishMs)>now).sort((a,b)=>a.finishMs-b.finishMs);
-    if(!active.length)return {state:'none'};
+    const list=Array.isArray(runs)?runs:[];
+    const uncollected=list.reduce((sum,x)=>{const rate=Number(x?.ratePerHour),from=Number(x?.accruesFromMs),end=Math.min(Number(x?.finishMs),now);return rate>0&&from>0&&end>from?sum+rate*(end-from)/3600000:sum;},0);
+    if(left+uncollected>=0)return {state:'covered',spare:left+uncollected,uncollected};
+    const active=list.filter(x=>Number(x?.ratePerHour)>0&&Number(x?.finishMs)>now).sort((a,b)=>a.finishMs-b.finishMs);
+    if(!active.length)return {state:'none',uncollected};
     const ratePerHour=active.reduce((sum,x)=>sum+Number(x.ratePerHour),0);
-    let short=-left,rate=ratePerHour,t=now;
+    const endSpare=left+uncollected+active.reduce((sum,x)=>sum+Number(x.ratePerHour)*(x.finishMs-now)/3600000,0);
+    let short=-left-uncollected,rate=ratePerHour,t=now;
     for(const run of active){
       const made=rate*(run.finishMs-t)/3600000;
-      if(made>=short)return {state:'running',metAtMs:t+short/rate*3600000,ratePerHour};
+      if(made>=short)return {state:'running',metAtMs:t+short/rate*3600000,ratePerHour,uncollected,endSpare};
       short-=made;t=run.finishMs;rate-=Number(run.ratePerHour);
     }
-    return {state:'late',missing:short,runEndsMs:t,ratePerHour};
+    return {state:'late',missing:short,runEndsMs:t,ratePerHour,uncollected};
   };
   const etaDuration=ms=>{const s=Math.max(0,Math.floor(ms/1000)),h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?`${h}h ${String(m).padStart(2,'0')}m ${String(x).padStart(2,'0')}s`:`${m}m ${String(x).padStart(2,'0')}s`;};
   const etaText=(at,done)=>{const ms=at-Date.now();return ms>0?etaDuration(ms):done;};
   const etaStrip=(r,left)=>{
     // Older saved snapshots have no run data, so show no timer rather than a false "Not producing".
     if(!Array.isArray(r.etaRuns))return '';
-    const now=S.etaAnchor||Date.now(),e=demandEta(left,r.etaRuns,now),demand=Number(r.demand)||0;
-    const pct=e.state==='covered'?100:e.state==='none'||!(demand>0)?0:Math.max(0,Math.min(100,(demand+left)/demand*100));
+    const now=Date.now(),e=demandEta(left,r.etaRuns,now),demand=Number(r.demand)||0,balanced=e.state==='late'&&Number(r.surplus)>0;
+    const pct=e.state==='covered'?100:e.state==='none'||!(demand>0)?0:Math.max(0,Math.min(100,(demand+left+(Number(e.uncollected)||0))/demand*100));
     let main,sub;
-    if(e.state==='covered'){main='✓ Covered';sub=`${num(e.spare)} spare`;}
+    if(e.state==='covered'){main=e.uncollected>0?'Covered once collected':'✓ Covered';sub=e.uncollected>0?`${num(e.spare)} spare · ${num(e.uncollected)} uncollected`:`${num(e.spare)} spare`;}
     else if(e.state==='none'){main='Not producing';sub='Buy it or start production';}
-    else if(e.state==='late'){main=`Short ${num(e.missing)} after run`;sub=`${num(e.ratePerHour)}/hr · run left: <span data-eta-at="${e.runEndsMs}" data-eta-done="none">${etaText(e.runEndsMs,'none')}</span>`;}
-    else{main=`⏱ <span data-eta-at="${e.metAtMs}" data-eta-done="due, awaiting stock update">${etaText(e.metAtMs,'due, awaiting stock update')}</span>`;sub=`${num(e.ratePerHour)}/hr · met ${esc(new Date(e.metAtMs).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'}))}`;}
-    return `<span class="scm-go-eta scm-go-eta-${e.state}"><span class="scm-go-eta-top"><span class="scm-go-eta-main">${main}</span><span class="scm-go-eta-sub">${sub}</span></span><span class="scm-go-eta-bar"><i style="width:${pct.toFixed(1)}%"></i></span></span>`;
+    else if(e.state==='late'){main=balanced?`Balanced for the full run, about ${num(e.missing)} tight right now`:`Short ${num(e.missing)} after run`;sub=`${num(e.ratePerHour)}/hr · run left: <span data-eta-at="${e.runEndsMs}" data-eta-done="none">${etaText(e.runEndsMs,'none')}</span>`;}
+    else{main=`⏱ <span data-eta-at="${e.metAtMs}" data-eta-done="due, awaiting stock update">${etaText(e.metAtMs,'due, awaiting stock update')}</span>`;sub=`${num(e.ratePerHour)}/hr · met ${esc(new Date(e.metAtMs).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'}))} · ${num(e.endSpare)} spare at run end`;}
+    return `<span class="scm-go-eta scm-go-eta-${e.state}${balanced?' scm-go-eta-none':''}" data-eta-row="${esc(`${r.id}:${Number(r.quality)||0}`)}"><span class="scm-go-eta-top"><span class="scm-go-eta-main">${main}</span><span class="scm-go-eta-sub">${sub}</span></span><span class="scm-go-eta-bar"><i style="width:${pct.toFixed(1)}%"></i></span></span>`;
   };
   const tickEta=()=>{
     if(document.hidden)return;
+    // About once a minute, swap only the timer strips in place (card, scroll and Copy Left stay untouched).
+    if(Date.now()-(S.etaStripAt||0)>=60000){
+      S.etaStripAt=Date.now();
+      const rows=Array.isArray(S.data?.rows)?S.data.rows:[];
+      document.querySelectorAll('#scm-game-balance-card [data-eta-row]').forEach(el=>{
+        const r=rows.find(x=>`${x.id}:${Number(x.quality)||0}`===el.getAttribute('data-eta-row'));if(!r)return;
+        const t=document.createElement('template');t.innerHTML=etaStrip(r,Number(r.remaining??r.difference)||0);
+        if(t.content.firstElementChild)el.replaceWith(t.content.firstElementChild);
+      });
+    }
     document.querySelectorAll('#scm-game-balance-card [data-eta-at]').forEach(el=>{el.textContent=etaText(Number(el.getAttribute('data-eta-at')),el.getAttribute('data-eta-done'));});
   };
   const refreshGameOverlay=()=>{
@@ -2430,8 +2445,6 @@ function scmPageTextNoLayout(){
         })).sort((a,b)=>a.id-b.id||a.quality-b.quality)
       });
       S.realm=r.realm;S.data=r;
-      const stockSignature=JSON.stringify((Array.isArray(r.rows)?r.rows:[]).map(row=>[row?.id,row?.quality,row?.warehouse,row?.demand,row?.contracted]));
-      if(stockSignature!==S.stockSignature){S.stockSignature=stockSignature;S.etaAnchor=Date.now();}
       if(signature!==S.signature||!document.getElementById('scm-game-balance-card')){S.signature=signature;renderBalance();}
       if(likelyContractPage())await loadContractHelper();schedulePosition();scheduleSellHelper();
     }catch{
