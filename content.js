@@ -889,7 +889,7 @@ let hookReady = false;
       return false;
     }
     if (message?.type === 'BRIDGE_STATUS') {
-      sendResponse({ok:true, ready:!!hookReady});
+      sendResponse({ok:true, ready:!!hookReady, realm:directKnownRealm===0||directKnownRealm===1?directKnownRealm:null});
       return false;
     }
     if (message?.type === 'CLICK_SYNC_TARGET') {
@@ -1948,6 +1948,25 @@ function scmPageTextNoLayout(){
     if(document.hidden)return;
     document.querySelectorAll('#scm-game-balance-card [data-eta-at]').forEach(el=>{el.textContent=etaText(Number(el.getAttribute('data-eta-at')),el.getAttribute('data-eta-done'));});
   };
+  const refreshGameOverlay=()=>{
+    if(S.refreshBusy||(S.realm!==0&&S.realm!==1))return;
+    S.refreshBusy=true;S.refreshError='';
+    let done=false;
+    const finish=(err)=>{
+      if(done)return;done=true;clearTimeout(S.refreshTimeout);S.refreshBusy=false;S.refreshError=err||'';
+      try{load();}catch{}
+      renderBalance();
+    };
+    S.refreshTimeout=setTimeout(()=>finish('Refresh timed out'),60000);
+    renderBalance();
+    try{
+      chrome.runtime.sendMessage({type:'REFRESH_GAME_OVERLAY_NOW',realm:S.realm},res=>{
+        const le=chrome.runtime.lastError;
+        if(le)return finish(le.message||'Refresh failed');
+        finish(res&&res.ok===false?(res.error||'Refresh failed'):'');
+      });
+    }catch(e){finish(String(e&&e.message||e||'Refresh failed'));}
+  };
   const renderBalance=()=>{
     if(!S.etaTimer)S.etaTimer=setInterval(tickEta,1000);
     const host=ensureCard('scm-game-balance-card','');style();
@@ -1956,9 +1975,11 @@ function scmPageTextNoLayout(){
     const rows=Array.isArray(S.data?.rows)?S.data.rows:[];
     const title=`${S.realm!=null?`R${S.realm+1}`:'Game'} · Stock After Demand & Contracts`;
     const items=rows.map(r=>{const remaining=Number(r.remaining??r.difference)||0;const cls=remaining>0?'positive':remaining<0?'negative':'balanced';const sub=Array.isArray(r.substituteQualities)&&r.substituteQualities.length?` scm-go-sub ${remaining<0?'scm-go-sub-neg':'scm-go-sub-pos'}`:'';return `<div class="scm-go-row${sub}"${sub?` title="Includes Q${r.substituteQualities.join(', Q')} stock"`:''}><span>${r.image?`<img src="${esc(r.image)}" alt="">`:''}</span><span class="scm-go-name">${esc(r.name)}${Number.isFinite(Number(r.quality))?` Q${Number(r.quality)}`:''}</span><span class="scm-go-stock">Warehouse ${num(r.warehouse)}${sub&&Array.isArray(r.warehouseByQuality)?`<span class="scm-go-split">${r.warehouseByQuality.map(x=>`${num(x.amount)} Q${x.quality}`).join(' + ')}</span>`:''}</span><span class="scm-go-contract">Demand ${num(r.demand)}</span><span class="scm-go-contract">Contracts (net) ${num(r.contracted)}</span><span class="scm-go-remaining ${cls}">Left ${num(remaining)}</span>${etaStrip(r,remaining)}</div>`;}).join('');
-    host.innerHTML=`<div class="scm-go-head"><span class="scm-go-title">${esc(title)}</span><span class="scm-go-head-actions"><button type="button" class="scm-go-toggle scm-go-copy" aria-label="Copy left resources">COPY LEFT</button><button type="button" class="scm-go-toggle" aria-label="Collapse production balance">‹</button></span></div>${items?`<div class="scm-go-grid">${items}</div>`:`<div class="scm-ch-none">${S.realm==null?'Checking which realm this game tab is in…':'Waiting for production data.'}</div>`}`;
+    host.innerHTML=`<div class="scm-go-head"><span class="scm-go-title">${esc(title)}</span><span class="scm-go-head-actions"><button type="button" class="scm-go-toggle scm-go-copy" aria-label="Copy left resources">COPY LEFT</button><button type="button" class="scm-go-toggle scm-go-refresh" aria-label="Refresh stock after demand">↻</button><button type="button" class="scm-go-toggle" aria-label="Collapse production balance">‹</button></span></div>${items?`<div class="scm-go-grid">${items}</div>`:`<div class="scm-ch-none">${S.realm==null?'Checking which realm this game tab is in…':'Waiting for production data.'}</div>`}`;
     host.querySelector('.scm-go-copy').onclick=openLeftCopy;
-    host.querySelectorAll('.scm-go-toggle:not(.scm-go-copy)').forEach(btn=>btn.onclick=()=>{S.collapsed=true;writeCollapsedPreference(true);renderBalance();schedulePosition();});
+    const rbtn=host.querySelector('.scm-go-refresh');
+    if(rbtn){rbtn.onclick=refreshGameOverlay;rbtn.disabled=!!S.refreshBusy;if(S.refreshError)rbtn.title=S.refreshError;}
+    host.querySelectorAll('.scm-go-toggle:not(.scm-go-copy):not(.scm-go-refresh)').forEach(btn=>btn.onclick=()=>{S.collapsed=true;writeCollapsedPreference(true);renderBalance();schedulePosition();});
     if(S.leftCopyOpen){
       const sig=JSON.stringify({discount:S.leftCopyDiscount,rows:leftRows().map(r=>[r.id,r.remaining??r.difference,r.vwap,r.quality])});
       if(sig!==S.leftCopySignature){openLeftCopy();}

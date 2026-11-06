@@ -3926,6 +3926,76 @@ function hasUsableMarketRows(data){
   return walk(data);
 }
 
+// Capped background order-book refresh: one alarm a minute, at most one order book per firing across all realms.
+// Only the tab pageGet would use is asked, because a request for the other realm would be refused there anyway.
+// The worker usually dies between firings, so the back-off and last attempts live in a small key, written only when
+// a request is made. A product with an empty book never gets a new receivedAt; its attempt time stops it blocking others.
+const ORDER_BOOK_REFRESH_ALARM='scm-order-book-refresh';
+const ORDER_BOOK_REFRESH_STATE_KEY='scmOrderBookRefresh';
+const ORDER_BOOK_REFRESH_FAILURE_BACKOFF_MS=5.5*60000; // skips the next 5 firings
+const ORDER_BOOK_REFRESH_429_BACKOFF_MS=15.5*60000; // skips the next 15 firings; the page bridge does not expose Retry-After
+const ORDER_BOOK_REFRESH_ATTEMPT_KEEP_MS=24*3600e3;
+let orderBookRefreshRunning=false;
+async function ensureOrderBookRefreshAlarm(){
+  try{if(!(await chrome.alarms.get(ORDER_BOOK_REFRESH_ALARM)))await chrome.alarms.create(ORDER_BOOK_REFRESH_ALARM,{delayInMinutes:1,periodInMinutes:1});}catch{}
+}
+function orderBookRefreshResourceIds(store,realm){
+  const ids=new Set();
+  const add=v=>{const id=Number(v);if(Number.isInteger(id)&&id>0)ids.add(id);};
+  for(const row of Array.isArray(store?.warehouseResources)?store.warehouseResources:[])add(row?.kind??row?.resourceId??row?.id);
+  const plan=store?.frozenNetworkPlan;
+  if(plan&&Number(plan.realm)===Number(realm))for(const row of [...(Array.isArray(plan.productionRows)?plan.productionRows:[]),...(Array.isArray(plan.demandRows)?plan.demandRows:[])])add(row?.id);
+  for(const p of Object.values(store?.productionPlans||{}))add(p?.productId??p?.resourceId);
+  for(const b of Array.isArray(store?.buildings)?store.buildings:[])add(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId);
+  return ids;
+}
+// Pure: the used resource with the oldest or missing order book. A record stamped with another realm counts as missing.
+function chooseOrderBookRefreshTarget(store,realm,attempts,now,minAgeMs=ORDER_BOOK_REFETCH_MS){
+  const n=Number(realm),seen=new Map(),rx=new RegExp(`^/api/v3/market/${n}/(\\d+)/?(?:\\?.*)?$`);
+  for(const [url,entry] of Object.entries(store?.endpointData||{})){
+    const m=rx.exec(String(url));if(!m||Number(entry?.captureRealm)!==n||entry?.captureRealm==null)continue;
+    const at=Date.parse(String(entry?.receivedAt||''));
+    if(Number.isFinite(at))seen.set(Number(m[1]),Math.max(seen.get(Number(m[1]))||0,at));
+  }
+  let best=null,bestAt=Infinity;
+  for(const id of orderBookRefreshResourceIds(store,n)){
+    const at=Math.max(seen.get(id)||0,Number(attempts?.[`${n}:${id}`])||0);
+    if(now-at<minAgeMs)continue;
+    if(at<bestAt||(at===bestAt&&id<best)){best=id;bestAt=at;}
+  }
+  return best;
+}
+async function runOrderBookRefreshFiring(){
+  if(orderBookRefreshRunning||coreSyncActive())return {ok:true,skipped:true};
+  orderBookRefreshRunning=true;
+  try{
+    const clearGen=extensionClearGeneration;
+    const saved=(await chrome.storage.local.get({[ORDER_BOOK_REFRESH_STATE_KEY]:null}))[ORDER_BOOK_REFRESH_STATE_KEY]||{};
+    const now=Date.now();
+    if(Number(saved.backoffUntil)>now)return {ok:true,skipped:true};
+    const tab=await simTab();if(!tab?.id)return {ok:true,skipped:true};
+    const bridge=await withSyncTimeout(chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),3000,'Order book refresh bridge check').catch(()=>null);
+    const realm=bridge?.ready&&(bridge.realm===0||bridge.realm===1)?bridge.realm:null;
+    if(realm==null||syncSessionForRealm(realm)||accountingDayWalkRunning.has(realm))return {ok:true,skipped:true};
+    const store=await notifyRealmStore(realm);
+    const attempts=Object.fromEntries(Object.entries(saved.attempts||{}).filter(([,at])=>now-Number(at)<ORDER_BOOK_REFRESH_ATTEMPT_KEEP_MS));
+    const resourceId=chooseOrderBookRefreshTarget(store,realm,attempts,now);
+    if(resourceId==null||coreSyncActive()||clearGen!==extensionClearGeneration)return {ok:true,skipped:true};
+    attempts[`${realm}:${resourceId}`]=now;
+    await rawStorageSet({[ORDER_BOOK_REFRESH_STATE_KEY]:{backoffUntil:0,attempts}});
+    let result;
+    try{result=await fetchExchangeOrderBookForRealm(realm,resourceId);}catch(e){result={ok:false,status:0,error:e?.message||String(e)};}
+    const status=Number(result?.status)||0;
+    // A 2xx without usable rows is an empty book, not a failed request.
+    if(!result?.ok&&!(status>=200&&status<300)){
+      const backoffMs=status===429?ORDER_BOOK_REFRESH_429_BACKOFF_MS:ORDER_BOOK_REFRESH_FAILURE_BACKOFF_MS;
+      if(clearGen===extensionClearGeneration)await rawStorageSet({[ORDER_BOOK_REFRESH_STATE_KEY]:{backoffUntil:Date.now()+backoffMs,attempts}});
+      logActivity(realm,'order-book-refresh','failure',{resourceId,status},result?.error||null,now,'alarm');
+    }
+    return {...result,realm,resourceId};
+  }finally{orderBookRefreshRunning=false;}
+}
+
 
 function simcoVwapNumber(v){
   if(v==null) return null;
@@ -5044,6 +5114,7 @@ chrome.runtime.onInstalled.addListener(async()=>{
   // (and retired legacy ones) are cleared now.
   for(const a of await chrome.alarms.getAll()){if(!INSTALL_KEEP_ALARM_PREFIXES.some(p=>String(a?.name||'').startsWith(p)))await chrome.alarms.clear(a.name);}
   await ensureLiveMarketRefreshAlarm('installed');
+  await ensureOrderBookRefreshAlarm();
   await chrome.alarms.create('scm-vwap-daily',{periodInMinutes:720});
   await chrome.alarms.create('scm-production-events-daily',{periodInMinutes:720});
   await chrome.alarms.create('scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15});
@@ -5062,6 +5133,7 @@ chrome.runtime.onInstalled.addListener(async()=>{
 });
 chrome.runtime.onStartup.addListener(async()=>{
   await ensureLiveMarketRefreshAlarm('service-worker-startup');
+  await ensureOrderBookRefreshAlarm();
   await ensureStandingAlarms().catch(()=>{});
   await restorePersistedAlarms('browser-startup').catch(()=>{});
   await ensureAccountingWalkSchedule('browser-startup').catch(()=>{});
@@ -5181,6 +5253,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
   const legacyPostSyncMatch=String(a?.name||'').match(/^scm-post-sync-market-r([01])$/);
   if(legacyPostSyncMatch){await runMarketStage(Number(legacyPostSyncMatch[1]),'vwap','legacy-post-sync-alarm').catch(()=>{});return;}
   if(a.name===LIVE_MARKET_REFRESH_ALARM_NAME){ await runScheduledLiveMarketRefresh('hourly-market-cycle').catch(()=>{}); return; }
+  if(a.name===ORDER_BOOK_REFRESH_ALARM){ await runOrderBookRefreshFiring().catch(()=>{}); return; }
   if(a.name===CRITICAL_DATA_GUARD_ALARM){ await runCriticalDataGuard('scheduled').catch(()=>{}); return; }
   if(a.name==='scm-vwap-daily'||a.name==='scm-vwap-retry'){
     await runScheduledLiveMarketRefresh('legacy-vwap-alarm').catch(()=>{});
@@ -6927,6 +7000,8 @@ function lastGoodGameOverlaySnapshot(source,realm){
 }
 
 const GAME_OVERLAY_REFRESH_MS=30000;
+const GAME_OVERLAY_MANUAL_REFRESH_GAP_MS=15000;
+const gameOverlayManualRefreshAt=new Map(); // realm → last accepted REFRESH_GAME_OVERLAY_NOW (ms)
 const gameOverlayRefreshPromises=new Map();
 const gameOverlayLastRefreshAt=new Map();
 // v2.5.327 mobile: the game page polls GET_GAME_OVERLAY_DATA every 10 s. Each heavy rebuild reads the realm
@@ -7252,6 +7327,25 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   }
   if(m?.type==='LIVE_MARKET_REFRESH'){
     (async()=>{try{const realm=validRealmNumber(m.realm);send(await scheduleMarketCycle(realm,'manual-market-refresh'));}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;
+  }
+  // Manual refresh of the "Stock After Demand & Contracts" overlay: warehouse, outgoing contracts, own market orders.
+  // Answers {ok,throttled,error} once the reads settle; never fetches order books.
+  if(m?.type==='REFRESH_GAME_OVERLAY_NOW'){
+    (async()=>{
+      try{
+        const realm=m.realm;
+        if(realm!==0&&realm!==1){send({ok:false,throttled:false,error:'Invalid realm.'});return;}
+        const now=Date.now();
+        if(now-(gameOverlayManualRefreshAt.get(realm)||0)<GAME_OVERLAY_MANUAL_REFRESH_GAP_MS){send({ok:true,throttled:true});return;}
+        if(coreSyncActive()){send({ok:false,throttled:false,error:'Sync is running.'});return;}
+        gameOverlayManualRefreshAt.set(realm,now);
+        const results=await Promise.allSettled([refreshRealmWarehouseForOverlay(realm,0),refreshOutgoingContracts(realm,0),refreshMarketOrders(realm,0)]);
+        const outcomes=results.map(r=>r.status==='fulfilled'?r.value:{ok:false,error:r.reason?.message||String(r.reason)});
+        if(outcomes.some(r=>r?.ok))scheduleGameOverlayRefreshNotification(realm,150);
+        const errors=outcomes.filter(r=>!r?.ok).map(r=>r?.error||'Refresh failed.');
+        send({ok:errors.length===0,throttled:false,error:errors.length?errors.join(' '):null});
+      }catch(e){send({ok:false,throttled:false,error:e?.message||String(e)});}
+    })();return true;
   }
   if(m?.type==='SET_BUILDING_ALARM'){
     (async()=>{try{
@@ -7698,7 +7792,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         resourceImagesMemo=null;notifyRecipesMemo=null;gameOverlayAssetsPromise=null;
         gameOverlaySnapshotMemo.clear();contractHelperCache.clear();
         gameOverlayLastRefreshAt.clear();gameOverlayDirty.clear();warehouseMutationLastAt.clear();warehouseOverlayBackoffUntil.clear();
-        ownListingsRefreshAt.clear();outgoingContractsRefreshAt.clear();abundanceAutoState.clear();gameCaptureLogAt.clear();
+        ownListingsRefreshAt.clear();outgoingContractsRefreshAt.clear();abundanceAutoState.clear();gameCaptureLogAt.clear();gameOverlayManualRefreshAt.clear();
         realmStorageMigrationChecked=false;realmMigrationPromise=null;
         const resetDefaults={...DEFAULTS,selectedRealm:null,activeRealmKey:null,vwapStatus:{message:'Waiting for VWAP sync.'},marketQueueStatus:{message:'Waiting for the logged-in Sim Companies tab.',updatedAt:new Date().toISOString()},resourceImageData:{}};
         await storageSet(resetDefaults);
@@ -7706,6 +7800,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         await ensureVwapWatchAlarm('clear-extension-data');
         await ensureCriticalDataGuard('clear-extension-data');
         await ensureLiveMarketRefreshAlarm('clear-extension-data'); // R5: clearAll removed it too
+        await ensureOrderBookRefreshAlarm();
         send({ok:true});
       }catch(e){send({ok:false,error:e?.message||String(e)});}
     })();
