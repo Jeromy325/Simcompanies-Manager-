@@ -1124,6 +1124,11 @@ function overlayVwap(store,id,quality,realm){
   if(!Number.isInteger(Number(realm))||![0,1].includes(Number(realm)))return null;
   return globalThis.SCM_MARKET_CORE.vwap(store,Number(realm),id,quality)?.value??null;
 }
+// Full marketPrice() hit ({price,source,stale,...}) so payloads can say where a price came from.
+function overlayMarketPriceHit(store,id,quality,realm,opts){
+  if(!Number.isInteger(Number(realm))||![0,1].includes(Number(realm)))return null;
+  return globalThis.SCM_MARKET_CORE.marketPrice(store,Number(realm),id,quality,{...opts,mode:'exact'})||null;
+}
 function overlayCurrentMarketPrice(store,id,quality,realm,opts){
   if(!Number.isInteger(Number(realm))||![0,1].includes(Number(realm)))return null;
   return globalThis.SCM_MARKET_CORE.marketPrice(store,Number(realm),id,quality,{...opts,mode:'exact'})?.price??null;
@@ -2309,11 +2314,13 @@ async function buildGameOverlayData(store,realm,globalState){
     // Left is actual warehouse stock after full planned demand, with Manager-saved
     // incoming commitments added once. Live outgoing game contracts never affect it.
     const left=(Number(r.warehouseOnlyLeft)||0)+incoming;
-    const marketPrice=overlayCurrentMarketPrice(store,r.id,quality,realm,marketOwn),marketPriceQuality=marketPrice!=null?quality:null;
+    const marketHit=overlayMarketPriceHit(store,r.id,quality,realm,marketOwn);
+    const marketPrice=marketHit?.price??null,marketPriceQuality=marketPrice!=null?quality:null;
+    const marketPriceSource=marketPrice!=null?(marketHit.source||null):null,marketPriceStale=marketPrice!=null&&marketHit.stale===true;
     const vwap=overlayVwap(store,r.id,quality,realm);
     // 2.5.347 production surplus for this resource+quality (game-page Sell helper "Surplus").
     const surplus=Math.max(0,Number(productionSurplusByKey.get(key))||0);
-    return {...r,etaRuns:etaRunsByKey.get(key)||[],contracted:netContracts,incoming,outgoing,leftover:left,difference:left,warehouseOnlyLeft:left,surplus,name,quality,vwap,marketPrice,marketPriceQuality,marketPriceExact:marketPriceQuality===quality,image:local||(file?`${assets.imageBase}${file}`:'')};
+    return {...r,etaRuns:etaRunsByKey.get(key)||[],contracted:netContracts,incoming,outgoing,leftover:left,difference:left,warehouseOnlyLeft:left,surplus,name,quality,vwap,marketPrice,marketPriceQuality,marketPriceExact:marketPriceQuality===quality,marketPriceSource,marketPriceStale,image:local||(file?`${assets.imageBase}${file}`:'')};
   }).filter(r=>{
     const key=`${Number(r.id)}:${Number(r.quality)||0}`;
     // Show every produced resource quality plus every resource/quality explicitly
@@ -7034,7 +7041,9 @@ function overlaySnapshotSignature(data){
       stock:Number(r.stock)||0,
       difference:Number(r.difference)||0,
       surplus:Number(r.surplus)||0,
-      vwap:Number.isFinite(Number(r.vwap))?Number(r.vwap):null
+      vwap:Number.isFinite(Number(r.vwap))?Number(r.vwap):null,
+      marketPriceSource:r.marketPriceSource||null,
+      marketPriceStale:r.marketPriceStale===true
     })).sort((a,b)=>a.id-b.id||a.quality-b.quality)
   });
 }
@@ -7753,7 +7762,11 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
           const resolvedQuantity=savedQuantityByContract.has(c)?Math.max(0,Number(savedQuantityByContract.get(c))||0):null;
           const savedEffectiveQuantity=resolvedQuantity!=null?resolvedQuantity:quantityMode==='surplus'?surplus:quantityMode==='left'?0:Math.max(0,Number(c?.quantity)||0);
           const left=quantityMode==='left'?savedEffectiveQuantity:baseLeft;
-          return {...c,price:plannerCore?.savedContractCurrentPrice?plannerCore.savedContractCurrentPrice(c,overlayCurrentMarketPrice(store,productId,quality,realm,marketOwn)):c?.price,productId:Number.isFinite(productId)?productId:null,productName,quality:Number.isFinite(quality)?quality:null,available:surplus,warehouseAvailable,surplus,left,quantityMode,savedEffectiveQuantity};
+          const mHit=overlayMarketPriceHit(store,productId,quality,realm,marketOwn);
+          const helperPrice=plannerCore?.savedContractCurrentPrice?plannerCore.savedContractCurrentPrice(c,mHit?.price??null):c?.price;
+          // Source only when the shown price was derived from the market price (discount contracts), else null.
+          const fromMarket=mHit?.price!=null&&helperPrice!==c?.price;
+          return {...c,price:helperPrice,marketPriceSource:fromMarket?(mHit.source||null):null,marketPriceStale:fromMarket&&mHit.stale===true,productId:Number.isFinite(productId)?productId:null,productName,quality:Number.isFinite(quality)?quality:null,available:surplus,warehouseAvailable,surplus,left,quantityMode,savedEffectiveQuantity};
         });
         const value={ok:true,realm,contracts:helperContracts,incomingContracts:incoming,warehouse:stock};
         contractHelperCache.set(realm,{at:now,value});
@@ -7815,7 +7828,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         if(realm==null||!Number.isFinite(resourceId)||resourceId<=0||!Number.isFinite(quality)){send({ok:false,price:null,error:'Valid realm, resource and quality required.'});return;}
         const key=realmKeyFromRealm(realm),store=s.realmStores?.[key]||{};
         const hit=globalThis.SCM_MARKET_CORE.marketPrice(store,realm,resourceId,quality,{mode:'exact'});
-        send({ok:true,realm,resourceId,quality,price:hit?.price??null,source:hit?hit.source:'unavailable'});
+        send({ok:true,realm,resourceId,quality,price:hit?.price??null,source:hit?hit.source:'unavailable',marketPriceSource:hit?.source||null,marketPriceStale:hit?.stale===true});
       }catch(e){send({ok:false,price:null,error:e?.message||String(e)});}
     })();return true;
   }

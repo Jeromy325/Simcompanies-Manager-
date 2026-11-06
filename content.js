@@ -1391,8 +1391,11 @@ function scmPageTextNoLayout(){
     return candidates[0]||null;
   };
   // v2.5.362 compact badge: only the % vs market price (VWAP when no market price is captured); tap it for the details popup.
-  const marketLabel=record=>record?.marketPriceSource==='realm-vwap'?'VWAP':'market price';
+  const marketLabel=record=>(record?.marketPriceSource==='realm-vwap'||record?.marketPriceSource==='vwap')?'VWAP':'market price';
   const oldTag=record=>record?.marketPriceStale?' (old)':'';
+  // Origin label for a price that is not a real exchange order-book price; absent fields or 'exchange' => no label.
+  const priceSrcLabel=(src,stale)=>src==='vwap'||src==='realm-vwap'?'VWAP fallback':src==='simcotools'?(stale?'SimcoTools · stale':'SimcoTools'):'';
+  const priceSrcSuffix=(src,stale)=>{const l=priceSrcLabel(src,stale);return l?` · ${l}`:'';};
   const detailLines=record=>{
     const marketPrice=Number(record?.marketPrice),p=Number(record?.price),qty=Number(record?.quantity),rk=record?._scmRank;
     if(!Number.isFinite(p)||p<=0)return [];
@@ -1403,7 +1406,7 @@ function scmPageTextNoLayout(){
     lines.push({k:'Contract',v:`${qty>0?qty.toLocaleString('en-US')+' @ ':''}${priceText(p)}${qty>0?` (${money(p*qty)})`:''}`});
     if(rk&&rk.of>1)lines.push({k:'Price rank',v:`#${rk.rank} of ${rk.of} incoming Q${Number(record?.quality)||0} (1 = cheapest)`,cls:rk.rank===1?'cheap':'flat'});
     if(!hasMarket){lines.push({k:'Market price',v:'not captured yet (no VWAP either)'});return lines;}
-    lines.push({k:label==='VWAP'?'VWAP (no market price)':'Market price',v:priceText(marketPrice)+oldTag(record)});
+    lines.push({k:label==='VWAP'?'VWAP (no market price)':'Market price',v:priceText(marketPrice)+(record?.marketPriceSource==='simcotools'?'':oldTag(record))+priceSrcSuffix(record?.marketPriceSource,record?.marketPriceStale)});
     lines.push({k:'Vs '+label,v:Math.abs(pct)<0.05?`At ${label}`:`${Math.abs(pct).toFixed(2)}% ${pct<0?'cheaper than':'above'} ${label}`,cls:pct< -0.0001?'cheap':pct>0.0001?'expensive':'flat'});
     const refName=record?.marketPriceSource==='realm-vwap'?'VWAP':record?.marketPriceSource==='simcotools'?'SimcoTools':'exchange';
     if(ex)lines.push({k:refName==='VWAP'?`VWAP Q${Number(record?.quality)||0}`:`${refName==='exchange'?'Exchange':refName} Q${Number(record?.quality)||0}+`,v:ex.savesPerUnit>=0?`saves ${priceText(ex.savesPerUnit)}/u vs ${refName} ${priceText(ex.exchangePrice)} (${money(ex.savesTotal)})`:`${refName} ${priceText(ex.exchangePrice)} is ${priceText(-ex.savesPerUnit)}/u cheaper (${money(-ex.savesTotal)})`,cls:ex.savesPerUnit>0.0000001?'cheap':ex.savesPerUnit< -0.0000001?'expensive':'flat'});
@@ -1557,6 +1560,8 @@ function scmPageTextNoLayout(){
   const writeCollapsedPreference=collapsed=>{try{localStorage.setItem(OVERLAY_COLLAPSED_KEY,collapsed?'1':'0');}catch{}};
   const S={data:null,realm:null,styled:false,collapsed:readCollapsedPreference(),signature:'',buildingSignature:'',contractSignature:'',contractCardSignature:'',contractDismissedKey:'',contractQtyMode:'saved',contractCustomQty:'',refreshTimer:null,recoveryTimer:null,lastUrl:location.href,observer:null,loadInFlight:false,loadQueued:false,loadEpoch:0,helperTimer:null,positionRaf:0,contractFillTimer:0,leftCopyDiscount:3,leftCopySignature:'',leftCopyOpen:false};
   const esc=v=>{const d=document.createElement('div');d.textContent=String(v??'');return d.innerHTML;};
+  // Origin suffix for a price that is not a real exchange order-book price; absent fields or 'exchange' => ''.
+  const priceSrcSuffix=(src,stale)=>{const l=src==='vwap'||src==='realm-vwap'?'VWAP fallback':src==='simcotools'?(stale?'SimcoTools · stale':'SimcoTools'):'';return l?` · ${l}`:'';};
   const num=v=>Number.isFinite(Number(v))?Number(v).toLocaleString(undefined,{maximumFractionDigits:0}):'—';
   const money=v=>Number.isFinite(Number(v))?'$'+Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
   const norm=v=>String(v??'').toLowerCase().replace(/[’']/g,'').replace(/[^a-z0-9]+/g,'').replace(/s$/,'');
@@ -2317,7 +2322,7 @@ function scmPageTextNoLayout(){
   const sellPriceHtml=(p,quality)=>{
     if(!p)return '';
     const lines=[];
-    if(p.suggested!=null)lines.push(`Cheapest Q${quality}+ listing${p.cheapestQuality!=null&&p.cheapestQuality!==quality?` (a Q${p.cheapestQuality})`:''} · ${num(p.competing)} competing`);
+    if(p.suggested!=null)lines.push(`Cheapest Q${quality}+ listing${p.cheapestQuality!=null&&p.cheapestQuality!==quality?` (a Q${p.cheapestQuality})`:''} · ${num(p.competing)} competing${priceSrcSuffix(p.marketPriceSource,p.marketPriceStale)}`);
     else lines.push(p.refreshing?'Loading the exchange listings…':'No competing listing captured.');
     if(p.range)lines.push(`7-day VWAP ${sellMoney(p.range.low)}–${sellMoney(p.range.high)} (avg ${sellMoney(p.range.average)})`);
     const tail=[];if(p.unitCost!=null)tail.push(`your cost ${sellMoney(p.unitCost)}`);if(p.net!=null)tail.push(`you get ${sellMoney(p.net)} after ${Number(p.feePct).toFixed(1)}% fee`);if(tail.length)lines.push(tail.join(' · '));
