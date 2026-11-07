@@ -9,6 +9,7 @@
     "e2e": "playwright test --trace off"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.10.2",
     "@playwright/test": "1.63.0",
     "vitest": "^3.2.4"
   }
