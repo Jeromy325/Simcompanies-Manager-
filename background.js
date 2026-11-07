@@ -728,7 +728,7 @@ async function storageSetRealmPatch(realm, patch={}, onTiming=null){
   entry.patch={...entry.patch,...patch};
   pendingRealmPatches.set(n,entry);
   scmMirrorPendingPatches();
-  if(!entry.timer)entry.timer=setTimeout(()=>{entry.timer=null;flushRealmPatches(n).catch(()=>{});},REALM_PATCH_COALESCE_MS);
+  if(!entry.timer)entry.timer=setTimeout(()=>{entry.timer=null;flushRealmPatches(n).catch(e=>logError('storage:flush-realm-patches',e));},REALM_PATCH_COALESCE_MS);
   try{onTiming?.({realmCommitQueueWaitMs:0,realmStateReadMs:0,physicalWriteMs:0,realmCommitDurationMs:0,realmCommitBuffered:true});}catch{}
   return {ok:true,buffered:true,realm:n};
 }
@@ -1773,12 +1773,43 @@ async function notifyCostChanges(realm,history,newEntries){
   for(const e of newEntries){if(Date.now()-Date.parse(e.t)>24*3600e3)continue;const r=globalThis.SCM_NOTIFY_CORE.costChanged({history,entry:e,thresholdPct:Number(cfg.costChangePct)||3,names,realm:n});if(r)await scmNotify(`cost-${n}-${e.k}`,r.title,r.message);}
 }
 chrome.alarms.get('scm-daily-summary').then(a=>{if(!a)scheduleDailySummary().catch(()=>{});}).catch(()=>{});
+// Notifications: one stable ID per category+realm so updates replace instead of stacking; events arriving within
+// SCM_NOTIFY_BATCH_MS are merged into one 'list' notification. The action badge counts alerts not yet seen.
+const SCM_NOTIFY_BATCH_MS=2500;
+const scmNotifyBatches=new Map(); // stableId -> {items:[],timer}
+const SCM_BADGE_COUNT_KEY='scmAlertBadgeCount';
+async function scmBumpAlertBadge(by){try{const cur=Number((await chrome.storage.session.get(SCM_BADGE_COUNT_KEY))?.[SCM_BADGE_COUNT_KEY])||0;const next=cur+by;await chrome.storage.session.set({[SCM_BADGE_COUNT_KEY]:next});await chrome.action?.setBadgeBackgroundColor?.({color:'#c0392b'});await chrome.action?.setBadgeText?.({text:next>99?'99+':String(next)});}catch(e){logError('badge',e);}}
+async function scmClearAlertBadge(){try{await chrome.storage.session.remove(SCM_BADGE_COUNT_KEY);await chrome.action?.setBadgeText?.({text:''});}catch(e){logError('badge',e);}}
 function scmNotify(id,title,message){
   {const m=String(id).match(/^[a-z]+-([01])-/);if(m&&!String(id).startsWith('jobs-'))logActivity(Number(m[1]),'alert-sent','success',{title:String(title).slice(0,80)});}
+  const sid=String(id);
+  if(sid.startsWith('test-'))return scmNotifyNow(sid,title,message);
+  const cm=sid.match(/^([a-z]+)-([01])?/);
+  const stableId=cm?`${cm[1]}-${cm[2]??'x'}-scm`:sid;
+  // Callers await this inside notify-state locks, so resolve at once instead of holding them for the batch window.
+  return new Promise(resolve=>{
+    const b=scmNotifyBatches.get(stableId)||{items:[],timer:null};
+    b.items.push({title:String(title),message:String(message)});resolve({ok:true,queued:true,id:stableId});
+    scmNotifyBatches.set(stableId,b);
+    if(!b.timer)b.timer=setTimeout(async()=>{
+      scmNotifyBatches.delete(stableId);
+      let r;
+      try{
+        if(b.items.length===1)r=await scmNotifyNow(stableId,b.items[0].title,b.items[0].message);
+        else r=await scmNotifyNow(stableId,`${b.items.length} alerts: ${b.items[0].title}`,b.items.map(x=>x.title).join(' · '),b.items.slice(0,8).map(x=>({title:x.title.slice(0,60),message:x.message.slice(0,120)})));
+        if(r?.ok)await scmBumpAlertBadge(b.items.length);
+        else logError('notify',r?.error);
+      }catch(e){logError('notify',e);}
+    },SCM_NOTIFY_BATCH_MS);
+  });
+}
+function scmNotifyNow(id,title,message,listItems=null){
   return new Promise(resolve=>{
     try{
       if(!chrome.notifications?.create)return resolve({ok:false,error:'This browser does not provide extension notifications (chrome.notifications is missing).'});
-      chrome.notifications.create(id,{type:'basic',iconUrl:chrome.runtime.getURL('icons/icon128.png'),title:String(title).slice(0,120),message:String(message).slice(0,300),priority:2},nid=>{const e=chrome.runtime.lastError;resolve(e?{ok:false,error:e.message||String(e)}:{ok:true,id:nid});});
+      const opts={type:listItems?'list':'basic',iconUrl:chrome.runtime.getURL('icons/icon128.png'),title:String(title).slice(0,120),message:String(message).slice(0,300),priority:2};
+      if(listItems)opts.items=listItems;
+      chrome.notifications.create(id,opts,nid=>{const e=chrome.runtime.lastError;resolve(e?{ok:false,error:e.message||String(e)}:{ok:true,id:nid});});
     }catch(e){resolve({ok:false,error:e?.message||String(e)});}
   });
 }
@@ -1821,8 +1852,8 @@ async function fireProductionFinished(name){
   const st0=Date.parse(String(b?.busy?.started||''));
   if(cfg.idle&&Number.isFinite(st0)){const h=Math.max(0.25,Number(cfg.idleHours)||1);await createFollowupAlarm(`scm-followup:${realm}:${bid}:${st0}:${m[3]}:0`,Number(m[3])+h*3600e3>Date.now()?Number(m[3])+h*3600e3:Date.now()+60000,clearGen);}
 }
-chrome.alarms.onAlarm.addListener(a=>{if(String(a?.name||'').startsWith('scm-prodfin:'))fireProductionFinished(a.name).catch(()=>{});});
-try{chrome.notifications?.onClicked?.addListener(id=>{if(String(id).startsWith('prodfin-'))chrome.tabs.create({url:'https://www.simcompanies.com/'}).catch(()=>{});try{chrome.notifications.clear(id);}catch{}});}catch{}
+chrome.alarms.onAlarm.addListener(a=>{if(String(a?.name||'').startsWith('scm-prodfin:'))fireProductionFinished(a.name).catch(e=>logError('alarm:prodfin',e));});
+try{chrome.notifications?.onClicked?.addListener(id=>{scmClearAlertBadge();if(String(id).startsWith('prodfin-'))chrome.tabs.create({url:'https://www.simcompanies.com/'}).catch(()=>{});try{chrome.notifications.clear(id);}catch{}});}catch{}
 function backgroundJobHistoryKey(realm){return `scmBackgroundJobs:${Number(realm)}`;}
 const backgroundJobQueues=new Map();
 
@@ -4322,6 +4353,7 @@ async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS){
       lastError=e?.name==='AbortError'
         ? new Error(`SimcoTools request timed out after ${Math.round(timeoutMs/1000)}s (attempt ${attempt+1}/${SIMCOTOOLS_RETRY_DELAYS_MS.length})`)
         : new Error(`SimcoTools network error: ${e?.message||String(e)} (attempt ${attempt+1}/${SIMCOTOOLS_RETRY_DELAYS_MS.length})`);
+      logError('fetch:simcotools',lastError);
     }finally{clearTimeout(timer);simcoReleaseRequestSlot()}
   }
   throw lastError||new Error('SimcoTools request failed.');
@@ -5250,7 +5282,7 @@ async function restorePersistedAlarms(reason='restore'){
       // Already due while the browser was closed: run it shortly instead of dropping it.
       await chrome.alarms.create(name,{when:Math.max(Number(when)||0,Date.now()+60000)});out.followups++;
     }
-  }catch(e){out.error=e?.message||String(e);}
+  }catch(e){out.error=e?.message||String(e);logError('alarms:restore',e);}
   try{if(!(await chrome.alarms.get('scm-daily-summary')))await scheduleDailySummary();}catch(e){out.error=e?.message||String(e);}
   for(const n of [0,1]){
     try{
@@ -5364,7 +5396,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
   if(String(a?.name||'').startsWith('scm-building-')){
     try{
       const m=String(a.name).match(/^scm-building-(\d+)-(\d+)$/);if(!m)return;const realm=Number(m[1]),buildingId=Number(m[2]);const s=await state(realm),key=realmKeyFromRealm(realm),store=s.realmStores?.[key]||{};const buildings=realmStoredBuildings(store,s,realm);await withRealmWriteLock(realm,async()=>{const latest=await state(realm),latestStore=latest.realmStores?.[key]||{},alarms={...(latestStore.buildingAlarms||{})};delete alarms[String(buildingId)];await storageSet({realmStores:{[key]:{...latestStore,buildingAlarms:alarms}}});});const b=buildings.find(x=>Number(x?.id)===buildingId);const tabs=await chrome.tabs.query({url:['https://www.simcompanies.com/*','https://simcompanies.com/*']});for(const tab of tabs||[])try{await chrome.tabs.sendMessage(tab.id,{type:'BUILDING_ALARM_FIRED',realm,buildingId,buildingName:b?.name||`Building ${buildingId}`,resourceName:b?.busy?.resource?.name||'Building job'});}catch{}return;
-    }catch{return;}
+    }catch(e){logError('alarm:building',e);return;}
   }
 
   const buildingEnrichMatch=String(a?.name||'').match(/^scm-building-enrich-r([01])$/);
@@ -5387,16 +5419,16 @@ chrome.alarms.onAlarm.addListener(async a=>{
     const realm=Number(syncRetryMatch[1]);
     if(coreSyncActive()){await chrome.alarms.create(a.name,{when:Date.now()+30000}).catch(()=>{});return;}
     syncAutoRetryRuns.add(realm);
-    await syncNow(realm).catch(()=>{});
+    await syncNow(realm).catch(e=>logError('sync:auto-retry',e));
     syncAutoRetryRuns.delete(realm);
     return;
   }
-  if(a?.name===ACCOUNTING_WALK_DAILY_ALARM){await runScheduledAccountingWalk('alarm').catch(()=>{});return;}
+  if(a?.name===ACCOUNTING_WALK_DAILY_ALARM){await runScheduledAccountingWalk('alarm').catch(e=>logError('alarm:accounting-walk',e));return;}
   const dayWalkMatch=String(a?.name||'').match(/^scm-accounting-day-walk-r([01])$/);
   if(dayWalkMatch){
     const realm=Number(dayWalkMatch[1]);
     if(syncSessionForRealm(realm)){await chrome.alarms.create(a.name,{when:Date.now()+5000}).catch(()=>{});return;}
-    await runAccountingDayWalk(realm,'after-sync').catch(()=>{});
+    await runAccountingDayWalk(realm,'after-sync').catch(e=>logError('alarm:accounting-day-walk',e));
     return;
   }
   const accountingWeekMatch=String(a?.name||'').match(/^scm-accounting-week-refresh-r([01])$/);
@@ -5423,7 +5455,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
   }
 
   const marketStageMatch=String(a?.name||'').match(/^scm-market-stage-r([01])-(vwap|prices)$/);
-  if(marketStageMatch){await runMarketStage(Number(marketStageMatch[1]),marketStageMatch[2],'alarm').catch(()=>{});return;}
+  if(marketStageMatch){await runMarketStage(Number(marketStageMatch[1]),marketStageMatch[2],'alarm').catch(e=>logError('alarm:market-stage',e));return;}
   const legacyPostSyncMatch=String(a?.name||'').match(/^scm-post-sync-market-r([01])$/);
   if(legacyPostSyncMatch){await runMarketStage(Number(legacyPostSyncMatch[1]),'vwap','legacy-post-sync-alarm').catch(()=>{});return;}
   if(a.name===LIVE_MARKET_REFRESH_ALARM_NAME){ await runScheduledLiveMarketRefresh('hourly-market-cycle').catch(()=>{}); return; }
@@ -6921,7 +6953,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     }
     return {ok:false,realm:selected,results,walkReport,endpointWarnings,total,successful,failed,missingRequiredWrites,missingRequiredEndpoints,elapsedMs:Date.now()-startedAt,error:finalSyncError};
   }catch(e){
-    const error=e?.message||String(e);
+    const error=e?.message||String(e);logError('sync',e);
     // Nothing of this run may reach storage after a clear, not even its failure status.
     if(e instanceof SyncCancelledByClear)return {ok:false,cancelled:true,error,realm:selected};
     syncTrace.push({at:Date.now(),type:'sync-exception',error});
@@ -7473,6 +7505,9 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   // types are accepted only from extension pages (popup/dashboard/options), never content scripts.
   if(!sender||sender.id!==chrome.runtime.id)return false;
   if(SCM_PRIVILEGED_MESSAGE_TYPES.has(m?.type)&&!scmIsExtensionPageSender(sender)){try{send({ok:false,error:'Not allowed from this context.'});}catch{}return false;}
+  if(m?.type==='GET_ERROR_LOG'){getErrorLog().then(log=>send({ok:true,log,version:BUILD_VERSION,at:new Date().toISOString()})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
+  if(m?.type==='CLEAR_ERROR_LOG'){clearErrorLog().then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
+  if(m?.type==='SCM_CLEAR_ALERT_BADGE'){if(!scmIsExtensionPageSender(sender))return false;scmClearAlertBadge().then(()=>send({ok:true})).catch(()=>send({ok:false}));return true;}
   if(m?.type==='SET_ACCOUNTING_WALK_SCHEDULE'){(async()=>{const realm=validRealmNumber(m.realm);const patch={enabled:Boolean(m.enabled),offsetMin:accountingWalkOffset(m.offsetMin),attempt:0,retryAt:null};if(realm!=null)patch.realm=realm;await writeAccountingWalkSchedule(patch);const r=await ensureAccountingWalkSchedule('user');return {...r,schedule:await readAccountingWalkSchedule()};})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   // 2.5.393 CSV import from Analyze → Data: statements by date and ledger rows; captured data always wins.
   if(m?.type==='IMPORT_CSV_STATEMENTS'){(async()=>{const realm=validRealmNumber(m.realm);if(realm==null)return {ok:false,error:'Pick a realm first.'};if(!/^(income-statement|cashflow-statement|balance-sheet)$/.test(String(m.field||'')))return {ok:false,error:'Unknown statement.'};return queueStatementHistory(realm,(Array.isArray(m.items)?m.items:[]).map(data=>({kind:m.field,data})),{keep:true});})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}

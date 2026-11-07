@@ -5,3 +5,4 @@ document.querySelector('#sync').onclick=async()=>{ document.querySelector('#stat
 document.querySelector('#openDashboard').onclick=async()=>{const base=chrome.runtime.getURL('dashboard.html');try{const tabs=await chrome.tabs.query({url:base+'*'});const t=(tabs||[])[0];if(t?.id){await chrome.tabs.update(t.id,{active:true});try{await chrome.windows.update(t.windowId,{focused:true});}catch{}window.close();return;}}catch{}chrome.tabs.create({url:base});};
 document.querySelector('#openOptions').onclick=()=>chrome.runtime.openOptionsPage();
 render();
+try{chrome.runtime.sendMessage({type:'SCM_CLEAR_ALERT_BADGE'}).catch(()=>{});}catch{}
