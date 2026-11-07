@@ -134,5 +134,21 @@
     };
     return { status: componentSnapshots ? 'partial-component-state-captured' : 'partial-state-paths-found', reason: componentSnapshots ? 'Bounded React component props/state snapshots were captured. This may reveal live application data but is not guaranteed to be a complete raw Redux export.' : 'Relevant paths were discovered; this remains a bounded metadata/path diagnostic, not a full raw-state export.', candidates, fibers, visitedNodes: visited, stateMatchCount: matches, componentSnapshotCount: componentSnapshots };
   }
-  root.SCM_DIAGNOSTIC_CORE = { createSerialQueue, summarizeNetworkCapture, verifyNetworkCaptureExport, endpointCoverageReport, summarizeNetworkCaptureV3, classifyStateDiscovery };
+  // Strip secrets from anything exported/copied (storage dumps, diagnostic bundles).
+  const SECRET_KEY_RE = /^(token|authData|cookies?|set-cookie|authorization|scmLiveBridgeToken|x-csrftoken|csrftoken|sessionid)$/i;
+  const SECRET_BACKUP_RE = /token.*backup/i;
+  function isSecretKey(k) { k = String(k); return SECRET_KEY_RE.test(k) || SECRET_BACKUP_RE.test(k); }
+  function redactSecrets(value, seen) {
+    if (value === null || typeof value !== 'object') return value;
+    seen = seen || new WeakMap();
+    if (seen.has(value)) return seen.get(value);
+    if (Array.isArray(value)) { const out = []; seen.set(value, out); for (const v of value) out.push(redactSecrets(v, seen)); return out; }
+    const out = {}; seen.set(value, out);
+    for (const [k, v] of Object.entries(value)) {
+      if (isSecretKey(k)) { if (v !== '' && v != null && v !== false) out[k] = '[REDACTED]'; else out[k] = v; continue; }
+      out[k] = redactSecrets(v, seen);
+    }
+    return out;
+  }
+  root.SCM_DIAGNOSTIC_CORE = { redactSecrets, isSecretKey, createSerialQueue, summarizeNetworkCapture, verifyNetworkCaptureExport, endpointCoverageReport, summarizeNetworkCaptureV3, classifyStateDiscovery };
 })(globalThis);
