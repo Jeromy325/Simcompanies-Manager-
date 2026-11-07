@@ -5039,3 +5039,6 @@ function scmAutoCollapse(root){
 })();
 
 try{chrome.runtime.sendMessage({type:'SCM_CLEAR_ALERT_BADGE'}).catch(()=>{});}catch{}
+
+// v2.5.439 Settings → Diagnostic → Storage: "Trim now" runs the 90-day retention pass and shows bytes before/after.
+document.querySelector('#trimStorageNow')?.addEventListener('click',async e=>{const btn=e.currentTarget,out=document.querySelector('#trimStorageStatus');const mb=b=>b==null?'?':`${(b/1048576).toFixed(2)} MB`;btn.disabled=true;if(out)out.textContent='Trimming…';try{const r=await chrome.runtime.sendMessage({type:'PRUNE_STORAGE'});if(out)out.textContent=r?.ok?`${mb(r.before)} → ${mb(r.after)}${r.written?.length?'':' (nothing older than 90 days)'}`:`Trim failed: ${r?.error||'no answer'}`;}catch(err){if(out)out.textContent=`Trim failed: ${err?.message||err}`;}finally{btn.disabled=false;}});
