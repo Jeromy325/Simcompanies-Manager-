@@ -1,16 +1,21 @@
-// v2.5.433 authenticated page bridge. content.js hands page-hook.js a private MessageChannel port once
-// (with a crypto-random per-page nonce echoed in the ack); afterwards page-hook traffic is accepted only
-// over that port, so other page scripts can neither read it nor forge events that reach the background.
-// Until the handshake completes, window.postMessage (targetOrigin = location.origin) is used as before.
+// v2.5.433 page bridge. content.js hands page-hook.js a private MessageChannel port (with a crypto-random
+// per-world nonce echoed in the ack). Once the matching PORT_ACK arrives, page-hook traffic is accepted
+// only over that port, so other page scripts can no longer read it or inject window-path events. This is
+// NOT authentication of earlier traffic: before the ack, window.postMessage (targetOrigin=location.origin)
+// is used and any page script could forge messages; type/size validation limits what they can carry.
+// A forged PORT_HANDOFF cannot silence capture: page-hook adopts only the first handoff, and this side
+// keeps the window path until an ack with OUR nonce arrives. PORT_PING is answered only while the
+// extension context is valid, which lets a reloaded extension's new world take over a dead port.
 if(!globalThis.__scmPageBridge)globalThis.__scmPageBridge=(()=>{
   const SRC='SIMCO_MANAGER',GRACE_MS=1500;
-  const KNOWN=new Set(['API_DATA','API_RESULT','API_SEEN','BRIDGE_QUEUE_FLUSHED','DOM_RUNTIME_DIAGNOSTIC_RESULT','GAME_CONFIG','GAME_LOCAL_STORAGE_SNAPSHOT','GAME_STATE','HOOK_READY','INITIALIZED_ACK','JAVASCRIPT_DIAGNOSTIC','MARKET_CACHE','NETWORK_CAPTURE_CONTROL_ACK','NETWORK_CAPTURE_EVENT','PAGE_REALM','REALM_SWITCH','REALM_SWITCH_CONFIRMED','REDUX_STATE_DIAGNOSTIC_RESULT','REPLAY_EVENT','RESOURCE_CATALOG','RESOURCE_IMAGE_RESULT','STOCK_MUTATION_COMPLETE','SYNC_REALM_SET','SYNC_REALM_CLEARED','PORT_ACK']);
+  const KNOWN=Object.assign(Object.create(null),Object.fromEntries(['API_DATA','API_RESULT','API_SEEN','BRIDGE_QUEUE_FLUSHED','DOM_RUNTIME_DIAGNOSTIC_RESULT','GAME_CONFIG','GAME_LOCAL_STORAGE_SNAPSHOT','GAME_STATE','HOOK_READY','INITIALIZED_ACK','JAVASCRIPT_DIAGNOSTIC','MARKET_CACHE','NETWORK_CAPTURE_CONTROL_ACK','NETWORK_CAPTURE_EVENT','PAGE_REALM','REALM_SWITCH','REALM_SWITCH_CONFIRMED','REDUX_STATE_DIAGNOSTIC_RESULT','REPLAY_EVENT','RESOURCE_CATALOG','RESOURCE_IMAGE_RESULT','STOCK_MUTATION_COMPLETE','SYNC_REALM_SET','SYNC_REALM_CLEARED','PORT_ACK','PORT_PING'].map(t=>[t,true])));const MAX_KEYS=64;
   const nonce=(()=>{try{const a=new Uint8Array(16);crypto.getRandomValues(a);return Array.from(a,b=>b.toString(16).padStart(2,'0')).join('');}catch{return `${Date.now()}-${Math.random()}`.replace('.','');}})();
   const origin=(()=>{try{return location.origin&&location.origin!=='null'?location.origin:'*';}catch{return '*';}})();
   const STR_KEYS=['id','requestId','captureId','url','method','reason','realmResolvedBy','eventType'];
   const valid=d=>{
     if(!d||typeof d!=='object'||d.source!==SRC)return false;
-    const t=d.type;if(typeof t!=='string'||t.length>64||!KNOWN.has(t))return false;
+    const t=d.type;if(typeof t!=='string'||t.length>64||KNOWN[t]!==true)return false;
+    try{if(Object.keys(d).length>MAX_KEYS)return false;}catch{return false;}
     for(const k of STR_KEYS){const v=d[k];if(v!=null&&(typeof v==='object'||String(v).length>8192))return false;}
     return true;
   };
@@ -22,17 +27,22 @@ if(!globalThis.__scmPageBridge)globalThis.__scmPageBridge=(()=>{
     const p=ch.port1;
     p.onmessage=e=>{const d=e.data;if(!valid(d))return;
       if(d.type==='PORT_ACK'){if(!port&&d.nonce===nonce){port=p;portAt=Date.now();}return;}
+      if(d.type==='PORT_PING'){let ok=false;try{ok=!!chrome?.runtime?.id;}catch{}if(ok&&p===port){try{p.postMessage({source:SRC,type:'PORT_PONG'});}catch{}}return;}
       if(p!==port)return;dispatch(d);};
     try{window.postMessage({source:SRC,type:'PORT_HANDOFF',nonce},origin,[ch.port2]);}catch{}
   };
   window.addEventListener('message',ev=>{
-    if(ev.source!==window)return;const d=ev.data;if(!valid(d)||d.type==='PORT_ACK')return;
+    if(ev.source!==window)return;const d=ev.data;if(!valid(d)||d.type==='PORT_ACK'||d.type==='PORT_PING')return;
     // After the port handshake only port traffic is trusted (short grace for in-flight window posts).
     if(port&&Date.now()-portAt>GRACE_MS)return;
     if(d.type==='HOOK_READY'&&!port)handoff();
     dispatch(d);
   });
   const send=m=>{const msg={...m,source:SRC};if(port){try{port.postMessage(msg);return;}catch{}}window.postMessage(msg,origin);};
+  // v2.5.434 bfcache (Chrome 123+ may restore pages with open MessageChannels closed): after a persisted
+  // pageshow, drop to the window path and hand over a fresh port. page-hook only replaces its port if
+  // the old one stops answering, so this never lets a page script take over.
+  try{window.addEventListener('pageshow',e=>{if(!e.persisted)return;port=null;handoffs=0;handoff();});}catch{}
   return {listen:h=>{handlers.push(h);},send,handoff,isPortReady:()=>!!port};
 })();
 // v2.5.433 teardown when the extension context is invalidated (extension reloaded/updated): orphaned
@@ -45,11 +55,12 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
     globalThis.clearInterval=function(id){intervals.delete(id);return ci.call(this,id);};
     const proto=MutationObserver.prototype,obs=proto.observe;
     proto.observe=function(...a){observers.add(this);return obs.apply(this,a);};
+    const disc=proto.disconnect;proto.disconnect=function(){observers.delete(this);return disc.call(this);};
     const alive=()=>{try{return !!chrome?.runtime?.id;}catch{return false;}};
-    const kill=()=>{if(dead||alive())return;dead=true;for(const id of intervals){try{ci(id);}catch{}}intervals.clear();for(const o of observers){try{o.disconnect();}catch{}}observers.clear();};
+    const kill=()=>{if(dead||alive())return;dead=true;for(const id of intervals){try{ci(id);}catch{}}intervals.clear();for(const o of Array.from(observers)){try{o.disconnect();}catch{}}observers.clear();};
     const watch=si(()=>{kill();if(dead)ci(watch);},10000);
     document.addEventListener('visibilitychange',kill);
-    return {check:kill,isDead:()=>dead};
+    return {check:kill,isDead:()=>dead,counts:()=>({intervals:intervals.size,observers:observers.size})};
   }catch{return {check(){},isDead:()=>false};}
 })();
 (() => {
@@ -2633,7 +2644,9 @@ function scmPageTextNoLayout(){
         return;
       }
     });
-    S.observer.observe(document.documentElement,{childList:true,subtree:true});window.addEventListener('resize',()=>{schedulePosition();},{passive:true});setInterval(()=>{if(!document.hidden)schedulePosition();},8000);
+    S.observer.observe(document.documentElement,{childList:true,subtree:true});
+    // v2.5.434: start() can run again (DOMContentLoaded + readyState race); never stack listeners/timers.
+    if(!S.posHooks){S.posHooks=true;window.addEventListener('resize',()=>{schedulePosition();},{passive:true});setInterval(()=>{if(!document.hidden)schedulePosition();},8000);}
   };
   if(document.readyState!=='loading')start();else document.addEventListener('DOMContentLoaded',start,{once:true});
   window.addEventListener('pageshow',()=>{setTimeout(load,600);setTimeout(load,1800);});

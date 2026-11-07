@@ -21,33 +21,61 @@
   const BRIDGE_FALLBACK_FLUSH_MS = 15000;
   const bridgeQueue = [];
   let bridgeInitialized = false, bridgeDropped = 0, bridgeQueuedTotal = 0;
-  // v2.5.433: once content.js hands over a private MessageChannel port (PORT_HANDOFF), all events go
+  // v2.5.434: once content.js hands over a private MessageChannel port (PORT_HANDOFF), all events go
   // over it instead of window.postMessage, so other page scripts cannot read them. Before that the
-  // window path is used with targetOrigin = location.origin. A later handoff (extension reload/new
-  // content world) replaces the port. Commands are still accepted on both paths (MAIN world).
+  // window path is used with targetOrigin = location.origin. Only the FIRST handoff is adopted; a later
+  // handoff (e.g. a page script trying to hijack the bridge) replaces it only if the current port fails
+  // a liveness ping (content.js answers PORT_PING only while its extension context is valid, so after a
+  // genuine extension reload the new content world can take over). Commands are still accepted on both
+  // paths (MAIN world). Pristine references are captured here at document_start so later page scripts
+  // cannot intercept the bridge by patching postMessage/addEventListener/JSON.
+  const P_winPost = window.postMessage.bind(window);
+  const P_addEL = EventTarget.prototype.addEventListener;
+  const P_portPost = MessagePort.prototype.postMessage;
+  const P_JSON = { parse: JSON.parse, stringify: JSON.stringify };
+  const portSend = (p, m) => P_portPost.call(p, m);
   const BRIDGE_ORIGIN = (() => { try { return location.origin && location.origin !== 'null' ? location.origin : '*'; } catch { return '*'; } })();
-  let bridgePort = null;
+  const PORT_PING_MS = 1000;
+  let bridgePort = null, portCandidatePending = false, portPongWaiter = null;
   const bridgeHandlers = [];
-  const onBridge = (h) => { window.addEventListener('message', h); bridgeHandlers.push(h); };
+  const onBridge = (h) => { P_addEL.call(window, 'message', h); bridgeHandlers.push(h); };
   const post = (type, payload) => {
     const msg = { source: 'SIMCO_MANAGER', type, ...payload };
-    if (bridgePort) { try { bridgePort.postMessage(msg); return; } catch {} }
-    window.postMessage(msg, BRIDGE_ORIGIN);
+    if (bridgePort) { try { portSend(bridgePort, msg); return; } catch {} }
+    P_winPost(msg, BRIDGE_ORIGIN);
   };
-  window.addEventListener('message', (event) => {
-    if (event.source !== window) return;
-    const d = event.data;
-    if (!d || d.source !== 'SIMCO_MANAGER' || d.type !== 'PORT_HANDOFF' || !event.ports || !event.ports[0]) return;
-    const p = event.ports[0];
+  const adoptPort = (p, nonce) => {
     try { if (bridgePort && bridgePort !== p) bridgePort.close(); } catch {}
     bridgePort = p;
     p.onmessage = (e) => {
       const m = e.data;
       if (!m || typeof m !== 'object' || m.source !== 'SIMCO_MANAGER' || typeof m.type !== 'string') return;
+      if (p !== bridgePort) return;
+      if (m.type === 'PORT_PONG') { if (portPongWaiter) portPongWaiter(); return; }
       const ev = { source: window, data: m };
       for (const h of bridgeHandlers) { try { h(ev); } catch {} }
     };
-    try { p.postMessage({ source: 'SIMCO_MANAGER', type: 'PORT_ACK', nonce: String(d.nonce || '') }); } catch {}
+    try { portSend(p, { source: 'SIMCO_MANAGER', type: 'PORT_ACK', nonce }); } catch {}
+  };
+  P_addEL.call(window, 'message', (event) => {
+    if (event.source !== window) return;
+    const d = event.data;
+    if (!d || d.source !== 'SIMCO_MANAGER' || d.type !== 'PORT_HANDOFF' || !event.ports || !event.ports[0]) return;
+    const p = event.ports[0];
+    const nonce = typeof d.nonce === 'string' ? d.nonce.slice(0, 128) : '';
+    if (!nonce) return;
+    if (!bridgePort) { adoptPort(p, nonce); return; }
+    if (p === bridgePort || portCandidatePending) return;
+    // A port is already in use: replace it only if it no longer answers (extension reloaded).
+    portCandidatePending = true;
+    let alive = false;
+    portPongWaiter = () => { alive = true; };
+    try { portSend(bridgePort, { source: 'SIMCO_MANAGER', type: 'PORT_PING' }); } catch {}
+    setTimeout(() => {
+      portCandidatePending = false; portPongWaiter = null;
+      if (alive) { try { p.close(); } catch {} return; }
+      adoptPort(p, nonce);
+    }, PORT_PING_MS);
   });
   const flushBridgeQueue = () => {
     bridgeInitialized = true;
@@ -900,7 +928,7 @@
         const text = await clone.text();
         if (text && text.length <= 2000000) {
           let data = null;
-          try { data = JSON.parse(text); } catch { data = text; }
+          try { data = P_JSON.parse(text); } catch { data = text; }
           const u = new URL(url, location.href);
           const ar = /\/api\/v3\/companies\/auth-data\//.test(u.pathname) && response.ok ? realmFromAuthData(data) : null;
           if (ar === 0 || ar === 1) { emit('API_DATA', { url: u.pathname + u.search, status: response.status, method, data, captureRealm: ar }); learnRealm(ar, 'auth-data'); }
@@ -940,7 +968,7 @@
       this.addEventListener('load', () => {
         try {
           let data = null;
-          try { data = JSON.parse(this.responseText); } catch { data = this.responseText; }
+          try { data = P_JSON.parse(this.responseText); } catch { data = this.responseText; }
           const u = new URL(this.__scmUrl, location.href);
           const ar = /\/api\/v3\/companies\/auth-data\//.test(u.pathname) && this.status >= 200 && this.status < 300 ? realmFromAuthData(data) : null;
           if (String(this.responseText || '').length <= 2000000) {
@@ -1158,7 +1186,7 @@
       });
       const text = await response.text();
       let data = null;
-      try { data = JSON.parse(text); } catch { data = text; }
+      try { data = P_JSON.parse(text); } catch { data = text; }
       // Explicit API_GET responses bypass the generic API_DATA observer, so
       // update the page's realm identity here before returning auth-data.
       try {
