@@ -21,14 +21,16 @@
     return { expected: arr(expected).length, present: names.length, missing, status: missing.length ? 'warn' : 'pass' };
   }
 
-  function evalErrorLog(log, now, windowMs = 86400000) {
-    const since = now - windowMs; const counts = new Map(); let n = 0;
+  // currentVersion (optional): entries tagged with another version are counted as `older` and do not affect status,
+  // so errors logged before an update (e.g. already-fixed bugs) don't fail the report.
+  function evalErrorLog(log, now, windowMs = 86400000, currentVersion = '') {
+    const since = now - windowMs; const counts = new Map(); let n = 0; let older = 0;
     const samples = new Map();
     // A short, scrubbed sample message per context (URLs and long tokens removed) so reports show what failed.
     const scrub = m => String(m || '').replace(/https?:\/\/\S+/g, '<url>').replace(/[A-Za-z0-9_\-]{24,}/g, '<redacted>').slice(0, 140);
-    for (const e of arr(log)) { const t = ms(e?.at); if (t == null || t < since) continue; n++; const c = String(e?.context || 'unknown').slice(0, 60); counts.set(c, (counts.get(c) || 0) + 1); const m = scrub(e?.message ?? e?.error ?? e?.msg); if (m) samples.set(c, m); }
+    for (const e of arr(log)) { const t = ms(e?.at); if (t == null || t < since) continue; if (currentVersion && e?.version && String(e.version) !== String(currentVersion)) { older++; continue; } n++; const c = String(e?.context || 'unknown').slice(0, 60); counts.set(c, (counts.get(c) || 0) + 1); const m = scrub(e?.message ?? e?.error ?? e?.msg); if (m) samples.set(c, m); }
     const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([context, count]) => ({ context, count, sample: samples.get(context) || '' }));
-    return { count24h: n, total: arr(log).length, top, status: n === 0 ? 'pass' : n > 20 ? 'fail' : 'warn' };
+    return { count24h: n, older24h: older, total: arr(log).length, top, status: n === 0 ? 'pass' : n > 20 ? 'fail' : 'warn' };
   }
 
   // Freshness of a timestamp: pass within warnMin, warn within failMin, else fail; skip when absent.
