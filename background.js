@@ -4,6 +4,7 @@ import './tools-core.js';
 import './market-core.js';
 import './notify-core.js';
 import './analyze-core.js';
+import './self-test-core.js';
 import {
   REALM_DEFINITIONS, validRealmNumber, realmDefinition, realmKeyFromRealm, realmStorageKey,
   realmDisplayNumber, realmDisplayName, realmContractPaths
@@ -7572,7 +7573,71 @@ async function requestJavascriptDiagnostic(send){
   return {ok:true,skipped:true,realm:validRealmNumber(candidates?.[0]?.url?.match(/\/rc\/(\d+)\//)?.[1]),diagnostic:null,source:'runtime-diagnostic-skipped',message:'Runtime diagnostic was skipped because the game page was busy.'};
 }
 
-const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['SYNC_NOW','RUN_ACCOUNTING_WALK_NOW','RUN_JAVASCRIPT_DIAGNOSTIC','LIVE_MARKET_REFRESH','CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_FROZEN_NETWORK_PLAN','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','SET_BUILDING_ALARM','CLEAR_BUILDING_ALARM','GET_COMPANY_AUTH_DATA','SYNC_RESOURCE_IMAGES','GET_ERROR_LOG','CLEAR_ERROR_LOG','GET_LIVE_BRIDGE_TOKEN']);
+// v2.5.436 in-app self-test (Settings → Run self-test). READ-ONLY toward the game: at most one GET through the
+// existing page path (pageGet), with its own cooldown; no orders, no game writes, no heavy jobs.
+const scmSelfTestSeen={apiSeenAt:null,apiDataAt:null};
+let scmSelfTestLiveAt=0;
+const SCM_SELF_TEST_LIVE_COOLDOWN_MS=60000;
+async function scmRunSelfTest(opts={}){
+  const C=globalThis.SCM_SELF_TEST_CORE,now=Date.now(),out=[];
+  const add=(...a)=>out.push(C.row(...a));
+  const safe=async(id,name,fn)=>{try{await fn();}catch(e){add(id,name,'fail',`Check threw: ${String(e?.message||e).slice(0,200)}`);}};
+  const GAME_URLS=['https://www.simcompanies.com/*','https://simcompanies.com/*'];
+  // 1. Extension health
+  await safe('ext-version','Extension version & service worker',async()=>{add('ext-version','Extension version & service worker','pass',`v${BUILD_VERSION}, service worker answered`,{version:BUILD_VERSION,manifestVersion:chrome.runtime.getManifest().manifest_version});});
+  await safe('ext-permissions','Permissions',async()=>{const want=['storage','alarms','tabs','scripting'];const p=await chrome.permissions.getAll();const missing=want.filter(x=>!(p.permissions||[]).includes(x));const hostOk=(p.origins||[]).some(o=>/simcompanies\.com/.test(o));add('ext-permissions','Permissions',missing.length||!hostOk?'fail':'pass',missing.length?`Missing: ${missing.join(', ')}`:hostOk?'Required permissions and game host access granted':'No host access to simcompanies.com',{missing:missing.length,hostAccess:hostOk,notifications:(p.permissions||[]).includes('notifications')});});
+  await safe('ext-alarms','Background alarms',async()=>{const present=await chrome.alarms.getAll();const expected=[...STANDING_ALARMS.map(a=>a[0]),GAME_CONSTANTS_ALARM,CRITICAL_DATA_GUARD_ALARM];const r=C.evalAlarms(expected,present);add('ext-alarms','Background alarms',r.status,r.missing.length?`Missing: ${r.missing.join(', ')}`:`All ${r.expected} standing alarms registered`,{expected:r.expected,present:r.present,missing:r.missing});});
+  await safe('ext-storage','Storage usage',async()=>{let bytes=null;try{bytes=await chrome.storage.local.getBytesInUse(null);}catch{}add('ext-storage','Storage usage',bytes==null?'skip':'pass',bytes==null?'getBytesInUse not supported':`${(bytes/1048576).toFixed(2)} MB in storage.local`,{bytes});});
+  await safe('ext-errors','Error log (24 h)',async()=>{const r=C.evalErrorLog(await getErrorLog(),now);add('ext-errors','Error log (24 h)',r.status,r.count24h?`${r.count24h} error(s) in 24 h; top: ${r.top.map(t=>`${t.context} x${t.count}`).join(', ')}`:'No errors in the last 24 h',{count24h:r.count24h,total:r.total,top:r.top});});
+  // 2. Game tab
+  let tab=null,bridge=null,tabRealm=null;
+  await safe('tab-open','Game tab open',async()=>{tab=await simTab();const n=(await chrome.tabs.query({url:GAME_URLS})).length;add('tab-open','Game tab open',tab?'pass':'fail',tab?'A simcompanies.com tab is open':'Open www.simcompanies.com and log in, then run again',{tabs:n});});
+  await safe('tab-content','Content script & page bridge',async()=>{
+    if(!tab?.id){add('tab-content','Content script & page bridge','skip','No game tab');return;}
+    try{bridge=await Promise.race([chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),new Promise(r=>setTimeout(()=>r(null),3000))]);}catch{bridge=null;}
+    tabRealm=validRealmNumber(bridge?.realm);
+    add('tab-content','Content script & page bridge',!bridge?'fail':bridge.ready?'pass':'warn',!bridge?'Content script did not answer (reload the game tab)':bridge.ready?'Content script answered; page-hook bridge connected':'Content script answered but the page-hook bridge is not ready',{contentScript:!!bridge,bridgeReady:!!bridge?.ready,realmKnown:tabRealm!=null});});
+  // 3. Captured data per realm
+  const stores={};
+  for(const n of Object.keys(REALM_DEFINITIONS).map(Number)){
+    const id=`realm-${n}`,name=`Captured data ${realmDisplayNumber(n)}`;
+    await safe(id,name,async()=>{const st=await notifyRealmStore(n);stores[n]=st;const s=C.realmDataSummary(st);
+      const mo=(await chrome.storage.local.get({[`scmMarketOrders:${n}`]:null}))[`scmMarketOrders:${n}`];s.marketOrders=Array.isArray(mo?.data)?mo.data.length:Array.isArray(mo?.orders)?mo.orders.length:0;
+      const v=C.evalRealmData(s);
+      add(id,name,v,v==='skip'?'No data captured for this realm yet':`auth ${s.hasAuthData?'yes':'no'}, ${s.buildings} buildings, ${s.resources} resources, ${s.marketOrders} market orders, ${s.contracts} contracts; last sync ${s.lastSync||'never'}${s.hasSyncError?' (last sync reported an error)':''}`,s);});
+  }
+  await safe('api-fresh','Recent game API capture',async()=>{const cand=[scmSelfTestSeen.apiDataAt,scmSelfTestSeen.apiSeenAt,...Object.values(stores).map(s=>Date.parse(C.realmDataSummary(s).latestReceived||''))].filter(Number.isFinite).sort((a,b)=>b-a);const f=C.evalFreshness(cand[0],now,30,24*60);const iso=v=>v?new Date(v).toISOString():null;add('api-fresh','Recent game API capture',f.status,f.ageMin==null?'No API data captured yet':`Last captured ${f.ageMin} min ago`,{ageMin:f.ageMin,apiSeenAt:iso(scmSelfTestSeen.apiSeenAt),apiDataAt:iso(scmSelfTestSeen.apiDataAt)});});
+  // 4. Live read-only fetch: one GET through the existing page path, own cooldown, skipped during a sync
+  await safe('live-fetch','Live read-only fetch',async()=>{
+    if(opts.liveFetch===false){add('live-fetch','Live read-only fetch','skip','Not selected');return;}
+    if(!bridge?.ready){add('live-fetch','Live read-only fetch','skip','Game tab bridge not ready');return;}
+    if(now-scmSelfTestLiveAt<SCM_SELF_TEST_LIVE_COOLDOWN_MS){add('live-fetch','Live read-only fetch','skip',`Cooldown: wait ${Math.ceil((SCM_SELF_TEST_LIVE_COOLDOWN_MS-(now-scmSelfTestLiveAt))/1000)} s`);return;}
+    if(tabRealm!=null&&syncSessionForRealm(tabRealm)){add('live-fetch','Live read-only fetch','skip','A sync is running; skipped to respect rate limits');return;}
+    scmSelfTestLiveAt=now;const t0=Date.now();
+    const r=await pageGet('/api/v3/companies/auth-data/',tabRealm,null,'self-test',{timeoutMs:8000,attempts:1}).catch(e=>({ok:false,status:0,error:e?.message||String(e)}));
+    const v=C.evalLiveFetch(r);add('live-fetch','Live read-only fetch',v.status,v.status==='pass'?'GET auth-data returned 200 with the expected shape':`GET auth-data: ${r?.error?String(r.error).slice(0,160):`status ${v.httpStatus}`}`,{httpStatus:v.httpStatus,shapeOk:v.shapeOk,ms:Date.now()-t0});});
+  // 5. Calculations sanity on stored data (core market pricing)
+  await safe('calc','Calculations sanity',async()=>{
+    const M=globalThis.SCM_MARKET_CORE;let lots=0,priced=0,bPriced=0,bTotal=0,bBusy=0;const vals=[],amounts=[];
+    for(const [k,st] of Object.entries(stores)){const n=Number(k);
+      for(const w of (Array.isArray(st?.warehouseResources)?st.warehouseResources:[]).slice(0,300)){lots++;amounts.push(w?.amount);const id=Number(w?.kind?.db_letter??w?.kind??w?.resourceId);if(!(id>0))continue;const p=M.marketPrice(st,n,id,Number(w?.quality)||0,{mode:'exact'})?.price;if(p!=null){priced++;vals.push(p,Number(w?.amount)*p);}}
+      for(const b of (Array.isArray(st?.buildings)?st.buildings:[])){bTotal++;const rid=Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId);if(!(rid>0))continue;bBusy++;const p=M.marketPrice(st,n,rid,Number(b?.busy?.resource?.quality??b?.busy?.quality)||0,{mode:'exact'})?.price;if(p!=null){bPriced++;vals.push(p);}}}
+    if(!bTotal&&!lots){add('calc','Calculations sanity','skip','No stored buildings or inventory to evaluate');return;}
+    const s=C.scanNumbers([...vals,...amounts]);
+    add('calc','Calculations sanity',s.status,`${s.checked} values checked: ${s.nan} NaN, ${s.infinite} Infinity, ${s.negative} negative; ${bPriced}/${bBusy} producing buildings priced (${bTotal} total), ${priced}/${lots} inventory lots priced`,{...s,buildings:bTotal,buildingsProducing:bBusy,buildingsPriced:bPriced,lots,lotsPriced:priced});});
+  // 6. Game-tab cards: no-op key the card listeners ignore, then count card elements in the tab
+  await safe('cards','Game-tab cards',async()=>{
+    if(!tab?.id||!bridge){add('cards','Game-tab cards','skip','No responsive game tab');return;}
+    let delivered=false;try{await chrome.tabs.sendMessage(tab.id,{type:'SCM_CARD_KEY_CHANGED',key:'scmSelfTestPing'});delivered=true;}catch(e){delivered=!/Receiving end does not exist|Could not establish/i.test(String(e?.message||e));}
+    let dom=null;try{const [r]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>({cards:document.querySelectorAll('#scm-listings-pill,#scm-listings-card,#scm-contracts-pill,#scm-contracts-card').length})});dom=r?.result||null;}catch{}
+    const status=!delivered?'fail':dom?.cards?'pass':'skip';
+    add('cards','Game-tab cards',status,!delivered?'SCM_CARD_KEY_CHANGED could not be delivered':dom?.cards?`Ping delivered; ${dom.cards} card element(s) present`:'Ping delivered; no card elements on this page',{delivered,cardElements:dom?.cards??null});});
+  // 7. Notifications / badge
+  await safe('notify','Notifications & badge',async()=>{let level=null;try{level=chrome.notifications?.getPermissionLevel?await chrome.notifications.getPermissionLevel():null;}catch{}const badge=!!chrome.action?.setBadgeText;
+    add('notify','Notifications & badge',!chrome.notifications&&!badge?'skip':level==='denied'?'warn':'pass',!chrome.notifications?'Notifications API not available in this browser':`Notifications ${level||'available'}; badge ${badge?'available':'unavailable'}`,{notifications:!!chrome.notifications,permissionLevel:level,badge});});
+  return {ok:true,version:BUILD_VERSION,at:new Date(now).toISOString(),totals:C.totals(out),results:out};
+}
+const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['RUN_SELF_TEST','SYNC_NOW','RUN_ACCOUNTING_WALK_NOW','RUN_JAVASCRIPT_DIAGNOSTIC','LIVE_MARKET_REFRESH','CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_FROZEN_NETWORK_PLAN','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','SET_BUILDING_ALARM','CLEAR_BUILDING_ALARM','GET_COMPANY_AUTH_DATA','SYNC_RESOURCE_IMAGES','GET_ERROR_LOG','CLEAR_ERROR_LOG','GET_LIVE_BRIDGE_TOKEN']);
 // GET_STATE from a non-extension-page context (content script) never carries secrets.
 // NOTE (authData): authData is the game's /api/v2/companies/me/ auth payload (company id/name, user/session
 // metadata), captured from the game page itself. It stays in storage.local (top level and per realmStores) because
@@ -7589,6 +7654,8 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   // types are accepted only from extension pages (popup/dashboard/options), never content scripts.
   if(!sender||sender.id!==chrome.runtime.id)return false;
   if(SCM_PRIVILEGED_MESSAGE_TYPES.has(m?.type)&&!scmIsExtensionPageSender(sender)){try{send({ok:false,error:'Not allowed from this context.'});}catch{}return false;}
+  if(m?.type==='API_SEEN')scmSelfTestSeen.apiSeenAt=Date.now();else if(m?.type==='API_DATA')scmSelfTestSeen.apiDataAt=Date.now();
+  if(m?.type==='RUN_SELF_TEST'){scmRunSelfTest({liveFetch:m.liveFetch!==false}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='GET_ERROR_LOG'){getErrorLog().then(log=>send({ok:true,log,version:BUILD_VERSION,at:new Date().toISOString()})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='CLEAR_ERROR_LOG'){clearErrorLog().then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_CLEAR_ALERT_BADGE'){if(!scmIsExtensionPageSender(sender))return false;scmClearAlertBadge().then(()=>send({ok:true})).catch(()=>send({ok:false}));return true;}
