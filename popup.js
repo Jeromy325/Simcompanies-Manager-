@@ -7,3 +7,6 @@ document.querySelector('#openDashboard').onclick=async()=>{const base=chrome.run
 render().catch(()=>{ document.querySelector('#status').textContent='Could not load data. Try reopening the popup.'; });
 render();
 try{chrome.runtime.sendMessage({type:'SCM_CLEAR_ALERT_BADGE'}).catch(()=>{});}catch{}
+
+// v2.5.438 Self-test now lives in the dashboard Settings tab too.
+document.querySelector('#openSelfTest')?.addEventListener('click',()=>{chrome.tabs.create({url:chrome.runtime.getURL('dashboard.html?tab=selftest')});window.close();});
