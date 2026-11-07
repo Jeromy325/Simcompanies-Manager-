@@ -104,7 +104,6 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
     const old = document.getElementById('scm-mobile-network-capture-indicator');
     if (old) old.remove();
     const card = document.createElement('div');
-    card.id = 'scm-mobile-network-capture-indicator';
     card.setAttribute('role','status');
     card.setAttribute('aria-live','polite');
     card.style.cssText = 'position:fixed;z-index:2147483646;top:calc(env(safe-area-inset-top, 0px) + 8px);left:8px;max-width:min(190px,calc(100vw - 16px));box-sizing:border-box;padding:5px 7px;border:1px solid rgba(104,169,225,.75);border-radius:9px;background:rgba(8,15,24,.94);color:#edf5ff;box-shadow:0 3px 12px rgba(0,0,0,.38);font:400 12px/1.35 system-ui,-apple-system,Segoe UI,sans-serif;pointer-events:auto;touch-action:manipulation;';
@@ -152,7 +151,16 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
     detail.textContent = 'Starting…';
     detail.style.cssText = 'margin-top:1px;font-size:11px;font-weight:400;color:#b9c6d5;';
     card.append(header,count,detail);
-    (document.documentElement || document.body)?.appendChild(card);
+    // v2.5.433: self-contained floating panel -> isolated in a shadow root so game CSS cannot restyle it
+    // and page scripts cannot query its contents via document selectors. Falls back to a plain append.
+    const host = document.createElement('div');
+    host.id = 'scm-mobile-network-capture-indicator';
+    host.setAttribute('data-scm-owned','1');
+    host.style.cssText = 'all:initial;position:static;';
+    let shadow = null;
+    try { shadow = host.attachShadow({mode:'closed'}); } catch {}
+    if (shadow) { shadow.appendChild(card); card.__scmHost = host; (document.documentElement || document.body)?.appendChild(host); }
+    else { card.id = 'scm-mobile-network-capture-indicator'; (document.documentElement || document.body)?.appendChild(card); }
     scmCaptureOverlay = card;
     positionCaptureOverlay();
     return card;
@@ -196,6 +204,7 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
   const stopCaptureOverlay = () => {
     if (scmCaptureOverlayTimer) clearInterval(scmCaptureOverlayTimer);
     scmCaptureOverlayTimer = null;
+    scmCaptureOverlay?.__scmHost?.remove();
     scmCaptureOverlay?.remove();
     scmCaptureOverlay = null;
   };
@@ -924,7 +933,7 @@ let hookReady = false;
         const title=String(message?.buildingName||'Building ready');
         const body=String(message?.resourceName||'A building job is ready to resolve.');
         const old=document.getElementById('scm-building-alarm-toast');old?.remove();
-        const toast=document.createElement('div');toast.id='scm-building-alarm-toast';toast.style.cssText='position:fixed;z-index:2147483647;left:50%;top:18%;transform:translateX(-50%);max-width:min(330px,calc(100vw - 24px));padding:10px 12px;border:1px solid #d75d78;border-radius:8px;background:rgba(8,12,18,.97);color:#edf2f7;box-shadow:0 10px 28px rgba(0,0,0,.55);font:11px/1.25 system-ui;';toast.innerHTML=`<strong style="display:block;font-size:12px">⏰ ${escToast(title)}</strong><span style="display:block;color:#aebdcb;margin-top:3px">${escToast(body)}</span>`;document.documentElement.appendChild(toast);setTimeout(()=>toast.remove(),7000);
+        const toastHost=document.createElement('div');toastHost.id='scm-building-alarm-toast';toastHost.setAttribute('data-scm-owned','1');toastHost.style.cssText='all:initial;position:static;';let toastRoot=null;try{toastRoot=toastHost.attachShadow({mode:'closed'});}catch{}const toast=document.createElement('div');if(!toastRoot)toast.id='scm-building-alarm-toast';toast.style.cssText='position:fixed;z-index:2147483647;left:50%;top:18%;transform:translateX(-50%);max-width:min(330px,calc(100vw - 24px));padding:10px 12px;border:1px solid #d75d78;border-radius:8px;background:rgba(8,12,18,.97);color:#edf2f7;box-shadow:0 10px 28px rgba(0,0,0,.55);font:11px/1.25 system-ui;';toast.innerHTML=`<strong style="display:block;font-size:12px">⏰ ${escToast(title)}</strong><span style="display:block;color:#aebdcb;margin-top:3px">${escToast(body)}</span>`;if(toastRoot){toastRoot.appendChild(toast);document.documentElement.appendChild(toastHost);}else document.documentElement.appendChild(toast);setTimeout(()=>{toast.remove();toastHost.remove();},7000);
       }catch{} return false;
     }
     // REFRESH_GAME_OVERLAY is handled inside the overlay IIFE below, where load() is in scope.
