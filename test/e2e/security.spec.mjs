@@ -45,7 +45,10 @@ test('security: GET_STATE from content script has no secrets; bridge token is se
     expect(set.liveBridge.token).toBe('');
     const after = await ext.evaluate(async () => ({ local: JSON.stringify(await chrome.storage.local.get(null)), session: (await chrome.storage.session.get('scmLiveBridgeToken')).scmLiveBridgeToken }));
     expect(after.session).toBe('tok-123');
-    // The token is never in the liveBridge settings object; it only lives in the backup key.
+    // storage.local holds no token anywhere (the persistent backup lives in extension-origin IndexedDB).
+    expect(after.local).not.toContain('tok-123');
+    expect(after.local).not.toContain('legacy-secret');
+    expect(after.local).not.toContain('scmLiveBridgeTokenBackup');
     const lb = await ext.evaluate(async () => (await chrome.storage.local.get('liveBridge')).liveBridge);
     expect(JSON.stringify(lb)).not.toContain('tok-123');
 
@@ -54,6 +57,34 @@ test('security: GET_STATE from content script has no secrets; bridge token is se
     await ext.evaluate(() => chrome.runtime.sendMessage({ type: 'PUSH_LIVE_BRIDGE', realm: 0, force: true }));
     const restored = await ext.evaluate(async () => (await chrome.storage.session.get('scmLiveBridgeToken')).scmLiveBridgeToken);
     expect(restored).toBe('tok-123');
+    expect(await ext.evaluate(async () => JSON.stringify(await chrome.storage.local.get(null)))).not.toContain('tok-123');
+    // Options page reads the token through the privileged message after a restart.
+    await ext.evaluate(() => chrome.storage.session.remove('scmLiveBridgeToken'));
+    const viaMsg = await ext.evaluate(() => chrome.runtime.sendMessage({ type: 'GET_LIVE_BRIDGE_TOKEN' }));
+    expect(viaMsg).toEqual({ ok: true, token: 'tok-123' });
+
+    // Legacy storage.local backup key is migrated into IndexedDB and deleted.
+    await ext.evaluate(() => chrome.runtime.sendMessage({ type: 'SET_LIVE_BRIDGE', enabled: false, url: 'https://example.invalid/b', token: '', pushOnSync: false }));
+    await ext.evaluate(() => chrome.storage.local.set({ scmLiveBridgeTokenBackup: 'old-backup' }));
+    const mig = await ext.evaluate(() => chrome.runtime.sendMessage({ type: 'GET_LIVE_BRIDGE_TOKEN' }));
+    expect(mig.token).toBe('old-backup');
+    expect(await ext.evaluate(async () => JSON.stringify(await chrome.storage.local.get(null)))).not.toContain('old-backup');
+    await ext.evaluate(() => chrome.runtime.sendMessage({ type: 'SET_LIVE_BRIDGE', enabled: false, url: 'https://example.invalid/b', token: 'tok-123', pushOnSync: false }));
+
+    // Export paths: the shared redact helper used by every dashboard download/copy strips secrets.
+    const dash = await ctx.newPage();
+    await dash.goto(`chrome-extension://${id}/dashboard.html`);
+    await dash.waitForLoadState('load');
+    const exported = await dash.evaluate(async () => {
+      await chrome.storage.local.set({ authData: { authCompany: { companyId: 7 }, sessionSecret: 'auth-secret' }, realmStores: { r0: { authData: { cookie: 'auth-secret' } } }, fooTokenBackup: 'tok-123' });
+      const storage = await chrome.storage.local.get(null);
+      return JSON.stringify(SCM_DIAGNOSTIC_CORE.redactSecrets({ storage, liveBridge: { token: 'tok-123' }, headers: { Authorization: 'Bearer tok-123', cookies: 'a=b' } }));
+    });
+    expect(exported).not.toContain('tok-123');
+    expect(exported).not.toContain('auth-secret');
+    expect(exported).not.toContain('a=b');
+    await dash.evaluate(() => chrome.storage.local.remove(['authData', 'realmStores', 'fooTokenBackup']));
+    await dash.close();
 
     // Content-script (isolated world) context on the game page.
     const p = await ctx.newPage();
@@ -75,6 +106,7 @@ test('security: GET_STATE from content script has no secrets; bridge token is se
       const r = await inCs(`chrome.runtime.sendMessage({type:'${type}'})`);
       expect(r, type).toEqual({ ok: false, error: 'Not allowed from this context.' });
     }
+    expect(await inCs(`chrome.runtime.sendMessage({type:'GET_LIVE_BRIDGE_TOKEN'})`)).toEqual({ ok: false, error: 'Not allowed from this context.' });
 
     // Extension page still gets the full shape.
     const pageState = await ext.evaluate(() => chrome.runtime.sendMessage({ type: 'GET_STATE' }));

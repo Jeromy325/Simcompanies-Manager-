@@ -19,16 +19,16 @@ if(!globalThis.__scmPageBridge)globalThis.__scmPageBridge=(()=>{
     for(const k of STR_KEYS){const v=d[k];if(v!=null&&(typeof v==='object'||String(v).length>8192))return false;}
     return true;
   };
-  const handlers=[];let port=null,portAt=0,handoffs=0;
+  const handlers=[];let port=null,portAt=0,handoffs=0,oldPort=null;
   const dispatch=d=>{const ev={source:window,data:d};for(const h of handlers.slice()){try{h(ev);}catch(e){try{setTimeout(()=>{throw e;});}catch{}}}};
   const handoff=()=>{
     if(port||handoffs>=30)return;handoffs++;
     let ch;try{ch=new MessageChannel();}catch{return;}
     const p=ch.port1;
     p.onmessage=e=>{const d=e.data;if(!valid(d))return;
-      if(d.type==='PORT_ACK'){if(!port&&d.nonce===nonce){port=p;portAt=Date.now();}return;}
+      if(d.type==='PORT_ACK'){if(!port&&d.nonce===nonce){port=p;portAt=Date.now();oldPort=null;}return;}
       if(d.type==='PORT_PING'){let ok=false;try{ok=!!chrome?.runtime?.id;}catch{}if(ok&&p===port){try{p.postMessage({source:SRC,type:'PORT_PONG'});}catch{}}return;}
-      if(p!==port)return;dispatch(d);};
+      if(p!==port&&p!==oldPort)return;dispatch(d);};
     try{window.postMessage({source:SRC,type:'PORT_HANDOFF',nonce},origin,[ch.port2]);}catch{}
   };
   window.addEventListener('message',ev=>{
@@ -41,8 +41,9 @@ if(!globalThis.__scmPageBridge)globalThis.__scmPageBridge=(()=>{
   const send=m=>{const msg={...m,source:SRC};if(port){try{port.postMessage(msg);return;}catch{}}window.postMessage(msg,origin);};
   // v2.5.434 bfcache (Chrome 123+ may restore pages with open MessageChannels closed): after a persisted
   // pageshow, drop to the window path and hand over a fresh port. page-hook only replaces its port if
-  // the old one stops answering, so this never lets a page script take over.
-  try{window.addEventListener('pageshow',e=>{if(!e.persisted)return;port=null;handoffs=0;handoff();});}catch{}
+  // the old one stops answering, so this never lets a page script take over. The old port keeps being
+  // accepted (if it is still alive) until the new port's PORT_ACK arrives, so no traffic is dropped.
+  try{window.addEventListener('pageshow',e=>{if(!e.persisted)return;if(port)oldPort=port;port=null;handoffs=0;handoff();});}catch{}
   return {listen:h=>{handlers.push(h);},send,handoff,isPortReady:()=>!!port};
 })();
 // v2.5.433 teardown when the extension context is invalidated (extension reloaded/updated): orphaned
@@ -1836,9 +1837,11 @@ function scmPageTextNoLayout(){
       if(e.target.closest?.('#scm-listings-pill')){e.preventDefault();e.stopPropagation();setOpen(true);}
     },true);
     window.addEventListener('resize',()=>{placeSaved(document.getElementById(CARD));placeSaved(document.getElementById(PILL));},{passive:true});
-    chrome.storage?.onChanged?.addListener((changes,area)=>{
-      const realm=currentRealm();if(area!=='local'||realm==null||!changes[`scmMarketOrders:${realm}`]||!L.open)return;
-      clearTimeout(L.changeTimer);L.changeTimer=setTimeout(()=>request(false),300);
+    // Background tells us when the small key changes (no storage.onChanged: it would deliver every large realm-store write).
+    chrome.runtime?.onMessage?.addListener((msg)=>{
+      if(msg?.type!=='SCM_CARD_KEY_CHANGED')return false;
+      const realm=currentRealm();if(realm==null||msg.key!==`scmMarketOrders:${realm}`||!L.open)return false;
+      clearTimeout(L.changeTimer);L.changeTimer=setTimeout(()=>request(false),300);return false;
     });
     document.addEventListener('visibilitychange',()=>{if(!document.hidden&&L.open){request(true);tickAgo();}});
     // the game re-announces its realm on every state update; act only on a real change
@@ -1918,9 +1921,11 @@ function scmPageTextNoLayout(){
       if(e.target.closest?.('#scm-contracts-pill')){e.preventDefault();e.stopPropagation();setOpen(true);}
     },true);
     window.addEventListener('resize',()=>{placeSaved(document.getElementById(CARD));placeSaved(document.getElementById(PILL));},{passive:true});
-    chrome.storage?.onChanged?.addListener((changes,area)=>{
-      const realm=currentRealm();if(area!=='local'||realm==null||!changes[`scmOutgoingContracts:${realm}`]||!C.open)return;
-      clearTimeout(C.changeTimer);C.changeTimer=setTimeout(()=>request(false),300);
+    // Background tells us when the small key changes (no storage.onChanged: it would deliver every large realm-store write).
+    chrome.runtime?.onMessage?.addListener((msg)=>{
+      if(msg?.type!=='SCM_CARD_KEY_CHANGED')return false;
+      const realm=currentRealm();if(realm==null||msg.key!==`scmOutgoingContracts:${realm}`||!C.open)return false;
+      clearTimeout(C.changeTimer);C.changeTimer=setTimeout(()=>request(false),300);return false;
     });
     document.addEventListener('visibilitychange',()=>{if(!document.hidden&&C.open){request(true);tickAgo();}});
     // the game re-announces its realm on every state update; act only on a real change

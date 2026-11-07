@@ -155,13 +155,13 @@ async function scmNetDebuggerEvent(source,method,params){if(!scmNetCapture.activ
 const SCM_NET_SESSION_KEY='scmNetCaptureSessionState';
 async function scmNetPersistSession(){try{await chrome.storage.session?.set({[SCM_NET_SESSION_KEY]:{tabId:scmNetCapture.tabId,captureId:scmNetCapture.captureId,active:scmNetCapture.active,startedAt:scmNetCapture.startedAt}});}catch{}}
 async function scmNetRecoverStaleSession(){try{if(!chrome.storage.session)return;const st=(await chrome.storage.session.get(SCM_NET_SESSION_KEY))[SCM_NET_SESSION_KEY];if(!st?.active||scmNetCapture.active)return;try{if(st.tabId!=null&&chrome.debugger?.detach)await chrome.debugger.detach({tabId:st.tabId});}catch{}await chrome.storage.session.set({[SCM_NET_SESSION_KEY]:{...st,active:false}});const cur=(await chrome.storage.local.get('scmNetworkCaptureV3Status')).scmNetworkCaptureV3Status||{};if(cur.captureId===st.captureId&&cur.status==='recording'&&cur.mode!=='mobile-page')await chrome.storage.local.set({scmNetworkCaptureV3Status:{...cur,status:'stopped',stopReason:'service-worker-restart',stoppedAt:new Date().toISOString()}});}catch{}}
-scmNetRecoverStaleSession();
+const scmNetRecoveryPromise=scmNetRecoverStaleSession();
 // debugger is an optional permission (some Android browsers remove extensions that require it), so bind only once it exists.
 let scmNetDebuggerBound=false;
 function scmNetBindDebugger(){if(scmNetDebuggerBound||!chrome.debugger?.onEvent)return scmNetDebuggerBound;scmNetDebuggerBound=true;chrome.debugger.onEvent.addListener(scmNetDebuggerEvent);chrome.debugger.onDetach.addListener((source,reason)=>{if(source.tabId===scmNetCapture.tabId){scmNetCapture.active=false;scmNetPersistSession();scmNetSave({kind:'capture-detached',reason:String(reason||'unknown')}).catch(()=>{});}});return true;}
 scmNetBindDebugger();
 chrome.permissions?.onAdded?.addListener(p=>{if(p?.permissions?.includes('debugger'))scmNetBindDebugger();});
-async function scmNetStart(tabId){if(!scmNetBindDebugger())throw new Error('Debugger permission not granted. Use page capture instead.');if(scmNetCapture.active)throw new Error('A network capture is already active. Stop it first.');const tab=await chrome.tabs.get(tabId);if(!tab?.url||!/^https:\/\/(www\.)?simcompanies\.com\//i.test(tab.url))throw new Error('Selected tab is not a Sim Companies page.');scmNetCapture.tabId=tabId;scmNetCapture.captureId=`net3-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;scmNetCapture.requestMap.clear();scmNetCapture.counters={events:0,requests:0,responses:0,bodies:0,errors:0};scmNetCapture.startedAt=new Date().toISOString();await scmNetClearEvents(scmNetCapture.captureId);await chrome.debugger.attach({tabId},'1.3');try{await chrome.debugger.sendCommand({tabId},'Network.enable',{maxTotalBufferSize:20000000,maxResourceBufferSize:10000000,maxPostDataSize:1000000});scmNetCapture.active=true;await scmNetPersistSession();await scmNetSave({kind:'capture-start',tabId,pageUrl:tab.url,coverage:'Chrome DevTools Protocol Network domain; browser-observed requests for this tab'});return {ok:true,captureId:scmNetCapture.captureId,tabId,status:'recording',note:'Chrome may display a debugging notification while capture is active.'};}catch(err){try{await chrome.debugger.detach({tabId});}catch{}scmNetCapture.active=false;throw err;}}
+async function scmNetStart(tabId){try{await scmNetRecoveryPromise;}catch{}if(!scmNetBindDebugger())throw new Error('Debugger permission not granted. Use page capture instead.');if(scmNetCapture.active)throw new Error('A network capture is already active. Stop it first.');const tab=await chrome.tabs.get(tabId);if(!tab?.url||!/^https:\/\/(www\.)?simcompanies\.com\//i.test(tab.url))throw new Error('Selected tab is not a Sim Companies page.');scmNetCapture.tabId=tabId;scmNetCapture.captureId=`net3-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;scmNetCapture.requestMap.clear();scmNetCapture.counters={events:0,requests:0,responses:0,bodies:0,errors:0};scmNetCapture.startedAt=new Date().toISOString();await scmNetClearEvents(scmNetCapture.captureId);await chrome.debugger.attach({tabId},'1.3');try{await chrome.debugger.sendCommand({tabId},'Network.enable',{maxTotalBufferSize:20000000,maxResourceBufferSize:10000000,maxPostDataSize:1000000});scmNetCapture.active=true;await scmNetPersistSession();await scmNetSave({kind:'capture-start',tabId,pageUrl:tab.url,coverage:'Chrome DevTools Protocol Network domain; browser-observed requests for this tab'});return {ok:true,captureId:scmNetCapture.captureId,tabId,status:'recording',note:'Chrome may display a debugging notification while capture is active.'};}catch(err){try{await chrome.debugger.detach({tabId});}catch{}scmNetCapture.active=false;throw err;}}
 async function scmNetStop(){if(!scmNetCapture.captureId)return {ok:false,error:'No capture session exists.'};const tabId=scmNetCapture.tabId;scmNetCapture.active=false;await scmNetPersistSession();await scmNetSave({kind:'capture-stop',tabId,stopReason:'user-request'}).catch(()=>{});try{if(tabId!=null)await chrome.debugger.detach({tabId});}catch(err){await scmNetSave({kind:'capture-detach-error',error:String(err?.message||err)}).catch(()=>{});}const status={ok:true,captureId:scmNetCapture.captureId,tabId,status:'stopped',...scmNetCapture.counters};await chrome.storage.local.set({scmNetworkCaptureV3Status:{...status,startedAt:scmNetCapture.startedAt,stoppedAt:new Date().toISOString()}});return status;}
 
 const BUILD_VERSION=chrome.runtime.getManifest().version;
@@ -380,6 +380,13 @@ async function refreshGameConstants(force=false){
     return {ok:true};
   }catch(e){logActivity(await activeRealmNumber(),'game-constants','failure',{},String(e?.message||e));return {ok:false,error:String(e?.message||e)};}
 }
+// Targeted delivery for the game-page cards: instead of the content script listening to every storage.local
+// write (realm stores are ~1MB), tell Sim Companies tabs which small key changed.
+async function notifyGameCardsKeyChanged(key){
+  try{const tabs=await chrome.tabs.query({url:['https://www.simcompanies.com/*','https://simcompanies.com/*']});
+    for(const t of tabs){if(t?.id!=null)chrome.tabs.sendMessage(t.id,{type:'SCM_CARD_KEY_CHANGED',key}).catch(()=>{});}
+  }catch{}
+}
 const ownListingsRefreshAt=new Map(); // realm → last GET_OWN_LISTINGS_DATA refresh request (ms)
 async function refreshMarketOrders(realm,maxAgeMs=5*60000){
   try{
@@ -393,7 +400,7 @@ async function refreshMarketOrders(realm,maxAgeMs=5*60000){
     const res=await fetch(`https://www.simcompanies.com/api/v2/companies/${cid}/market-orders/`,{credentials:'omit'});
     if(!res.ok)return {ok:false,error:`HTTP ${res.status}`};
     const orders=await res.json();if(!Array.isArray(orders))return {ok:false,error:'not a list'};
-    await rawStorageSet({[k]:{companyId:cid,orders,at:new Date().toISOString()}});
+    await rawStorageSet({[k]:{companyId:cid,orders,at:new Date().toISOString()}});notifyGameCardsKeyChanged(k);
     logActivity(r,'market-orders','success',{rows:orders.length});
     return {ok:true};
   }catch(e){logActivity(validRealmNumber(realm),'market-orders','failure',{},String(e?.message||e));return {ok:false,error:String(e?.message||e)};}
@@ -410,7 +417,7 @@ async function refreshOutgoingContracts(realm,minGapMs=OUTGOING_CONTRACTS_REFRES
   try{
     const x=await pageGet('/api/v3/contracts-outgoing/me/',r,null,'outgoing-contracts-card',{timeoutMs:8000,attempts:1});
     if(!x?.ok||x.data==null)return {ok:false,error:x?.error||`HTTP ${x?.status||0}`};
-    await rawStorageSet({[`scmOutgoingContracts:${r}`]:{data:x.data,at:new Date().toISOString()}});
+    await rawStorageSet({[`scmOutgoingContracts:${r}`]:{data:x.data,at:new Date().toISOString()}});notifyGameCardsKeyChanged(`scmOutgoingContracts:${r}`);
     return {ok:true};
   }catch(e){return {ok:false,error:String(e?.message||e)};}
 }
@@ -7133,25 +7140,40 @@ function buildLiveBridgePayload(s, realm, store, overlay){
 // scripts, never in storage.local backups). Session storage clears on browser restart, so storage.local
 // keeps only a non-secret liveBridge.tokenSet flag that lets Settings ask the user to re-enter it.
 const LIVE_BRIDGE_TOKEN_SESSION_KEY='scmLiveBridgeToken';
+// Legacy storage.local key (readable by content scripts); migrated into extension-origin IndexedDB.
 const LIVE_BRIDGE_TOKEN_BACKUP_KEY='scmLiveBridgeTokenBackup';
+const LIVE_BRIDGE_SECRET_DB='scmSecrets';
+function liveBridgeSecretDb(){return new Promise((resolve,reject)=>{const req=indexedDB.open(LIVE_BRIDGE_SECRET_DB,1);req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains('kv'))db.createObjectStore('kv');};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error||new Error('IndexedDB open failed'));});}
+async function liveBridgeSecretOp(mode,fn){const db=await liveBridgeSecretDb();try{return await new Promise((resolve,reject)=>{const tx=db.transaction('kv',mode);const st=tx.objectStore('kv');let out;const r=fn(st);if(r)r.onsuccess=()=>{out=r.result;};tx.oncomplete=()=>resolve(out);tx.onerror=tx.onabort=()=>reject(tx.error||new Error('IndexedDB tx failed'));});}finally{db.close();}}
+async function liveBridgeBackupGet(){try{return String(await liveBridgeSecretOp('readonly',st=>st.get('liveBridgeToken'))||'');}catch{return '';}}
+async function liveBridgeBackupSet(token){await liveBridgeSecretOp('readwrite',st=>st.put(String(token),'liveBridgeToken'));}
+async function liveBridgeBackupClear(){try{await liveBridgeSecretOp('readwrite',st=>st.delete('liveBridgeToken'));}catch{}}
+async function migrateLegacyLiveBridgeBackup(){
+  try{const legacy=String((await chrome.storage.local.get(LIVE_BRIDGE_TOKEN_BACKUP_KEY))?.[LIVE_BRIDGE_TOKEN_BACKUP_KEY]||'');
+    if(legacy){if(!(await liveBridgeBackupGet()))await liveBridgeBackupSet(legacy);}
+    await chrome.storage.local.remove(LIVE_BRIDGE_TOKEN_BACKUP_KEY);
+  }catch(e){logError('live-bridge-backup-migrate',e);}
+}
 async function migrateLiveBridgeToken(){
   const cur=(await chrome.storage.local.get({liveBridge:null})).liveBridge;
   const legacy=cur&&typeof cur==='object'?String(cur.token||''):'';
   if(!legacy)return null;
   if(chrome.storage.session)await chrome.storage.session.set({[LIVE_BRIDGE_TOKEN_SESSION_KEY]:legacy});
-  await chrome.storage.local.set({[LIVE_BRIDGE_TOKEN_BACKUP_KEY]:legacy});
+  await liveBridgeBackupSet(legacy);
   await storageSet({liveBridge:{...cur,token:'',tokenSet:true}});
   return legacy;
 }
 async function getLiveBridgeToken(){
   try{const migrated=await migrateLiveBridgeToken();if(migrated)return migrated;}catch(e){logError('live-bridge-token-migrate',e);}
+  await migrateLegacyLiveBridgeBackup();
   let t='';try{t=String((await chrome.storage.session?.get(LIVE_BRIDGE_TOKEN_SESSION_KEY))?.[LIVE_BRIDGE_TOKEN_SESSION_KEY]||'');}catch{}
   if(t)return t;
-  // Session storage is cleared on browser restart; restore from the persistent backup so the user
-  // never has to re-enter the token. The backup key is never returned by GET_STATE.
-  try{t=String((await chrome.storage.local.get(LIVE_BRIDGE_TOKEN_BACKUP_KEY))?.[LIVE_BRIDGE_TOKEN_BACKUP_KEY]||'');if(t&&chrome.storage.session)await chrome.storage.session.set({[LIVE_BRIDGE_TOKEN_SESSION_KEY]:t});}catch{}
+  // Session storage is cleared on browser restart; restore from the extension-origin IndexedDB
+  // backup (not reachable from content scripts) so the user never has to re-enter the token.
+  try{t=await liveBridgeBackupGet();if(t&&chrome.storage.session)await chrome.storage.session.set({[LIVE_BRIDGE_TOKEN_SESSION_KEY]:t});}catch{}
   return t;
 }
+migrateLegacyLiveBridgeBackup();
 async function pushLiveBridge(realm, force=false){
   const n=validRealmNumber(realm); if(n==null)return {ok:false,error:'Valid realm required.'};
   const s=await state(realm); const cfg=s.liveBridge||{};
@@ -7550,8 +7572,13 @@ async function requestJavascriptDiagnostic(send){
   return {ok:true,skipped:true,realm:validRealmNumber(candidates?.[0]?.url?.match(/\/rc\/(\d+)\//)?.[1]),diagnostic:null,source:'runtime-diagnostic-skipped',message:'Runtime diagnostic was skipped because the game page was busy.'};
 }
 
-const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['SYNC_NOW','RUN_ACCOUNTING_WALK_NOW','RUN_JAVASCRIPT_DIAGNOSTIC','LIVE_MARKET_REFRESH','CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_FROZEN_NETWORK_PLAN','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','SET_BUILDING_ALARM','CLEAR_BUILDING_ALARM','GET_COMPANY_AUTH_DATA','SYNC_RESOURCE_IMAGES','GET_ERROR_LOG','CLEAR_ERROR_LOG']);
+const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['SYNC_NOW','RUN_ACCOUNTING_WALK_NOW','RUN_JAVASCRIPT_DIAGNOSTIC','LIVE_MARKET_REFRESH','CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_FROZEN_NETWORK_PLAN','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','SET_BUILDING_ALARM','CLEAR_BUILDING_ALARM','GET_COMPANY_AUTH_DATA','SYNC_RESOURCE_IMAGES','GET_ERROR_LOG','CLEAR_ERROR_LOG','GET_LIVE_BRIDGE_TOKEN']);
 // GET_STATE from a non-extension-page context (content script) never carries secrets.
+// NOTE (authData): authData is the game's /api/v2/companies/me/ auth payload (company id/name, user/session
+// metadata), captured from the game page itself. It stays in storage.local (top level and per realmStores) because
+// many readers depend on it; content scripts run on the same game origin that already holds the session, so it
+// grants them nothing new. It is stripped here (GET_STATE defense in depth) and by SCM_DIAGNOSTIC_CORE.redactSecrets
+// in every export/copy path. Bearer-style secrets (the live-bridge token) are NOT kept in storage.local.
 function scmStripStateSecrets(out){const o={...out};if(o.liveBridge&&typeof o.liveBridge==='object'){const{token,...rest}=o.liveBridge;o.liveBridge={...rest,hasToken:Boolean(token||rest.tokenSet)};}delete o.authData;if(o.realmStores&&typeof o.realmStores==='object'){const rs={};for(const[k,v]of Object.entries(o.realmStores)){if(v&&typeof v==='object'){const{authData,...rest}=v;rs[k]=rest;}else rs[k]=v;}o.realmStores=rs;}return o;}
 function scmIsExtensionPageSender(sender){const base=chrome.runtime.getURL('');return typeof sender?.url==='string'&&sender.url.startsWith(base)&&!(sender.tab&&!String(sender.tab.url||'').startsWith(base)&&sender.frameId===0);}
 replayEvent('runtime-start',{buildVersion:BUILD_VERSION,activeRealmKey:null});
@@ -8069,7 +8096,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         pendingBuildingCollects.clear();if(buildingCollectFlushTimer){clearTimeout(buildingCollectFlushTimer);buildingCollectFlushTimer=null;} // collect stamps (scmBuildingCollects:N) go with the clear below
         await withRealmStorageCommit(()=>chrome.storage.local.clear());
         await scmNetClearAllEvents().catch(()=>{});
-        await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY).catch(()=>{});await chrome.storage.local.remove(LIVE_BRIDGE_TOKEN_BACKUP_KEY).catch(()=>{}); // bridge token is session-only now
+        await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY).catch(()=>{});await chrome.storage.local.remove(LIVE_BRIDGE_TOKEN_BACKUP_KEY).catch(()=>{});await liveBridgeBackupClear(); // session token + IDB backup
         // R5: in-memory copies of cleared data would otherwise be served (and written back) until the worker restarts.
         resourceImagesMemo=null;notifyRecipesMemo=null;gameOverlayAssetsPromise=null;
         gameOverlaySnapshotMemo.clear();contractHelperCache.clear();
@@ -8365,14 +8392,17 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
   if(m?.type==='PUSH_LIVE_BRIDGE'){
     pushLiveBridge(m.realm,Boolean(m.force)).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;
   }
+  if(m?.type==='GET_LIVE_BRIDGE_TOKEN'){
+    getLiveBridgeToken().then(token=>send({ok:true,token:String(token||'')})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;
+  }
   if(m?.type==='SET_LIVE_BRIDGE'){
     (async()=>{try{
       const current=await chrome.storage.local.get({liveBridge:DEFAULTS.liveBridge});
       const token=String(m.token||'');
       const next={...(current.liveBridge||{}),enabled:Boolean(m.enabled),url:String(m.url||'').trim(),token:'',tokenSet:Boolean(token),pushOnSync:Boolean(m.pushOnSync)};
       if(next.url && !/^https:\/\//i.test(next.url)) throw new Error('Live bridge URL must use HTTPS.');
-      if(token){if(!chrome.storage.session)throw new Error('Session storage unavailable; cannot store bridge token.');await chrome.storage.session.set({[LIVE_BRIDGE_TOKEN_SESSION_KEY]:token});await chrome.storage.local.set({[LIVE_BRIDGE_TOKEN_BACKUP_KEY]:token});}
-      else {await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY);await chrome.storage.local.remove(LIVE_BRIDGE_TOKEN_BACKUP_KEY);}
+      if(token){if(!chrome.storage.session)throw new Error('Session storage unavailable; cannot store bridge token.');await chrome.storage.session.set({[LIVE_BRIDGE_TOKEN_SESSION_KEY]:token});await liveBridgeBackupSet(token);await chrome.storage.local.remove(LIVE_BRIDGE_TOKEN_BACKUP_KEY);}
+      else {await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY);await chrome.storage.local.remove(LIVE_BRIDGE_TOKEN_BACKUP_KEY);await liveBridgeBackupClear();}
       await storageSet({liveBridge:next});
       send({ok:true,liveBridge:{...next,hasToken:Boolean(token)}});
     }catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;
