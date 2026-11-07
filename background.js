@@ -5,6 +5,7 @@ import './market-core.js';
 import './notify-core.js';
 import './analyze-core.js';
 import './self-test-core.js';
+import './storage-core.js';
 import {
   REALM_DEFINITIONS, validRealmNumber, realmDefinition, realmKeyFromRealm, realmStorageKey,
   realmDisplayNumber, realmDisplayName, realmContractPaths
@@ -5302,6 +5303,7 @@ const STANDING_ALARMS=[
   ['scm-production-events-daily',{periodInMinutes:720}],
   ['scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15}],
   ['scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080}],
+  ['scm-storage-prune',{delayInMinutes:30,periodInMinutes:1440}],
 ];
 // Idempotent: (re)create a periodic alarm only when it is missing or its period changed, so it is not pushed back.
 async function scmEnsurePeriodicAlarm(name,info){const cur=await chrome.alarms.get(name);if(cur&&Number(cur.periodInMinutes)===Number(info.periodInMinutes))return false;await scmAlarmCreate(name,info);return true;}
@@ -5338,6 +5340,59 @@ async function restorePersistedAlarms(reason='restore'){
   }
   return out;
 }
+// v2.5.439 storage retention (user: "cut the storage to 90 days"). One pass over the time-series families; every
+// rule and what reads each family is in storage-core.js / research_notes/storage_inventory.md. Each standalone key is
+// pruned inside its own writer queue (no lost appends) and the realm-store fields under the realm storage queue.
+// Only keys that changed are written. Settings, tokens, snapshots, alarms, saved contracts and planner state are
+// never read here. Safe to run any number of times; a corrupt value is left as it is.
+const STORAGE_PRUNE_DAYS=90;
+let scmPruneRunning=null;
+async function scmStorageBytes(){try{return await chrome.storage.local.getBytesInUse(null);}catch{return null;}}
+async function scmStorageTopKeys(n=8){
+  const SC=globalThis.SCM_STORAGE_CORE;const sizes={};
+  let keys=null;try{if(typeof chrome.storage.local.getKeys==='function')keys=await chrome.storage.local.getKeys();}catch{}
+  if(Array.isArray(keys)){for(const k of keys){try{sizes[k]=await chrome.storage.local.getBytesInUse(k);}catch{}}}
+  else{const all=await chrome.storage.local.get(null);for(const [k,v] of Object.entries(all||{}))sizes[k]=SC.approxBytes(v)+k.length;}
+  return SC.topKeys(sizes,n);
+}
+async function scmPruneStorage({days=STORAGE_PRUNE_DAYS,reason='manual'}={}){
+  if(scmPruneRunning)return scmPruneRunning;
+  scmPruneRunning=(async()=>{
+    const SC=globalThis.SCM_STORAGE_CORE;const now=Date.now();const removed={};const written=[];
+    const add=(r)=>{for(const [k,v] of Object.entries(r||{}))removed[k]=(removed[k]||0)+v;};
+    const before=await scmStorageBytes();
+    const pruneKey=async(key,plan)=>{const got=await chrome.storage.local.get({[key]:null});const r=plan(got);if(r&&Object.keys(r.patch).length){await rawStorageSet(r.patch);written.push(...Object.keys(r.patch));add(r.removed);}};
+    for(const n of [0,1]){
+      const one=key=>got=>{const r=SC.planRealmKeys(n,got,now,days);return {patch:r.patch[key]!==undefined?{[key]:r.patch[key]}:{},removed:Object.fromEntries(Object.entries(r.removed).filter(([f])=>key.startsWith(f+':')))};};
+      const chain=(map,key)=>{const run=(map.get(n)||Promise.resolve()).then(()=>pruneKey(key,one(key)));map.set(n,run.catch(()=>{}));return run;};
+      try{await chain(productionCostQueues,`scmProductionCostHistory:${n}`);}catch(e){logError('prune:pch',e);}
+      try{await chain(statementHistoryQueues,`scmStatementHistory:${n}`);}catch(e){logError('prune:statements',e);}
+      try{await chain(backgroundJobQueues,`scmBackgroundJobs:${n}`);}catch(e){logError('prune:jobs',e);}
+      try{priceLogQueue=priceLogQueue.then(()=>pruneKey(`scmPriceLog:${n}`,one(`scmPriceLog:${n}`))).catch(e=>logError('prune:pricelog',e));await priceLogQueue;}catch{}
+    }
+    // Realm-store fields: under the realm storage queue, never during a Sync (it holds the store).
+    if(coreSyncActive())deferUntilSyncEnds('storage-prune-realm',()=>{scmPruneStorage({days,reason:'after-sync'}).catch(()=>{});});
+    else for(const n of [0,1]){
+      try{
+        const r=await enqueueApiStorage(async()=>{
+          const raw=(await chrome.storage.local.get({[realmStorageKey(n)]:null}))[realmStorageKey(n)];
+          const plan=SC.planRealmStore(raw,now,days);
+          if(!Object.keys(plan.patch).length)return plan;
+          await storageSetRealmPatch(n,plan.patch);return plan;
+        },n,{priority:true});
+        if(r&&Object.keys(r.patch||{}).length){await flushRealmPatches(n);written.push(realmStorageKey(n));add(r.removed);}
+      }catch(e){logError('prune:realm-store',e);}
+    }
+    // Error log: flush the in-memory buffer first, then trim it in place so a later debounced write keeps the trim.
+    try{const log=await getErrorLog();const r=SC.planGlobal({scmErrorLog:log},now,days);if(r.patch.scmErrorLog){scmErrorLogBuffer=r.patch.scmErrorLog;await rawStorageSet(r.patch);written.push('scmErrorLog');add(r.removed);}}catch(e){logError('prune:error-log',e);}
+    const after=await scmStorageBytes();
+    const result={ok:true,reason,days,before,after,freed:before!=null&&after!=null?before-after:null,removed,written:[...new Set(written)],at:new Date(now).toISOString()};
+    await rawStorageSet({scmStoragePruneLast:result}).catch(()=>{});
+    return result;
+  })().catch(e=>{logError('prune',e);return {ok:false,error:e?.message||String(e)};}).finally(()=>{scmPruneRunning=null;});
+  return scmPruneRunning;
+}
+globalThis.scmPruneStorage=scmPruneStorage;
 // Each lifecycle step is isolated: one failing step is logged and must not skip the rest.
 async function scmLifecycleStep(label,fn){try{return await fn();}catch(e){logError(`lifecycle:${label}`,e);return undefined;}}
 chrome.runtime.onInstalled.addListener(async()=>{
@@ -5370,6 +5425,8 @@ chrome.runtime.onInstalled.addListener(async()=>{
   await scmLifecycleStep('installed:critical-data-guard',()=>ensureCriticalDataGuard('installed'));
   await scmLifecycleStep('installed:vwap-watch',()=>ensureVwapWatchAlarm('installed'));
   await scmLifecycleStep('installed:resource-image-validation',()=>scmEnsurePeriodicAlarm('scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080}));
+  await scmLifecycleStep('installed:storage-prune-alarm',()=>scmEnsurePeriodicAlarm('scm-storage-prune',{delayInMinutes:30,periodInMinutes:1440}));
+  await scmLifecycleStep('installed:storage-prune',()=>scmPruneStorage({reason:'installed'}));
   await scmLifecycleStep('installed:restore-alarms',()=>restorePersistedAlarms('installed'));
   await scmLifecycleStep('installed:accounting-walk',()=>ensureAccountingWalkSchedule('installed'));
   // R4: an update restarts the worker too; a Sync interrupted by it must not stay "running" (jobs <5 min old are skipped).
@@ -5387,6 +5444,7 @@ chrome.runtime.onStartup.addListener(async()=>{
   await scmLifecycleStep('startup:live-market-alarm',()=>ensureLiveMarketRefreshAlarm('service-worker-startup'));
   await scmLifecycleStep('startup:order-book-alarm',()=>ensureOrderBookRefreshAlarm());
   await scmLifecycleStep('startup:standing-alarms',()=>ensureStandingAlarms());
+  await scmLifecycleStep('startup:storage-prune',()=>scmPruneStorage({reason:'startup'}));
   await scmLifecycleStep('startup:restore-alarms',()=>restorePersistedAlarms('browser-startup'));
   await scmLifecycleStep('startup:accounting-walk',()=>ensureAccountingWalkSchedule('browser-startup'));
   await scmLifecycleStep('startup:recover-sync',()=>recoverInterruptedSyncJobs('service-worker-startup'));
@@ -5500,6 +5558,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
   if(legacyPostSyncMatch){await runMarketStage(Number(legacyPostSyncMatch[1]),'vwap','legacy-post-sync-alarm').catch(()=>{});return;}
   if(a.name===LIVE_MARKET_REFRESH_ALARM_NAME){ await runScheduledLiveMarketRefresh('hourly-market-cycle').catch(()=>{}); return; }
   if(a.name===ORDER_BOOK_REFRESH_ALARM){ if(await scmOrderBookShouldThrottle())return; await runOrderBookRefreshFiring().catch(e=>logError('order-book-refresh',e)); return; }
+  if(a.name==='scm-storage-prune'){ await scmPruneStorage({reason:'daily-alarm'}).catch(()=>{}); return; }
   if(a.name===CRITICAL_DATA_GUARD_ALARM){ await runCriticalDataGuard('scheduled').catch(()=>{}); return; }
   if(a.name==='scm-vwap-daily'||a.name==='scm-vwap-retry'){
     await runScheduledLiveMarketRefresh('legacy-vwap-alarm').catch(()=>{});
@@ -7588,7 +7647,7 @@ async function scmRunSelfTest(opts={}){
   await safe('ext-version','Extension version & service worker',async()=>{add('ext-version','Extension version & service worker','pass',`v${BUILD_VERSION}, service worker answered`,{version:BUILD_VERSION,manifestVersion:chrome.runtime.getManifest().manifest_version});});
   await safe('ext-permissions','Permissions',async()=>{const want=['storage','alarms','tabs','scripting'];const p=await chrome.permissions.getAll();const missing=want.filter(x=>!(p.permissions||[]).includes(x));const hostOk=(p.origins||[]).some(o=>/simcompanies\.com/.test(o));add('ext-permissions','Permissions',missing.length||!hostOk?'fail':'pass',missing.length?`Missing: ${missing.join(', ')}`:hostOk?'Required permissions and game host access granted':'No host access to simcompanies.com',{missing:missing.length,hostAccess:hostOk,notifications:(p.permissions||[]).includes('notifications')});});
   await safe('ext-alarms','Background alarms',async()=>{const present=await chrome.alarms.getAll();const expected=[...STANDING_ALARMS.map(a=>a[0]),GAME_CONSTANTS_ALARM,CRITICAL_DATA_GUARD_ALARM];const r=C.evalAlarms(expected,present);add('ext-alarms','Background alarms',r.status,r.missing.length?`Missing: ${r.missing.join(', ')}`:`All ${r.expected} standing alarms registered`,{expected:r.expected,present:r.present,missing:r.missing});});
-  await safe('ext-storage','Storage usage',async()=>{let bytes=null;try{bytes=await chrome.storage.local.getBytesInUse(null);}catch{}add('ext-storage','Storage usage',bytes==null?'skip':'pass',bytes==null?'getBytesInUse not supported':`${(bytes/1048576).toFixed(2)} MB in storage.local`,{bytes});});
+  await safe('ext-storage','Storage usage',async()=>{let bytes=null;try{bytes=await chrome.storage.local.getBytesInUse(null);}catch{}let top=[];try{top=await scmStorageTopKeys(8);}catch{}const last=(await chrome.storage.local.get({scmStoragePruneLast:null})).scmStoragePruneLast;const topTxt=top.length?`; largest: ${top.map(t=>`${t.key} ${(t.bytes/1024).toFixed(0)} KB`).join(', ')}`:'';add('ext-storage','Storage usage',bytes==null?'skip':'pass',bytes==null?'getBytesInUse not supported':`${(bytes/1048576).toFixed(2)} MB in storage.local${topTxt}`,{bytes,top,lastPruneAt:last?.at||null,lastPruneFreed:last?.freed??null});});
   await safe('ext-errors','Error log (24 h)',async()=>{const r=C.evalErrorLog(await getErrorLog(),now);add('ext-errors','Error log (24 h)',r.status,r.count24h?`${r.count24h} error(s) in 24 h; top: ${r.top.map(t=>`${t.context} x${t.count}`).join(', ')}`:'No errors in the last 24 h',{count24h:r.count24h,total:r.total,top:r.top});});
   // 2. Game tab
   let tab=null,bridge=null,tabRealm=null;
@@ -7638,7 +7697,7 @@ async function scmRunSelfTest(opts={}){
     add('notify','Notifications & badge',!chrome.notifications&&!badge?'skip':level==='denied'?'warn':'pass',!chrome.notifications?'Notifications API not available in this browser':`Notifications ${level||'available'}; badge ${badge?'available':'unavailable'}`,{notifications:!!chrome.notifications,permissionLevel:level,badge});});
   return {ok:true,version:BUILD_VERSION,at:new Date(now).toISOString(),totals:C.totals(out),results:out};
 }
-const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['RUN_SELF_TEST','SYNC_NOW','RUN_ACCOUNTING_WALK_NOW','RUN_JAVASCRIPT_DIAGNOSTIC','LIVE_MARKET_REFRESH','CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_FROZEN_NETWORK_PLAN','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','SET_BUILDING_ALARM','CLEAR_BUILDING_ALARM','GET_COMPANY_AUTH_DATA','SYNC_RESOURCE_IMAGES','GET_ERROR_LOG','CLEAR_ERROR_LOG','GET_LIVE_BRIDGE_TOKEN']);
+const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['RUN_SELF_TEST','PRUNE_STORAGE','SYNC_NOW','RUN_ACCOUNTING_WALK_NOW','RUN_JAVASCRIPT_DIAGNOSTIC','LIVE_MARKET_REFRESH','CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_FROZEN_NETWORK_PLAN','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','SET_BUILDING_ALARM','CLEAR_BUILDING_ALARM','GET_COMPANY_AUTH_DATA','SYNC_RESOURCE_IMAGES','GET_ERROR_LOG','CLEAR_ERROR_LOG','GET_LIVE_BRIDGE_TOKEN']);
 // GET_STATE from a non-extension-page context (content script) never carries secrets.
 // NOTE (authData): authData is the game's /api/v2/companies/me/ auth payload (company id/name, user/session
 // metadata), captured from the game page itself. It stays in storage.local (top level and per realmStores) because
@@ -7656,6 +7715,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(!sender||sender.id!==chrome.runtime.id)return false;
   if(SCM_PRIVILEGED_MESSAGE_TYPES.has(m?.type)&&!scmIsExtensionPageSender(sender)){try{send({ok:false,error:'Not allowed from this context.'});}catch{}return false;}
   if(m?.type==='API_SEEN')scmSelfTestSeen.apiSeenAt=Date.now();else if(m?.type==='API_DATA')scmSelfTestSeen.apiDataAt=Date.now();
+  if(m?.type==='PRUNE_STORAGE'){scmPruneStorage({reason:'manual'}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='RUN_SELF_TEST'){scmRunSelfTest({liveFetch:m.liveFetch!==false}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='GET_ERROR_LOG'){getErrorLog().then(log=>send({ok:true,log,version:BUILD_VERSION,at:new Date().toISOString()})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='CLEAR_ERROR_LOG'){clearErrorLog().then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
