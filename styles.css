@@ -1856,3 +1856,5 @@ tbody tr:hover td{background:var(--surface-2)}
 .planner-missing-prices{color:#e8a34a;font-size:11px;font-weight:600;padding:0 10px 6px}.planner-missing-prices:empty{display:none}.scm-upgrade-panel .planner-missing-prices{padding:0;color:#e8a34a}
 
 #contractMwapNote{display:block;margin-top:3px;font-size:10px;color:#e8a34a}#contractMwapNote:empty{display:none}td .market-inline-vwap{display:block;white-space:normal}
+/* v2.5.438 Self-test results (options + dashboard Settings) */
+.self-test-results{list-style:none;padding:0;margin:8px 0;max-width:100%}.self-test-results li{padding:6px 8px;margin:4px 0;border-left:4px solid #888;overflow-wrap:anywhere;word-break:break-word}.self-test-results .st-pass{border-color:#2e7d32}.self-test-results .st-warn{border-color:#b26a00}.self-test-results .st-fail{border-color:#c62828}.self-test-results .st-skip{border-color:#777}.self-test-results b{display:inline-block;min-width:3.2em}

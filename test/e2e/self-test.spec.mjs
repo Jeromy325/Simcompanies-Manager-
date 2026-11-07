@@ -76,6 +76,23 @@ test('self-test: RUN_SELF_TEST shape, redacted report, refused from content scri
     const width = await opt.evaluate(() => document.documentElement.scrollWidth);
     expect(width).toBeLessThanOrEqual(360);
 
+    // v2.5.438 Dashboard Settings has the same Self-test card (popup links to ?tab=selftest).
+    const dash = await ctx.newPage();
+    await dash.goto(`chrome-extension://${id}/dashboard.html?tab=selftest`);
+    const card = dash.locator('#settings [data-collapse="settings:selftest"]');
+    await expect(card).toBeVisible();
+    await expect(card.locator('[data-collapse-head]')).toHaveText('Self-test');
+    await expect(dash.locator('#runSelfTest')).toBeVisible({ timeout: 5000 });
+    await dash.click('#runSelfTest');
+    await expect(dash.locator('#selfTestResults li').first()).toBeVisible({ timeout: 30000 });
+    await expect(dash.locator('#selfTestStatus')).toContainText(/\d+ pass, \d+ warn, \d+ fail/);
+    await dash.click('#copySelfTest');
+    const dashReport = await dash.evaluate(() => globalThis.__scmSelfTestReport);
+    expect(dashReport).toContain('Totals:');
+    for (const s of ['tok-secret-xyz', 'auth-secret-xyz', 'SecretCorp', '4242']) expect(dashReport).not.toContain(s);
+    expect(await dash.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+    await dash.close();
+
     // Content scripts are refused.
     expect(worlds.length).toBeGreaterThan(0);
     const cs = (await cdp.send('Runtime.evaluate', { expression: `chrome.runtime.sendMessage({type:'RUN_SELF_TEST'})`, contextId: worlds[worlds.length - 1], awaitPromise: true, returnByValue: true })).result.value;
