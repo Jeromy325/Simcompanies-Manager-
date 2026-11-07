@@ -1,0 +1,15 @@
+{
+  "name": "simcompanies-manager",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Test + CI harness for the Sim Companies Manager Chrome extension",
+  "scripts": {
+    "check": "node test/check.mjs",
+    "test": "vitest run",
+    "e2e": "playwright test --trace off"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "vitest": "^3.2.4"
+  }
+}

@@ -5005,3 +5005,5 @@ function scmAutoCollapse(root){
   scmApplyCollapse(document.getElementById('accounting'));scmApplyCollapse(document.getElementById('contracts'));
   try{scmAutoCollapse(document.body);new MutationObserver(()=>scmAutoCollapse(document.body)).observe(document.body,{childList:true,subtree:true});}catch(e){console.error('Auto collapse failed',e);}
 })();
+
+try{chrome.runtime.sendMessage({type:'SCM_CLEAR_ALERT_BADGE'}).catch(()=>{});}catch{}

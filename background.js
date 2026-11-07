@@ -8,17 +8,44 @@ import {
   REALM_DEFINITIONS, validRealmNumber, realmDefinition, realmKeyFromRealm, realmStorageKey,
   realmDisplayNumber, realmDisplayName, realmContractPaths
 } from './realm-core.js';
+// Local error ring buffer (last 200 errors) for diagnostics; writes are debounced.
+const SCM_ERROR_LOG_KEY='scmErrorLog';
+const SCM_ERROR_LOG_MAX=200;
+var scmErrorLogBuffer=null,scmErrorLogTimer=null,scmErrorLogLoading=null;
+function scmErrorLogLoad(){if(scmErrorLogBuffer)return Promise.resolve(scmErrorLogBuffer);if(!scmErrorLogLoading)scmErrorLogLoading=chrome.storage.local.get({[SCM_ERROR_LOG_KEY]:[]}).then(r=>{const saved=Array.isArray(r?.[SCM_ERROR_LOG_KEY])?r[SCM_ERROR_LOG_KEY]:[];scmErrorLogBuffer=[...saved,...(scmErrorLogBuffer||[])].slice(-SCM_ERROR_LOG_MAX);return scmErrorLogBuffer;}).catch(()=>{scmErrorLogBuffer=scmErrorLogBuffer||[];return scmErrorLogBuffer;});return scmErrorLogLoading;}
+function logError(context,err){try{
+  const entry={at:new Date().toISOString(),context:String(context||'unknown').slice(0,120),message:String(err?.message??err??'').slice(0,1000),stack:err?.stack?String(err.stack).slice(0,2000):null,version:chrome.runtime.getManifest?.().version||null};
+  scmErrorLogLoad().then(buf=>{buf.push(entry);if(buf.length>SCM_ERROR_LOG_MAX)buf.splice(0,buf.length-SCM_ERROR_LOG_MAX);if(scmErrorLogTimer)return;scmErrorLogTimer=setTimeout(()=>{scmErrorLogTimer=null;chrome.storage.local.set({[SCM_ERROR_LOG_KEY]:scmErrorLogBuffer.slice(-SCM_ERROR_LOG_MAX)}).catch(()=>{});},2000);});
+}catch{}}
+async function getErrorLog(){if(scmErrorLogTimer){clearTimeout(scmErrorLogTimer);scmErrorLogTimer=null;}const buf=await scmErrorLogLoad();await chrome.storage.local.set({[SCM_ERROR_LOG_KEY]:buf.slice(-SCM_ERROR_LOG_MAX)}).catch(()=>{});return buf.slice();}
+async function clearErrorLog(){if(scmErrorLogTimer){clearTimeout(scmErrorLogTimer);scmErrorLogTimer=null;}scmErrorLogBuffer=[];scmErrorLogLoading=null;await chrome.storage.local.remove(SCM_ERROR_LOG_KEY);}
+self.addEventListener('error',e=>logError('uncaught',e?.error||e?.message||e));
+self.addEventListener('unhandledrejection',e=>logError('unhandledrejection',e?.reason));
 // v2.5.361 performance: the service worker no longer listens to chrome.storage.onChanged. Every listener receives a
 // full copy of each changed value, so the ~1 MB realm store was deserialized here on every write. The three memos that
 // listened (images, game constants, overlay snapshots) are only written by this worker, so its own writes clear them.
 const __scmOwnWriteHooks=globalThis.__scmOwnWriteHooks=[];
 {const __orig=chrome.storage.local.set.bind(chrome.storage.local);chrome.storage.local.set=(items,...rest)=>{if(items&&typeof items==='object')for(const h of __scmOwnWriteHooks){try{h(items);}catch{}}return __orig(items,...rest);};}
+// Chrome clamps one-shot alarms to >=30 s. scmCreateShortAlarm keeps the alarm as an eviction-safe fallback and,
+// while the worker is alive, fires it on time via setTimeout (clearing the alarm first so it never runs twice).
+const scmAlarmListeners=[];
+{const __origAdd=chrome.alarms.onAlarm.addListener.bind(chrome.alarms.onAlarm);chrome.alarms.onAlarm.addListener=fn=>{scmAlarmListeners.push(fn);return __origAdd(fn);};}
+async function scmCreateShortAlarm(name,delayMs){
+  const when=Date.now()+Math.max(0,Number(delayMs)||0);
+  await chrome.alarms.create(name,{when});
+  if(delayMs<30000)setTimeout(async()=>{try{const a=await chrome.alarms.get(name);if(!a||Math.abs(Number(a.when)-when)>5)return;if(!(await chrome.alarms.clear(name)))return;for(const fn of scmAlarmListeners){try{Promise.resolve(fn({name,scheduledTime:when})).catch(e=>logError(`alarm:${name}`,e));}catch(e){logError(`alarm:${name}`,e);}}}catch(e){logError('short-alarm',e);}},Math.max(0,delayMs));
+}
 const realmSyncSessions=new Map();
 let syncCaptureRealm=null;
 // v2.5.380 Sync priority: while a core Sync runs (setup, targets and the post-sync tail), optional background work
 // (VWAP stages, warehouse/overlay refreshes, endpoint-seen flushes) waits instead of competing for the storage lane,
 // and resumes once Sync ends. R2 2.5.378: 162 VWAP reschedules + 4 warehouse refreshes ran inside one 239 s Sync.
 const syncDeferredWork=new Map();
+// Eviction visibility: running Sync sessions are mirrored to chrome.storage.session. A Sync cannot resume after the
+// worker is evicted, so on wake leftover markers are logged as interrupted and cleared (never re-hydrated as live).
+const SCM_SYNC_SESSION_KEY='scmActiveSyncSessionsV1';
+function scmMirrorSyncSessions(){try{if(!chrome.storage?.session)return;const out={};for(const [n,v] of realmSyncSessions.entries())out[n]={realm:n,startedAt:v?.startedAt??null,capture:syncCaptureRealm===n};(Object.keys(out).length?chrome.storage.session.set({[SCM_SYNC_SESSION_KEY]:out}):chrome.storage.session.remove(SCM_SYNC_SESSION_KEY)).catch(()=>{});}catch{}}
+async function scmCheckInterruptedSyncSessions(){try{if(!chrome.storage?.session)return;const saved=(await chrome.storage.session.get(SCM_SYNC_SESSION_KEY))?.[SCM_SYNC_SESSION_KEY];if(!saved||!Object.keys(saved).length||realmSyncSessions.size)return;for(const v of Object.values(saved))logError('sync-interrupted',new Error(`Sync for realm ${v?.realm} started ${v?.startedAt} was interrupted by service-worker shutdown.`));await chrome.storage.session.remove(SCM_SYNC_SESSION_KEY);}catch(e){logError('sync-session-check',e);}}
 function coreSyncActive(){return realmSyncSessions.size>0;}
 function deferUntilSyncEnds(key,fn){syncDeferredWork.set(String(key),fn);}
 function resumeSyncDeferredWork(){
@@ -113,7 +140,7 @@ let scmNetDebuggerBound=false;
 function scmNetBindDebugger(){if(scmNetDebuggerBound||!chrome.debugger?.onEvent)return scmNetDebuggerBound;scmNetDebuggerBound=true;chrome.debugger.onEvent.addListener(scmNetDebuggerEvent);chrome.debugger.onDetach.addListener((source,reason)=>{if(source.tabId===scmNetCapture.tabId){scmNetCapture.active=false;scmNetSave({kind:'capture-detached',reason:String(reason||'unknown')}).catch(()=>{});}});return true;}
 scmNetBindDebugger();
 chrome.permissions?.onAdded?.addListener(p=>{if(p?.permissions?.includes('debugger'))scmNetBindDebugger();});
-async function scmNetStart(tabId){if(!scmNetBindDebugger())throw new Error('Debugger permission not granted. Use page capture instead.');if(scmNetCapture.active)throw new Error('A network capture is already active. Stop it first.');const tab=await chrome.tabs.get(tabId);if(!tab?.url||!/^https?:/i.test(tab.url))throw new Error('Selected tab is not a normal HTTP/HTTPS page.');scmNetCapture.tabId=tabId;scmNetCapture.captureId=`net3-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;scmNetCapture.requestMap.clear();scmNetCapture.counters={events:0,requests:0,responses:0,bodies:0,errors:0};scmNetCapture.startedAt=new Date().toISOString();await scmNetClearEvents(scmNetCapture.captureId);await chrome.debugger.attach({tabId},'1.3');try{await chrome.debugger.sendCommand({tabId},'Network.enable',{maxTotalBufferSize:100000000,maxResourceBufferSize:50000000,maxPostDataSize:10000000});scmNetCapture.active=true;await scmNetSave({kind:'capture-start',tabId,pageUrl:tab.url,coverage:'Chrome DevTools Protocol Network domain; browser-observed requests for this tab'});return {ok:true,captureId:scmNetCapture.captureId,tabId,status:'recording',note:'Chrome may display a debugging notification while capture is active.'};}catch(err){try{await chrome.debugger.detach({tabId});}catch{}scmNetCapture.active=false;throw err;}}
+async function scmNetStart(tabId){if(!scmNetBindDebugger())throw new Error('Debugger permission not granted. Use page capture instead.');if(scmNetCapture.active)throw new Error('A network capture is already active. Stop it first.');const tab=await chrome.tabs.get(tabId);if(!tab?.url||!/^https:\/\/(www\.)?simcompanies\.com\//i.test(tab.url))throw new Error('Selected tab is not a Sim Companies page.');scmNetCapture.tabId=tabId;scmNetCapture.captureId=`net3-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;scmNetCapture.requestMap.clear();scmNetCapture.counters={events:0,requests:0,responses:0,bodies:0,errors:0};scmNetCapture.startedAt=new Date().toISOString();await scmNetClearEvents(scmNetCapture.captureId);await chrome.debugger.attach({tabId},'1.3');try{await chrome.debugger.sendCommand({tabId},'Network.enable',{maxTotalBufferSize:20000000,maxResourceBufferSize:10000000,maxPostDataSize:1000000});scmNetCapture.active=true;await scmNetSave({kind:'capture-start',tabId,pageUrl:tab.url,coverage:'Chrome DevTools Protocol Network domain; browser-observed requests for this tab'});return {ok:true,captureId:scmNetCapture.captureId,tabId,status:'recording',note:'Chrome may display a debugging notification while capture is active.'};}catch(err){try{await chrome.debugger.detach({tabId});}catch{}scmNetCapture.active=false;throw err;}}
 async function scmNetStop(){if(!scmNetCapture.captureId)return {ok:false,error:'No capture session exists.'};const tabId=scmNetCapture.tabId;scmNetCapture.active=false;await scmNetSave({kind:'capture-stop',tabId,stopReason:'user-request'}).catch(()=>{});try{if(tabId!=null)await chrome.debugger.detach({tabId});}catch(err){await scmNetSave({kind:'capture-detach-error',error:String(err?.message||err)}).catch(()=>{});}const status={ok:true,captureId:scmNetCapture.captureId,tabId,status:'stopped',...scmNetCapture.counters};await chrome.storage.local.set({scmNetworkCaptureV3Status:{...status,startedAt:scmNetCapture.startedAt,stoppedAt:new Date().toISOString()}});return status;}
 
 const BUILD_VERSION=chrome.runtime.getManifest().version;
@@ -628,15 +655,44 @@ function scheduleCrossLaneConfirm(n){
     else scheduleCrossLaneConfirm(n);
   }),n).catch(()=>{crossLaneConfirmQueued.delete(n);});
 }
+// Eviction safety: pending (unflushed) realm patches are mirrored to chrome.storage.session so a service-worker
+// eviction inside the coalesce window does not lose them; they are re-buffered and flushed on next wake.
+const SCM_PENDING_PATCH_SESSION_KEY='scmPendingRealmPatchesV1';
+const SCM_PENDING_PATCH_MIRROR_MAX_CHARS=4000000;
+let scmPendingPatchMirrorTimer=null;
+function scmMirrorPendingPatches(immediate=false){
+  if(!chrome.storage?.session)return;
+  if(scmPendingPatchMirrorTimer){clearTimeout(scmPendingPatchMirrorTimer);scmPendingPatchMirrorTimer=null;}
+  const run=()=>{scmPendingPatchMirrorTimer=null;try{
+    const out={};for(const n of new Set([...pendingRealmPatches.keys(),...inflightRealmPatches.keys()])){const p={...(inflightRealmPatches.get(n)||{}),...(pendingRealmPatches.get(n)?.patch||{})};if(Object.keys(p).length)out[n]=p;}
+    if(!Object.keys(out).length){chrome.storage.session.remove(SCM_PENDING_PATCH_SESSION_KEY).catch(()=>{});return;}
+    if(JSON.stringify(out).length>SCM_PENDING_PATCH_MIRROR_MAX_CHARS)return;
+    chrome.storage.session.set({[SCM_PENDING_PATCH_SESSION_KEY]:out}).catch(e=>logError('pending-patch-mirror',e));
+  }catch(e){logError('pending-patch-mirror',e);}};
+  if(immediate)run();else scmPendingPatchMirrorTimer=setTimeout(run,300);
+}
+async function scmRestorePendingRealmPatches(){
+  try{
+    if(!chrome.storage?.session)return;
+    const saved=(await chrome.storage.session.get(SCM_PENDING_PATCH_SESSION_KEY))?.[SCM_PENDING_PATCH_SESSION_KEY];
+    if(!saved||typeof saved!=='object')return;
+    for(const [k,patch] of Object.entries(saved)){const n=validRealmNumber(k);if(n==null||!patch||typeof patch!=='object')continue;
+      // Older restored values go underneath anything already buffered in this lifetime.
+      const entry=pendingRealmPatches.get(n);if(entry){entry.patch={...patch,...entry.patch};}else await storageSetRealmPatch(n,patch);}
+    await flushRealmPatches();
+  }catch(e){logError('pending-patch-restore',e);}
+}
 function dropPendingRealmPatch(realm){
   const n=validRealmNumber(realm); if(n==null)return;
   const entry=pendingRealmPatches.get(n);
   if(entry){if(entry.timer)clearTimeout(entry.timer);pendingRealmPatches.delete(n);}
+  scmMirrorPendingPatches(true);
 }
 function discardAllRealmPatches(){
   for(const n of [...pendingRealmPatches.keys()])dropPendingRealmPatch(n);
   inflightRealmPatches.clear();
   crossLaneRealmPatches.clear();
+  scmMirrorPendingPatches(true);
 }
 function flushRealmPatches(realm=null){
   const only=realm==null?null:validRealmNumber(realm);
@@ -659,6 +715,7 @@ function flushRealmPatches(realm=null){
       }catch(error){firstError=firstError||error;}
       finally{if(inflightRealmPatches.get(n)===entry.patch)inflightRealmPatches.delete(n);}
     }
+    scmMirrorPendingPatches(!firstError);
     if(firstError)throw firstError;
     return {ok:true,flushed};
   });
@@ -670,7 +727,8 @@ async function storageSetRealmPatch(realm, patch={}, onTiming=null){
   const entry=pendingRealmPatches.get(n)||{patch:{},timer:null};
   entry.patch={...entry.patch,...patch};
   pendingRealmPatches.set(n,entry);
-  if(!entry.timer)entry.timer=setTimeout(()=>{entry.timer=null;flushRealmPatches(n).catch(()=>{});},REALM_PATCH_COALESCE_MS);
+  scmMirrorPendingPatches();
+  if(!entry.timer)entry.timer=setTimeout(()=>{entry.timer=null;flushRealmPatches(n).catch(e=>logError('storage:flush-realm-patches',e));},REALM_PATCH_COALESCE_MS);
   try{onTiming?.({realmCommitQueueWaitMs:0,realmStateReadMs:0,physicalWriteMs:0,realmCommitDurationMs:0,realmCommitBuffered:true});}catch{}
   return {ok:true,buffered:true,realm:n};
 }
@@ -1715,12 +1773,43 @@ async function notifyCostChanges(realm,history,newEntries){
   for(const e of newEntries){if(Date.now()-Date.parse(e.t)>24*3600e3)continue;const r=globalThis.SCM_NOTIFY_CORE.costChanged({history,entry:e,thresholdPct:Number(cfg.costChangePct)||3,names,realm:n});if(r)await scmNotify(`cost-${n}-${e.k}`,r.title,r.message);}
 }
 chrome.alarms.get('scm-daily-summary').then(a=>{if(!a)scheduleDailySummary().catch(()=>{});}).catch(()=>{});
+// Notifications: one stable ID per category+realm so updates replace instead of stacking; events arriving within
+// SCM_NOTIFY_BATCH_MS are merged into one 'list' notification. The action badge counts alerts not yet seen.
+const SCM_NOTIFY_BATCH_MS=2500;
+const scmNotifyBatches=new Map(); // stableId -> {items:[],timer}
+const SCM_BADGE_COUNT_KEY='scmAlertBadgeCount';
+async function scmBumpAlertBadge(by){try{const cur=Number((await chrome.storage.session.get(SCM_BADGE_COUNT_KEY))?.[SCM_BADGE_COUNT_KEY])||0;const next=cur+by;await chrome.storage.session.set({[SCM_BADGE_COUNT_KEY]:next});await chrome.action?.setBadgeBackgroundColor?.({color:'#c0392b'});await chrome.action?.setBadgeText?.({text:next>99?'99+':String(next)});}catch(e){logError('badge',e);}}
+async function scmClearAlertBadge(){try{await chrome.storage.session.remove(SCM_BADGE_COUNT_KEY);await chrome.action?.setBadgeText?.({text:''});}catch(e){logError('badge',e);}}
 function scmNotify(id,title,message){
   {const m=String(id).match(/^[a-z]+-([01])-/);if(m&&!String(id).startsWith('jobs-'))logActivity(Number(m[1]),'alert-sent','success',{title:String(title).slice(0,80)});}
+  const sid=String(id);
+  if(sid.startsWith('test-'))return scmNotifyNow(sid,title,message);
+  const cm=sid.match(/^([a-z]+)-([01])?/);
+  const stableId=cm?`${cm[1]}-${cm[2]??'x'}-scm`:sid;
+  // Callers await this inside notify-state locks, so resolve at once instead of holding them for the batch window.
+  return new Promise(resolve=>{
+    const b=scmNotifyBatches.get(stableId)||{items:[],timer:null};
+    b.items.push({title:String(title),message:String(message)});resolve({ok:true,queued:true,id:stableId});
+    scmNotifyBatches.set(stableId,b);
+    if(!b.timer)b.timer=setTimeout(async()=>{
+      scmNotifyBatches.delete(stableId);
+      let r;
+      try{
+        if(b.items.length===1)r=await scmNotifyNow(stableId,b.items[0].title,b.items[0].message);
+        else r=await scmNotifyNow(stableId,`${b.items.length} alerts: ${b.items[0].title}`,b.items.map(x=>x.title).join(' · '),b.items.slice(0,8).map(x=>({title:x.title.slice(0,60),message:x.message.slice(0,120)})));
+        if(r?.ok)await scmBumpAlertBadge(b.items.length);
+        else logError('notify',r?.error);
+      }catch(e){logError('notify',e);}
+    },SCM_NOTIFY_BATCH_MS);
+  });
+}
+function scmNotifyNow(id,title,message,listItems=null){
   return new Promise(resolve=>{
     try{
       if(!chrome.notifications?.create)return resolve({ok:false,error:'This browser does not provide extension notifications (chrome.notifications is missing).'});
-      chrome.notifications.create(id,{type:'basic',iconUrl:chrome.runtime.getURL('icons/icon128.png'),title:String(title).slice(0,120),message:String(message).slice(0,300),priority:2},nid=>{const e=chrome.runtime.lastError;resolve(e?{ok:false,error:e.message||String(e)}:{ok:true,id:nid});});
+      const opts={type:listItems?'list':'basic',iconUrl:chrome.runtime.getURL('icons/icon128.png'),title:String(title).slice(0,120),message:String(message).slice(0,300),priority:2};
+      if(listItems)opts.items=listItems;
+      chrome.notifications.create(id,opts,nid=>{const e=chrome.runtime.lastError;resolve(e?{ok:false,error:e.message||String(e)}:{ok:true,id:nid});});
     }catch(e){resolve({ok:false,error:e?.message||String(e)});}
   });
 }
@@ -1763,8 +1852,8 @@ async function fireProductionFinished(name){
   const st0=Date.parse(String(b?.busy?.started||''));
   if(cfg.idle&&Number.isFinite(st0)){const h=Math.max(0.25,Number(cfg.idleHours)||1);await createFollowupAlarm(`scm-followup:${realm}:${bid}:${st0}:${m[3]}:0`,Number(m[3])+h*3600e3>Date.now()?Number(m[3])+h*3600e3:Date.now()+60000,clearGen);}
 }
-chrome.alarms.onAlarm.addListener(a=>{if(String(a?.name||'').startsWith('scm-prodfin:'))fireProductionFinished(a.name).catch(()=>{});});
-try{chrome.notifications?.onClicked?.addListener(id=>{if(String(id).startsWith('prodfin-'))chrome.tabs.create({url:'https://www.simcompanies.com/'}).catch(()=>{});try{chrome.notifications.clear(id);}catch{}});}catch{}
+chrome.alarms.onAlarm.addListener(a=>{if(String(a?.name||'').startsWith('scm-prodfin:'))fireProductionFinished(a.name).catch(e=>logError('alarm:prodfin',e));});
+try{chrome.notifications?.onClicked?.addListener(id=>{scmClearAlertBadge();if(String(id).startsWith('prodfin-'))chrome.tabs.create({url:'https://www.simcompanies.com/'}).catch(()=>{});try{chrome.notifications.clear(id);}catch{}});}catch{}
 function backgroundJobHistoryKey(realm){return `scmBackgroundJobs:${Number(realm)}`;}
 const backgroundJobQueues=new Map();
 
@@ -2798,7 +2887,7 @@ async function scheduleAccountingWeekRefresh(realm,delayMs=1500){
     if(accountingWeekLedgerCacheComplete(store,boundary,recentRows))return {ok:true,scheduled:false,skipped:true,realm:n,reason:'current-week-ledger-cache-complete'};
     const existing=await chrome.alarms.get(name);
     if(existing?.when && Number(existing.when)>Date.now()) return {ok:true,scheduled:true,existing:true,realm:n};
-    await chrome.alarms.create(name,{when:Date.now()+Math.max(500,Number(delayMs)||1500)});
+    await scmCreateShortAlarm(name,Math.max(500,Number(delayMs)||1500));
     return {ok:true,scheduled:true,existing:false,realm:n};
   }catch(e){return {ok:false,error:e?.message||String(e),realm:n};}
 }
@@ -4038,6 +4127,18 @@ const ORDER_BOOK_REFRESH_FAILURE_BACKOFF_MS=5.5*60000; // skips the next 5 firin
 const ORDER_BOOK_REFRESH_429_BACKOFF_MS=15.5*60000; // skips the next 15 firings; the page bridge does not expose Retry-After
 const ORDER_BOOK_REFRESH_ATTEMPT_KEEP_MS=24*3600e3;
 let orderBookRefreshRunning=false;
+// The alarm stays at 1 min (user on the game). With no active Sim Companies tab, every other firing is skipped (~2 min).
+async function scmOrderBookShouldThrottle(){
+  try{
+    const tabs=await chrome.tabs.query({active:true,url:['https://www.simcompanies.com/*','https://simcompanies.com/*']});
+    if(tabs.length)return false;
+    const key='scmOrderBookLastFiringAt',now=Date.now();
+    const last=Number((await chrome.storage.session.get(key))?.[key])||0;
+    if(now-last<110000)return true;
+    await chrome.storage.session.set({[key]:now});
+    return false;
+  }catch{return false;}
+}
 async function ensureOrderBookRefreshAlarm(){
   try{if(!(await chrome.alarms.get(ORDER_BOOK_REFRESH_ALARM)))await chrome.alarms.create(ORDER_BOOK_REFRESH_ALARM,{delayInMinutes:1,periodInMinutes:1});}catch{}
 }
@@ -4252,6 +4353,7 @@ async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS){
       lastError=e?.name==='AbortError'
         ? new Error(`SimcoTools request timed out after ${Math.round(timeoutMs/1000)}s (attempt ${attempt+1}/${SIMCOTOOLS_RETRY_DELAYS_MS.length})`)
         : new Error(`SimcoTools network error: ${e?.message||String(e)} (attempt ${attempt+1}/${SIMCOTOOLS_RETRY_DELAYS_MS.length})`);
+      logError('fetch:simcotools',lastError);
     }finally{clearTimeout(timer);simcoReleaseRequestSlot()}
   }
   throw lastError||new Error('SimcoTools request failed.');
@@ -4864,7 +4966,7 @@ async function hasPendingMarketStageAlarm(){
 async function scheduleMarketStage(realm,stage,delayMs=MARKET_STAGE_COOLDOWN_MS,reason='scheduled'){
   const n=validRealmNumber(realm),name=marketStageAlarmName(realm,stage);
   if(n==null||!name||!['vwap','prices'].includes(stage))return {ok:false,error:'Invalid market stage or realm.'};
-  try{await chrome.alarms.create(name,{when:Date.now()+Math.max(1000,Number(delayMs)||0)});await recordBackgroundJobEvent(n,{job:`market-${stage}-stage-scheduled`,trigger:reason,startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),durationMs:0,outcome:'success',details:{alarm:name,delayMs:Math.max(1000,Number(delayMs)||0)}}).catch(()=>{});return {ok:true,realm:n,stage,alarm:name,delayMs:Math.max(1000,Number(delayMs)||0),reason};}
+  try{await scmCreateShortAlarm(name,Math.max(1000,Number(delayMs)||0));await recordBackgroundJobEvent(n,{job:`market-${stage}-stage-scheduled`,trigger:reason,startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),durationMs:0,outcome:'success',details:{alarm:name,delayMs:Math.max(1000,Number(delayMs)||0)}}).catch(()=>{});return {ok:true,realm:n,stage,alarm:name,delayMs:Math.max(1000,Number(delayMs)||0),reason};}
   catch(e){return {ok:false,realm:n,stage,error:e?.message||String(e),reason};}
 }
 async function schedulePostSyncMarketRefresh(realm,reason='sync-complete'){
@@ -5165,6 +5267,8 @@ const STANDING_ALARMS=[
   ['scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15}],
   ['scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080}],
 ];
+// Idempotent: (re)create a periodic alarm only when it is missing or its period changed, so it is not pushed back.
+async function scmEnsurePeriodicAlarm(name,info){const cur=await chrome.alarms.get(name);if(cur&&Number(cur.periodInMinutes)===Number(info.periodInMinutes))return false;await chrome.alarms.create(name,info);return true;}
 async function ensureStandingAlarms(){
   for(const [name,info] of STANDING_ALARMS)if(!(await chrome.alarms.get(name)))await chrome.alarms.create(name,info);
   if(!(await chrome.alarms.get(GAME_CONSTANTS_ALARM)))await chrome.alarms.create(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});
@@ -5178,7 +5282,7 @@ async function restorePersistedAlarms(reason='restore'){
       // Already due while the browser was closed: run it shortly instead of dropping it.
       await chrome.alarms.create(name,{when:Math.max(Number(when)||0,Date.now()+60000)});out.followups++;
     }
-  }catch(e){out.error=e?.message||String(e);}
+  }catch(e){out.error=e?.message||String(e);logError('alarms:restore',e);}
   try{if(!(await chrome.alarms.get('scm-daily-summary')))await scheduleDailySummary();}catch(e){out.error=e?.message||String(e);}
   for(const n of [0,1]){
     try{
@@ -5217,12 +5321,12 @@ chrome.runtime.onInstalled.addListener(async()=>{
   for(const a of await chrome.alarms.getAll()){if(!INSTALL_KEEP_ALARM_PREFIXES.some(p=>String(a?.name||'').startsWith(p)))await chrome.alarms.clear(a.name);}
   await ensureLiveMarketRefreshAlarm('installed');
   await ensureOrderBookRefreshAlarm();
-  await chrome.alarms.create('scm-vwap-daily',{periodInMinutes:720});
-  await chrome.alarms.create('scm-production-events-daily',{periodInMinutes:720});
-  await chrome.alarms.create('scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15});
+  await scmEnsurePeriodicAlarm('scm-vwap-daily',{periodInMinutes:720});
+  await scmEnsurePeriodicAlarm('scm-production-events-daily',{periodInMinutes:720});
+  await scmEnsurePeriodicAlarm('scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15});
   await ensureCriticalDataGuard('installed');
   await ensureVwapWatchAlarm('installed');
-  await chrome.alarms.create('scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080});
+  await scmEnsurePeriodicAlarm('scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080});
   await restorePersistedAlarms('installed').catch(()=>{});
   await ensureAccountingWalkSchedule('installed').catch(()=>{});
   // R4: an update restarts the worker too; a Sync interrupted by it must not stay "running" (jobs <5 min old are skipped).
@@ -5291,8 +5395,8 @@ async function scanOpenGameTabsForProductionEvents(reason='scheduled') {
 chrome.alarms.onAlarm.addListener(async a=>{
   if(String(a?.name||'').startsWith('scm-building-')){
     try{
-      const m=String(a.name).match(/^scm-building-(\d+)-(\d+)$/);if(!m)return;const realm=Number(m[1]),buildingId=Number(m[2]);const s=await state(realm),key=realmKeyFromRealm(realm),store=s.realmStores?.[key]||{};const buildings=realmStoredBuildings(store,s,realm);await withRealmWriteLock(realm,async()=>{const latest=await state(realm),latestStore=latest.realmStores?.[key]||{},alarms={...(latestStore.buildingAlarms||{})};delete alarms[String(buildingId)];const stores={...(latest.realmStores||{})};stores[key]={...latestStore,buildingAlarms:alarms};await storageSet({realmStores:stores});});const b=buildings.find(x=>Number(x?.id)===buildingId);const tabs=await chrome.tabs.query({url:['https://www.simcompanies.com/*','https://simcompanies.com/*']});for(const tab of tabs||[])try{await chrome.tabs.sendMessage(tab.id,{type:'BUILDING_ALARM_FIRED',realm,buildingId,buildingName:b?.name||`Building ${buildingId}`,resourceName:b?.busy?.resource?.name||'Building job'});}catch{}return;
-    }catch{return;}
+      const m=String(a.name).match(/^scm-building-(\d+)-(\d+)$/);if(!m)return;const realm=Number(m[1]),buildingId=Number(m[2]);const s=await state(realm),key=realmKeyFromRealm(realm),store=s.realmStores?.[key]||{};const buildings=realmStoredBuildings(store,s,realm);await withRealmWriteLock(realm,async()=>{const latest=await state(realm),latestStore=latest.realmStores?.[key]||{},alarms={...(latestStore.buildingAlarms||{})};delete alarms[String(buildingId)];await storageSet({realmStores:{[key]:{...latestStore,buildingAlarms:alarms}}});});const b=buildings.find(x=>Number(x?.id)===buildingId);const tabs=await chrome.tabs.query({url:['https://www.simcompanies.com/*','https://simcompanies.com/*']});for(const tab of tabs||[])try{await chrome.tabs.sendMessage(tab.id,{type:'BUILDING_ALARM_FIRED',realm,buildingId,buildingName:b?.name||`Building ${buildingId}`,resourceName:b?.busy?.resource?.name||'Building job'});}catch{}return;
+    }catch(e){logError('alarm:building',e);return;}
   }
 
   const buildingEnrichMatch=String(a?.name||'').match(/^scm-building-enrich-r([01])$/);
@@ -5315,16 +5419,16 @@ chrome.alarms.onAlarm.addListener(async a=>{
     const realm=Number(syncRetryMatch[1]);
     if(coreSyncActive()){await chrome.alarms.create(a.name,{when:Date.now()+30000}).catch(()=>{});return;}
     syncAutoRetryRuns.add(realm);
-    await syncNow(realm).catch(()=>{});
+    await syncNow(realm).catch(e=>logError('sync:auto-retry',e));
     syncAutoRetryRuns.delete(realm);
     return;
   }
-  if(a?.name===ACCOUNTING_WALK_DAILY_ALARM){await runScheduledAccountingWalk('alarm').catch(()=>{});return;}
+  if(a?.name===ACCOUNTING_WALK_DAILY_ALARM){await runScheduledAccountingWalk('alarm').catch(e=>logError('alarm:accounting-walk',e));return;}
   const dayWalkMatch=String(a?.name||'').match(/^scm-accounting-day-walk-r([01])$/);
   if(dayWalkMatch){
     const realm=Number(dayWalkMatch[1]);
     if(syncSessionForRealm(realm)){await chrome.alarms.create(a.name,{when:Date.now()+5000}).catch(()=>{});return;}
-    await runAccountingDayWalk(realm,'after-sync').catch(()=>{});
+    await runAccountingDayWalk(realm,'after-sync').catch(e=>logError('alarm:accounting-day-walk',e));
     return;
   }
   const accountingWeekMatch=String(a?.name||'').match(/^scm-accounting-week-refresh-r([01])$/);
@@ -5351,11 +5455,11 @@ chrome.alarms.onAlarm.addListener(async a=>{
   }
 
   const marketStageMatch=String(a?.name||'').match(/^scm-market-stage-r([01])-(vwap|prices)$/);
-  if(marketStageMatch){await runMarketStage(Number(marketStageMatch[1]),marketStageMatch[2],'alarm').catch(()=>{});return;}
+  if(marketStageMatch){await runMarketStage(Number(marketStageMatch[1]),marketStageMatch[2],'alarm').catch(e=>logError('alarm:market-stage',e));return;}
   const legacyPostSyncMatch=String(a?.name||'').match(/^scm-post-sync-market-r([01])$/);
   if(legacyPostSyncMatch){await runMarketStage(Number(legacyPostSyncMatch[1]),'vwap','legacy-post-sync-alarm').catch(()=>{});return;}
   if(a.name===LIVE_MARKET_REFRESH_ALARM_NAME){ await runScheduledLiveMarketRefresh('hourly-market-cycle').catch(()=>{}); return; }
-  if(a.name===ORDER_BOOK_REFRESH_ALARM){ await runOrderBookRefreshFiring().catch(()=>{}); return; }
+  if(a.name===ORDER_BOOK_REFRESH_ALARM){ if(await scmOrderBookShouldThrottle())return; await runOrderBookRefreshFiring().catch(e=>logError('order-book-refresh',e)); return; }
   if(a.name===CRITICAL_DATA_GUARD_ALARM){ await runCriticalDataGuard('scheduled').catch(()=>{}); return; }
   if(a.name==='scm-vwap-daily'||a.name==='scm-vwap-retry'){
     await runScheduledLiveMarketRefresh('legacy-vwap-alarm').catch(()=>{});
@@ -5757,7 +5861,7 @@ async function scheduleAccountingDayWalk(realm,delayMs=4000){
   const n=validRealmNumber(realm); if(n==null)return {ok:false,error:'Invalid realm.'};
   const name=`${ACCOUNTING_DAY_WALK_ALARM_PREFIX}${n}`;
   await setAccountingDayWalkStatus(n,{status:'scheduled',scheduledAt:new Date().toISOString()});
-  await chrome.alarms.create(name,{when:Date.now()+Math.max(1000,Number(delayMs)||4000)});
+  await scmCreateShortAlarm(name,Math.max(1000,Number(delayMs)||4000));
   return {ok:true,scheduled:true,realm:n};
 }
 // One step on the game's Accounting page. op: 'probe' | 'mode' (index 0 Current, 1 Day) | 'day' (index n).
@@ -6039,6 +6143,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     // at a time. Background VWAP jobs do not use this capture lock.
     const session={realm:selected,startedAt,phase:'preflight'};
     realmSyncSessions.set(selected,session);
+    scmMirrorSyncSessions();
     // Whatever this key says from now on is about this run.
     chrome.storage.local.remove(`scmSyncReturn:${selected}`).catch(()=>{});
     syncCaptureRealm=selected;
@@ -6848,7 +6953,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     }
     return {ok:false,realm:selected,results,walkReport,endpointWarnings,total,successful,failed,missingRequiredWrites,missingRequiredEndpoints,elapsedMs:Date.now()-startedAt,error:finalSyncError};
   }catch(e){
-    const error=e?.message||String(e);
+    const error=e?.message||String(e);logError('sync',e);
     // Nothing of this run may reach storage after a clear, not even its failure status.
     if(e instanceof SyncCancelledByClear)return {ok:false,cancelled:true,error,realm:selected};
     syncTrace.push({at:Date.now(),type:'sync-exception',error});
@@ -6877,7 +6982,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const t=await simTab();
       if(t?.id) await withSyncTimeout(chrome.tabs.sendMessage(t.id,{type:'CLEAR_SYNC_REALM'}),1500,'Clear Sync realm capture boundary').catch(()=>{});
     }catch{}
-    if(ownsSyncSession && selected!=null){ realmSyncSessions.delete(selected); if(syncCaptureRealm===selected) syncCaptureRealm=null; }
+    if(ownsSyncSession && selected!=null){ realmSyncSessions.delete(selected); if(syncCaptureRealm===selected) syncCaptureRealm=null; scmMirrorSyncSessions(); }
     if(ownsSyncSession && selected!=null && !clearedDuringRun){
       const syncFinishedAt=new Date().toISOString();
       const traceFailed=Array.isArray(syncTrace)&&syncTrace.some(x=>/failed|error|exception/i.test(String(x?.type||'')));
@@ -7390,9 +7495,19 @@ async function requestJavascriptDiagnostic(send){
   return {ok:true,skipped:true,realm:validRealmNumber(candidates?.[0]?.url?.match(/\/rc\/(\d+)\//)?.[1]),diagnostic:null,source:'runtime-diagnostic-skipped',message:'Runtime diagnostic was skipped because the game page was busy.'};
 }
 
+const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_FROZEN_NETWORK_PLAN','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','SET_BUILDING_ALARM','CLEAR_BUILDING_ALARM','GET_COMPANY_AUTH_DATA','SYNC_RESOURCE_IMAGES','GET_ERROR_LOG','CLEAR_ERROR_LOG']);
+function scmIsExtensionPageSender(sender){const base=chrome.runtime.getURL('');return typeof sender?.url==='string'&&sender.url.startsWith(base)&&!(sender.tab&&!String(sender.tab.url||'').startsWith(base)&&sender.frameId===0);}
 replayEvent('runtime-start',{buildVersion:BUILD_VERSION,activeRealmKey:null});
+setTimeout(()=>{scmRestorePendingRealmPatches();scmCheckInterruptedSyncSessions();},0);
 
 chrome.runtime.onMessage.addListener((m,sender,send)=>{
+  // Sender hardening: only this extension may message us, and privileged/destructive
+  // types are accepted only from extension pages (popup/dashboard/options), never content scripts.
+  if(!sender||sender.id!==chrome.runtime.id)return false;
+  if(SCM_PRIVILEGED_MESSAGE_TYPES.has(m?.type)&&!scmIsExtensionPageSender(sender)){try{send({ok:false,error:'Not allowed from this context.'});}catch{}return false;}
+  if(m?.type==='GET_ERROR_LOG'){getErrorLog().then(log=>send({ok:true,log,version:BUILD_VERSION,at:new Date().toISOString()})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
+  if(m?.type==='CLEAR_ERROR_LOG'){clearErrorLog().then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
+  if(m?.type==='SCM_CLEAR_ALERT_BADGE'){if(!scmIsExtensionPageSender(sender))return false;scmClearAlertBadge().then(()=>send({ok:true})).catch(()=>send({ok:false}));return true;}
   if(m?.type==='SET_ACCOUNTING_WALK_SCHEDULE'){(async()=>{const realm=validRealmNumber(m.realm);const patch={enabled:Boolean(m.enabled),offsetMin:accountingWalkOffset(m.offsetMin),attempt:0,retryAt:null};if(realm!=null)patch.realm=realm;await writeAccountingWalkSchedule(patch);const r=await ensureAccountingWalkSchedule('user');return {...r,schedule:await readAccountingWalkSchedule()};})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   // 2.5.393 CSV import from Analyze → Data: statements by date and ledger rows; captured data always wins.
   if(m?.type==='IMPORT_CSV_STATEMENTS'){(async()=>{const realm=validRealmNumber(m.realm);if(realm==null)return {ok:false,error:'Pick a realm first.'};if(!/^(income-statement|cashflow-statement|balance-sheet)$/.test(String(m.field||'')))return {ok:false,error:'Unknown statement.'};return queueStatementHistory(realm,(Array.isArray(m.items)?m.items:[]).map(data=>({kind:m.field,data})),{keep:true});})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
@@ -7455,13 +7570,13 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     (async()=>{try{
       const realm=validRealmNumber(m.realm)!=null?validRealmNumber(m.realm):validRealmNumber((await state()).selectedRealm);const buildingId=Number(m.buildingId),readyAt=Number(m.readyAt);if(realm==null||!Number.isFinite(buildingId)||!Number.isFinite(readyAt)||readyAt<=Date.now()){send({ok:false,error:'Invalid building alarm.'});return;}
       await withRealmWriteLock(realm,async()=>{
-        const key=realmKeyFromRealm(realm),latest=await state(realm),stores={...(latest.realmStores||{})},store={...(stores[key]||{})},alarms={...(store.buildingAlarms||{})};const alarmKey=String(buildingId);alarms[alarmKey]={buildingId,readyAt,createdAt:new Date().toISOString()};stores[key]={...store,buildingAlarms:alarms};await storageSet({realmStores:stores});
+        const key=realmKeyFromRealm(realm),latest=await state(realm),stores={...(latest.realmStores||{})},store={...(stores[key]||{})},alarms={...(store.buildingAlarms||{})};const alarmKey=String(buildingId);alarms[alarmKey]={buildingId,readyAt,createdAt:new Date().toISOString()};await storageSet({realmStores:{[key]:{...store,buildingAlarms:alarms}}});
       });
       const alarmName=`scm-building-${realm}-${buildingId}`;await chrome.alarms.clear(alarmName);await chrome.alarms.create(alarmName,{when:readyAt});send({ok:true,realm,buildingId,readyAt});
     }catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;
   }
   if(m?.type==='CLEAR_BUILDING_ALARM'){
-    (async()=>{try{const realm=validRealmNumber(m.realm),buildingId=Number(m.buildingId);if(realm==null||!Number.isFinite(buildingId)){send({ok:false});return;}await withRealmWriteLock(realm,async()=>{const key=realmKeyFromRealm(realm),s=await state(realm),stores={...(s.realmStores||{})},store={...(stores[key]||{})},alarms={...(store.buildingAlarms||{})};delete alarms[String(buildingId)];stores[key]={...store,buildingAlarms:alarms};await storageSet({realmStores:stores});});await chrome.alarms.clear(`scm-building-${realm}-${buildingId}`);send({ok:true});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;
+    (async()=>{try{const realm=validRealmNumber(m.realm),buildingId=Number(m.buildingId);if(realm==null||!Number.isFinite(buildingId)){send({ok:false});return;}await withRealmWriteLock(realm,async()=>{const key=realmKeyFromRealm(realm),s=await state(realm),stores={...(s.realmStores||{})},store={...(stores[key]||{})},alarms={...(store.buildingAlarms||{})};delete alarms[String(buildingId)];await storageSet({realmStores:{[key]:{...store,buildingAlarms:alarms}}});});await chrome.alarms.clear(`scm-building-${realm}-${buildingId}`);send({ok:true});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;
   }
   if(m?.type==='OPEN_MANAGER_TAB') {
     (async()=>{

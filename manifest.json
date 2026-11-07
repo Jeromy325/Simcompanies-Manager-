@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sim Companies Manager",
-  "version": "2.5.432",
+  "version": "2.5.433",
   "description": "Sim Companies Manager, optimized for mobile: lighter background work, phone layouts, Tools tab and building-card profit.",
   "permissions": [
     "storage",
@@ -86,7 +86,8 @@
       "matches": [
         "https://www.simcompanies.com/*",
         "https://simcompanies.com/*"
-      ]
+      ],
+      "use_dynamic_url": true
     }
   ],
   "icons": {
