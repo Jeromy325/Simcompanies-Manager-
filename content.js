@@ -1,3 +1,57 @@
+// v2.5.433 authenticated page bridge. content.js hands page-hook.js a private MessageChannel port once
+// (with a crypto-random per-page nonce echoed in the ack); afterwards page-hook traffic is accepted only
+// over that port, so other page scripts can neither read it nor forge events that reach the background.
+// Until the handshake completes, window.postMessage (targetOrigin = location.origin) is used as before.
+if(!globalThis.__scmPageBridge)globalThis.__scmPageBridge=(()=>{
+  const SRC='SIMCO_MANAGER',GRACE_MS=1500;
+  const KNOWN=new Set(['API_DATA','API_RESULT','API_SEEN','BRIDGE_QUEUE_FLUSHED','DOM_RUNTIME_DIAGNOSTIC_RESULT','GAME_CONFIG','GAME_LOCAL_STORAGE_SNAPSHOT','GAME_STATE','HOOK_READY','INITIALIZED_ACK','JAVASCRIPT_DIAGNOSTIC','MARKET_CACHE','NETWORK_CAPTURE_CONTROL_ACK','NETWORK_CAPTURE_EVENT','PAGE_REALM','REALM_SWITCH','REALM_SWITCH_CONFIRMED','REDUX_STATE_DIAGNOSTIC_RESULT','REPLAY_EVENT','RESOURCE_CATALOG','RESOURCE_IMAGE_RESULT','STOCK_MUTATION_COMPLETE','SYNC_REALM_SET','SYNC_REALM_CLEARED','PORT_ACK']);
+  const nonce=(()=>{try{const a=new Uint8Array(16);crypto.getRandomValues(a);return Array.from(a,b=>b.toString(16).padStart(2,'0')).join('');}catch{return `${Date.now()}-${Math.random()}`.replace('.','');}})();
+  const origin=(()=>{try{return location.origin&&location.origin!=='null'?location.origin:'*';}catch{return '*';}})();
+  const STR_KEYS=['id','requestId','captureId','url','method','reason','realmResolvedBy','eventType'];
+  const valid=d=>{
+    if(!d||typeof d!=='object'||d.source!==SRC)return false;
+    const t=d.type;if(typeof t!=='string'||t.length>64||!KNOWN.has(t))return false;
+    for(const k of STR_KEYS){const v=d[k];if(v!=null&&(typeof v==='object'||String(v).length>8192))return false;}
+    return true;
+  };
+  const handlers=[];let port=null,portAt=0,handoffs=0;
+  const dispatch=d=>{const ev={source:window,data:d};for(const h of handlers.slice()){try{h(ev);}catch(e){try{setTimeout(()=>{throw e;});}catch{}}}};
+  const handoff=()=>{
+    if(port||handoffs>=30)return;handoffs++;
+    let ch;try{ch=new MessageChannel();}catch{return;}
+    const p=ch.port1;
+    p.onmessage=e=>{const d=e.data;if(!valid(d))return;
+      if(d.type==='PORT_ACK'){if(!port&&d.nonce===nonce){port=p;portAt=Date.now();}return;}
+      if(p!==port)return;dispatch(d);};
+    try{window.postMessage({source:SRC,type:'PORT_HANDOFF',nonce},origin,[ch.port2]);}catch{}
+  };
+  window.addEventListener('message',ev=>{
+    if(ev.source!==window)return;const d=ev.data;if(!valid(d)||d.type==='PORT_ACK')return;
+    // After the port handshake only port traffic is trusted (short grace for in-flight window posts).
+    if(port&&Date.now()-portAt>GRACE_MS)return;
+    if(d.type==='HOOK_READY'&&!port)handoff();
+    dispatch(d);
+  });
+  const send=m=>{const msg={...m,source:SRC};if(port){try{port.postMessage(msg);return;}catch{}}window.postMessage(msg,origin);};
+  return {listen:h=>{handlers.push(h);},send,handoff,isPortReady:()=>!!port};
+})();
+// v2.5.433 teardown when the extension context is invalidated (extension reloaded/updated): orphaned
+// content scripts otherwise keep their intervals and subtree observers running forever. This only
+// records intervals/observers created in this isolated world; nothing changes while the context is valid.
+if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
+  const intervals=new Set(),observers=new Set();let dead=false;
+  try{const si=globalThis.setInterval,ci=globalThis.clearInterval;
+    globalThis.setInterval=function(...a){const id=si.apply(this,a);if(!dead)intervals.add(id);return id;};
+    globalThis.clearInterval=function(id){intervals.delete(id);return ci.call(this,id);};
+    const proto=MutationObserver.prototype,obs=proto.observe;
+    proto.observe=function(...a){observers.add(this);return obs.apply(this,a);};
+    const alive=()=>{try{return !!chrome?.runtime?.id;}catch{return false;}};
+    const kill=()=>{if(dead||alive())return;dead=true;for(const id of intervals){try{ci(id);}catch{}}intervals.clear();for(const o of observers){try{o.disconnect();}catch{}}observers.clear();};
+    const watch=si(()=>{kill();if(dead)ci(watch);},10000);
+    document.addEventListener('visibilitychange',kill);
+    return {check:kill,isDead:()=>dead};
+  }catch{return {check(){},isDead:()=>false};}
+})();
 (() => {
   if (window.__SCM_BRIDGE__) return;
   const safeRuntimeSend = (message) => {
@@ -50,7 +104,6 @@
     const old = document.getElementById('scm-mobile-network-capture-indicator');
     if (old) old.remove();
     const card = document.createElement('div');
-    card.id = 'scm-mobile-network-capture-indicator';
     card.setAttribute('role','status');
     card.setAttribute('aria-live','polite');
     card.style.cssText = 'position:fixed;z-index:2147483646;top:calc(env(safe-area-inset-top, 0px) + 8px);left:8px;max-width:min(190px,calc(100vw - 16px));box-sizing:border-box;padding:5px 7px;border:1px solid rgba(104,169,225,.75);border-radius:9px;background:rgba(8,15,24,.94);color:#edf5ff;box-shadow:0 3px 12px rgba(0,0,0,.38);font:400 12px/1.35 system-ui,-apple-system,Segoe UI,sans-serif;pointer-events:auto;touch-action:manipulation;';
@@ -98,7 +151,16 @@
     detail.textContent = 'Starting…';
     detail.style.cssText = 'margin-top:1px;font-size:11px;font-weight:400;color:#b9c6d5;';
     card.append(header,count,detail);
-    (document.documentElement || document.body)?.appendChild(card);
+    // v2.5.433: self-contained floating panel -> isolated in a shadow root so game CSS cannot restyle it
+    // and page scripts cannot query its contents via document selectors. Falls back to a plain append.
+    const host = document.createElement('div');
+    host.id = 'scm-mobile-network-capture-indicator';
+    host.setAttribute('data-scm-owned','1');
+    host.style.cssText = 'all:initial;position:static;';
+    let shadow = null;
+    try { shadow = host.attachShadow({mode:'closed'}); } catch {}
+    if (shadow) { shadow.appendChild(card); card.__scmHost = host; (document.documentElement || document.body)?.appendChild(host); }
+    else { card.id = 'scm-mobile-network-capture-indicator'; (document.documentElement || document.body)?.appendChild(card); }
     scmCaptureOverlay = card;
     positionCaptureOverlay();
     return card;
@@ -142,6 +204,7 @@
   const stopCaptureOverlay = () => {
     if (scmCaptureOverlayTimer) clearInterval(scmCaptureOverlayTimer);
     scmCaptureOverlayTimer = null;
+    scmCaptureOverlay?.__scmHost?.remove();
     scmCaptureOverlay?.remove();
     scmCaptureOverlay = null;
   };
@@ -445,7 +508,8 @@
   // 5-second GAME_STATE writes and realm-follow races.
   // Primary capture is page-hook change-driven. Keep a 1-second fallback when
   // the MAIN-world hook is unavailable; raw storage changes are parsed only once.
-  setInterval(()=>{if(!hookReady)captureDirectGameState();}, 1000);
+  setInterval(()=>{if(!hookReady&&!document.hidden)captureDirectGameState();}, 1000);
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!hookReady){try{captureDirectGameState();}catch{}}});
   // v2.5.327 mobile: background tabs do no polling work; a fresh capture runs when the tab is shown again.
   setInterval(()=>{if(!document.hidden)captureProductionEvents();}, 15000);
   setInterval(()=>{if(!document.hidden)captureWarehouseCostDetail();}, 10000);
@@ -479,7 +543,7 @@
     let timer = null;
     const finish = (value) => { if (timer) clearTimeout(timer); pending.delete(id); resolve(value||{ok:false,status:0,error:'No response from Sim Companies page.'}); };
     pending.set(id, { resolve: finish });
-    try { window.postMessage({ source:'SIMCO_MANAGER', type:'API_GET', id, path:String(path||'') }, '*'); }
+    try { globalThis.__scmPageBridge.send({ source:'SIMCO_MANAGER', type:'API_GET', id, path:String(path||'') }); }
     catch(e){ finish({ok:false,status:0,error:e?.message||String(e)}); return; }
     timer=setTimeout(()=>finish({ok:false,status:0,error:'Sim Companies page API request timed out.'}),Math.max(2000,Number(timeoutMs)||8000));
   });
@@ -487,12 +551,12 @@
 let hookReady = false;
   // v2.5.326: tell page-hook.js we are listening so it releases its queued network events.
   let bridgeInitializedAck = false;
-  const sendBridgeInitialized = () => { try { window.postMessage({ source:'SIMCO_MANAGER', type:'INITIALIZED' }, '*'); } catch {} };
+  const sendBridgeInitialized = () => { try { globalThis.__scmPageBridge.handoff(); globalThis.__scmPageBridge.send({ source:'SIMCO_MANAGER', type:'INITIALIZED' }); } catch {} };
   let pingTimer = null;
-  const pingHook = () => { try { window.postMessage({source:'SIMCO_MANAGER',type:'BRIDGE_PING'}, '*'); } catch {} };
+  const pingHook = () => { try { globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'BRIDGE_PING'}); } catch {} };
   const startPing = () => { if (hookReady || pingTimer) return; pingHook(); pingTimer = setInterval(() => { if (hookReady) { clearInterval(pingTimer); pingTimer=null; } else pingHook(); }, 1000); };
 
-  window.addEventListener('message', (event) => {
+  globalThis.__scmPageBridge.listen((event) => {
     if (event.source !== window || event.data?.source !== 'SIMCO_MANAGER') return;
     const d = event.data;
     if (d.type === 'NETWORK_CAPTURE_CONTROL_ACK') {
@@ -519,13 +583,13 @@ let hookReady = false;
           const c=raw?.scmNetworkTrafficCapture;
           if(c?.status!=='recording'||!c?.captureId||networkResumeRequestedCaptureId===String(c.captureId))return;
           networkResumeRequestedCaptureId=String(c.captureId);
-          window.postMessage({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:true,resume:true,captureId:String(c.captureId),requestId:`resume-${Date.now()}`},'*');
+          globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:true,resume:true,captureId:String(c.captureId),requestId:`resume-${Date.now()}`});
         }).catch(()=>{});
         chrome.runtime.sendMessage({type:'SCM_NET3_STATUS'}).then(result => {
           const c=result?.status;
           if(c?.mode!=='mobile-page'||c?.status!=='recording'||!c?.captureId)return;
           startCaptureOverlay(String(c.captureId));
-          window.postMessage({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:true,resume:true,captureId:String(c.captureId),requestId:`mobile-resume-${Date.now()}`},'*');
+          globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:true,resume:true,captureId:String(c.captureId),requestId:`mobile-resume-${Date.now()}`});
         }).catch(()=>{});
       } catch {}
       return;
@@ -619,12 +683,20 @@ let hookReady = false;
   });
 
   let lastWarehouseCostPath = location.pathname;
-  new MutationObserver(() => {
+  // v2.5.433 mobile CPU: coalesce the subtree callback to one path check per idle slot/frame.
+  let warehouseCostPathCheckPending = false;
+  const checkWarehouseCostPath = () => {
+    warehouseCostPathCheckPending = false;
     if (lastWarehouseCostPath !== location.pathname) {
       lastWarehouseCostPath = location.pathname;
       lastWarehouseCostDetailFingerprint = '';
       scheduleWarehouseCostDetailCapture();
     }
+  };
+  new MutationObserver(() => {
+    if (warehouseCostPathCheckPending) return;
+    warehouseCostPathCheckPending = true;
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(checkWarehouseCostPath, {timeout:300}); else setTimeout(checkWarehouseCostPath, 100);
   }).observe(document.documentElement || document, {subtree:true, childList:true});
 
   startPing();
@@ -824,7 +896,7 @@ let hookReady = false;
       (async()=>{
         const ready=await waitForHookReady(4500);
         if(!ready)throw new Error('Sim Companies page hook was not ready; reload the game tab and retry.');
-        window.postMessage({source:'SIMCO_MANAGER',type:'DOM_RUNTIME_DIAGNOSTIC_GET',id:requestId},'*');
+        globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'DOM_RUNTIME_DIAGNOSTIC_GET',id:requestId});
       })().catch(error=>finish({ok:false,error:error?.message||String(error)}));
       return true;
     }
@@ -837,7 +909,7 @@ let hookReady = false;
       (async()=>{
         const ready=await waitForHookReady(3500);
         if(!ready) throw new Error('Sim Companies page hook was not ready; reload the game tab and retry.');
-        window.postMessage({source:'SIMCO_MANAGER',type:'REDUX_STATE_DIAGNOSTIC_GET',id:requestId},'*');
+        globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'REDUX_STATE_DIAGNOSTIC_GET',id:requestId});
       })().catch(error=>finish({ok:false,error:error?.message||String(error)}));
       return true;
     }
@@ -852,7 +924,7 @@ let hookReady = false;
         if(!ready)throw new Error('Game-page recorder hook is not ready. Reload the Sim Companies tab and try again.');
         if (message.enabled) startCaptureOverlay(String(message.captureId||''));
         else stopCaptureOverlay();
-        window.postMessage({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:Boolean(message.enabled),captureId:String(message.captureId||''),requestId},'*');
+        globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:Boolean(message.enabled),captureId:String(message.captureId||''),requestId});
       })().catch(error=>{if(message.enabled)stopCaptureOverlay();finish({ok:false,error:error?.message||String(error)});});
       return true;
     }
@@ -861,7 +933,7 @@ let hookReady = false;
         const title=String(message?.buildingName||'Building ready');
         const body=String(message?.resourceName||'A building job is ready to resolve.');
         const old=document.getElementById('scm-building-alarm-toast');old?.remove();
-        const toast=document.createElement('div');toast.id='scm-building-alarm-toast';toast.style.cssText='position:fixed;z-index:2147483647;left:50%;top:18%;transform:translateX(-50%);max-width:min(330px,calc(100vw - 24px));padding:10px 12px;border:1px solid #d75d78;border-radius:8px;background:rgba(8,12,18,.97);color:#edf2f7;box-shadow:0 10px 28px rgba(0,0,0,.55);font:11px/1.25 system-ui;';toast.innerHTML=`<strong style="display:block;font-size:12px">⏰ ${escToast(title)}</strong><span style="display:block;color:#aebdcb;margin-top:3px">${escToast(body)}</span>`;document.documentElement.appendChild(toast);setTimeout(()=>toast.remove(),7000);
+        const toastHost=document.createElement('div');toastHost.id='scm-building-alarm-toast';toastHost.setAttribute('data-scm-owned','1');toastHost.style.cssText='all:initial;position:static;';let toastRoot=null;try{toastRoot=toastHost.attachShadow({mode:'closed'});}catch{}const toast=document.createElement('div');if(!toastRoot)toast.id='scm-building-alarm-toast';toast.style.cssText='position:fixed;z-index:2147483647;left:50%;top:18%;transform:translateX(-50%);max-width:min(330px,calc(100vw - 24px));padding:10px 12px;border:1px solid #d75d78;border-radius:8px;background:rgba(8,12,18,.97);color:#edf2f7;box-shadow:0 10px 28px rgba(0,0,0,.55);font:11px/1.25 system-ui;';toast.innerHTML=`<strong style="display:block;font-size:12px">⏰ ${escToast(title)}</strong><span style="display:block;color:#aebdcb;margin-top:3px">${escToast(body)}</span>`;if(toastRoot){toastRoot.appendChild(toast);document.documentElement.appendChild(toastHost);}else document.documentElement.appendChild(toast);setTimeout(()=>{toast.remove();toastHost.remove();},7000);
       }catch{} return false;
     }
     // REFRESH_GAME_OVERLAY is handled inside the overlay IIFE below, where load() is in scope.
@@ -871,20 +943,20 @@ let hookReady = false;
       return false;
     }
     if (message?.type === 'PAGE_MARKET_CACHE') {
-      window.postMessage({ source: 'SIMCO_MANAGER', type: 'MARKET_CACHE_GET' }, '*');
+      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'MARKET_CACHE_GET' });
       sendResponse({ok:true});
       return false;
     }
     if (message?.type === 'SET_SYNC_REALM') {
       const forced = Number(message.realm);
       directCaptureRealm = forced === 0 || forced === 1 ? forced : null;
-      window.postMessage({ source: 'SIMCO_MANAGER', type: 'SET_SYNC_REALM', realm: forced, ttlMs: Number(message.ttlMs) || 120000 }, '*');
+      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'SET_SYNC_REALM', realm: forced, ttlMs: Number(message.ttlMs) || 120000 });
       sendResponse({ok:true,realm:forced});
       return false;
     }
     if (message?.type === 'CLEAR_SYNC_REALM') {
       directCaptureRealm = null;
-      window.postMessage({ source: 'SIMCO_MANAGER', type: 'CLEAR_SYNC_REALM' }, '*');
+      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'CLEAR_SYNC_REALM' });
       sendResponse({ok:true});
       return false;
     }
@@ -901,17 +973,17 @@ let hookReady = false;
       return true;
     }
     if (message?.type === 'PAGE_GAME_STATE') {
-      window.postMessage({ source: 'SIMCO_MANAGER', type: 'GAME_STATE_GET' }, '*');
+      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'GAME_STATE_GET' });
       sendResponse({ok:true});
       return false;
     }
     if (message?.type === 'PAGE_RESOURCE_CATALOG') {
-      window.postMessage({ source: 'SIMCO_MANAGER', type: 'RESOURCE_CATALOG_GET' }, '*');
+      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'RESOURCE_CATALOG_GET' });
       sendResponse({ok:true});
       return false;
     }
     if (message?.type === 'PAGE_RESOURCE_IMAGE') {
-      window.postMessage({ source: 'SIMCO_MANAGER', type: 'RESOURCE_IMAGE_GET', resource: Number(message.resource) }, '*');
+      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'RESOURCE_IMAGE_GET', resource: Number(message.resource) });
       sendResponse({ok:true});
       return false;
     }
@@ -944,7 +1016,7 @@ let hookReady = false;
           sendResponse({ok:false,error:'Sim Companies page hook was not ready after reinjection.'});
           return;
         }
-        window.postMessage({ source:'SIMCO_MANAGER', type:'JAVASCRIPT_DIAGNOSTIC_GET', id:message.requestId||null }, '*');
+        globalThis.__scmPageBridge.send({ source:'SIMCO_MANAGER', type:'JAVASCRIPT_DIAGNOSTIC_GET', id:message.requestId||null });
         sendResponse({ok:true});
       }).catch(e => sendResponse({ok:false,error:e?.message||String(e)}));
       return true;
@@ -952,7 +1024,7 @@ let hookReady = false;
     if (message?.type !== 'PAGE_API_GET') return;
     const id = `${Date.now()}-${++seq}`;
     pending.set(id, { resolve: sendResponse });
-    window.postMessage({ source: 'SIMCO_MANAGER', type: 'API_GET', id, path: message.path, timeoutMs: message.timeoutMs }, '*');
+    globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'API_GET', id, path: message.path, timeoutMs: message.timeoutMs });
     return true;
   });
 })();
@@ -1115,7 +1187,7 @@ function scmPageTextNoLayout(){
   // v2.5.319: use the game's own market response directly (seen by the page hook) instead of
   // waiting for it to be written to storage and read back. VWAP rows are cached separately.
   const liveMarket=new Map();let liveLatestId=null,vwapCache=null;
-  window.addEventListener('message',event=>{
+  globalThis.__scmPageBridge.listen(event=>{
     if(event.source!==window||event.data?.source!=='SIMCO_MANAGER'||event.data?.type!=='API_DATA')return;
     const d=event.data,m=String(d.url||'').match(/^\/api\/v3\/market\/(\d+)\/(\d+)\/?(?:\?.*)?$/);
     if(!m||!(Number(d.status)>=200&&Number(d.status)<300)||!Array.isArray(d.data))return;
@@ -1559,7 +1631,7 @@ function scmPageTextNoLayout(){
   const readCollapsedPreference=()=>{try{const value=localStorage.getItem(OVERLAY_COLLAPSED_KEY);return value===null?true:value!=='0';}catch{return true;}};
   const writeCollapsedPreference=collapsed=>{try{localStorage.setItem(OVERLAY_COLLAPSED_KEY,collapsed?'1':'0');}catch{}};
   const S={data:null,realm:null,styled:false,collapsed:readCollapsedPreference(),signature:'',buildingSignature:'',contractSignature:'',contractCardSignature:'',contractDismissedKey:'',contractQtyMode:'saved',contractCustomQty:'',refreshTimer:null,recoveryTimer:null,lastUrl:location.href,observer:null,loadInFlight:false,loadQueued:false,loadEpoch:0,helperTimer:null,positionRaf:0,contractFillTimer:0,leftCopyDiscount:3,leftCopySignature:'',leftCopyOpen:false};
-  const esc=v=>{const d=document.createElement('div');d.textContent=String(v??'');return d.innerHTML;};
+  const esc=v=>String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   // Origin suffix for a price that is not a real exchange order-book price; absent fields or 'exchange' => ''.
   const priceSrcSuffix=(src,stale)=>{const l=src==='vwap'||src==='realm-vwap'?'VWAP fallback':src==='simcotools'?(stale?'SimcoTools · stale':'SimcoTools'):'';return l?` · ${l}`:'';};
   const num=v=>Number.isFinite(Number(v))?Number(v).toLocaleString(undefined,{maximumFractionDigits:0}):'—';
@@ -2009,7 +2081,7 @@ function scmPageTextNoLayout(){
     }catch(e){finish(String(e&&e.message||e||'Refresh failed'));}
   };
   const renderBalance=()=>{
-    if(!S.etaTimer)S.etaTimer=setInterval(tickEta,1000);
+    if(!S.etaTimer){S.etaTimer=setInterval(()=>{if(!document.hidden)tickEta();},1000);document.addEventListener('visibilitychange',()=>{if(!document.hidden){try{tickEta();}catch{}}});}
     const host=ensureCard('scm-game-balance-card','');style();
     if(S.collapsed){host.className='scm-go-collapsed';host.innerHTML='<button type="button" class="scm-go-toggle" aria-label="Expand production balance">›</button>';host.querySelector('button').onclick=()=>{S.collapsed=false;writeCollapsedPreference(false);renderBalance();schedulePosition();};return;}
     host.className='';
@@ -2544,7 +2616,11 @@ function scmPageTextNoLayout(){
     let helperCheckPending=false;
     const runHelperChecks=()=>{helperCheckPending=false;try{scheduleSellHelper();if(document.getElementById('scm-game-balance-card')&&likelyContractPage())scheduleContractHelper();}catch{}};
     const queueHelperChecks=()=>{if(helperCheckPending)return;helperCheckPending=true;if(typeof requestIdleCallback==='function')requestIdleCallback(runHelperChecks,{timeout:400});else setTimeout(runHelperChecks,150);};
-    if(S.observer)S.observer.disconnect();S.observer=new MutationObserver(()=>{
+    // v2.5.433: mutations only inside the extension's own UI need no work here (the card-removal
+    // mutation targets the game's parent node, so it is never skipped).
+    const scmOwnMutation=m=>{const t=m.target;return t&&t.nodeType===1&&!!t.closest?.('[id^="scm-"],[data-scm-owned]');};
+    if(S.observer)S.observer.disconnect();S.observer=new MutationObserver(muts=>{
+      if(muts&&muts.length&&muts.every(scmOwnMutation))return;
       queueHelperChecks();
       const card=document.getElementById('scm-game-balance-card');
       if(!card){
@@ -2562,9 +2638,16 @@ function scmPageTextNoLayout(){
   if(document.readyState!=='loading')start();else document.addEventListener('DOMContentLoaded',start,{once:true});
   window.addEventListener('pageshow',()=>{setTimeout(load,600);setTimeout(load,1800);});
   document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){setTimeout(load,350);}});
-  let last=location.href;setInterval(()=>{if(location.href!==last){last=location.href;route();setTimeout(load,500);}},1500);
+  // v2.5.433 mobile CPU: SPA route changes come from the Navigation API (+popstate); the URL poll is now
+  // only a slow, visible-tab safety net (3 s without the Navigation API, 10 s with it).
+  let last=location.href;const onRouteChange=()=>{if(location.href!==last){last=location.href;route();setTimeout(load,500);}};
+  const nav=window.navigation;let hasNavApi=false;
+  try{if(nav&&typeof nav.addEventListener==='function'){nav.addEventListener('currententrychange',()=>setTimeout(onRouteChange,0));nav.addEventListener('navigatesuccess',()=>setTimeout(onRouteChange,0));hasNavApi=true;}}catch{}
+  window.addEventListener('popstate',()=>setTimeout(onRouteChange,0));
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)onRouteChange();});
+  setInterval(()=>{if(!document.hidden)onRouteChange();},hasNavApi?10000:3000);
 })();
 
 // v2.5.326: every content.js listener above is now attached; release page-hook.js's queued events.
 // postMessage is delivered asynchronously, so the flush always arrives after all listeners exist.
-try { window.postMessage({ source:'SIMCO_MANAGER', type:'INITIALIZED' }, '*'); } catch {}
+try { globalThis.__scmPageBridge.handoff(); globalThis.__scmPageBridge.send({ source:'SIMCO_MANAGER', type:'INITIALIZED' }); } catch {}
