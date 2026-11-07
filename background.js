@@ -4388,7 +4388,8 @@ async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS){
       lastError=e?.name==='AbortError'
         ? new Error(`SimcoTools request timed out after ${Math.round(timeoutMs/1000)}s (attempt ${attempt+1}/${SIMCOTOOLS_RETRY_DELAYS_MS.length})`)
         : new Error(`SimcoTools network error: ${e?.message||String(e)} (attempt ${attempt+1}/${SIMCOTOOLS_RETRY_DELAYS_MS.length})`);
-      logError('fetch:simcotools',lastError);
+      // Only the final attempt is an error worth logging; earlier timeouts/drops are retried (common on mobile data).
+      if(attempt===SIMCOTOOLS_RETRY_DELAYS_MS.length-1)logError('fetch:simcotools',lastError);
     }finally{clearTimeout(timer);simcoReleaseRequestSlot()}
   }
   throw lastError||new Error('SimcoTools request failed.');
