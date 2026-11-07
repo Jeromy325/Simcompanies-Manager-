@@ -243,7 +243,7 @@ function roundResourceDown(value,precision=3){const n=Number(value),digits=Numbe
 function money(v){if(v==null||v==='')return '—';const n=Number(v);return Number.isFinite(n)?n.toLocaleString(undefined,{style:'currency',currency:'USD',maximumFractionDigits:2}):'—'}
 function contractPriceMoney(v){const n=Number(v);return Number.isFinite(n)?n.toLocaleString(undefined,{style:'currency',currency:'USD',minimumFractionDigits:2,maximumFractionDigits:3}):'—'}
 function num(v){const n=Number(v);return Number.isFinite(n)?n.toLocaleString():'—'}
-function escapeHtml(v){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function escapeHtml(v){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 async function copyDiagnosticText(text,button){try{await navigator.clipboard.writeText(String(text??''));if(button){const old=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=old,1200);}}catch(e){const ta=document.createElement('textarea');ta.value=String(text??'');ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();try{document.execCommand('copy');if(button){const old=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=old,1200);}}finally{ta.remove();}}}
 function pick(o,keys){for(const k of keys)if(o?.[k]!==undefined&&o?.[k]!==null)return o[k];return null}
 function flattenObjects(x,out=[]){if(!x)return out;if(Array.isArray(x)){for(const v of x)flattenObjects(v,out);return out}if(typeof x==='object'){out.push(x);for(const v of Object.values(x)){if(v&&typeof v==='object')flattenObjects(v,out)}}return out}
@@ -4162,7 +4162,7 @@ function renderContracts(s){
   // Outgoing contracts are sales/income; Incoming contracts are purchases/expense.
   // Therefore All is net income: outgoing income minus incoming expense.
   const savedGross=savedOutgoingGross-savedIncomingGross;
-  const setRows=(selector,list,colspan,message)=>{const el=$(selector);if(!el)return;const saved=selector==='#savedContractRows';el.innerHTML=list.length?list.map(c=>contractRow(c,s,saved,saved)).join(''):`<tr><td colspan="${colspan}">${message}</td></tr>`;};
+  const setRows=(selector,list,colspan,message)=>{const el=$(selector);if(!el)return;const saved=selector==='#savedContractRows';el.innerHTML=list.length?list.map(c=>contractRow(c,s,saved,saved)).join(''):`<tr><td colspan="${Number(colspan)||1}">${escapeHtml(message)}</td></tr>`;};
   setRows('#incomingContractRows',incoming,8,'No incoming contracts captured yet. Sync with Sim Companies open.');
   setRows('#outgoingContractRows',outgoing,8,'No outgoing contracts captured yet. Sync with Sim Companies open.');
   setRows('#savedContractRows',saved,10,'No saved contracts yet.');
@@ -5003,7 +5003,10 @@ function scmAutoCollapse(root){
   document.addEventListener('click',e=>{const head=e.target.closest?.('[data-collapse-head]');if(head)toggle(head,e);});
   document.addEventListener('keydown',e=>{if(e.key!=='Enter'&&e.key!==' ')return;const head=e.target.closest?.('[data-collapse-head]');if(head&&e.target===head){e.preventDefault();toggle(head,null);}});
   scmApplyCollapse(document.getElementById('accounting'));scmApplyCollapse(document.getElementById('contracts'));
-  try{scmAutoCollapse(document.body);new MutationObserver(()=>scmAutoCollapse(document.body)).observe(document.body,{childList:true,subtree:true});}catch(e){console.error('Auto collapse failed',e);}
+  // Debounced to one pass per frame; mutations made by scmAutoCollapse itself are ignored.
+  let acRaf=0,acBusy=false;const acRun=()=>{acRaf=0;acBusy=true;try{scmAutoCollapse(document.body);}catch(e){console.error('Auto collapse failed',e);}finally{acObs?.takeRecords();acBusy=false;}};
+  let acObs=null;
+  try{scmAutoCollapse(document.body);acObs=new MutationObserver(()=>{if(acBusy||acRaf)return;acRaf=requestAnimationFrame(acRun);});acObs.observe(document.body,{childList:true,subtree:true});}catch(e){console.error('Auto collapse failed',e);}
 })();
 
 try{chrome.runtime.sendMessage({type:'SCM_CLEAR_ALERT_BADGE'}).catch(()=>{});}catch{}

@@ -20,6 +20,16 @@ function logError(context,err){try{
 async function getErrorLog(){if(scmErrorLogTimer){clearTimeout(scmErrorLogTimer);scmErrorLogTimer=null;}const buf=await scmErrorLogLoad();await chrome.storage.local.set({[SCM_ERROR_LOG_KEY]:buf.slice(-SCM_ERROR_LOG_MAX)}).catch(()=>{});return buf.slice();}
 async function clearErrorLog(){if(scmErrorLogTimer){clearTimeout(scmErrorLogTimer);scmErrorLogTimer=null;}scmErrorLogBuffer=[];scmErrorLogLoading=null;await chrome.storage.local.remove(SCM_ERROR_LOG_KEY);}
 self.addEventListener('error',e=>logError('uncaught',e?.error||e?.message||e));
+// Alarms: ask for persistAcrossSessions explicitly where the browser's schema accepts it. Older/other Chromium
+// builds reject unknown keys with a TypeError, so the first rejection is remembered and later calls omit it.
+let scmAlarmPersistSupported=null;
+async function scmAlarmCreate(name,info){
+  if(scmAlarmPersistSupported!==false){
+    try{const r=await chrome.alarms.create(name,{...(info||{}),persistAcrossSessions:true});scmAlarmPersistSupported=true;return r;}
+    catch(e){if(scmAlarmPersistSupported===true)throw e;scmAlarmPersistSupported=false;}
+  }
+  return chrome.alarms.create(name,info);
+}
 self.addEventListener('unhandledrejection',e=>logError('unhandledrejection',e?.reason));
 // v2.5.361 performance: the service worker no longer listens to chrome.storage.onChanged. Every listener receives a
 // full copy of each changed value, so the ~1 MB realm store was deserialized here on every write. The three memos that
@@ -32,7 +42,7 @@ const scmAlarmListeners=[];
 {const __origAdd=chrome.alarms.onAlarm.addListener.bind(chrome.alarms.onAlarm);chrome.alarms.onAlarm.addListener=fn=>{scmAlarmListeners.push(fn);return __origAdd(fn);};}
 async function scmCreateShortAlarm(name,delayMs){
   const when=Date.now()+Math.max(0,Number(delayMs)||0);
-  await chrome.alarms.create(name,{when});
+  await scmAlarmCreate(name,{when});
   if(delayMs<30000)setTimeout(async()=>{try{const a=await chrome.alarms.get(name);if(!a||Math.abs(Number(a.when)-when)>5)return;if(!(await chrome.alarms.clear(name)))return;for(const fn of scmAlarmListeners){try{Promise.resolve(fn({name,scheduledTime:when})).catch(e=>logError(`alarm:${name}`,e));}catch(e){logError(`alarm:${name}`,e);}}}catch(e){logError('short-alarm',e);}},Math.max(0,delayMs));
 }
 const realmSyncSessions=new Map();
@@ -88,6 +98,11 @@ const SCM_NET_DB='scm-network-capture-v3';
 function scmNetDb(){return new Promise((resolve,reject)=>{const req=indexedDB.open(SCM_NET_DB,1);req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains('events')){const st=db.createObjectStore('events',{keyPath:'id',autoIncrement:true});st.createIndex('captureId','captureId',{unique:false});}};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error||new Error('IndexedDB open failed'));});}
 async function scmNetSave(event){const db=await scmNetDb();await new Promise((resolve,reject)=>{const tx=db.transaction('events','readwrite');tx.objectStore('events').add({captureId:scmNetCapture.captureId,at:new Date().toISOString(),...event});tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error||new Error('IndexedDB write failed'));});scmNetCapture.counters.events++;if(event.kind==='request')scmNetCapture.counters.requests++;if(event.kind==='response')scmNetCapture.counters.responses++;if(event.kind==='response-body')scmNetCapture.counters.bodies++;if(event.kind==='loading-failed'||event.kind==='capture-error')scmNetCapture.counters.errors++;await chrome.storage.local.set({scmNetworkCaptureV3Status:{captureId:scmNetCapture.captureId,status:scmNetCapture.active?'recording':'stopped',tabId:scmNetCapture.tabId,startedAt:scmNetCapture.startedAt,updatedAt:new Date().toISOString(),...scmNetCapture.counters}}).catch(()=>{});}
 async function scmNetGetEvents(captureId){const db=await scmNetDb();return await new Promise((resolve,reject)=>{const tx=db.transaction('events','readonly');const req=tx.objectStore('events').index('captureId').getAll(captureId);req.onsuccess=()=>resolve(req.result||[]);req.onerror=()=>reject(req.error||new Error('IndexedDB read failed'));});}
+const SCM_NET_BODY_CAP=256*1024;
+const SCM_NET_SECRET_PATH_RE=/auth|login|logout|token|session|password|passwd|signin|signup|register|oauth|csrf|2fa|otp/i;
+const SCM_NET_SECRET_BODY_RE=/"(?:password|passwd|token|access_?token|refresh_?token|id_?token|session(?:id|_id)?|csrf(?:token)?|secret|api_?key|authorization|jwt)"\s*:|(?:^|[?&])(?:password|token|secret|csrf[a-z_]*|session[a-z_]*)=/i;
+function scmNetRedactBody(url,body,skipContentScan){if(body==null)return {body:null,status:null};const str=String(body);let path='';try{path=new URL(String(url||'')).pathname;}catch{path=String(url||'');}if(SCM_NET_SECRET_PATH_RE.test(path)||(!skipContentScan&&SCM_NET_SECRET_BODY_RE.test(str.slice(0,SCM_NET_BODY_CAP))))return {body:'[REDACTED]',status:'redacted'};if(str.length>SCM_NET_BODY_CAP)return {body:str.slice(0,SCM_NET_BODY_CAP),status:'truncated'};return {body:str,status:null};}
+async function scmNetPageEvents(captureId,offset,limit){const db=await scmNetDb();return await new Promise((resolve,reject)=>{const tx=db.transaction('events','readonly');const req=tx.objectStore('events').index('captureId').openCursor(IDBKeyRange.only(captureId));const events=[];const summary={eventCount:0,requests:0,responses:0,bodies:0,bodyUnavailable:0,errors:0};let i=0;req.onsuccess=()=>{const c=req.result;if(!c){resolve({events,total:i,summary});return;}const e=c.value||{};if(i>=offset&&events.length<limit)events.push(e);i++;summary.eventCount++;if(e.kind==='request'||e.kind==='request-start')summary.requests++;if(e.kind==='response'||e.kind==='fetch'||e.kind==='xhr')summary.responses++;if(e.kind==='response-body'||((e.kind==='fetch'||e.kind==='xhr')&&e.body!=null))summary.bodies++;if(e.kind==='body-unavailable')summary.bodyUnavailable++;if(e.kind==='capture-error'||e.kind==='loading-failed'||e.kind==='request-error')summary.errors++;c.continue();};req.onerror=()=>reject(req.error||new Error('IndexedDB read failed'));});}
 async function scmNetClearAllEvents(){const db=await scmNetDb();await new Promise((resolve,reject)=>{const tx=db.transaction('events','readwrite');tx.objectStore('events').clear();tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error||new Error('IndexedDB clear failed'));});}
 async function scmNetClearEvents(captureId){const db=await scmNetDb();await new Promise((resolve,reject)=>{const tx=db.transaction('events','readwrite'),idx=tx.objectStore('events').index('captureId'),req=idx.openCursor(IDBKeyRange.only(captureId));req.onsuccess=()=>{const c=req.result;if(c){c.delete();c.continue();}};tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error||new Error('IndexedDB clear failed'));});}
 async function scmMobileNetSave(captureId,event){
@@ -126,22 +141,28 @@ async function scmMobileNetStop(){
 function scmNetSafeHeaders(headers){const out={};for(const h of headers||[]){const name=String(h.name||'');if(/authorization|cookie|set-cookie|token|csrf|session/i.test(name))out[name]='[REDACTED]';else out[name]=String(h.value||'');}return out;}
 async function scmNetDebuggerEvent(source,method,params){if(!scmNetCapture.active||source.tabId!==scmNetCapture.tabId)return;try{
  const id=params.requestId;
- if(method==='Network.requestWillBeSent'){const req=params.request||{};const row={requestId:id,url:req.url||'',method:req.method||'GET',headers:scmNetSafeHeaders(Object.entries(req.headers||{}).map(([name,value])=>({name,value:String(value)}))),postData:req.postData??null,resourceType:params.type||null,initiator:params.initiator||null,wallTime:params.wallTime||null,timestamp:params.timestamp||null,redirectResponse:params.redirectResponse?{status:params.redirectResponse.status,url:params.redirectResponse.url,headers:scmNetSafeHeaders(Object.entries(params.redirectResponse.headers||{}).map(([name,value])=>({name,value:String(value)})))}:null};scmNetCapture.requestMap.set(id,{request:row,response:null});await scmNetSave({kind:'request',...row});if(params.redirectResponse)await scmNetSave({kind:'redirect-response',requestId:id,url:params.redirectResponse.url,status:params.redirectResponse.status,headers:scmNetSafeHeaders(Object.entries(params.redirectResponse.headers||{}).map(([name,value])=>({name,value:String(value)})))});return;}
+ if(method==='Network.requestWillBeSent'){const req=params.request||{};const row={requestId:id,url:req.url||'',method:req.method||'GET',headers:scmNetSafeHeaders(Object.entries(req.headers||{}).map(([name,value])=>({name,value:String(value)}))),postData:req.postData==null?null:scmNetRedactBody(req.url,req.postData).body,resourceType:params.type||null,initiator:params.initiator||null,wallTime:params.wallTime||null,timestamp:params.timestamp||null,redirectResponse:params.redirectResponse?{status:params.redirectResponse.status,url:params.redirectResponse.url,headers:scmNetSafeHeaders(Object.entries(params.redirectResponse.headers||{}).map(([name,value])=>({name,value:String(value)})))}:null};scmNetCapture.requestMap.set(id,{request:row,response:null});await scmNetSave({kind:'request',...row});if(params.redirectResponse)await scmNetSave({kind:'redirect-response',requestId:id,url:params.redirectResponse.url,status:params.redirectResponse.status,headers:scmNetSafeHeaders(Object.entries(params.redirectResponse.headers||{}).map(([name,value])=>({name,value:String(value)})))});return;}
  if(method==='Network.responseReceived'){const resp=params.response||{};const entry=scmNetCapture.requestMap.get(id)||{request:{requestId:id,url:resp.url||'',method:'GET'},response:null};entry.response={url:resp.url||entry.request.url,status:resp.status,statusText:resp.statusText,mimeType:resp.mimeType,protocol:resp.protocol,fromDiskCache:resp.fromDiskCache,fromServiceWorker:resp.fromServiceWorker,headers:scmNetSafeHeaders(Object.entries(resp.headers||{}).map(([name,value])=>({name,value:String(value)}))),remoteIPAddress:resp.remoteIPAddress||null,encodedDataLength:resp.encodedDataLength??null,resourceType:params.type||null};scmNetCapture.requestMap.set(id,entry);await scmNetSave({kind:'response',requestId:id,...entry.response});return;}
- if(method==='Network.loadingFinished'){const entry=scmNetCapture.requestMap.get(id);await scmNetSave({kind:'loading-finished',requestId:id,encodedDataLength:params.encodedDataLength??null});if(entry){try{const result=await chrome.debugger.sendCommand(source,'Network.getResponseBody',{requestId:id});const body=result?.body;await scmNetSave({kind:'response-body',requestId:id,url:entry.response?.url||entry.request?.url||'',base64Encoded:Boolean(result?.base64Encoded),body:body??null,bodyLength:typeof body==='string'?body.length:0,bodyCaptureStatus:body==null?'empty':'captured'});}catch(err){await scmNetSave({kind:'body-unavailable',requestId:id,url:entry.response?.url||entry.request?.url||'',reason:String(err?.message||err).slice(0,500)});}}scmNetCapture.requestMap.delete(id);return;}
+ if(method==='Network.loadingFinished'){const entry=scmNetCapture.requestMap.get(id);await scmNetSave({kind:'loading-finished',requestId:id,encodedDataLength:params.encodedDataLength??null});if(entry){try{const result=await chrome.debugger.sendCommand(source,'Network.getResponseBody',{requestId:id});const rawBody=result?.body;const bodyUrl=entry.response?.url||entry.request?.url||'';const red=scmNetRedactBody(bodyUrl,rawBody,Boolean(result?.base64Encoded));const body=red.body;await scmNetSave({kind:'response-body',requestId:id,url:bodyUrl,base64Encoded:Boolean(result?.base64Encoded),body:body??null,bodyLength:typeof rawBody==='string'?rawBody.length:0,bodyCaptureStatus:rawBody==null?'empty':(red.status||'captured')});}catch(err){await scmNetSave({kind:'body-unavailable',requestId:id,url:entry.response?.url||entry.request?.url||'',reason:String(err?.message||err).slice(0,500)});}}scmNetCapture.requestMap.delete(id);return;}
  if(method==='Network.loadingFailed'){await scmNetSave({kind:'loading-failed',requestId:id,url:scmNetCapture.requestMap.get(id)?.request?.url||'',errorText:params.errorText||'',canceled:Boolean(params.canceled),blockedReason:params.blockedReason||null});scmNetCapture.requestMap.delete(id);return;}
  if(method.startsWith('Network.webSocket')||method.startsWith('Network.eventSource')){const clean={...params};if(clean.request)clean.request={url:clean.request.url,method:clean.request.method,headers:scmNetSafeHeaders(Object.entries(clean.request.headers||{}).map(([name,value])=>({name,value:String(value)})))};await scmNetSave({kind:'protocol-event',protocolMethod:method,params:clean});return;}
  if(method==='Network.dataReceived'){await scmNetSave({kind:'data-received',requestId:id,dataLength:params.dataLength??null,encodedDataLength:params.encodedDataLength??null});return;}
  if(method==='Network.requestServedFromCache'){await scmNetSave({kind:'served-from-cache',requestId:id});return;}
  }catch(err){try{await scmNetSave({kind:'capture-error',protocolMethod:method,error:String(err?.message||err).slice(0,500)});}catch{}}
 }
+// Debugger capture state lives in storage.session so a restarted service worker can
+// detach a debugger session it no longer tracks (in-memory requestMap is lost on restart).
+const SCM_NET_SESSION_KEY='scmNetCaptureSessionState';
+async function scmNetPersistSession(){try{await chrome.storage.session?.set({[SCM_NET_SESSION_KEY]:{tabId:scmNetCapture.tabId,captureId:scmNetCapture.captureId,active:scmNetCapture.active,startedAt:scmNetCapture.startedAt}});}catch{}}
+async function scmNetRecoverStaleSession(){try{if(!chrome.storage.session)return;const st=(await chrome.storage.session.get(SCM_NET_SESSION_KEY))[SCM_NET_SESSION_KEY];if(!st?.active||scmNetCapture.active)return;try{if(st.tabId!=null&&chrome.debugger?.detach)await chrome.debugger.detach({tabId:st.tabId});}catch{}await chrome.storage.session.set({[SCM_NET_SESSION_KEY]:{...st,active:false}});const cur=(await chrome.storage.local.get('scmNetworkCaptureV3Status')).scmNetworkCaptureV3Status||{};if(cur.captureId===st.captureId&&cur.status==='recording'&&cur.mode!=='mobile-page')await chrome.storage.local.set({scmNetworkCaptureV3Status:{...cur,status:'stopped',stopReason:'service-worker-restart',stoppedAt:new Date().toISOString()}});}catch{}}
+scmNetRecoverStaleSession();
 // debugger is an optional permission (some Android browsers remove extensions that require it), so bind only once it exists.
 let scmNetDebuggerBound=false;
-function scmNetBindDebugger(){if(scmNetDebuggerBound||!chrome.debugger?.onEvent)return scmNetDebuggerBound;scmNetDebuggerBound=true;chrome.debugger.onEvent.addListener(scmNetDebuggerEvent);chrome.debugger.onDetach.addListener((source,reason)=>{if(source.tabId===scmNetCapture.tabId){scmNetCapture.active=false;scmNetSave({kind:'capture-detached',reason:String(reason||'unknown')}).catch(()=>{});}});return true;}
+function scmNetBindDebugger(){if(scmNetDebuggerBound||!chrome.debugger?.onEvent)return scmNetDebuggerBound;scmNetDebuggerBound=true;chrome.debugger.onEvent.addListener(scmNetDebuggerEvent);chrome.debugger.onDetach.addListener((source,reason)=>{if(source.tabId===scmNetCapture.tabId){scmNetCapture.active=false;scmNetPersistSession();scmNetSave({kind:'capture-detached',reason:String(reason||'unknown')}).catch(()=>{});}});return true;}
 scmNetBindDebugger();
 chrome.permissions?.onAdded?.addListener(p=>{if(p?.permissions?.includes('debugger'))scmNetBindDebugger();});
-async function scmNetStart(tabId){if(!scmNetBindDebugger())throw new Error('Debugger permission not granted. Use page capture instead.');if(scmNetCapture.active)throw new Error('A network capture is already active. Stop it first.');const tab=await chrome.tabs.get(tabId);if(!tab?.url||!/^https:\/\/(www\.)?simcompanies\.com\//i.test(tab.url))throw new Error('Selected tab is not a Sim Companies page.');scmNetCapture.tabId=tabId;scmNetCapture.captureId=`net3-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;scmNetCapture.requestMap.clear();scmNetCapture.counters={events:0,requests:0,responses:0,bodies:0,errors:0};scmNetCapture.startedAt=new Date().toISOString();await scmNetClearEvents(scmNetCapture.captureId);await chrome.debugger.attach({tabId},'1.3');try{await chrome.debugger.sendCommand({tabId},'Network.enable',{maxTotalBufferSize:20000000,maxResourceBufferSize:10000000,maxPostDataSize:1000000});scmNetCapture.active=true;await scmNetSave({kind:'capture-start',tabId,pageUrl:tab.url,coverage:'Chrome DevTools Protocol Network domain; browser-observed requests for this tab'});return {ok:true,captureId:scmNetCapture.captureId,tabId,status:'recording',note:'Chrome may display a debugging notification while capture is active.'};}catch(err){try{await chrome.debugger.detach({tabId});}catch{}scmNetCapture.active=false;throw err;}}
-async function scmNetStop(){if(!scmNetCapture.captureId)return {ok:false,error:'No capture session exists.'};const tabId=scmNetCapture.tabId;scmNetCapture.active=false;await scmNetSave({kind:'capture-stop',tabId,stopReason:'user-request'}).catch(()=>{});try{if(tabId!=null)await chrome.debugger.detach({tabId});}catch(err){await scmNetSave({kind:'capture-detach-error',error:String(err?.message||err)}).catch(()=>{});}const status={ok:true,captureId:scmNetCapture.captureId,tabId,status:'stopped',...scmNetCapture.counters};await chrome.storage.local.set({scmNetworkCaptureV3Status:{...status,startedAt:scmNetCapture.startedAt,stoppedAt:new Date().toISOString()}});return status;}
+async function scmNetStart(tabId){if(!scmNetBindDebugger())throw new Error('Debugger permission not granted. Use page capture instead.');if(scmNetCapture.active)throw new Error('A network capture is already active. Stop it first.');const tab=await chrome.tabs.get(tabId);if(!tab?.url||!/^https:\/\/(www\.)?simcompanies\.com\//i.test(tab.url))throw new Error('Selected tab is not a Sim Companies page.');scmNetCapture.tabId=tabId;scmNetCapture.captureId=`net3-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;scmNetCapture.requestMap.clear();scmNetCapture.counters={events:0,requests:0,responses:0,bodies:0,errors:0};scmNetCapture.startedAt=new Date().toISOString();await scmNetClearEvents(scmNetCapture.captureId);await chrome.debugger.attach({tabId},'1.3');try{await chrome.debugger.sendCommand({tabId},'Network.enable',{maxTotalBufferSize:20000000,maxResourceBufferSize:10000000,maxPostDataSize:1000000});scmNetCapture.active=true;await scmNetPersistSession();await scmNetSave({kind:'capture-start',tabId,pageUrl:tab.url,coverage:'Chrome DevTools Protocol Network domain; browser-observed requests for this tab'});return {ok:true,captureId:scmNetCapture.captureId,tabId,status:'recording',note:'Chrome may display a debugging notification while capture is active.'};}catch(err){try{await chrome.debugger.detach({tabId});}catch{}scmNetCapture.active=false;throw err;}}
+async function scmNetStop(){if(!scmNetCapture.captureId)return {ok:false,error:'No capture session exists.'};const tabId=scmNetCapture.tabId;scmNetCapture.active=false;await scmNetPersistSession();await scmNetSave({kind:'capture-stop',tabId,stopReason:'user-request'}).catch(()=>{});try{if(tabId!=null)await chrome.debugger.detach({tabId});}catch(err){await scmNetSave({kind:'capture-detach-error',error:String(err?.message||err)}).catch(()=>{});}const status={ok:true,captureId:scmNetCapture.captureId,tabId,status:'stopped',...scmNetCapture.counters};await chrome.storage.local.set({scmNetworkCaptureV3Status:{...status,startedAt:scmNetCapture.startedAt,stoppedAt:new Date().toISOString()}});return status;}
 
 const BUILD_VERSION=chrome.runtime.getManifest().version;
 const enqueueNetworkCaptureWrite=SCM_DIAGNOSTIC_CORE.createSerialQueue();
@@ -510,7 +531,7 @@ async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
   return {ok:true,saved:out,warnings};
 }
 chrome.alarms.onAlarm.addListener(a=>{if(a?.name===GAME_CONSTANTS_ALARM)refreshGameConstants().catch(()=>{});});
-async function ensureGameConstantsAlarm(){try{await chrome.alarms.create(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});}catch{}refreshGameConstants().catch(()=>{});}
+async function ensureGameConstantsAlarm(){try{await scmAlarmCreate(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});}catch{}refreshGameConstants().catch(()=>{});}
 ensureGameConstantsAlarm();
 // v2.5.338 economy phase log per realm (scmEconomyStateLog:<realm>) from auth-data temporals.economyState.
 // Seeds from the previously stored auth-data so the phase before a change is kept. Storage only, no network.
@@ -660,16 +681,22 @@ function scheduleCrossLaneConfirm(n){
 const SCM_PENDING_PATCH_SESSION_KEY='scmPendingRealmPatchesV1';
 const SCM_PENDING_PATCH_MIRROR_MAX_CHARS=4000000;
 let scmPendingPatchMirrorTimer=null;
+let scmPendingPatchMirrorLast=null; // last mirrored JSON ('' = known removed, null = unknown)
 function scmMirrorPendingPatches(immediate=false){
   if(!chrome.storage?.session)return;
   if(scmPendingPatchMirrorTimer){clearTimeout(scmPendingPatchMirrorTimer);scmPendingPatchMirrorTimer=null;}
   const run=()=>{scmPendingPatchMirrorTimer=null;try{
     const out={};for(const n of new Set([...pendingRealmPatches.keys(),...inflightRealmPatches.keys()])){const p={...(inflightRealmPatches.get(n)||{}),...(pendingRealmPatches.get(n)?.patch||{})};if(Object.keys(p).length)out[n]=p;}
-    if(!Object.keys(out).length){chrome.storage.session.remove(SCM_PENDING_PATCH_SESSION_KEY).catch(()=>{});return;}
-    if(JSON.stringify(out).length>SCM_PENDING_PATCH_MIRROR_MAX_CHARS)return;
-    chrome.storage.session.set({[SCM_PENDING_PATCH_SESSION_KEY]:out}).catch(e=>logError('pending-patch-mirror',e));
+    if(!Object.keys(out).length){if(scmPendingPatchMirrorLast!==''){scmPendingPatchMirrorLast='';chrome.storage.session.remove(SCM_PENDING_PATCH_SESSION_KEY).catch(()=>{});}return;}
+    const json=JSON.stringify(out);
+    // Unchanged since the last mirror: skip the (up to 4MB) session write.
+    if(json===scmPendingPatchMirrorLast)return;
+    // Oversize: a stale smaller mirror must not survive to be restored over newer data later.
+    if(json.length>SCM_PENDING_PATCH_MIRROR_MAX_CHARS){scmPendingPatchMirrorLast='';chrome.storage.session.remove(SCM_PENDING_PATCH_SESSION_KEY).catch(()=>{});return;}
+    scmPendingPatchMirrorLast=json;
+    chrome.storage.session.set({[SCM_PENDING_PATCH_SESSION_KEY]:out}).catch(e=>{scmPendingPatchMirrorLast=null;logError('pending-patch-mirror',e);});
   }catch(e){logError('pending-patch-mirror',e);}};
-  if(immediate)run();else scmPendingPatchMirrorTimer=setTimeout(run,300);
+  if(immediate)run();else scmPendingPatchMirrorTimer=setTimeout(run,500);
 }
 async function scmRestorePendingRealmPatches(){
   try{
@@ -1713,7 +1740,7 @@ async function notifyIncomingContracts(realm,data){
   await updateNotifyState(async state=>{const key=`contracts:${n}`;const r=N.newIncomingContracts(data,state[key],names,n);state[key]=r.seen;for(const f of r.fresh)await scmNotify(`contract-${n}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,f.title,f.message);return state;});
 }
 // 12: daily summary alarm at the chosen local time.
-async function scheduleDailySummary(){const cfg=await notifySettings();await chrome.alarms.clear('scm-daily-summary');if(cfg.dailySummary)await chrome.alarms.create('scm-daily-summary',{when:globalThis.SCM_NOTIFY_CORE.nextDailyTime(cfg.dailySummaryTime),periodInMinutes:1440});}
+async function scheduleDailySummary(){const cfg=await notifySettings();await chrome.alarms.clear('scm-daily-summary');if(cfg.dailySummary)await scmAlarmCreate('scm-daily-summary',{when:globalThis.SCM_NOTIFY_CORE.nextDailyTime(cfg.dailySummaryTime),periodInMinutes:1440});}
 async function fireDailySummary(){
   const cfg=await notifySettings();if(!cfg.dailySummary)return;const {names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE;
   for(const n of [0,1]){
@@ -1834,7 +1861,7 @@ async function scheduleProductionFinishAlarms(realm,buildings){
   // a building whose batch changed or ended gets its old alarm removed; buildings missing from this snapshot keep theirs
   for(const a of mine){const bid=Number(String(a.name).split(':')[2]);if(!wantedNames.has(a.name)&&seenBuildings.has(bid))await chrome.alarms.clear(a.name);}
   const have=new Set(mine.map(a=>a.name));let created=0;
-  for(const x of wanted)if(!have.has(x.name)){await chrome.alarms.create(x.name,{when:x.when});created++;}
+  for(const x of wanted)if(!have.has(x.name)){await scmAlarmCreate(x.name,{when:x.when});created++;}
   return {ok:true,created,total:wanted.length};
 }
 async function fireProductionFinished(name){
@@ -3511,11 +3538,11 @@ async function ensureAccountingWalkSchedule(reason='ensure'){
   const sch=await readAccountingWalkSchedule();
   if(!sch.enabled||validRealmNumber(sch.realm)==null){await chrome.alarms.clear(ACCOUNTING_WALK_DAILY_ALARM).catch(()=>{});if(sch.nextAt)await writeAccountingWalkSchedule({nextAt:null});return {ok:true,enabled:false,reason};}
   // a pending retry keeps its own time
-  if(sch.retryAt&&Date.parse(sch.retryAt)>Date.now()){await chrome.alarms.create(ACCOUNTING_WALK_DAILY_ALARM,{when:Date.parse(sch.retryAt)});return {ok:true,enabled:true,nextAt:sch.retryAt,retry:true,reason};}
+  if(sch.retryAt&&Date.parse(sch.retryAt)>Date.now()){await scmAlarmCreate(ACCOUNTING_WALK_DAILY_ALARM,{when:Date.parse(sch.retryAt)});return {ok:true,enabled:true,nextAt:sch.retryAt,retry:true,reason};}
   const ready=await accountingStatementsReadyAt(sch.realm);
   const at=nextAccountingWalkAt(ready,sch.offsetMin);
   if(at==null){await chrome.alarms.clear(ACCOUNTING_WALK_DAILY_ALARM).catch(()=>{});await writeAccountingWalkSchedule({nextAt:null,waitingFor:'statement-time'});return {ok:false,enabled:true,error:'Sync once so the Manager knows when the game finishes your statements.',reason};}
-  await chrome.alarms.create(ACCOUNTING_WALK_DAILY_ALARM,{when:at});
+  await scmAlarmCreate(ACCOUNTING_WALK_DAILY_ALARM,{when:at});
   await writeAccountingWalkSchedule({nextAt:new Date(at).toISOString(),readyAt:new Date(ready).toISOString(),waitingFor:null});
   return {ok:true,enabled:true,nextAt:new Date(at).toISOString(),reason};
 }
@@ -3523,7 +3550,7 @@ async function runScheduledAccountingWalk(trigger='alarm'){
   const sch=await readAccountingWalkSchedule();
   const realm=validRealmNumber(sch.realm);
   if((!sch.enabled&&trigger==='alarm')||realm==null)return {ok:false,skipped:true};
-  if(syncSessionForRealm(realm)||accountingDayWalkRunning.has(realm)){await chrome.alarms.create(ACCOUNTING_WALK_DAILY_ALARM,{when:Date.now()+60000});return {ok:false,busy:true};}
+  if(syncSessionForRealm(realm)||accountingDayWalkRunning.has(realm)){await scmAlarmCreate(ACCOUNTING_WALK_DAILY_ALARM,{when:Date.now()+60000});return {ok:false,busy:true};}
   const before=await accountingStatementsReadyAt(realm);
   const attempt=(Number(sch.attempt)||0)+1;
   // Current statements + past finances through the game tab (same 7 Accounting requests as Sync), then the page walk.
@@ -3541,7 +3568,7 @@ async function runScheduledAccountingWalk(trigger='alarm'){
   if(!okRun&&trigger==='alarm'&&attempt<ACCOUNTING_WALK_MAX_ATTEMPTS){
     const retryAt=new Date(Date.now()+ACCOUNTING_WALK_RETRY_MS).toISOString();
     await writeAccountingWalkSchedule({attempt,retryAt,nextAt:retryAt,lastResult:result});
-    await chrome.alarms.create(ACCOUNTING_WALK_DAILY_ALARM,{when:Date.parse(retryAt)});
+    await scmAlarmCreate(ACCOUNTING_WALK_DAILY_ALARM,{when:Date.parse(retryAt)});
     return {ok:false,retryAt,...result};
   }
   await writeAccountingWalkSchedule({attempt:0,retryAt:null,lastResult:result});
@@ -4140,7 +4167,7 @@ async function scmOrderBookShouldThrottle(){
   }catch{return false;}
 }
 async function ensureOrderBookRefreshAlarm(){
-  try{if(!(await chrome.alarms.get(ORDER_BOOK_REFRESH_ALARM)))await chrome.alarms.create(ORDER_BOOK_REFRESH_ALARM,{delayInMinutes:1,periodInMinutes:1});}catch{}
+  try{if(!(await chrome.alarms.get(ORDER_BOOK_REFRESH_ALARM)))await scmAlarmCreate(ORDER_BOOK_REFRESH_ALARM,{delayInMinutes:1,periodInMinutes:1});}catch{}
 }
 function orderBookRefreshResourceIds(store,realm){
   const ids=new Set();
@@ -5018,7 +5045,7 @@ async function ensureLiveMarketRefreshAlarm(reason='ensure'){
   try{
     const existing=await chrome.alarms.get(LIVE_MARKET_REFRESH_ALARM_NAME);
     if(existing)return {ok:true,created:false,alarm:existing,reason};
-    await chrome.alarms.create(LIVE_MARKET_REFRESH_ALARM_NAME,{
+    await scmAlarmCreate(LIVE_MARKET_REFRESH_ALARM_NAME,{
       delayInMinutes:LIVE_MARKET_REFRESH_PERIOD_MINUTES,
       periodInMinutes:LIVE_MARKET_REFRESH_PERIOD_MINUTES
     });
@@ -5217,7 +5244,7 @@ async function refreshContractsScheduled(reason='critical-data-guard',realmArg=n
   return {ok:results.every(x=>x.ok)&&count>0,realm,reason,results,count};
 }
 const CRITICAL_DATA_GUARD_ALARM='scm-critical-data-guard';
-async function ensureCriticalDataGuard(reason='ensure'){try{await chrome.alarms.create(CRITICAL_DATA_GUARD_ALARM,{delayInMinutes:10,periodInMinutes:10});return {ok:true,reason};}catch(e){return {ok:false,error:e?.message||String(e)}}}
+async function ensureCriticalDataGuard(reason='ensure'){try{await scmAlarmCreate(CRITICAL_DATA_GUARD_ALARM,{delayInMinutes:10,periodInMinutes:10});return {ok:true,reason};}catch(e){return {ok:false,error:e?.message||String(e)}}}
 async function runCriticalDataGuard(reason='scheduled'){
   const report=[];
   for(const realm of [0,1]){
@@ -5249,7 +5276,7 @@ function createFollowupAlarm(name,when,clearGen=extensionClearGeneration){
     if(clearGen!==extensionClearGeneration)return; // started before Clear Stored Data: must not bring anything back
     const cur=(await chrome.storage.local.get({[FOLLOWUP_ALARMS_KEY]:{}}))[FOLLOWUP_ALARMS_KEY]||{};
     await rawStorageSet({[FOLLOWUP_ALARMS_KEY]:{...cur,[name]:when}});
-    await chrome.alarms.create(name,{when});
+    await scmAlarmCreate(name,{when});
   });
 }
 function forgetFollowupAlarm(name){
@@ -5268,10 +5295,10 @@ const STANDING_ALARMS=[
   ['scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080}],
 ];
 // Idempotent: (re)create a periodic alarm only when it is missing or its period changed, so it is not pushed back.
-async function scmEnsurePeriodicAlarm(name,info){const cur=await chrome.alarms.get(name);if(cur&&Number(cur.periodInMinutes)===Number(info.periodInMinutes))return false;await chrome.alarms.create(name,info);return true;}
+async function scmEnsurePeriodicAlarm(name,info){const cur=await chrome.alarms.get(name);if(cur&&Number(cur.periodInMinutes)===Number(info.periodInMinutes))return false;await scmAlarmCreate(name,info);return true;}
 async function ensureStandingAlarms(){
-  for(const [name,info] of STANDING_ALARMS)if(!(await chrome.alarms.get(name)))await chrome.alarms.create(name,info);
-  if(!(await chrome.alarms.get(GAME_CONSTANTS_ALARM)))await chrome.alarms.create(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});
+  for(const [name,info] of STANDING_ALARMS)if(!(await chrome.alarms.get(name)))await scmAlarmCreate(name,info);
+  if(!(await chrome.alarms.get(GAME_CONSTANTS_ALARM)))await scmAlarmCreate(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});
 }
 async function restorePersistedAlarms(reason='restore'){
   const out={reason,buildingReminders:0,production:[],followups:0};
@@ -5280,7 +5307,7 @@ async function restorePersistedAlarms(reason='restore'){
     for(const [name,when] of Object.entries(fu)){
       if(await chrome.alarms.get(name))continue;
       // Already due while the browser was closed: run it shortly instead of dropping it.
-      await chrome.alarms.create(name,{when:Math.max(Number(when)||0,Date.now()+60000)});out.followups++;
+      await scmAlarmCreate(name,{when:Math.max(Number(when)||0,Date.now()+60000)});out.followups++;
     }
   }catch(e){out.error=e?.message||String(e);logError('alarms:restore',e);}
   try{if(!(await chrome.alarms.get('scm-daily-summary')))await scheduleDailySummary();}catch(e){out.error=e?.message||String(e);}
@@ -5289,72 +5316,84 @@ async function restorePersistedAlarms(reason='restore'){
       const st=(await chrome.storage.local.get({[`scmRealmStore:${n}`]:null}))[`scmRealmStore:${n}`]||{};
       for(const a of Object.values(st.buildingAlarms||{})){
         const bid=Number(a?.buildingId),when=Number(a?.readyAt);if(!(bid>0)||!(when>Date.now()))continue;
-        const name=`scm-building-${n}-${bid}`;if(!(await chrome.alarms.get(name))){await chrome.alarms.create(name,{when});out.buildingReminders++;}
+        const name=`scm-building-${n}-${bid}`;if(!(await chrome.alarms.get(name))){await scmAlarmCreate(name,{when});out.buildingReminders++;}
       }
       if(Array.isArray(st.buildings)&&st.buildings.length)out.production.push(await scheduleProductionFinishAlarms(n,st.buildings));
       // v2.5.370 a scheduled / interrupted Accounting day walk survives an update or restart.
       const walk=st.accountingDayWalkStatus;
-      if(walk&&(walk.status==='scheduled'||walk.status==='running')){const name=`${ACCOUNTING_DAY_WALK_ALARM_PREFIX}${n}`;if(!(await chrome.alarms.get(name))){await chrome.alarms.create(name,{when:Date.now()+15000});out.accountingDayWalk=(out.accountingDayWalk||0)+1;}}
+      if(walk&&(walk.status==='scheduled'||walk.status==='running')){const name=`${ACCOUNTING_DAY_WALK_ALARM_PREFIX}${n}`;if(!(await chrome.alarms.get(name))){await scmAlarmCreate(name,{when:Date.now()+15000});out.accountingDayWalk=(out.accountingDayWalk||0)+1;}}
       // The current-week ledger refresh that was waiting or retrying has the same problem.
       const ledger=st.accountingWeekLedgerStatus?.status;
-      if(ledger==='scheduled'||ledger==='retrying'||ledger==='running'){const name=accountingWeekRefreshAlarmName(n);if(name&&!(await chrome.alarms.get(name))){await chrome.alarms.create(name,{when:Date.now()+20000});out.accountingWeekLedger=(out.accountingWeekLedger||0)+1;}}
+      if(ledger==='scheduled'||ledger==='retrying'||ledger==='running'){const name=accountingWeekRefreshAlarmName(n);if(name&&!(await chrome.alarms.get(name))){await scmAlarmCreate(name,{when:Date.now()+20000});out.accountingWeekLedger=(out.accountingWeekLedger||0)+1;}}
     }catch(e){out.error=e?.message||String(e);}
   }
   return out;
 }
+// Each lifecycle step is isolated: one failing step is logged and must not skip the rest.
+async function scmLifecycleStep(label,fn){try{return await fn();}catch(e){logError(`lifecycle:${label}`,e);return undefined;}}
 chrome.runtime.onInstalled.addListener(async()=>{
-  const current=await chrome.storage.local.get(null);
-  // Preserve existing physical realm containers and global settings, but do
-  // not recreate the old root mirror for realm-owned caches.
-  const globalPatch={};
-  for(const key of Object.keys(GLOBAL_DEFAULTS)){
-    if(key==='realmStores'||key==='scmRealmStoreSchema'||key==='activeRealmKey') continue;
-    if(Object.prototype.hasOwnProperty.call(current,key)) globalPatch[key]=current[key];
-  }
-  globalPatch.selectedRealm=current.selectedRealm??null;
-  globalPatch.activeRealmKey=current.activeRealmKey??null;
-  await storageSet(globalPatch);
-  await ensureRealmStorageMigration();
+  await scmLifecycleStep('installed:global-patch',async()=>{
+    // Targeted read of only the global keys we preserve (never storage.local.get(null)).
+    const keys=[...Object.keys(GLOBAL_DEFAULTS).filter(k=>k!=='realmStores'&&k!=='scmRealmStoreSchema'&&k!=='activeRealmKey'),'selectedRealm','activeRealmKey'];
+    const current=await chrome.storage.local.get([...new Set(keys)]);
+    // Preserve existing physical realm containers and global settings, but do
+    // not recreate the old root mirror for realm-owned caches.
+    const globalPatch={};
+    for(const key of Object.keys(GLOBAL_DEFAULTS)){
+      if(key==='realmStores'||key==='scmRealmStoreSchema'||key==='activeRealmKey') continue;
+      if(Object.prototype.hasOwnProperty.call(current,key)) globalPatch[key]=current[key];
+    }
+    globalPatch.selectedRealm=current.selectedRealm??null;
+    globalPatch.activeRealmKey=current.activeRealmKey??null;
+    await storageSet(globalPatch);
+  });
+  await scmLifecycleStep('installed:live-bridge-token',()=>migrateLiveBridgeToken());
+  await scmLifecycleStep('installed:realm-migration',()=>ensureRealmStorageMigration());
   // v2.5.345 an update used to clear every alarm, dropping the building reminders you set, batch-finished
   // alerts, follow-ups, the daily summary and the constants refresh. Only the scheduler alarms re-created below
   // (and retired legacy ones) are cleared now.
-  for(const a of await chrome.alarms.getAll()){if(!INSTALL_KEEP_ALARM_PREFIXES.some(p=>String(a?.name||'').startsWith(p)))await chrome.alarms.clear(a.name);}
-  await ensureLiveMarketRefreshAlarm('installed');
-  await ensureOrderBookRefreshAlarm();
-  await scmEnsurePeriodicAlarm('scm-vwap-daily',{periodInMinutes:720});
-  await scmEnsurePeriodicAlarm('scm-production-events-daily',{periodInMinutes:720});
-  await scmEnsurePeriodicAlarm('scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15});
-  await ensureCriticalDataGuard('installed');
-  await ensureVwapWatchAlarm('installed');
-  await scmEnsurePeriodicAlarm('scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080});
-  await restorePersistedAlarms('installed').catch(()=>{});
-  await ensureAccountingWalkSchedule('installed').catch(()=>{});
+  await scmLifecycleStep('installed:clear-alarms',async()=>{for(const a of await chrome.alarms.getAll()){if(!INSTALL_KEEP_ALARM_PREFIXES.some(p=>String(a?.name||'').startsWith(p)))await chrome.alarms.clear(a.name);}});
+  await scmLifecycleStep('installed:live-market-alarm',()=>ensureLiveMarketRefreshAlarm('installed'));
+  await scmLifecycleStep('installed:order-book-alarm',()=>ensureOrderBookRefreshAlarm());
+  await scmLifecycleStep('installed:vwap-daily',()=>scmEnsurePeriodicAlarm('scm-vwap-daily',{periodInMinutes:720}));
+  await scmLifecycleStep('installed:production-events-daily',()=>scmEnsurePeriodicAlarm('scm-production-events-daily',{periodInMinutes:720}));
+  await scmLifecycleStep('installed:production-events-watch',()=>scmEnsurePeriodicAlarm('scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15}));
+  await scmLifecycleStep('installed:critical-data-guard',()=>ensureCriticalDataGuard('installed'));
+  await scmLifecycleStep('installed:vwap-watch',()=>ensureVwapWatchAlarm('installed'));
+  await scmLifecycleStep('installed:resource-image-validation',()=>scmEnsurePeriodicAlarm('scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080}));
+  await scmLifecycleStep('installed:restore-alarms',()=>restorePersistedAlarms('installed'));
+  await scmLifecycleStep('installed:accounting-walk',()=>ensureAccountingWalkSchedule('installed'));
   // R4: an update restarts the worker too; a Sync interrupted by it must not stay "running" (jobs <5 min old are skipped).
-  await recoverInterruptedSyncJobs('installed').catch(()=>{});
+  await scmLifecycleStep('installed:recover-sync',()=>recoverInterruptedSyncJobs('installed'));
   syncAllResourceImages({forceValidate:false}).catch(()=>{});
-  const installRealmState=await state();
-  const installRealm=validRealmNumber(installRealmState.activeRealmKey?.replace(/^realm:/,'')??installRealmState.selectedRealm??installRealmState.authData?.authCompany?.realmId);
-  if(installRealm===0) await seedBundledVwapFallback('install-seed').catch(()=>{});
-  if(installRealm!=null) scheduleMarketCycle(installRealm,'install-complete').catch(()=>{});
+  await scmLifecycleStep('installed:market-cycle',async()=>{
+    const installRealmState=await state();
+    const installRealm=validRealmNumber(installRealmState.activeRealmKey?.replace(/^realm:/,'')??installRealmState.selectedRealm??installRealmState.authData?.authCompany?.realmId);
+    if(installRealm===0) await seedBundledVwapFallback('install-seed').catch(()=>{});
+    if(installRealm!=null) scheduleMarketCycle(installRealm,'install-complete').catch(()=>{});
+  });
 });
 chrome.runtime.onStartup.addListener(async()=>{
-  await ensureLiveMarketRefreshAlarm('service-worker-startup');
-  await ensureOrderBookRefreshAlarm();
-  await ensureStandingAlarms().catch(()=>{});
-  await restorePersistedAlarms('browser-startup').catch(()=>{});
-  await ensureAccountingWalkSchedule('browser-startup').catch(()=>{});
-  await recoverInterruptedSyncJobs('service-worker-startup');
-  await ensureVwapWatchAlarm('service-worker-startup');
-  await ensureCriticalDataGuard('startup');
-  try{
+  await scmLifecycleStep('startup:live-bridge-token',()=>migrateLiveBridgeToken());
+  await scmLifecycleStep('startup:live-market-alarm',()=>ensureLiveMarketRefreshAlarm('service-worker-startup'));
+  await scmLifecycleStep('startup:order-book-alarm',()=>ensureOrderBookRefreshAlarm());
+  await scmLifecycleStep('startup:standing-alarms',()=>ensureStandingAlarms());
+  await scmLifecycleStep('startup:restore-alarms',()=>restorePersistedAlarms('browser-startup'));
+  await scmLifecycleStep('startup:accounting-walk',()=>ensureAccountingWalkSchedule('browser-startup'));
+  await scmLifecycleStep('startup:recover-sync',()=>recoverInterruptedSyncJobs('service-worker-startup'));
+  await scmLifecycleStep('startup:vwap-watch',()=>ensureVwapWatchAlarm('service-worker-startup'));
+  await scmLifecycleStep('startup:critical-data-guard',()=>ensureCriticalDataGuard('startup'));
+  await scmLifecycleStep('startup:vwap-daily',async()=>{
     const s=await chrome.storage.local.get({activeRealmKey:null,selectedRealm:null,authData:null});
     const realm=validRealmNumber(s.activeRealmKey?.replace(/^realm:/,'')??s.selectedRealm??s.authData?.authCompany?.realmId);
     if(realm===0) await seedBundledVwapFallback('startup-seed').catch(()=>{});
     if(realm!=null) await refreshRealmVwapDaily('startup',realm);
-  }catch{}
-  const watchState=await chrome.storage.local.get({activeRealmKey:null,selectedRealm:null,authData:null});
-  const watchRealm=validRealmNumber(watchState.activeRealmKey?.replace(/^realm:/,'')??watchState.selectedRealm??watchState.authData?.authCompany?.realmId);
-  if(watchRealm!=null) scheduleMarketCycle(watchRealm,'startup-check').catch(()=>{});
+  });
+  await scmLifecycleStep('startup:market-cycle',async()=>{
+    const watchState=await chrome.storage.local.get({activeRealmKey:null,selectedRealm:null,authData:null});
+    const watchRealm=validRealmNumber(watchState.activeRealmKey?.replace(/^realm:/,'')??watchState.selectedRealm??watchState.authData?.authCompany?.realmId);
+    if(watchRealm!=null) scheduleMarketCycle(watchRealm,'startup-check').catch(()=>{});
+  });
   syncAllResourceImages({forceValidate:false}).catch(()=>{});
 });
 async function scanOpenGameTabsForProductionEvents(reason='scheduled') {
@@ -5375,19 +5414,11 @@ async function scanOpenGameTabsForProductionEvents(reason='scheduled') {
   const s=await state();
   const realm=validRealmNumber(s.activeRealmKey?.replace(/^realm:/,'')??s.selectedRealm??s.authData?.authCompany?.realmId);
   if(realm!=null){
-    const key=realmKeyFromRealm(realm);
-    await withRealmWriteLock(realm,async()=>{
-      const latest=await state(realm);
-      const stores={...(latest.realmStores||{})};
-      const store={...(stores[key]||{})};
-      const existing=store.productionEventMonitor||{};
-      const monitor={...existing,lastCheckAt:new Date().toISOString(),lastCheckReason:String(reason||'scheduled'),tabsScanned:results.length,successfulScans:results.filter(x=>x.ok).length};
-      store.productionEventMonitor=monitor;
-      stores[key]=store;
-      const patch={realmStores:stores};
-      if(key===latest.activeRealmKey) patch.productionEventMonitor=monitor;
-      await storageSet(patch);
-    });
+    // Own small key: the 15-minute watcher must not rewrite the whole realm store.
+    const monitorKey=`scmProductionEventMonitor:${realm}`;
+    const existing=(await chrome.storage.local.get({[monitorKey]:null}))[monitorKey]||{};
+    const monitor={...existing,lastCheckAt:new Date().toISOString(),lastCheckReason:String(reason||'scheduled'),tabsScanned:results.length,successfulScans:results.filter(x=>x.ok).length};
+    await rawStorageSet({[monitorKey]:monitor});
   }
   return {ok:true,scanned:results.length,results};
 }
@@ -5405,7 +5436,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
     try{
       if(syncSessionForRealm(realm)){
         const name=`scm-building-enrich-r${realm}`;
-        await chrome.alarms.create(name,{when:Date.now()+5000});
+        await scmAlarmCreate(name,{when:Date.now()+5000});
         return;
       }
       await postSyncBuildingUiRefresh(realm,()=>{}).catch(()=>{});
@@ -5417,7 +5448,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
   const syncRetryMatch=String(a?.name||'').match(/^scm-sync-retry-r([01])$/);
   if(syncRetryMatch){
     const realm=Number(syncRetryMatch[1]);
-    if(coreSyncActive()){await chrome.alarms.create(a.name,{when:Date.now()+30000}).catch(()=>{});return;}
+    if(coreSyncActive()){await scmAlarmCreate(a.name,{when:Date.now()+30000}).catch(()=>{});return;}
     syncAutoRetryRuns.add(realm);
     await syncNow(realm).catch(e=>logError('sync:auto-retry',e));
     syncAutoRetryRuns.delete(realm);
@@ -5427,7 +5458,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
   const dayWalkMatch=String(a?.name||'').match(/^scm-accounting-day-walk-r([01])$/);
   if(dayWalkMatch){
     const realm=Number(dayWalkMatch[1]);
-    if(syncSessionForRealm(realm)){await chrome.alarms.create(a.name,{when:Date.now()+5000}).catch(()=>{});return;}
+    if(syncSessionForRealm(realm)){await scmAlarmCreate(a.name,{when:Date.now()+5000}).catch(()=>{});return;}
     await runAccountingDayWalk(realm,'after-sync').catch(e=>logError('alarm:accounting-day-walk',e));
     return;
   }
@@ -5437,7 +5468,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
     try{
       if(syncSessionForRealm(realm)){
         const name=accountingWeekRefreshAlarmName(realm);
-        if(name)await chrome.alarms.create(name,{when:Date.now()+5000});
+        if(name)await scmAlarmCreate(name,{when:Date.now()+5000});
         return;
       }
       try{
@@ -5447,7 +5478,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
         try{
           await setAccountingWeekLedgerStatus(realm,'retrying',error,{retryAt:new Date(Date.now()+ACCOUNTING_WEEK_REFRESH_RETRY_MS).toISOString()});
           const name=accountingWeekRefreshAlarmName(realm);
-          if(name)await chrome.alarms.create(name,{when:Date.now()+ACCOUNTING_WEEK_REFRESH_RETRY_MS});
+          if(name)await scmAlarmCreate(name,{when:Date.now()+ACCOUNTING_WEEK_REFRESH_RETRY_MS});
         }catch{}
       }
     }catch{}
@@ -6995,7 +7026,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     if(ownsSyncSession && selected!=null){
       const wasAutoRetry=syncAutoRetryRuns.delete(selected);
       if(!syncCoreSucceeded && !wasAutoRetry && !clearedDuringRun){
-        await chrome.alarms.create(`${SYNC_AUTO_RETRY_ALARM_PREFIX}${selected}`,{when:Date.now()+SYNC_AUTO_RETRY_DELAY_MS}).catch(()=>{});
+        await scmAlarmCreate(`${SYNC_AUTO_RETRY_ALARM_PREFIX}${selected}`,{when:Date.now()+SYNC_AUTO_RETRY_DELAY_MS}).catch(()=>{});
         logActivity(selected,'sync-auto-retry-scheduled','success',{delayMs:SYNC_AUTO_RETRY_DELAY_MS},null,Date.now(),'sync-failed');
       }
     }
@@ -7098,12 +7129,36 @@ function buildLiveBridgePayload(s, realm, store, overlay){
     endpoints:bridgeSafeEndpointMap(store)
   };
 }
+// Live bridge token lives in chrome.storage.session (TRUSTED_CONTEXTS: never visible to content
+// scripts, never in storage.local backups). Session storage clears on browser restart, so storage.local
+// keeps only a non-secret liveBridge.tokenSet flag that lets Settings ask the user to re-enter it.
+const LIVE_BRIDGE_TOKEN_SESSION_KEY='scmLiveBridgeToken';
+const LIVE_BRIDGE_TOKEN_BACKUP_KEY='scmLiveBridgeTokenBackup';
+async function migrateLiveBridgeToken(){
+  const cur=(await chrome.storage.local.get({liveBridge:null})).liveBridge;
+  const legacy=cur&&typeof cur==='object'?String(cur.token||''):'';
+  if(!legacy)return null;
+  if(chrome.storage.session)await chrome.storage.session.set({[LIVE_BRIDGE_TOKEN_SESSION_KEY]:legacy});
+  await chrome.storage.local.set({[LIVE_BRIDGE_TOKEN_BACKUP_KEY]:legacy});
+  await storageSet({liveBridge:{...cur,token:'',tokenSet:true}});
+  return legacy;
+}
+async function getLiveBridgeToken(){
+  try{const migrated=await migrateLiveBridgeToken();if(migrated)return migrated;}catch(e){logError('live-bridge-token-migrate',e);}
+  let t='';try{t=String((await chrome.storage.session?.get(LIVE_BRIDGE_TOKEN_SESSION_KEY))?.[LIVE_BRIDGE_TOKEN_SESSION_KEY]||'');}catch{}
+  if(t)return t;
+  // Session storage is cleared on browser restart; restore from the persistent backup so the user
+  // never has to re-enter the token. The backup key is never returned by GET_STATE.
+  try{t=String((await chrome.storage.local.get(LIVE_BRIDGE_TOKEN_BACKUP_KEY))?.[LIVE_BRIDGE_TOKEN_BACKUP_KEY]||'');if(t&&chrome.storage.session)await chrome.storage.session.set({[LIVE_BRIDGE_TOKEN_SESSION_KEY]:t});}catch{}
+  return t;
+}
 async function pushLiveBridge(realm, force=false){
   const n=validRealmNumber(realm); if(n==null)return {ok:false,error:'Valid realm required.'};
   const s=await state(realm); const cfg=s.liveBridge||{};
-  const url=String(cfg.url||'').trim(); const token=String(cfg.token||'').trim();
+  const url=String(cfg.url||'').trim(); const token=String(await getLiveBridgeToken()).trim();
   if(!cfg.enabled||!url)return {ok:false,skipped:true,error:'Live bridge is not enabled or URL is missing.'};
   if(!/^https:\/\//i.test(url))return {ok:false,error:'Live bridge URL must use HTTPS.'};
+  if(!token&&cfg.tokenSet)return {ok:false,error:'Live bridge token is missing. Re-enter it in Settings.'};
   if(!force && cfg.lastPushAt && Date.now()-Date.parse(cfg.lastPushAt)<15000)return {ok:false,skipped:true,error:'Bridge push throttled.'};
   const key=realmKeyFromRealm(n); const store={...(s.realmStores?.[key]||{})};
   let overlay=null; try{overlay=await buildGameOverlayData(store,n,s);}catch{}
@@ -7495,7 +7550,9 @@ async function requestJavascriptDiagnostic(send){
   return {ok:true,skipped:true,realm:validRealmNumber(candidates?.[0]?.url?.match(/\/rc\/(\d+)\//)?.[1]),diagnostic:null,source:'runtime-diagnostic-skipped',message:'Runtime diagnostic was skipped because the game page was busy.'};
 }
 
-const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_FROZEN_NETWORK_PLAN','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','SET_BUILDING_ALARM','CLEAR_BUILDING_ALARM','GET_COMPANY_AUTH_DATA','SYNC_RESOURCE_IMAGES','GET_ERROR_LOG','CLEAR_ERROR_LOG']);
+const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['SYNC_NOW','RUN_ACCOUNTING_WALK_NOW','RUN_JAVASCRIPT_DIAGNOSTIC','LIVE_MARKET_REFRESH','CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_FROZEN_NETWORK_PLAN','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','SET_BUILDING_ALARM','CLEAR_BUILDING_ALARM','GET_COMPANY_AUTH_DATA','SYNC_RESOURCE_IMAGES','GET_ERROR_LOG','CLEAR_ERROR_LOG']);
+// GET_STATE from a non-extension-page context (content script) never carries secrets.
+function scmStripStateSecrets(out){const o={...out};if(o.liveBridge&&typeof o.liveBridge==='object'){const{token,...rest}=o.liveBridge;o.liveBridge={...rest,hasToken:Boolean(token||rest.tokenSet)};}delete o.authData;if(o.realmStores&&typeof o.realmStores==='object'){const rs={};for(const[k,v]of Object.entries(o.realmStores)){if(v&&typeof v==='object'){const{authData,...rest}=v;rs[k]=rest;}else rs[k]=v;}o.realmStores=rs;}return o;}
 function scmIsExtensionPageSender(sender){const base=chrome.runtime.getURL('');return typeof sender?.url==='string'&&sender.url.startsWith(base)&&!(sender.tab&&!String(sender.tab.url||'').startsWith(base)&&sender.frameId===0);}
 replayEvent('runtime-start',{buildVersion:BUILD_VERSION,activeRealmKey:null});
 setTimeout(()=>{scmRestorePendingRealmPatches();scmCheckInterruptedSyncSessions();},0);
@@ -7520,7 +7577,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='SCM_NET3_START'){scmNetStart(Number(m.tabId)).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_NET3_STOP'){scmNetStop().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_NET3_STATUS'){chrome.storage.local.get('scmNetworkCaptureV3Status').then(x=>send({ok:true,status:x.scmNetworkCaptureV3Status||{status:'idle'}})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
-  if(m?.type==='SCM_NET3_EXPORT'){(async()=>{const id=String(m.captureId||scmNetCapture.captureId||'');if(!id)throw new Error('No Network Capture 3.0 session is available.');const all=await scmNetGetEvents(id);const offset=Math.max(0,Number(m.offset)||0),limit=Math.max(1,Math.min(500,Number(m.limit)||300)),events=all.slice(offset,offset+limit);send({ok:true,captureId:id,events,total:all.length,offset,summary:{eventCount:all.length,requests:all.filter(e=>e.kind==='request'||e.kind==='request-start').length,responses:all.filter(e=>e.kind==='response'||e.kind==='fetch'||e.kind==='xhr').length,bodies:all.filter(e=>e.kind==='response-body'||((e.kind==='fetch'||e.kind==='xhr')&&e.body!=null)).length,bodyUnavailable:all.filter(e=>e.kind==='body-unavailable').length,errors:all.filter(e=>e.kind==='capture-error'||e.kind==='loading-failed'||e.kind==='request-error').length},startedAt:scmNetCapture.startedAt,status:(await chrome.storage.local.get('scmNetworkCaptureV3Status')).scmNetworkCaptureV3Status?.status|| (scmNetCapture.active?'recording':'stopped')});})().catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
+  if(m?.type==='SCM_NET3_EXPORT'){(async()=>{const id=String(m.captureId||scmNetCapture.captureId||'');if(!id)throw new Error('No Network Capture 3.0 session is available.');const offset=Math.max(0,Number(m.offset)||0),limit=Math.max(1,Math.min(500,Number(m.limit)||300));const pg=await scmNetPageEvents(id,offset,limit);send({ok:true,captureId:id,events:pg.events,total:pg.total,offset,summary:pg.summary,startedAt:scmNetCapture.startedAt,status:(await chrome.storage.local.get('scmNetworkCaptureV3Status')).scmNetworkCaptureV3Status?.status|| (scmNetCapture.active?'recording':'stopped')});})().catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='REPLAY_FLUSH'){flushReplayJournal(true).then(()=>send({ok:true,count:replayBuffer.length})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='RUN_JAVASCRIPT_DIAGNOSTIC'){
     requestJavascriptDiagnostic().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));
@@ -7572,7 +7629,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       await withRealmWriteLock(realm,async()=>{
         const key=realmKeyFromRealm(realm),latest=await state(realm),stores={...(latest.realmStores||{})},store={...(stores[key]||{})},alarms={...(store.buildingAlarms||{})};const alarmKey=String(buildingId);alarms[alarmKey]={buildingId,readyAt,createdAt:new Date().toISOString()};await storageSet({realmStores:{[key]:{...store,buildingAlarms:alarms}}});
       });
-      const alarmName=`scm-building-${realm}-${buildingId}`;await chrome.alarms.clear(alarmName);await chrome.alarms.create(alarmName,{when:readyAt});send({ok:true,realm,buildingId,readyAt});
+      const alarmName=`scm-building-${realm}-${buildingId}`;await chrome.alarms.clear(alarmName);await scmAlarmCreate(alarmName,{when:readyAt});send({ok:true,realm,buildingId,readyAt});
     }catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;
   }
   if(m?.type==='CLEAR_BUILDING_ALARM'){
@@ -8012,6 +8069,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         pendingBuildingCollects.clear();if(buildingCollectFlushTimer){clearTimeout(buildingCollectFlushTimer);buildingCollectFlushTimer=null;} // collect stamps (scmBuildingCollects:N) go with the clear below
         await withRealmStorageCommit(()=>chrome.storage.local.clear());
         await scmNetClearAllEvents().catch(()=>{});
+        await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY).catch(()=>{});await chrome.storage.local.remove(LIVE_BRIDGE_TOKEN_BACKUP_KEY).catch(()=>{}); // bridge token is session-only now
         // R5: in-memory copies of cleared data would otherwise be served (and written back) until the worker restarts.
         resourceImagesMemo=null;notifyRecipesMemo=null;gameOverlayAssetsPromise=null;
         gameOverlaySnapshotMemo.clear();contractHelperCache.clear();
@@ -8310,10 +8368,13 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
   if(m?.type==='SET_LIVE_BRIDGE'){
     (async()=>{try{
       const current=await chrome.storage.local.get({liveBridge:DEFAULTS.liveBridge});
-      const next={...(current.liveBridge||{}),enabled:Boolean(m.enabled),url:String(m.url||'').trim(),token:String(m.token||''),pushOnSync:Boolean(m.pushOnSync)};
+      const token=String(m.token||'');
+      const next={...(current.liveBridge||{}),enabled:Boolean(m.enabled),url:String(m.url||'').trim(),token:'',tokenSet:Boolean(token),pushOnSync:Boolean(m.pushOnSync)};
       if(next.url && !/^https:\/\//i.test(next.url)) throw new Error('Live bridge URL must use HTTPS.');
+      if(token){if(!chrome.storage.session)throw new Error('Session storage unavailable; cannot store bridge token.');await chrome.storage.session.set({[LIVE_BRIDGE_TOKEN_SESSION_KEY]:token});await chrome.storage.local.set({[LIVE_BRIDGE_TOKEN_BACKUP_KEY]:token});}
+      else {await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY);await chrome.storage.local.remove(LIVE_BRIDGE_TOKEN_BACKUP_KEY);}
       await storageSet({liveBridge:next});
-      send({ok:true,liveBridge:next});
+      send({ok:true,liveBridge:{...next,hasToken:Boolean(token)}});
     }catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;
   }
   if(m?.type==='GET_STATE'){
@@ -8323,7 +8384,8 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
       const active=validRealmNumber(s.activeRealmKey?.replace(/^realm:/,''));
       const activeKey=active!=null?realmKeyFromRealm(active):null;
       const store=activeKey?(s.realmStores||{})[activeKey]||{}:{};
-      return {...s,realmStores:activeKey?{[activeKey]:store}:{},activeRealmKey:activeKey,selectedRealm:s.selectedRealm!=null?Number(s.selectedRealm):null,viewRealm:active,captureRealm:active,apiBase:s.apiBase,syncMinutes:s.syncMinutes};
+      const out={...s,realmStores:activeKey?{[activeKey]:store}:{},activeRealmKey:activeKey,selectedRealm:s.selectedRealm!=null?Number(s.selectedRealm):null,viewRealm:active,captureRealm:active,apiBase:s.apiBase,syncMinutes:s.syncMinutes};
+      return scmIsExtensionPageSender(sender)?out:scmStripStateSecrets(out);
     }).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;
   }
 });
