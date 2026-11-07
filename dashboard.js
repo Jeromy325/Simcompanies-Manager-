@@ -1795,7 +1795,7 @@ function accountingStatementPeriodText(period){
 // v2.5.382 the full view is a popout over the page (✕, tap outside or Esc closes it).
 const ACCT_CHART_RANGES=[7,30,90];
 const ACCT_CHART_DAY=86400000;
-const ACCT_SERIES_KEEP_DAYS=120;
+const ACCT_SERIES_KEEP_DAYS=90;
 const ACCT_CHART_ICON='<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 11h10M2 8l3-3 2 2 4-5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 // Card key -> daily history field. Cash = the game's 90-day history (cash & receivables). The statement figures come
 // from the game's Day statements (income / cash-flow) and build up day by day: older days come from
@@ -1806,8 +1806,9 @@ const ACCT_CHART_TITLES={cash:'Cash & receivables'};
 const ACCT_COST_KEYS=new Set(['cogs','freightOut','marketFees','executives','operatingExpenses']);
 let acctChartRange=90, acctChartOpenKey=null, acctChartTouching=false, acctChartPending=null, acctChartPendingCount=0, acctChartDrawn=null, acctCardNow={};
 function acctDayKey(t){const d=new Date(t);return Number.isFinite(d.getTime())?d.toISOString().slice(0,10):null;}
-function accountingDailySeriesMerge(oldSeries,history){
-  // Saves each completed day's statement / balance-sheet figures by the day's end date, newest 120 days.
+function accountingDailySeriesMerge(oldSeries,history,statementHistory,now=Date.now()){
+  // Saves each completed day's statement / balance-sheet figures by the day's end date, last 90 days.
+  // v2.5.443 days imported on Analyze (CSV) or read earlier (scmStatementHistory) fill days and fields captures lack.
   const days={...(oldSeries&&typeof oldSeries.days==='object'?oldSeries.days:{})};
   for(const r of Array.isArray(history)?history:[]){
     const k=acctDayKey(r?.t);if(!k)continue;const cur={...(days[k]||{})};
@@ -1816,13 +1817,18 @@ function accountingDailySeriesMerge(oldSeries,history){
     put('cashChange',r.cashChange);put('currentLiabilities',r.currentLiabilities);
     if(Object.keys(cur).length)days[k]=cur;
   }
-  const keep=Object.keys(days).sort().slice(-ACCT_SERIES_KEEP_DAYS);
+  const fill=(k,vals)=>{if(!k)return;const cur={...(days[k]||{})};let n=0;for(const [f,v] of Object.entries(vals)){if(cur[f]==null&&v!=null&&Number.isFinite(Number(v))){cur[f]=Number(v);n++;}}if(n)days[k]=cur;};
+  const sh=statementHistory&&typeof statementHistory==='object'?statementHistory:{};
+  for(const e of Object.values(sh['income-statement']||{})){if(e?.isComputed===false)continue;const d=accountingStatementDay(e);fill(acctDayKey(Date.parse(String(e?.date||''))),{sales:d.sales,operatingExpenses:d.operatingExpenses,netIncome:d.netIncome,cogs:d.cogs,freightOut:d.freightOut,marketFees:d.marketFees,executives:d.executives});}
+  for(const e of Object.values(sh['cashflow-statement']||{})){if(e?.isComputed===false)continue;fill(acctDayKey(Date.parse(String(e?.date||''))),{cashChange:accountingCashChange(e)});}
+  const cutKey=acctDayKey(now-ACCT_SERIES_KEEP_DAYS*ACCT_CHART_DAY);
+  const keep=Object.keys(days).sort().filter(k=>!cutKey||k>=cutKey).slice(-ACCT_SERIES_KEEP_DAYS);
   return {v:1,days:Object.fromEntries(keep.map(k=>[k,days[k]]))};
 }
 function updateAccountingDailySeries(s,a){
   const realm=realmSnapshotStore(s);
   const old=realm?.store?.accountingDailySeries||s.accountingDailySeries||null;
-  const next=accountingDailySeriesMerge(old,a?.history);
+  const next=accountingDailySeriesMerge(old,a?.history,s.statementHistory);
   if(JSON.stringify(old?.days||{})!==JSON.stringify(next.days)&&realm){
     realm.store.accountingDailySeries=next;realm.stores[realm.key]=realm.store;
     chrome.runtime.sendMessage({type:'SAVE_REALM_FIELD',realmKey:realm.key,field:'accountingDailySeries',value:next}).catch(()=>{});

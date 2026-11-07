@@ -114,6 +114,8 @@
     apply('sellingHistory', pruneTimedMap(store.sellingHistory, v => v?.datetime, cut));
     apply('contractEvents', pruneList(store.contractEvents, e => e?.receivedAt, cut, 10));
     apply('endpointData', pruneEndpointData(store.endpointData, cut));
+    // v2.5.443 Accounting chart series {v,days:{'YYYY-MM-DD':{…}}}: same 90-day trim as the other time series.
+    if (isObj(store.accountingDailySeries) && isObj(store.accountingDailySeries.days)) { const r = pruneTimedMap(Object.fromEntries(Object.keys(store.accountingDailySeries.days).map(k => [k, k])), k => `${k}T23:59:59Z`, cut); if (r.removed > 0) apply('accountingDailySeries', { removed: r.removed, value: { ...store.accountingDailySeries, days: Object.fromEntries(Object.keys(r.value).map(k => [k, store.accountingDailySeries.days[k]])) } }); }
     return { patch, removed };
   }
   function planGlobal(got, now, days = 90) {

@@ -82,3 +82,14 @@ describe('unused endpoint replies (2.5.442)', () => {
     expect(Object.keys(r.value).sort()).toEqual(['/api/v3/market/1/112/', '/api/v4/1/resources-retail-info/']);
   });
 });
+
+describe('accounting chart series retention (2.5.443)', () => {
+  it('trims accountingDailySeries days older than 90 days, keeps the rest', () => {
+    const days = { [ymd(120)]: { sales: 1 }, [ymd(91)]: { sales: 2 }, [ymd(30)]: { sales: 3 }, [ymd(0)]: { sales: 4 } };
+    const rs = SC.planRealmStore({ accountingDailySeries: { v: 1, days } }, now);
+    expect(rs.removed.accountingDailySeries).toBe(2);
+    expect(Object.keys(rs.patch.accountingDailySeries.days).sort()).toEqual([ymd(30), ymd(0)].sort());
+    expect(rs.patch.accountingDailySeries.v).toBe(1);
+    expect(Object.keys(SC.planRealmStore({ accountingDailySeries: { v: 1, days: { [ymd(5)]: {} } } }, now).patch)).toEqual([]);
+  });
+});
