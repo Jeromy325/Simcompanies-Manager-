@@ -3661,6 +3661,8 @@ function endpointRecordWithFailedAttempt(old,incomingStatus,realm){
 }
 async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=null,onTiming=null){
   if(!url?.startsWith('/api/'))return;
+  // v2.5.442: never store replies the Manager does not read (see SCM_STORAGE_CORE.UNUSED_ENDPOINT).
+  if(globalThis.SCM_STORAGE_CORE?.UNUSED_ENDPOINT?.test(String(url||'')))return;
   // A successful GET that is not data (text, null, a boolean, an unlisted number), from any writer: it never replaces a record.
   if(Number(status)>=200&&Number(status)<300&&String(method||'GET').toUpperCase()==='GET'&&!endpointDataIsValid(url,data))return;
   await ensureRealmStorageMigration();

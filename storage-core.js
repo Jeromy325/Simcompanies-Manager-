@@ -72,6 +72,9 @@
   // statements (/day/N/) and generic endpoints are never dropped by age.
   const STATEMENT_DAY = /\/(income-statement|cashflow-statement|balance-sheet)\/day\/\d+\/?$/;
   const PER_ITEM = /\/\d{2,}(\/[a-z-]+)?\/?(\?|$)/i;
+  // v2.5.442: large game replies the Manager never reads (collectibles ~1.4 MB, messages, auctions, transaction
+  // pages). They are not stored on capture and are removed from existing stores by the daily trim.
+  const UNUSED_ENDPOINT = /\/api\/v\d+\/(?:market-collectibles|building-auctions|resources-transactions)\/|\/api\/messages_by_company\//i;
   function pruneEndpointData(map, cut) {
     if (!isObj(map)) return same(map);
     const byNorm = new Map();
@@ -83,6 +86,7 @@
     const winners = new Set(byNorm.values());
     const keep = Object.entries(map).filter(([k, v]) => {
       if (!winners.has(k)) return false;
+      if (UNUSED_ENDPOINT.test(k)) return false;
       if (STATEMENT_DAY.test(k) || !PER_ITEM.test(k)) return true;
       const t = ms(v?.receivedAt); return t == null || t >= cut;
     });
@@ -125,6 +129,6 @@
   }
   const approxBytes = v => { try { return v === undefined ? 0 : JSON.stringify(v).length; } catch { return 0; } };
 
-  root.SCM_STORAGE_CORE = { DAY, cutoff, pruneList, prunePriceLog, pruneProductionCostHistory, pruneStatementHistory, pruneVwapHistory, pruneTimedMap, pruneEndpointData, planRealmKeys, planRealmStore, planGlobal, topKeys, approxBytes };
+  root.SCM_STORAGE_CORE = { UNUSED_ENDPOINT, DAY, cutoff, pruneList, prunePriceLog, pruneProductionCostHistory, pruneStatementHistory, pruneVwapHistory, pruneTimedMap, pruneEndpointData, planRealmKeys, planRealmStore, planGlobal, topKeys, approxBytes };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.SCM_STORAGE_CORE;
 })(typeof globalThis !== 'undefined' ? globalThis : self);
