@@ -21,9 +21,34 @@
   const BRIDGE_FALLBACK_FLUSH_MS = 15000;
   const bridgeQueue = [];
   let bridgeInitialized = false, bridgeDropped = 0, bridgeQueuedTotal = 0;
+  // v2.5.433: once content.js hands over a private MessageChannel port (PORT_HANDOFF), all events go
+  // over it instead of window.postMessage, so other page scripts cannot read them. Before that the
+  // window path is used with targetOrigin = location.origin. A later handoff (extension reload/new
+  // content world) replaces the port. Commands are still accepted on both paths (MAIN world).
+  const BRIDGE_ORIGIN = (() => { try { return location.origin && location.origin !== 'null' ? location.origin : '*'; } catch { return '*'; } })();
+  let bridgePort = null;
+  const bridgeHandlers = [];
+  const onBridge = (h) => { window.addEventListener('message', h); bridgeHandlers.push(h); };
   const post = (type, payload) => {
-    window.postMessage({ source: 'SIMCO_MANAGER', type, ...payload }, '*');
+    const msg = { source: 'SIMCO_MANAGER', type, ...payload };
+    if (bridgePort) { try { bridgePort.postMessage(msg); return; } catch {} }
+    window.postMessage(msg, BRIDGE_ORIGIN);
   };
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    const d = event.data;
+    if (!d || d.source !== 'SIMCO_MANAGER' || d.type !== 'PORT_HANDOFF' || !event.ports || !event.ports[0]) return;
+    const p = event.ports[0];
+    try { if (bridgePort && bridgePort !== p) bridgePort.close(); } catch {}
+    bridgePort = p;
+    p.onmessage = (e) => {
+      const m = e.data;
+      if (!m || typeof m !== 'object' || m.source !== 'SIMCO_MANAGER' || typeof m.type !== 'string') return;
+      const ev = { source: window, data: m };
+      for (const h of bridgeHandlers) { try { h(ev); } catch {} }
+    };
+    try { p.postMessage({ source: 'SIMCO_MANAGER', type: 'PORT_ACK', nonce: String(d.nonce || '') }); } catch {}
+  });
   const flushBridgeQueue = () => {
     bridgeInitialized = true;
     let flushed = 0;
@@ -1073,7 +1098,7 @@
   };
 
   // Request a GET using the game's page context and its existing cookies/session.
-  window.addEventListener('message', async (event) => {
+  onBridge(async (event) => {
     if (event.source !== window || event.data?.source !== 'SIMCO_MANAGER') return;
     if(event.data.type==='SET_NETWORK_CAPTURE'){
       const wasEnabled=networkCaptureEnabled, priorCount=networkCaptureCount, priorCaptureId=networkCaptureId;
@@ -1170,7 +1195,7 @@
       return result;
     };
   } catch {}
-  window.addEventListener('message', (event) => {
+  onBridge((event) => {
     if (event.source !== window || event.data?.source !== 'SIMCO_MANAGER') return;
     if (event.data.type === 'BRIDGE_PING') emit('HOOK_READY', {});
     if (event.data.type === 'INITIALIZED') {

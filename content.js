@@ -1,3 +1,40 @@
+// v2.5.433 authenticated page bridge. content.js hands page-hook.js a private MessageChannel port once
+// (with a crypto-random per-page nonce echoed in the ack); afterwards page-hook traffic is accepted only
+// over that port, so other page scripts can neither read it nor forge events that reach the background.
+// Until the handshake completes, window.postMessage (targetOrigin = location.origin) is used as before.
+if(!globalThis.__scmPageBridge)globalThis.__scmPageBridge=(()=>{
+  const SRC='SIMCO_MANAGER',GRACE_MS=1500;
+  const KNOWN=new Set(['API_DATA','API_RESULT','API_SEEN','BRIDGE_QUEUE_FLUSHED','DOM_RUNTIME_DIAGNOSTIC_RESULT','GAME_CONFIG','GAME_LOCAL_STORAGE_SNAPSHOT','GAME_STATE','HOOK_READY','INITIALIZED_ACK','JAVASCRIPT_DIAGNOSTIC','MARKET_CACHE','NETWORK_CAPTURE_CONTROL_ACK','NETWORK_CAPTURE_EVENT','PAGE_REALM','REALM_SWITCH','REALM_SWITCH_CONFIRMED','REDUX_STATE_DIAGNOSTIC_RESULT','REPLAY_EVENT','RESOURCE_CATALOG','RESOURCE_IMAGE_RESULT','STOCK_MUTATION_COMPLETE','SYNC_REALM_SET','SYNC_REALM_CLEARED','PORT_ACK']);
+  const nonce=(()=>{try{const a=new Uint8Array(16);crypto.getRandomValues(a);return Array.from(a,b=>b.toString(16).padStart(2,'0')).join('');}catch{return `${Date.now()}-${Math.random()}`.replace('.','');}})();
+  const origin=(()=>{try{return location.origin&&location.origin!=='null'?location.origin:'*';}catch{return '*';}})();
+  const STR_KEYS=['id','requestId','captureId','url','method','reason','realmResolvedBy','eventType'];
+  const valid=d=>{
+    if(!d||typeof d!=='object'||d.source!==SRC)return false;
+    const t=d.type;if(typeof t!=='string'||t.length>64||!KNOWN.has(t))return false;
+    for(const k of STR_KEYS){const v=d[k];if(v!=null&&(typeof v==='object'||String(v).length>8192))return false;}
+    return true;
+  };
+  const handlers=[];let port=null,portAt=0,handoffs=0;
+  const dispatch=d=>{const ev={source:window,data:d};for(const h of handlers.slice()){try{h(ev);}catch(e){try{setTimeout(()=>{throw e;});}catch{}}}};
+  const handoff=()=>{
+    if(port||handoffs>=30)return;handoffs++;
+    let ch;try{ch=new MessageChannel();}catch{return;}
+    const p=ch.port1;
+    p.onmessage=e=>{const d=e.data;if(!valid(d))return;
+      if(d.type==='PORT_ACK'){if(!port&&d.nonce===nonce){port=p;portAt=Date.now();}return;}
+      if(p!==port)return;dispatch(d);};
+    try{window.postMessage({source:SRC,type:'PORT_HANDOFF',nonce},origin,[ch.port2]);}catch{}
+  };
+  window.addEventListener('message',ev=>{
+    if(ev.source!==window)return;const d=ev.data;if(!valid(d)||d.type==='PORT_ACK')return;
+    // After the port handshake only port traffic is trusted (short grace for in-flight window posts).
+    if(port&&Date.now()-portAt>GRACE_MS)return;
+    if(d.type==='HOOK_READY'&&!port)handoff();
+    dispatch(d);
+  });
+  const send=m=>{const msg={...m,source:SRC};if(port){try{port.postMessage(msg);return;}catch{}}window.postMessage(msg,origin);};
+  return {listen:h=>{handlers.push(h);},send,handoff,isPortReady:()=>!!port};
+})();
 (() => {
   if (window.__SCM_BRIDGE__) return;
   const safeRuntimeSend = (message) => {
@@ -479,7 +516,7 @@
     let timer = null;
     const finish = (value) => { if (timer) clearTimeout(timer); pending.delete(id); resolve(value||{ok:false,status:0,error:'No response from Sim Companies page.'}); };
     pending.set(id, { resolve: finish });
-    try { window.postMessage({ source:'SIMCO_MANAGER', type:'API_GET', id, path:String(path||'') }, '*'); }
+    try { globalThis.__scmPageBridge.send({ source:'SIMCO_MANAGER', type:'API_GET', id, path:String(path||'') }); }
     catch(e){ finish({ok:false,status:0,error:e?.message||String(e)}); return; }
     timer=setTimeout(()=>finish({ok:false,status:0,error:'Sim Companies page API request timed out.'}),Math.max(2000,Number(timeoutMs)||8000));
   });
@@ -487,12 +524,12 @@
 let hookReady = false;
   // v2.5.326: tell page-hook.js we are listening so it releases its queued network events.
   let bridgeInitializedAck = false;
-  const sendBridgeInitialized = () => { try { window.postMessage({ source:'SIMCO_MANAGER', type:'INITIALIZED' }, '*'); } catch {} };
+  const sendBridgeInitialized = () => { try { globalThis.__scmPageBridge.handoff(); globalThis.__scmPageBridge.send({ source:'SIMCO_MANAGER', type:'INITIALIZED' }); } catch {} };
   let pingTimer = null;
-  const pingHook = () => { try { window.postMessage({source:'SIMCO_MANAGER',type:'BRIDGE_PING'}, '*'); } catch {} };
+  const pingHook = () => { try { globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'BRIDGE_PING'}); } catch {} };
   const startPing = () => { if (hookReady || pingTimer) return; pingHook(); pingTimer = setInterval(() => { if (hookReady) { clearInterval(pingTimer); pingTimer=null; } else pingHook(); }, 1000); };
 
-  window.addEventListener('message', (event) => {
+  globalThis.__scmPageBridge.listen((event) => {
     if (event.source !== window || event.data?.source !== 'SIMCO_MANAGER') return;
     const d = event.data;
     if (d.type === 'NETWORK_CAPTURE_CONTROL_ACK') {
@@ -519,13 +556,13 @@ let hookReady = false;
           const c=raw?.scmNetworkTrafficCapture;
           if(c?.status!=='recording'||!c?.captureId||networkResumeRequestedCaptureId===String(c.captureId))return;
           networkResumeRequestedCaptureId=String(c.captureId);
-          window.postMessage({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:true,resume:true,captureId:String(c.captureId),requestId:`resume-${Date.now()}`},'*');
+          globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:true,resume:true,captureId:String(c.captureId),requestId:`resume-${Date.now()}`});
         }).catch(()=>{});
         chrome.runtime.sendMessage({type:'SCM_NET3_STATUS'}).then(result => {
           const c=result?.status;
           if(c?.mode!=='mobile-page'||c?.status!=='recording'||!c?.captureId)return;
           startCaptureOverlay(String(c.captureId));
-          window.postMessage({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:true,resume:true,captureId:String(c.captureId),requestId:`mobile-resume-${Date.now()}`},'*');
+          globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:true,resume:true,captureId:String(c.captureId),requestId:`mobile-resume-${Date.now()}`});
         }).catch(()=>{});
       } catch {}
       return;
@@ -824,7 +861,7 @@ let hookReady = false;
       (async()=>{
         const ready=await waitForHookReady(4500);
         if(!ready)throw new Error('Sim Companies page hook was not ready; reload the game tab and retry.');
-        window.postMessage({source:'SIMCO_MANAGER',type:'DOM_RUNTIME_DIAGNOSTIC_GET',id:requestId},'*');
+        globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'DOM_RUNTIME_DIAGNOSTIC_GET',id:requestId});
       })().catch(error=>finish({ok:false,error:error?.message||String(error)}));
       return true;
     }
@@ -837,7 +874,7 @@ let hookReady = false;
       (async()=>{
         const ready=await waitForHookReady(3500);
         if(!ready) throw new Error('Sim Companies page hook was not ready; reload the game tab and retry.');
-        window.postMessage({source:'SIMCO_MANAGER',type:'REDUX_STATE_DIAGNOSTIC_GET',id:requestId},'*');
+        globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'REDUX_STATE_DIAGNOSTIC_GET',id:requestId});
       })().catch(error=>finish({ok:false,error:error?.message||String(error)}));
       return true;
     }
@@ -852,7 +889,7 @@ let hookReady = false;
         if(!ready)throw new Error('Game-page recorder hook is not ready. Reload the Sim Companies tab and try again.');
         if (message.enabled) startCaptureOverlay(String(message.captureId||''));
         else stopCaptureOverlay();
-        window.postMessage({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:Boolean(message.enabled),captureId:String(message.captureId||''),requestId},'*');
+        globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:Boolean(message.enabled),captureId:String(message.captureId||''),requestId});
       })().catch(error=>{if(message.enabled)stopCaptureOverlay();finish({ok:false,error:error?.message||String(error)});});
       return true;
     }
@@ -871,20 +908,20 @@ let hookReady = false;
       return false;
     }
     if (message?.type === 'PAGE_MARKET_CACHE') {
-      window.postMessage({ source: 'SIMCO_MANAGER', type: 'MARKET_CACHE_GET' }, '*');
+      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'MARKET_CACHE_GET' });
       sendResponse({ok:true});
       return false;
     }
     if (message?.type === 'SET_SYNC_REALM') {
       const forced = Number(message.realm);
       directCaptureRealm = forced === 0 || forced === 1 ? forced : null;
-      window.postMessage({ source: 'SIMCO_MANAGER', type: 'SET_SYNC_REALM', realm: forced, ttlMs: Number(message.ttlMs) || 120000 }, '*');
+      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'SET_SYNC_REALM', realm: forced, ttlMs: Number(message.ttlMs) || 120000 });
       sendResponse({ok:true,realm:forced});
       return false;
     }
     if (message?.type === 'CLEAR_SYNC_REALM') {
       directCaptureRealm = null;
-      window.postMessage({ source: 'SIMCO_MANAGER', type: 'CLEAR_SYNC_REALM' }, '*');
+      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'CLEAR_SYNC_REALM' });
       sendResponse({ok:true});
       return false;
     }
@@ -901,17 +938,17 @@ let hookReady = false;
       return true;
     }
     if (message?.type === 'PAGE_GAME_STATE') {
-      window.postMessage({ source: 'SIMCO_MANAGER', type: 'GAME_STATE_GET' }, '*');
+      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'GAME_STATE_GET' });
       sendResponse({ok:true});
       return false;
     }
     if (message?.type === 'PAGE_RESOURCE_CATALOG') {
-      window.postMessage({ source: 'SIMCO_MANAGER', type: 'RESOURCE_CATALOG_GET' }, '*');
+      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'RESOURCE_CATALOG_GET' });
       sendResponse({ok:true});
       return false;
     }
     if (message?.type === 'PAGE_RESOURCE_IMAGE') {
-      window.postMessage({ source: 'SIMCO_MANAGER', type: 'RESOURCE_IMAGE_GET', resource: Number(message.resource) }, '*');
+      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'RESOURCE_IMAGE_GET', resource: Number(message.resource) });
       sendResponse({ok:true});
       return false;
     }
@@ -944,7 +981,7 @@ let hookReady = false;
           sendResponse({ok:false,error:'Sim Companies page hook was not ready after reinjection.'});
           return;
         }
-        window.postMessage({ source:'SIMCO_MANAGER', type:'JAVASCRIPT_DIAGNOSTIC_GET', id:message.requestId||null }, '*');
+        globalThis.__scmPageBridge.send({ source:'SIMCO_MANAGER', type:'JAVASCRIPT_DIAGNOSTIC_GET', id:message.requestId||null });
         sendResponse({ok:true});
       }).catch(e => sendResponse({ok:false,error:e?.message||String(e)}));
       return true;
@@ -952,7 +989,7 @@ let hookReady = false;
     if (message?.type !== 'PAGE_API_GET') return;
     const id = `${Date.now()}-${++seq}`;
     pending.set(id, { resolve: sendResponse });
-    window.postMessage({ source: 'SIMCO_MANAGER', type: 'API_GET', id, path: message.path, timeoutMs: message.timeoutMs }, '*');
+    globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'API_GET', id, path: message.path, timeoutMs: message.timeoutMs });
     return true;
   });
 })();
@@ -1115,7 +1152,7 @@ function scmPageTextNoLayout(){
   // v2.5.319: use the game's own market response directly (seen by the page hook) instead of
   // waiting for it to be written to storage and read back. VWAP rows are cached separately.
   const liveMarket=new Map();let liveLatestId=null,vwapCache=null;
-  window.addEventListener('message',event=>{
+  globalThis.__scmPageBridge.listen(event=>{
     if(event.source!==window||event.data?.source!=='SIMCO_MANAGER'||event.data?.type!=='API_DATA')return;
     const d=event.data,m=String(d.url||'').match(/^\/api\/v3\/market\/(\d+)\/(\d+)\/?(?:\?.*)?$/);
     if(!m||!(Number(d.status)>=200&&Number(d.status)<300)||!Array.isArray(d.data))return;
@@ -2567,4 +2604,4 @@ function scmPageTextNoLayout(){
 
 // v2.5.326: every content.js listener above is now attached; release page-hook.js's queued events.
 // postMessage is delivered asynchronously, so the flush always arrives after all listeners exist.
-try { window.postMessage({ source:'SIMCO_MANAGER', type:'INITIALIZED' }, '*'); } catch {}
+try { globalThis.__scmPageBridge.handoff(); globalThis.__scmPageBridge.send({ source:'SIMCO_MANAGER', type:'INITIALIZED' }); } catch {}
