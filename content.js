@@ -35,6 +35,23 @@ if(!globalThis.__scmPageBridge)globalThis.__scmPageBridge=(()=>{
   const send=m=>{const msg={...m,source:SRC};if(port){try{port.postMessage(msg);return;}catch{}}window.postMessage(msg,origin);};
   return {listen:h=>{handlers.push(h);},send,handoff,isPortReady:()=>!!port};
 })();
+// v2.5.433 teardown when the extension context is invalidated (extension reloaded/updated): orphaned
+// content scripts otherwise keep their intervals and subtree observers running forever. This only
+// records intervals/observers created in this isolated world; nothing changes while the context is valid.
+if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
+  const intervals=new Set(),observers=new Set();let dead=false;
+  try{const si=globalThis.setInterval,ci=globalThis.clearInterval;
+    globalThis.setInterval=function(...a){const id=si.apply(this,a);if(!dead)intervals.add(id);return id;};
+    globalThis.clearInterval=function(id){intervals.delete(id);return ci.call(this,id);};
+    const proto=MutationObserver.prototype,obs=proto.observe;
+    proto.observe=function(...a){observers.add(this);return obs.apply(this,a);};
+    const alive=()=>{try{return !!chrome?.runtime?.id;}catch{return false;}};
+    const kill=()=>{if(dead||alive())return;dead=true;for(const id of intervals){try{ci(id);}catch{}}intervals.clear();for(const o of observers){try{o.disconnect();}catch{}}observers.clear();};
+    const watch=si(()=>{kill();if(dead)ci(watch);},10000);
+    document.addEventListener('visibilitychange',kill);
+    return {check:kill,isDead:()=>dead};
+  }catch{return {check(){},isDead:()=>false};}
+})();
 (() => {
   if (window.__SCM_BRIDGE__) return;
   const safeRuntimeSend = (message) => {
@@ -482,7 +499,8 @@ if(!globalThis.__scmPageBridge)globalThis.__scmPageBridge=(()=>{
   // 5-second GAME_STATE writes and realm-follow races.
   // Primary capture is page-hook change-driven. Keep a 1-second fallback when
   // the MAIN-world hook is unavailable; raw storage changes are parsed only once.
-  setInterval(()=>{if(!hookReady)captureDirectGameState();}, 1000);
+  setInterval(()=>{if(!hookReady&&!document.hidden)captureDirectGameState();}, 1000);
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!hookReady){try{captureDirectGameState();}catch{}}});
   // v2.5.327 mobile: background tabs do no polling work; a fresh capture runs when the tab is shown again.
   setInterval(()=>{if(!document.hidden)captureProductionEvents();}, 15000);
   setInterval(()=>{if(!document.hidden)captureWarehouseCostDetail();}, 10000);
@@ -656,12 +674,20 @@ let hookReady = false;
   });
 
   let lastWarehouseCostPath = location.pathname;
-  new MutationObserver(() => {
+  // v2.5.433 mobile CPU: coalesce the subtree callback to one path check per idle slot/frame.
+  let warehouseCostPathCheckPending = false;
+  const checkWarehouseCostPath = () => {
+    warehouseCostPathCheckPending = false;
     if (lastWarehouseCostPath !== location.pathname) {
       lastWarehouseCostPath = location.pathname;
       lastWarehouseCostDetailFingerprint = '';
       scheduleWarehouseCostDetailCapture();
     }
+  };
+  new MutationObserver(() => {
+    if (warehouseCostPathCheckPending) return;
+    warehouseCostPathCheckPending = true;
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(checkWarehouseCostPath, {timeout:300}); else setTimeout(checkWarehouseCostPath, 100);
   }).observe(document.documentElement || document, {subtree:true, childList:true});
 
   startPing();
@@ -2046,7 +2072,7 @@ function scmPageTextNoLayout(){
     }catch(e){finish(String(e&&e.message||e||'Refresh failed'));}
   };
   const renderBalance=()=>{
-    if(!S.etaTimer)S.etaTimer=setInterval(tickEta,1000);
+    if(!S.etaTimer){S.etaTimer=setInterval(()=>{if(!document.hidden)tickEta();},1000);document.addEventListener('visibilitychange',()=>{if(!document.hidden){try{tickEta();}catch{}}});}
     const host=ensureCard('scm-game-balance-card','');style();
     if(S.collapsed){host.className='scm-go-collapsed';host.innerHTML='<button type="button" class="scm-go-toggle" aria-label="Expand production balance">›</button>';host.querySelector('button').onclick=()=>{S.collapsed=false;writeCollapsedPreference(false);renderBalance();schedulePosition();};return;}
     host.className='';
@@ -2581,7 +2607,11 @@ function scmPageTextNoLayout(){
     let helperCheckPending=false;
     const runHelperChecks=()=>{helperCheckPending=false;try{scheduleSellHelper();if(document.getElementById('scm-game-balance-card')&&likelyContractPage())scheduleContractHelper();}catch{}};
     const queueHelperChecks=()=>{if(helperCheckPending)return;helperCheckPending=true;if(typeof requestIdleCallback==='function')requestIdleCallback(runHelperChecks,{timeout:400});else setTimeout(runHelperChecks,150);};
-    if(S.observer)S.observer.disconnect();S.observer=new MutationObserver(()=>{
+    // v2.5.433: mutations only inside the extension's own UI need no work here (the card-removal
+    // mutation targets the game's parent node, so it is never skipped).
+    const scmOwnMutation=m=>{const t=m.target;return t&&t.nodeType===1&&!!t.closest?.('[id^="scm-"],[data-scm-owned]');};
+    if(S.observer)S.observer.disconnect();S.observer=new MutationObserver(muts=>{
+      if(muts&&muts.length&&muts.every(scmOwnMutation))return;
       queueHelperChecks();
       const card=document.getElementById('scm-game-balance-card');
       if(!card){
@@ -2599,7 +2629,14 @@ function scmPageTextNoLayout(){
   if(document.readyState!=='loading')start();else document.addEventListener('DOMContentLoaded',start,{once:true});
   window.addEventListener('pageshow',()=>{setTimeout(load,600);setTimeout(load,1800);});
   document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){setTimeout(load,350);}});
-  let last=location.href;setInterval(()=>{if(location.href!==last){last=location.href;route();setTimeout(load,500);}},1500);
+  // v2.5.433 mobile CPU: SPA route changes come from the Navigation API (+popstate); the URL poll is now
+  // only a slow, visible-tab safety net (3 s without the Navigation API, 10 s with it).
+  let last=location.href;const onRouteChange=()=>{if(location.href!==last){last=location.href;route();setTimeout(load,500);}};
+  const nav=window.navigation;let hasNavApi=false;
+  try{if(nav&&typeof nav.addEventListener==='function'){nav.addEventListener('currententrychange',()=>setTimeout(onRouteChange,0));nav.addEventListener('navigatesuccess',()=>setTimeout(onRouteChange,0));hasNavApi=true;}}catch{}
+  window.addEventListener('popstate',()=>setTimeout(onRouteChange,0));
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)onRouteChange();});
+  setInterval(()=>{if(!document.hidden)onRouteChange();},hasNavApi?10000:3000);
 })();
 
 // v2.5.326: every content.js listener above is now attached; release page-hook.js's queued events.
