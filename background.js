@@ -26,6 +26,15 @@ self.addEventListener('unhandledrejection',e=>logError('unhandledrejection',e?.r
 // listened (images, game constants, overlay snapshots) are only written by this worker, so its own writes clear them.
 const __scmOwnWriteHooks=globalThis.__scmOwnWriteHooks=[];
 {const __orig=chrome.storage.local.set.bind(chrome.storage.local);chrome.storage.local.set=(items,...rest)=>{if(items&&typeof items==='object')for(const h of __scmOwnWriteHooks){try{h(items);}catch{}}return __orig(items,...rest);};}
+// Chrome clamps one-shot alarms to >=30 s. scmCreateShortAlarm keeps the alarm as an eviction-safe fallback and,
+// while the worker is alive, fires it on time via setTimeout (clearing the alarm first so it never runs twice).
+const scmAlarmListeners=[];
+{const __origAdd=chrome.alarms.onAlarm.addListener.bind(chrome.alarms.onAlarm);chrome.alarms.onAlarm.addListener=fn=>{scmAlarmListeners.push(fn);return __origAdd(fn);};}
+async function scmCreateShortAlarm(name,delayMs){
+  const when=Date.now()+Math.max(0,Number(delayMs)||0);
+  await chrome.alarms.create(name,{when});
+  if(delayMs<30000)setTimeout(async()=>{try{const a=await chrome.alarms.get(name);if(!a||Math.abs(Number(a.when)-when)>5)return;if(!(await chrome.alarms.clear(name)))return;for(const fn of scmAlarmListeners){try{Promise.resolve(fn({name,scheduledTime:when})).catch(e=>logError(`alarm:${name}`,e));}catch(e){logError(`alarm:${name}`,e);}}}catch(e){logError('short-alarm',e);}},Math.max(0,delayMs));
+}
 const realmSyncSessions=new Map();
 let syncCaptureRealm=null;
 // v2.5.380 Sync priority: while a core Sync runs (setup, targets and the post-sync tail), optional background work
@@ -2847,7 +2856,7 @@ async function scheduleAccountingWeekRefresh(realm,delayMs=1500){
     if(accountingWeekLedgerCacheComplete(store,boundary,recentRows))return {ok:true,scheduled:false,skipped:true,realm:n,reason:'current-week-ledger-cache-complete'};
     const existing=await chrome.alarms.get(name);
     if(existing?.when && Number(existing.when)>Date.now()) return {ok:true,scheduled:true,existing:true,realm:n};
-    await chrome.alarms.create(name,{when:Date.now()+Math.max(500,Number(delayMs)||1500)});
+    await scmCreateShortAlarm(name,Math.max(500,Number(delayMs)||1500));
     return {ok:true,scheduled:true,existing:false,realm:n};
   }catch(e){return {ok:false,error:e?.message||String(e),realm:n};}
 }
@@ -4087,6 +4096,18 @@ const ORDER_BOOK_REFRESH_FAILURE_BACKOFF_MS=5.5*60000; // skips the next 5 firin
 const ORDER_BOOK_REFRESH_429_BACKOFF_MS=15.5*60000; // skips the next 15 firings; the page bridge does not expose Retry-After
 const ORDER_BOOK_REFRESH_ATTEMPT_KEEP_MS=24*3600e3;
 let orderBookRefreshRunning=false;
+// The alarm stays at 1 min (user on the game). With no active Sim Companies tab, every other firing is skipped (~2 min).
+async function scmOrderBookShouldThrottle(){
+  try{
+    const tabs=await chrome.tabs.query({active:true,url:['https://www.simcompanies.com/*','https://simcompanies.com/*']});
+    if(tabs.length)return false;
+    const key='scmOrderBookLastFiringAt',now=Date.now();
+    const last=Number((await chrome.storage.session.get(key))?.[key])||0;
+    if(now-last<110000)return true;
+    await chrome.storage.session.set({[key]:now});
+    return false;
+  }catch{return false;}
+}
 async function ensureOrderBookRefreshAlarm(){
   try{if(!(await chrome.alarms.get(ORDER_BOOK_REFRESH_ALARM)))await chrome.alarms.create(ORDER_BOOK_REFRESH_ALARM,{delayInMinutes:1,periodInMinutes:1});}catch{}
 }
@@ -4913,7 +4934,7 @@ async function hasPendingMarketStageAlarm(){
 async function scheduleMarketStage(realm,stage,delayMs=MARKET_STAGE_COOLDOWN_MS,reason='scheduled'){
   const n=validRealmNumber(realm),name=marketStageAlarmName(realm,stage);
   if(n==null||!name||!['vwap','prices'].includes(stage))return {ok:false,error:'Invalid market stage or realm.'};
-  try{await chrome.alarms.create(name,{when:Date.now()+Math.max(1000,Number(delayMs)||0)});await recordBackgroundJobEvent(n,{job:`market-${stage}-stage-scheduled`,trigger:reason,startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),durationMs:0,outcome:'success',details:{alarm:name,delayMs:Math.max(1000,Number(delayMs)||0)}}).catch(()=>{});return {ok:true,realm:n,stage,alarm:name,delayMs:Math.max(1000,Number(delayMs)||0),reason};}
+  try{await scmCreateShortAlarm(name,Math.max(1000,Number(delayMs)||0));await recordBackgroundJobEvent(n,{job:`market-${stage}-stage-scheduled`,trigger:reason,startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),durationMs:0,outcome:'success',details:{alarm:name,delayMs:Math.max(1000,Number(delayMs)||0)}}).catch(()=>{});return {ok:true,realm:n,stage,alarm:name,delayMs:Math.max(1000,Number(delayMs)||0),reason};}
   catch(e){return {ok:false,realm:n,stage,error:e?.message||String(e),reason};}
 }
 async function schedulePostSyncMarketRefresh(realm,reason='sync-complete'){
@@ -5214,6 +5235,8 @@ const STANDING_ALARMS=[
   ['scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15}],
   ['scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080}],
 ];
+// Idempotent: (re)create a periodic alarm only when it is missing or its period changed, so it is not pushed back.
+async function scmEnsurePeriodicAlarm(name,info){const cur=await chrome.alarms.get(name);if(cur&&Number(cur.periodInMinutes)===Number(info.periodInMinutes))return false;await chrome.alarms.create(name,info);return true;}
 async function ensureStandingAlarms(){
   for(const [name,info] of STANDING_ALARMS)if(!(await chrome.alarms.get(name)))await chrome.alarms.create(name,info);
   if(!(await chrome.alarms.get(GAME_CONSTANTS_ALARM)))await chrome.alarms.create(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});
@@ -5266,12 +5289,12 @@ chrome.runtime.onInstalled.addListener(async()=>{
   for(const a of await chrome.alarms.getAll()){if(!INSTALL_KEEP_ALARM_PREFIXES.some(p=>String(a?.name||'').startsWith(p)))await chrome.alarms.clear(a.name);}
   await ensureLiveMarketRefreshAlarm('installed');
   await ensureOrderBookRefreshAlarm();
-  await chrome.alarms.create('scm-vwap-daily',{periodInMinutes:720});
-  await chrome.alarms.create('scm-production-events-daily',{periodInMinutes:720});
-  await chrome.alarms.create('scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15});
+  await scmEnsurePeriodicAlarm('scm-vwap-daily',{periodInMinutes:720});
+  await scmEnsurePeriodicAlarm('scm-production-events-daily',{periodInMinutes:720});
+  await scmEnsurePeriodicAlarm('scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15});
   await ensureCriticalDataGuard('installed');
   await ensureVwapWatchAlarm('installed');
-  await chrome.alarms.create('scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080});
+  await scmEnsurePeriodicAlarm('scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080});
   await restorePersistedAlarms('installed').catch(()=>{});
   await ensureAccountingWalkSchedule('installed').catch(()=>{});
   // R4: an update restarts the worker too; a Sync interrupted by it must not stay "running" (jobs <5 min old are skipped).
@@ -5404,7 +5427,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
   const legacyPostSyncMatch=String(a?.name||'').match(/^scm-post-sync-market-r([01])$/);
   if(legacyPostSyncMatch){await runMarketStage(Number(legacyPostSyncMatch[1]),'vwap','legacy-post-sync-alarm').catch(()=>{});return;}
   if(a.name===LIVE_MARKET_REFRESH_ALARM_NAME){ await runScheduledLiveMarketRefresh('hourly-market-cycle').catch(()=>{}); return; }
-  if(a.name===ORDER_BOOK_REFRESH_ALARM){ await runOrderBookRefreshFiring().catch(()=>{}); return; }
+  if(a.name===ORDER_BOOK_REFRESH_ALARM){ if(await scmOrderBookShouldThrottle())return; await runOrderBookRefreshFiring().catch(e=>logError('order-book-refresh',e)); return; }
   if(a.name===CRITICAL_DATA_GUARD_ALARM){ await runCriticalDataGuard('scheduled').catch(()=>{}); return; }
   if(a.name==='scm-vwap-daily'||a.name==='scm-vwap-retry'){
     await runScheduledLiveMarketRefresh('legacy-vwap-alarm').catch(()=>{});
@@ -5806,7 +5829,7 @@ async function scheduleAccountingDayWalk(realm,delayMs=4000){
   const n=validRealmNumber(realm); if(n==null)return {ok:false,error:'Invalid realm.'};
   const name=`${ACCOUNTING_DAY_WALK_ALARM_PREFIX}${n}`;
   await setAccountingDayWalkStatus(n,{status:'scheduled',scheduledAt:new Date().toISOString()});
-  await chrome.alarms.create(name,{when:Date.now()+Math.max(1000,Number(delayMs)||4000)});
+  await scmCreateShortAlarm(name,Math.max(1000,Number(delayMs)||4000));
   return {ok:true,scheduled:true,realm:n};
 }
 // One step on the game's Accounting page. op: 'probe' | 'mode' (index 0 Current, 1 Day) | 'day' (index n).
