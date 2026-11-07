@@ -20,14 +20,17 @@ describe('self-test-core', () => {
   });
   it('evalErrorLog counts only the last 24 h and ranks contexts', () => {
     const log = [
-      { at: new Date(now - 1000).toISOString(), context: 'sync' },
+      { at: new Date(now - 1000).toISOString(), context: 'sync', message: 'timed out https://api.example.com/x?token=abc ' + 'Z'.repeat(30) },
       { at: new Date(now - 2000).toISOString(), context: 'sync' },
       { at: new Date(now - 3000).toISOString(), context: 'market' },
       { at: new Date(now - 2 * 86400000).toISOString(), context: 'old' },
     ];
     const r = S.evalErrorLog(log, now);
     expect(r.count24h).toBe(3);
-    expect(plain(r.top[0])).toEqual({ context: 'sync', count: 2 });
+    expect(plain(r.top[0])).toMatchObject({ context: 'sync', count: 2 });
+    expect(r.top[0].sample).toContain('timed out');
+    expect(r.top[0].sample).not.toContain('https://');
+    expect(r.top[0].sample).not.toContain('ZZZZZZZZZZZZZZZZZZZZZZZZ');
     expect(r.status).toBe('warn');
     expect(S.evalErrorLog([], now).status).toBe('pass');
   });

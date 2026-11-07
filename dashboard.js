@@ -162,7 +162,7 @@ document.addEventListener('click',e=>{
   row.classList.add('scm-row-selected');
 });
 // 'alerts' and 'diagnostic' were merged into 'settings' (saved last tab, ?tab=, SCM_SELECT_DASHBOARD_TAB).
-const SCM_TAB_ALIASES={alerts:'settings',diagnostic:'settings'};
+const SCM_TAB_ALIASES={alerts:'settings',diagnostic:'settings',selftest:'settings'};
 function selectDashboardTab(tab){let key=String(tab||'').trim();key=SCM_TAB_ALIASES[key]||key;const b=[...$$('.tab')].find(x=>x.dataset.tab===key);if(b)b.click();}
 // v2.5.330: remember the open tab and scroll position. Mobile browsers unload background
 // tabs, so coming back to the Manager reloads the page — it now reopens where you left it.
@@ -177,6 +177,7 @@ try{
   let saved=null;try{saved=JSON.parse(localStorage.getItem(SCM_LAST_TAB_KEY)||'null');}catch{}
   let target=requested||saved?.tab;target=SCM_TAB_ALIASES[target]||target;
   if(target&&target!==activeTab)selectDashboardTab(target);
+  if(requested==='selftest')setTimeout(()=>{const c=$('#selfTestCard');if(c){if(typeof scmSetCollapsed==='function')scmSetCollapsed(c,false);c.scrollIntoView({block:'start'});}},300);
   if(!requested&&saved?.tab&&saved.y>0){const y=saved.y;let tries=0;const restore=()=>{if(document.documentElement.scrollHeight>=y+innerHeight*0.5||tries++>20){window.scrollTo(0,y);return;}setTimeout(restore,150);};setTimeout(restore,300);}
 }catch{}
 chrome.runtime.onMessage.addListener(m=>{if(m?.type==='SCM_SELECT_DASHBOARD_TAB'&&m.tab)selectDashboardTab(String(m.tab));});
@@ -4859,7 +4860,34 @@ scmOnDashboardResume(async()=>{
     const fresh=await get();if(commitDashboardState(fresh))scheduleDashboardRender();
   }catch(e){console.debug('resume refresh failed',e);}
 });
-get().then(s=>{try{render(s)}catch(e){console.error('Dashboard render failed',e)};requestAccountingRefresh().catch(()=>{});requestAccountingWeekLedgerRefresh('dashboard-initial-load').catch(()=>{});});
+// v2.5.438: initial load must survive an extension update. While the worker restarts (Android Chromium
+// especially) chrome.storage reads can reject or never settle, which left the page showing only the static
+// HTML ("Build —", "No sync yet") until manual refreshes. Header renders at once; the data load is bounded
+// by a timeout and retried with backoff; once loaded, storage changes keep it live.
+const SCM_INITIAL_LOAD_DELAYS=[300,1000,2000,4000,4000,4000];
+function scmWithTimeout(promise,ms){return Promise.race([promise,new Promise((_,rej)=>setTimeout(()=>rej(new Error(`timed out after ${ms}ms`)),ms))]);}
+function scmPaintLoadingHeader(text){try{const b=$('#managerBuild');if(b)b.textContent=`Build ${BUILD_VERSION}`;const si=$('#syncInfo');if(si&&text&&!window.__scmDashboardLoaded)si.textContent=text;}catch{}}
+scmPaintLoadingHeader('Loading…');
+async function scmInitialDashboardLoad(){
+  for(let attempt=0;;attempt++){
+    let s=null;
+    try{s=await scmWithTimeout(get(),3000);}catch(e){console.warn('Dashboard initial load failed, retrying',e?.message||e);}
+    if(s){
+      try{render(s);window.__scmDashboardLoaded=true;}catch(e){console.error('Dashboard render failed',e);}
+      if(window.__scmDashboardLoaded){
+        if(s.viewRealm==null)scmPaintLoadingHeader();
+        requestAccountingRefresh().catch(()=>{});requestAccountingWeekLedgerRefresh('dashboard-initial-load').catch(()=>{});
+        return;
+      }
+    }
+    if(attempt>=SCM_INITIAL_LOAD_DELAYS.length){scmPaintLoadingHeader();const si=$('#syncInfo');if(si)si.textContent='Could not load data yet — waiting for the extension to finish updating';return;}
+    scmPaintLoadingHeader(attempt>=1?'Waiting for the extension to finish updating…':'Loading…');
+    await new Promise(r=>setTimeout(r,SCM_INITIAL_LOAD_DELAYS[attempt]));
+  }
+}
+scmInitialDashboardLoad();
+// If the first load never succeeded, any storage write (the updated worker finishing its migration) retries it.
+scmOnStorageChanged((changes,area)=>{if(area==='local'&&!window.__scmDashboardLoaded&&(changes.activeRealmKey||Object.keys(changes||{}).some(k=>/^scmRealmStore:\d+$/.test(k))))scmWithTimeout(get(),3000).then(s=>{if(!window.__scmDashboardLoaded){render(s);window.__scmDashboardLoaded=true;}}).catch(()=>{});});
 
 // v2.5.327 mobile: on phone widths, tables marked .mobile-cards render as stacked cards (CSS). Each cell
 // gets its column name as data-label; rows are re-labelled whenever a table body is re-rendered.

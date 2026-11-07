@@ -23,8 +23,11 @@
 
   function evalErrorLog(log, now, windowMs = 86400000) {
     const since = now - windowMs; const counts = new Map(); let n = 0;
-    for (const e of arr(log)) { const t = ms(e?.at); if (t == null || t < since) continue; n++; const c = String(e?.context || 'unknown').slice(0, 60); counts.set(c, (counts.get(c) || 0) + 1); }
-    const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([context, count]) => ({ context, count }));
+    const samples = new Map();
+    // A short, scrubbed sample message per context (URLs and long tokens removed) so reports show what failed.
+    const scrub = m => String(m || '').replace(/https?:\/\/\S+/g, '<url>').replace(/[A-Za-z0-9_\-]{24,}/g, '<redacted>').slice(0, 140);
+    for (const e of arr(log)) { const t = ms(e?.at); if (t == null || t < since) continue; n++; const c = String(e?.context || 'unknown').slice(0, 60); counts.set(c, (counts.get(c) || 0) + 1); const m = scrub(e?.message ?? e?.error ?? e?.msg); if (m) samples.set(c, m); }
+    const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([context, count]) => ({ context, count, sample: samples.get(context) || '' }));
     return { count24h: n, total: arr(log).length, top, status: n === 0 ? 'pass' : n > 20 ? 'fail' : 'warn' };
   }
 
