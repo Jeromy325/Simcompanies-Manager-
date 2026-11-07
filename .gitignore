@@ -8,3 +8,5 @@ tools/
 *.md
 CHANGELOG.txt
 TEST_RUN_README.txt
+# Committed test harness lives in test/ (tests/ above stays local-only)
+!test/
