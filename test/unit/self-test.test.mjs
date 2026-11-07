@@ -34,6 +34,12 @@ describe('self-test-core', () => {
     expect(r.status).toBe('warn');
     expect(S.evalErrorLog([], now).status).toBe('pass');
   });
+  it('evalErrorLog ignores entries from other versions when a current version is given', () => {
+    const at = new Date(now - 1000).toISOString();
+    const r = S.evalErrorLog([{ at, context: 'old', version: '1.0' }, { at, context: 'new', version: '2.0' }, { at, context: 'nov' }], now, 86400000, '2.0');
+    expect([r.count24h, r.older24h, r.status]).toEqual([2, 1, 'warn']);
+    expect(S.evalErrorLog([{ at, context: 'old', version: '1.0' }], now, 86400000, '2.0').status).toBe('pass');
+  });
   it('evalFreshness grades age', () => {
     expect(S.evalFreshness(now - 5 * 60000, now).status).toBe('pass');
     expect(S.evalFreshness(now - 120 * 60000, now).status).toBe('warn');
