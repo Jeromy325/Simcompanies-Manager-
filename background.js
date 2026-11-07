@@ -8,6 +8,19 @@ import {
   REALM_DEFINITIONS, validRealmNumber, realmDefinition, realmKeyFromRealm, realmStorageKey,
   realmDisplayNumber, realmDisplayName, realmContractPaths
 } from './realm-core.js';
+// Local error ring buffer (last 200 errors) for diagnostics; writes are debounced.
+const SCM_ERROR_LOG_KEY='scmErrorLog';
+const SCM_ERROR_LOG_MAX=200;
+var scmErrorLogBuffer=null,scmErrorLogTimer=null,scmErrorLogLoading=null;
+function scmErrorLogLoad(){if(scmErrorLogBuffer)return Promise.resolve(scmErrorLogBuffer);if(!scmErrorLogLoading)scmErrorLogLoading=chrome.storage.local.get({[SCM_ERROR_LOG_KEY]:[]}).then(r=>{const saved=Array.isArray(r?.[SCM_ERROR_LOG_KEY])?r[SCM_ERROR_LOG_KEY]:[];scmErrorLogBuffer=[...saved,...(scmErrorLogBuffer||[])].slice(-SCM_ERROR_LOG_MAX);return scmErrorLogBuffer;}).catch(()=>{scmErrorLogBuffer=scmErrorLogBuffer||[];return scmErrorLogBuffer;});return scmErrorLogLoading;}
+function logError(context,err){try{
+  const entry={at:new Date().toISOString(),context:String(context||'unknown').slice(0,120),message:String(err?.message??err??'').slice(0,1000),stack:err?.stack?String(err.stack).slice(0,2000):null,version:chrome.runtime.getManifest?.().version||null};
+  scmErrorLogLoad().then(buf=>{buf.push(entry);if(buf.length>SCM_ERROR_LOG_MAX)buf.splice(0,buf.length-SCM_ERROR_LOG_MAX);if(scmErrorLogTimer)return;scmErrorLogTimer=setTimeout(()=>{scmErrorLogTimer=null;chrome.storage.local.set({[SCM_ERROR_LOG_KEY]:scmErrorLogBuffer.slice(-SCM_ERROR_LOG_MAX)}).catch(()=>{});},2000);});
+}catch{}}
+async function getErrorLog(){if(scmErrorLogTimer){clearTimeout(scmErrorLogTimer);scmErrorLogTimer=null;}const buf=await scmErrorLogLoad();await chrome.storage.local.set({[SCM_ERROR_LOG_KEY]:buf.slice(-SCM_ERROR_LOG_MAX)}).catch(()=>{});return buf.slice();}
+async function clearErrorLog(){if(scmErrorLogTimer){clearTimeout(scmErrorLogTimer);scmErrorLogTimer=null;}scmErrorLogBuffer=[];scmErrorLogLoading=null;await chrome.storage.local.remove(SCM_ERROR_LOG_KEY);}
+self.addEventListener('error',e=>logError('uncaught',e?.error||e?.message||e));
+self.addEventListener('unhandledrejection',e=>logError('unhandledrejection',e?.reason));
 // v2.5.361 performance: the service worker no longer listens to chrome.storage.onChanged. Every listener receives a
 // full copy of each changed value, so the ~1 MB realm store was deserialized here on every write. The three memos that
 // listened (images, game constants, overlay snapshots) are only written by this worker, so its own writes clear them.
@@ -19,6 +32,11 @@ let syncCaptureRealm=null;
 // (VWAP stages, warehouse/overlay refreshes, endpoint-seen flushes) waits instead of competing for the storage lane,
 // and resumes once Sync ends. R2 2.5.378: 162 VWAP reschedules + 4 warehouse refreshes ran inside one 239 s Sync.
 const syncDeferredWork=new Map();
+// Eviction visibility: running Sync sessions are mirrored to chrome.storage.session. A Sync cannot resume after the
+// worker is evicted, so on wake leftover markers are logged as interrupted and cleared (never re-hydrated as live).
+const SCM_SYNC_SESSION_KEY='scmActiveSyncSessionsV1';
+function scmMirrorSyncSessions(){try{if(!chrome.storage?.session)return;const out={};for(const [n,v] of realmSyncSessions.entries())out[n]={realm:n,startedAt:v?.startedAt??null,capture:syncCaptureRealm===n};(Object.keys(out).length?chrome.storage.session.set({[SCM_SYNC_SESSION_KEY]:out}):chrome.storage.session.remove(SCM_SYNC_SESSION_KEY)).catch(()=>{});}catch{}}
+async function scmCheckInterruptedSyncSessions(){try{if(!chrome.storage?.session)return;const saved=(await chrome.storage.session.get(SCM_SYNC_SESSION_KEY))?.[SCM_SYNC_SESSION_KEY];if(!saved||!Object.keys(saved).length||realmSyncSessions.size)return;for(const v of Object.values(saved))logError('sync-interrupted',new Error(`Sync for realm ${v?.realm} started ${v?.startedAt} was interrupted by service-worker shutdown.`));await chrome.storage.session.remove(SCM_SYNC_SESSION_KEY);}catch(e){logError('sync-session-check',e);}}
 function coreSyncActive(){return realmSyncSessions.size>0;}
 function deferUntilSyncEnds(key,fn){syncDeferredWork.set(String(key),fn);}
 function resumeSyncDeferredWork(){
@@ -628,15 +646,44 @@ function scheduleCrossLaneConfirm(n){
     else scheduleCrossLaneConfirm(n);
   }),n).catch(()=>{crossLaneConfirmQueued.delete(n);});
 }
+// Eviction safety: pending (unflushed) realm patches are mirrored to chrome.storage.session so a service-worker
+// eviction inside the coalesce window does not lose them; they are re-buffered and flushed on next wake.
+const SCM_PENDING_PATCH_SESSION_KEY='scmPendingRealmPatchesV1';
+const SCM_PENDING_PATCH_MIRROR_MAX_CHARS=4000000;
+let scmPendingPatchMirrorTimer=null;
+function scmMirrorPendingPatches(immediate=false){
+  if(!chrome.storage?.session)return;
+  if(scmPendingPatchMirrorTimer){clearTimeout(scmPendingPatchMirrorTimer);scmPendingPatchMirrorTimer=null;}
+  const run=()=>{scmPendingPatchMirrorTimer=null;try{
+    const out={};for(const n of new Set([...pendingRealmPatches.keys(),...inflightRealmPatches.keys()])){const p={...(inflightRealmPatches.get(n)||{}),...(pendingRealmPatches.get(n)?.patch||{})};if(Object.keys(p).length)out[n]=p;}
+    if(!Object.keys(out).length){chrome.storage.session.remove(SCM_PENDING_PATCH_SESSION_KEY).catch(()=>{});return;}
+    if(JSON.stringify(out).length>SCM_PENDING_PATCH_MIRROR_MAX_CHARS)return;
+    chrome.storage.session.set({[SCM_PENDING_PATCH_SESSION_KEY]:out}).catch(e=>logError('pending-patch-mirror',e));
+  }catch(e){logError('pending-patch-mirror',e);}};
+  if(immediate)run();else scmPendingPatchMirrorTimer=setTimeout(run,300);
+}
+async function scmRestorePendingRealmPatches(){
+  try{
+    if(!chrome.storage?.session)return;
+    const saved=(await chrome.storage.session.get(SCM_PENDING_PATCH_SESSION_KEY))?.[SCM_PENDING_PATCH_SESSION_KEY];
+    if(!saved||typeof saved!=='object')return;
+    for(const [k,patch] of Object.entries(saved)){const n=validRealmNumber(k);if(n==null||!patch||typeof patch!=='object')continue;
+      // Older restored values go underneath anything already buffered in this lifetime.
+      const entry=pendingRealmPatches.get(n);if(entry){entry.patch={...patch,...entry.patch};}else await storageSetRealmPatch(n,patch);}
+    await flushRealmPatches();
+  }catch(e){logError('pending-patch-restore',e);}
+}
 function dropPendingRealmPatch(realm){
   const n=validRealmNumber(realm); if(n==null)return;
   const entry=pendingRealmPatches.get(n);
   if(entry){if(entry.timer)clearTimeout(entry.timer);pendingRealmPatches.delete(n);}
+  scmMirrorPendingPatches(true);
 }
 function discardAllRealmPatches(){
   for(const n of [...pendingRealmPatches.keys()])dropPendingRealmPatch(n);
   inflightRealmPatches.clear();
   crossLaneRealmPatches.clear();
+  scmMirrorPendingPatches(true);
 }
 function flushRealmPatches(realm=null){
   const only=realm==null?null:validRealmNumber(realm);
@@ -659,6 +706,7 @@ function flushRealmPatches(realm=null){
       }catch(error){firstError=firstError||error;}
       finally{if(inflightRealmPatches.get(n)===entry.patch)inflightRealmPatches.delete(n);}
     }
+    scmMirrorPendingPatches(!firstError);
     if(firstError)throw firstError;
     return {ok:true,flushed};
   });
@@ -670,6 +718,7 @@ async function storageSetRealmPatch(realm, patch={}, onTiming=null){
   const entry=pendingRealmPatches.get(n)||{patch:{},timer:null};
   entry.patch={...entry.patch,...patch};
   pendingRealmPatches.set(n,entry);
+  scmMirrorPendingPatches();
   if(!entry.timer)entry.timer=setTimeout(()=>{entry.timer=null;flushRealmPatches(n).catch(()=>{});},REALM_PATCH_COALESCE_MS);
   try{onTiming?.({realmCommitQueueWaitMs:0,realmStateReadMs:0,physicalWriteMs:0,realmCommitDurationMs:0,realmCommitBuffered:true});}catch{}
   return {ok:true,buffered:true,realm:n};
@@ -6039,6 +6088,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     // at a time. Background VWAP jobs do not use this capture lock.
     const session={realm:selected,startedAt,phase:'preflight'};
     realmSyncSessions.set(selected,session);
+    scmMirrorSyncSessions();
     // Whatever this key says from now on is about this run.
     chrome.storage.local.remove(`scmSyncReturn:${selected}`).catch(()=>{});
     syncCaptureRealm=selected;
@@ -6877,7 +6927,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const t=await simTab();
       if(t?.id) await withSyncTimeout(chrome.tabs.sendMessage(t.id,{type:'CLEAR_SYNC_REALM'}),1500,'Clear Sync realm capture boundary').catch(()=>{});
     }catch{}
-    if(ownsSyncSession && selected!=null){ realmSyncSessions.delete(selected); if(syncCaptureRealm===selected) syncCaptureRealm=null; }
+    if(ownsSyncSession && selected!=null){ realmSyncSessions.delete(selected); if(syncCaptureRealm===selected) syncCaptureRealm=null; scmMirrorSyncSessions(); }
     if(ownsSyncSession && selected!=null && !clearedDuringRun){
       const syncFinishedAt=new Date().toISOString();
       const traceFailed=Array.isArray(syncTrace)&&syncTrace.some(x=>/failed|error|exception/i.test(String(x?.type||'')));
@@ -7393,6 +7443,7 @@ async function requestJavascriptDiagnostic(send){
 const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_FROZEN_NETWORK_PLAN','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','SET_BUILDING_ALARM','CLEAR_BUILDING_ALARM','GET_COMPANY_AUTH_DATA','SYNC_RESOURCE_IMAGES','GET_ERROR_LOG','CLEAR_ERROR_LOG']);
 function scmIsExtensionPageSender(sender){const base=chrome.runtime.getURL('');return typeof sender?.url==='string'&&sender.url.startsWith(base)&&!(sender.tab&&!String(sender.tab.url||'').startsWith(base)&&sender.frameId===0);}
 replayEvent('runtime-start',{buildVersion:BUILD_VERSION,activeRealmKey:null});
+setTimeout(()=>{scmRestorePendingRealmPatches();scmCheckInterruptedSyncSessions();},0);
 
 chrome.runtime.onMessage.addListener((m,sender,send)=>{
   // Sender hardening: only this extension may message us, and privileged/destructive
