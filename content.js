@@ -1596,7 +1596,7 @@ function scmPageTextNoLayout(){
   const readCollapsedPreference=()=>{try{const value=localStorage.getItem(OVERLAY_COLLAPSED_KEY);return value===null?true:value!=='0';}catch{return true;}};
   const writeCollapsedPreference=collapsed=>{try{localStorage.setItem(OVERLAY_COLLAPSED_KEY,collapsed?'1':'0');}catch{}};
   const S={data:null,realm:null,styled:false,collapsed:readCollapsedPreference(),signature:'',buildingSignature:'',contractSignature:'',contractCardSignature:'',contractDismissedKey:'',contractQtyMode:'saved',contractCustomQty:'',refreshTimer:null,recoveryTimer:null,lastUrl:location.href,observer:null,loadInFlight:false,loadQueued:false,loadEpoch:0,helperTimer:null,positionRaf:0,contractFillTimer:0,leftCopyDiscount:3,leftCopySignature:'',leftCopyOpen:false};
-  const esc=v=>{const d=document.createElement('div');d.textContent=String(v??'');return d.innerHTML;};
+  const esc=v=>String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   // Origin suffix for a price that is not a real exchange order-book price; absent fields or 'exchange' => ''.
   const priceSrcSuffix=(src,stale)=>{const l=src==='vwap'||src==='realm-vwap'?'VWAP fallback':src==='simcotools'?(stale?'SimcoTools · stale':'SimcoTools'):'';return l?` · ${l}`:'';};
   const num=v=>Number.isFinite(Number(v))?Number(v).toLocaleString(undefined,{maximumFractionDigits:0}):'—';
