@@ -7133,17 +7133,24 @@ function buildLiveBridgePayload(s, realm, store, overlay){
 // scripts, never in storage.local backups). Session storage clears on browser restart, so storage.local
 // keeps only a non-secret liveBridge.tokenSet flag that lets Settings ask the user to re-enter it.
 const LIVE_BRIDGE_TOKEN_SESSION_KEY='scmLiveBridgeToken';
+const LIVE_BRIDGE_TOKEN_BACKUP_KEY='scmLiveBridgeTokenBackup';
 async function migrateLiveBridgeToken(){
   const cur=(await chrome.storage.local.get({liveBridge:null})).liveBridge;
   const legacy=cur&&typeof cur==='object'?String(cur.token||''):'';
   if(!legacy)return null;
   if(chrome.storage.session)await chrome.storage.session.set({[LIVE_BRIDGE_TOKEN_SESSION_KEY]:legacy});
+  await chrome.storage.local.set({[LIVE_BRIDGE_TOKEN_BACKUP_KEY]:legacy});
   await storageSet({liveBridge:{...cur,token:'',tokenSet:true}});
   return legacy;
 }
 async function getLiveBridgeToken(){
   try{const migrated=await migrateLiveBridgeToken();if(migrated)return migrated;}catch(e){logError('live-bridge-token-migrate',e);}
-  try{return String((await chrome.storage.session?.get(LIVE_BRIDGE_TOKEN_SESSION_KEY))?.[LIVE_BRIDGE_TOKEN_SESSION_KEY]||'');}catch{return '';}
+  let t='';try{t=String((await chrome.storage.session?.get(LIVE_BRIDGE_TOKEN_SESSION_KEY))?.[LIVE_BRIDGE_TOKEN_SESSION_KEY]||'');}catch{}
+  if(t)return t;
+  // Session storage is cleared on browser restart; restore from the persistent backup so the user
+  // never has to re-enter the token. The backup key is never returned by GET_STATE.
+  try{t=String((await chrome.storage.local.get(LIVE_BRIDGE_TOKEN_BACKUP_KEY))?.[LIVE_BRIDGE_TOKEN_BACKUP_KEY]||'');if(t&&chrome.storage.session)await chrome.storage.session.set({[LIVE_BRIDGE_TOKEN_SESSION_KEY]:t});}catch{}
+  return t;
 }
 async function pushLiveBridge(realm, force=false){
   const n=validRealmNumber(realm); if(n==null)return {ok:false,error:'Valid realm required.'};
@@ -7151,7 +7158,7 @@ async function pushLiveBridge(realm, force=false){
   const url=String(cfg.url||'').trim(); const token=String(await getLiveBridgeToken()).trim();
   if(!cfg.enabled||!url)return {ok:false,skipped:true,error:'Live bridge is not enabled or URL is missing.'};
   if(!/^https:\/\//i.test(url))return {ok:false,error:'Live bridge URL must use HTTPS.'};
-  if(!token&&cfg.tokenSet)return {ok:false,error:'Live bridge token is missing (it is cleared when the browser restarts). Re-enter it in Settings.'};
+  if(!token&&cfg.tokenSet)return {ok:false,error:'Live bridge token is missing. Re-enter it in Settings.'};
   if(!force && cfg.lastPushAt && Date.now()-Date.parse(cfg.lastPushAt)<15000)return {ok:false,skipped:true,error:'Bridge push throttled.'};
   const key=realmKeyFromRealm(n); const store={...(s.realmStores?.[key]||{})};
   let overlay=null; try{overlay=await buildGameOverlayData(store,n,s);}catch{}
@@ -8062,7 +8069,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         pendingBuildingCollects.clear();if(buildingCollectFlushTimer){clearTimeout(buildingCollectFlushTimer);buildingCollectFlushTimer=null;} // collect stamps (scmBuildingCollects:N) go with the clear below
         await withRealmStorageCommit(()=>chrome.storage.local.clear());
         await scmNetClearAllEvents().catch(()=>{});
-        await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY).catch(()=>{}); // bridge token is session-only now
+        await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY).catch(()=>{});await chrome.storage.local.remove(LIVE_BRIDGE_TOKEN_BACKUP_KEY).catch(()=>{}); // bridge token is session-only now
         // R5: in-memory copies of cleared data would otherwise be served (and written back) until the worker restarts.
         resourceImagesMemo=null;notifyRecipesMemo=null;gameOverlayAssetsPromise=null;
         gameOverlaySnapshotMemo.clear();contractHelperCache.clear();
@@ -8364,8 +8371,8 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
       const token=String(m.token||'');
       const next={...(current.liveBridge||{}),enabled:Boolean(m.enabled),url:String(m.url||'').trim(),token:'',tokenSet:Boolean(token),pushOnSync:Boolean(m.pushOnSync)};
       if(next.url && !/^https:\/\//i.test(next.url)) throw new Error('Live bridge URL must use HTTPS.');
-      if(token){if(!chrome.storage.session)throw new Error('Session storage unavailable; cannot store bridge token.');await chrome.storage.session.set({[LIVE_BRIDGE_TOKEN_SESSION_KEY]:token});}
-      else await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY);
+      if(token){if(!chrome.storage.session)throw new Error('Session storage unavailable; cannot store bridge token.');await chrome.storage.session.set({[LIVE_BRIDGE_TOKEN_SESSION_KEY]:token});await chrome.storage.local.set({[LIVE_BRIDGE_TOKEN_BACKUP_KEY]:token});}
+      else {await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY);await chrome.storage.local.remove(LIVE_BRIDGE_TOKEN_BACKUP_KEY);}
       await storageSet({liveBridge:next});
       send({ok:true,liveBridge:{...next,hasToken:Boolean(token)}});
     }catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;

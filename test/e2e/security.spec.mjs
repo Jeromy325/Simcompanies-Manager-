@@ -45,7 +45,15 @@ test('security: GET_STATE from content script has no secrets; bridge token is se
     expect(set.liveBridge.token).toBe('');
     const after = await ext.evaluate(async () => ({ local: JSON.stringify(await chrome.storage.local.get(null)), session: (await chrome.storage.session.get('scmLiveBridgeToken')).scmLiveBridgeToken }));
     expect(after.session).toBe('tok-123');
-    expect(after.local).not.toContain('tok-123');
+    // The token is never in the liveBridge settings object; it only lives in the backup key.
+    const lb = await ext.evaluate(async () => (await chrome.storage.local.get('liveBridge')).liveBridge);
+    expect(JSON.stringify(lb)).not.toContain('tok-123');
+
+    // Browser restart clears storage.session: the token is restored from the backup, no re-entry needed.
+    await ext.evaluate(() => chrome.storage.session.remove('scmLiveBridgeToken'));
+    await ext.evaluate(() => chrome.runtime.sendMessage({ type: 'PUSH_LIVE_BRIDGE', realm: 0, force: true }));
+    const restored = await ext.evaluate(async () => (await chrome.storage.session.get('scmLiveBridgeToken')).scmLiveBridgeToken);
+    expect(restored).toBe('tok-123');
 
     // Content-script (isolated world) context on the game page.
     const p = await ctx.newPage();
