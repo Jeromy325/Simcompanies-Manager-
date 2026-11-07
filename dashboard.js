@@ -1,4 +1,6 @@
 const BUILD_VERSION=chrome.runtime.getManifest().version;
+// v2.5.441: paint the build number as soon as this script starts (the full load can take seconds on phones).
+try{const b=document.getElementById('managerBuild');if(b)b.textContent=`Build ${BUILD_VERSION}`;const si=document.getElementById('syncInfo');if(si)si.textContent='Loading…';}catch{}
 function updateDeviceLayout(){const width=Math.max(window.innerWidth||0,window.visualViewport?.width||0),root=document.documentElement;root.classList.toggle('scm-mobile',width<=600);root.classList.toggle('scm-tablet',width>600&&width<=1000);root.classList.toggle('scm-desktop',width>1000);}
 updateDeviceLayout();window.addEventListener('resize',updateDeviceLayout,{passive:true});window.visualViewport?.addEventListener('resize',updateDeviceLayout,{passive:true});
 const $=s=>document.querySelector(s), $$=s=>document.querySelectorAll(s);

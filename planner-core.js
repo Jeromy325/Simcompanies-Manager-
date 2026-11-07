@@ -325,7 +325,9 @@
       for (const req of [...(contractsById.get(id)||[])].sort((a,b)=>b.quality-a.quality)) {
         let need=Number(req.amount)||0;
         contracted += need;
-        for (const supply of available) {
+        // A contract is filled from its own quality first, then the next higher one (never spend Q3 on a Q1 contract
+        // while Q1 stock is there), so its consumption lands on the row the contract is shown on.
+        for (const supply of [...available].sort((a,b)=>a.quality-b.quality)) {
           if (need<=1e-9) break;
           if (supply.amount<=1e-9 || supply.quality<req.quality) continue;
           const take=Math.min(need,supply.amount); supply.amount-=take; need-=take;
@@ -364,8 +366,9 @@
           const unmet=takeForDisplay(displayAvailable,req.amount,req.minQuality,displayDemandAlloc);
           if(unmet>1e-9)displayUnmetDemand.set(req.minQuality,(displayUnmetDemand.get(req.minQuality)||0)+unmet);
         }
+        const displayAvailableAsc=[...displayAvailable].sort((a,b)=>a.quality-b.quality);
         for(const req of [...idContracts].sort((a,b)=>b.quality-a.quality)){
-          const unmet=takeForDisplay(displayAvailable,req.amount,req.quality,displayContractAlloc);
+          const unmet=takeForDisplay(displayAvailableAsc,req.amount,req.quality,displayContractAlloc);
           if(unmet>1e-9)displayUnmetContracts.set(req.quality,(displayUnmetContracts.get(req.quality)||0)+unmet);
         }
 

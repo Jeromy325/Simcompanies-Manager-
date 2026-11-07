@@ -68,3 +68,17 @@ describe('storage-core retention (90 days)', () => {
     expect(plain(t[0])).toEqual({ key: 'scmRealmStore:1', bytes: 5e6 });
   });
 });
+
+describe('unused endpoint replies (2.5.442)', () => {
+  it('trim drops replies the Manager never reads and keeps used ones', async () => {
+    const { loadCore } = await import('./load.mjs');
+    const SC = loadCore('storage-core.js').SCM_STORAGE_CORE;
+    const now = Date.parse('2026-11-07T12:00:00Z'), at = new Date(now - 1000).toISOString();
+    const map = { '/api/v2/market-collectibles/': { receivedAt: at }, '/api/messages_by_company/': { receivedAt: at },
+      '/api/v2/building-auctions/1/': { receivedAt: at }, '/api/v2/resources-transactions/1/2/': { receivedAt: at },
+      '/api/v3/market/1/112/': { receivedAt: at }, '/api/v4/1/resources-retail-info/': { receivedAt: at } };
+    const r = SC.pruneEndpointData(map, now - 90 * 86400000);
+    expect(r.removed).toBe(4);
+    expect(Object.keys(r.value).sort()).toEqual(['/api/v3/market/1/112/', '/api/v4/1/resources-retail-info/']);
+  });
+});
