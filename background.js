@@ -33,9 +33,9 @@ async function scmAlarmCreate(name,info){
   return chrome.alarms.create(name,info);
 }
 self.addEventListener('unhandledrejection',e=>logError('unhandledrejection',e?.reason));
-// v2.5.361 performance: the service worker no longer listens to chrome.storage.onChanged. Every listener receives a
-// full copy of each changed value, so the ~1 MB realm store was deserialized here on every write. The three memos that
-// listened (images, game constants, overlay snapshots) are only written by this worker, so its own writes clear them.
+// The service worker does not listen to chrome.storage.onChanged: every listener receives a full copy of each changed
+// value. The three memos (images, game constants, overlay snapshots) are only written by this worker, so its own
+// writes clear them.
 const __scmOwnWriteHooks=globalThis.__scmOwnWriteHooks=[];
 {const __orig=chrome.storage.local.set.bind(chrome.storage.local);chrome.storage.local.set=(items,...rest)=>{if(items&&typeof items==='object')for(const h of __scmOwnWriteHooks){try{h(items);}catch{}}return __orig(items,...rest);};}
 // Chrome clamps one-shot alarms to >=30 s. scmCreateShortAlarm keeps the alarm as an eviction-safe fallback and,
@@ -49,9 +49,9 @@ async function scmCreateShortAlarm(name,delayMs){
 }
 const realmSyncSessions=new Map();
 let syncCaptureRealm=null;
-// v2.5.380 Sync priority: while a core Sync runs (setup, targets and the post-sync tail), optional background work
+// Sync priority: while a core Sync runs (setup, targets and the post-sync tail), optional background work
 // (VWAP stages, warehouse/overlay refreshes, endpoint-seen flushes) waits instead of competing for the storage lane,
-// and resumes once Sync ends. R2 2.5.378: 162 VWAP reschedules + 4 warehouse refreshes ran inside one 239 s Sync.
+// and resumes once Sync ends.
 const syncDeferredWork=new Map();
 // Eviction visibility: running Sync sessions are mirrored to chrome.storage.session. A Sync cannot resume after the
 // worker is evicted, so on wake leftover markers are logged as interrupted and cleared (never re-hydrated as live).
@@ -66,7 +66,7 @@ function resumeSyncDeferredWork(){
   for(const fn of jobs){try{Promise.resolve(fn()).catch(()=>{});}catch{}}
   return jobs.length;
 }
-// v2.5.389 A failed Sync retries itself once, a minute later, so the user does not have to notice and re-sync.
+// A failed Sync retries itself once, a minute later, so the user does not have to notice and re-sync.
 const SYNC_AUTO_RETRY_ALARM_PREFIX='scm-sync-retry-r';
 const SYNC_AUTO_RETRY_DELAY_MS=60000;
 const syncAutoRetryRuns=new Set();
@@ -99,7 +99,6 @@ const scmNetCapture = { tabId:null, captureId:null, active:false, requestMap:new
 const SCM_NET_DB='scm-network-capture-v3';
 function scmNetDb(){return new Promise((resolve,reject)=>{const req=indexedDB.open(SCM_NET_DB,1);req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains('events')){const st=db.createObjectStore('events',{keyPath:'id',autoIncrement:true});st.createIndex('captureId','captureId',{unique:false});}};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error||new Error('IndexedDB open failed'));});}
 async function scmNetSave(event){const db=await scmNetDb();await new Promise((resolve,reject)=>{const tx=db.transaction('events','readwrite');tx.objectStore('events').add({captureId:scmNetCapture.captureId,at:new Date().toISOString(),...event});tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error||new Error('IndexedDB write failed'));});scmNetCapture.counters.events++;if(event.kind==='request')scmNetCapture.counters.requests++;if(event.kind==='response')scmNetCapture.counters.responses++;if(event.kind==='response-body')scmNetCapture.counters.bodies++;if(event.kind==='loading-failed'||event.kind==='capture-error')scmNetCapture.counters.errors++;await chrome.storage.local.set({scmNetworkCaptureV3Status:{captureId:scmNetCapture.captureId,status:scmNetCapture.active?'recording':'stopped',tabId:scmNetCapture.tabId,startedAt:scmNetCapture.startedAt,updatedAt:new Date().toISOString(),...scmNetCapture.counters}}).catch(()=>{});}
-async function scmNetGetEvents(captureId){const db=await scmNetDb();return await new Promise((resolve,reject)=>{const tx=db.transaction('events','readonly');const req=tx.objectStore('events').index('captureId').getAll(captureId);req.onsuccess=()=>resolve(req.result||[]);req.onerror=()=>reject(req.error||new Error('IndexedDB read failed'));});}
 const SCM_NET_BODY_CAP=256*1024;
 const SCM_NET_SECRET_PATH_RE=/auth|login|logout|token|session|password|passwd|signin|signup|register|oauth|csrf|2fa|otp/i;
 const SCM_NET_SECRET_BODY_RE=/"(?:password|passwd|token|access_?token|refresh_?token|id_?token|session(?:id|_id)?|csrf(?:token)?|secret|api_?key|authorization|jwt)"\s*:|(?:^|[?&])(?:password|token|secret|csrf[a-z_]*|session[a-z_]*)=/i;
@@ -280,11 +279,11 @@ function simcoReleaseRequestSlot(){
   const next=simcoRequestWaiters.shift();
   if(next)next();
 }
-// v2.5.345 the phone's game API answers took 14–70 s; 8 s × 2 made every Sync fail on that link. One attempt,
-// up to 45 s (the page hook aborts at the same limit, max 60 s); retrying a slow request only doubles the load.
+// Game API answers can take 14–70 s on a slow phone connection. One attempt, up to 45 s (the page hook aborts at
+// the same limit, max 60 s); retrying a slow request only doubles the load.
 const SYNC_PAGE_API_TIMEOUT_MS=45000;
-// v2.5.380 Sync writes are serialized (~3 s each on a 6 MB realm store); 8 s timed out 6/7 Accounting writes that
-// landed a few seconds later and forced a slow UI-click fallback. Wait in line instead.
+// Sync writes are serialized (~3 s each on a 6 MB realm store); a short timeout fails writes that land a few seconds
+// later and forces a slow UI-click fallback. Wait in line instead.
 const SYNC_PERSIST_VERIFY_TIMEOUT_MS=30000;
 const SYNC_PAGE_API_ATTEMPTS=1;
 const SYNC_CLICK_TIMEOUT_MS=2000;
@@ -365,7 +364,7 @@ const USEFUL_PATTERNS = [
 ];
 
 const rawStorageSet=chrome.storage.local.set.bind(chrome.storage.local);
-// v2.5.342 the game's public constants (/api/v2/constants/core|buildings|resources/) → scmGameConstants, refreshed
+// The game's public constants (/api/v2/constants/core|buildings|resources/) → scmGameConstants, refreshed
 // every 6 h; and your own exchange listings (/api/v2/companies/<id>/market-orders/, public) → scmMarketOrders:<realm>.
 // Plain fetches, no storage lock held while fetching.
 const GAME_CONSTANTS_ALARM='scm-game-constants';
@@ -407,7 +406,7 @@ async function refreshMarketOrders(realm,maxAgeMs=5*60000){
     return {ok:true};
   }catch(e){logActivity(validRealmNumber(realm),'market-orders','failure',{},String(e?.message||e));return {ok:false,error:String(e?.message||e)};}
 }
-// v2.5.407 your outgoing contracts read through the game tab into a small key scmOutgoingContracts:<realm>
+// Your outgoing contracts read through the game tab into a small key scmOutgoingContracts:<realm>
 // ({data,at}), so the game-page card can follow it with chrome.storage.onChanged without touching the large realm
 // store. A Manager pageGet is not captured by the page hook, so this never rewrites endpointData. No lock held.
 const OWN_LISTINGS_REFRESH_GAP_MS=12000,OUTGOING_CONTRACTS_REFRESH_GAP_MS=12000,OUTGOING_CONTRACTS_FRESH_MS=60000;
@@ -436,10 +435,10 @@ function scheduleOwnOrdersRefresh(realm,delayMs=800){
     refreshOutgoingContracts(n,0).catch(()=>{});
   },delayMs));
 }
-// v2.5.343 logged-in extras through the game tab after Sync: research, government orders + your tier, and the
+// Logged-in extras through the game tab after Sync: research, government orders + your tier, and the
 // abundance of every building whose abundance the game has shown (mines etc.). Each pageGet runs without a lock;
 // saveData takes its own lock per response.
-// Buildings that make an abundance resource. v2.5.352: the game constants (scmGameConstants, downloaded in the
+// Buildings that make an abundance resource. The game constants (scmGameConstants, downloaded in the
 // background) are one source; if they are missing on the phone, the bundled buildings.json/recipes.json (same game
 // data: Mine, Oil Rig, Quarry) are used, plus any building producing an abundance resource now or of a kind whose
 // abundance was captured before. Returns {ids, sources}.
@@ -463,13 +462,13 @@ async function abundanceBuildingInfo(st){
   return {ids:[...ids],sources,buildings:list.length};
 }
 async function abundanceBuildingIds(st){return (await abundanceBuildingInfo(st)).ids;}
-// v2.5.352 one line in the Background updates monitor for work the Manager does (job history scmBackgroundJobs:<n>).
+// One line in the Background updates monitor for work the Manager does (job history scmBackgroundJobs:<n>).
 function logActivity(realm,job,outcome,details={},error=null,startedMs=Date.now(),trigger='manager'){
   const n=validRealmNumber(realm);if(n==null)return Promise.resolve();
   return recordBackgroundJobEvent(n,{job,trigger,outcome,startedAt:new Date(startedMs).toISOString(),finishedAt:new Date().toISOString(),durationMs:Date.now()-startedMs,details,error}).catch(()=>{});
 }
 async function activeRealmNumber(){try{const r=await chrome.storage.local.get({activeRealmKey:null});return validRealmNumber(realmNumberFromKey(r.activeRealmKey));}catch{return null;}}
-// v2.5.352 "Game data saved" lines in the monitor: one per kind of data, at most once a minute each.
+// "Game data saved" lines in the monitor: one per kind of data, at most once a minute each.
 const GAME_CAPTURE_FAMILIES=[[/\/companies\/me\/buildings\/?$/,'Buildings'],[/\/resources\/\d+\/?$/,'Warehouse'],[/\/contracts-(?:incoming|outgoing)/,'Contracts'],[/\/abundance\/?$/,'Abundance'],[/\/cashflow\/recent/,'Cash flow (sales)'],[/\/market\/\d+\/\d+\/?$/,'Exchange order book'],[/\/buildings\/\d+\/history/,'Building history'],[/\/government-orders/,'Government orders'],[/\/(?:balance-sheet|income-statement|cashflow-statement|past-finances)/,'Accounting'],[/\/executives\/?$/,'Executives']];
 const gameCaptureLogAt=new Map();
 function logGameCapture(realm,url){
@@ -477,7 +476,7 @@ function logGameCapture(realm,url){
   const k=`${realm}|${f[1]}`;if(Date.now()-(gameCaptureLogAt.get(k)||0)<60000)return;gameCaptureLogAt.set(k,Date.now());
   logActivity(realm,'game-data-saved','success',{what:f[1]},null,Date.now(),'game');
 }
-// v2.5.351 abundance without a Sync or opening the mine: whenever the game's buildings list is captured, fetch
+// Abundance without a Sync or opening the mine: whenever the game's buildings list is captured, fetch
 // /abundance/ through the game tab for each mine/oil rig/quarry whose capture is missing or older than 1 h.
 // One run per realm at a time, at most every 5 min; skipped during a Sync (Sync fetches them itself afterwards).
 // No storage lock is held while fetching (pageGet, then saveData per building).
@@ -528,7 +527,7 @@ async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
   const ab=new Set(Object.keys(ep).map(k=>(k.match(/^\/api\/v2\/companies\/buildings\/(\d+)\/abundance\/$/)||[])[1]).filter(Boolean));
   const kinds=new Set((Array.isArray(st?.buildings)?st.buildings:[]).filter(b=>ab.has(String(b?.id))).map(b=>String(b?.kind)));
   for(const b of (Array.isArray(st?.buildings)?st.buildings:[]))if(kinds.has(String(b?.kind)))ab.add(String(b.id));
-  // v2.5.349 also every building that makes an abundance resource (mines, oil rigs, quarries: constants producedAt),
+  // Also every building that makes an abundance resource (mines, oil rigs, quarries: constants producedAt),
   // even when its abundance was never captured or the record was lost.
   for(const id of await abundanceBuildingIds(st))ab.add(id);
   const paths=['/api/v3/players/research/',`/api/v3/government-orders/${r}/`,'/api/v3/government-orders/tier/',...[...ab].map(id=>`/api/v2/companies/buildings/${id}/abundance/`)];
@@ -542,7 +541,7 @@ async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
 chrome.alarms.onAlarm.addListener(a=>{if(a?.name===GAME_CONSTANTS_ALARM)refreshGameConstants().catch(()=>{});});
 async function ensureGameConstantsAlarm(){try{await scmAlarmCreate(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});}catch{}refreshGameConstants().catch(()=>{});}
 ensureGameConstantsAlarm();
-// v2.5.338 economy phase log per realm (scmEconomyStateLog:<realm>) from auth-data temporals.economyState.
+// Economy phase log per realm (scmEconomyStateLog:<realm>) from auth-data temporals.economyState.
 // Seeds from the previously stored auth-data so the phase before a change is kept. Storage only, no network.
 let economyLogChain=Promise.resolve();
 function recordEconomyState(realm,prevEntry,data){
@@ -557,17 +556,16 @@ function recordEconomyState(realm,prevEntry,data){
     const last=Array.isArray(log)&&log.length?log[log.length-1]:null;
     const next=C.economyLogAppend(log,st,now);
     await rawStorageSet({[k]:next});
-    // v2.5.359 phase changed since the last observation → notification (setting "economyChange").
+    // Phase changed since the last observation → notification (setting "economyChange").
     if(last&&Number.isFinite(Number(last.s))&&Number(last.s)!==st&&next.length&&Number(next[next.length-1].s)===st){
       try{const cfg=await notifySettings();if(cfg.economyChange){const gc=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;const store=await notifyRealmStore(r);const msg=globalThis.SCM_NOTIFY_CORE.economyChanged({from:Number(last.s),to:st,realm:r,constants:gc,buildings:store?.buildings});await scmNotify(`economy-${r}-${Date.now()}`,msg.title,msg.message);}}catch(e){console.debug('economy notification failed',e);}
     }
   }).catch(()=>{});
   return economyLogChain;
 }
-// v2.5.327 mobile: resource images (base64 data URLs, ~2.3 MB) used to live inside the realm store, so
-// every state() read and every realm write serialized them. They now live in their own key and are
-// only read by the code that draws images. Any realm write that still carries image fields is routed
-// here and merged (image writes are additive), so legacy callers keep working unchanged.
+// Resource images (base64 data URLs, ~2.3 MB) live in their own key, not the realm store, so state() reads and
+// realm writes do not serialize them; only the code that draws images reads them. Any realm write that still
+// carries image fields is routed here and merged (image writes are additive).
 const RESOURCE_IMAGES_KEY='scmResourceImages';
 const RESOURCE_IMAGE_FIELDS=['resourceImageCache','resourceImageData','resourceImageMeta'];
 let resourceImagesMemo=null;
@@ -643,9 +641,8 @@ function withRealmStorageCommit(task){
 function storageSet(patch={}){
   return withRealmStorageCommit(()=>storageSetUnlocked(patch));
 }
-// Integration P1: realm patches are coalesced. Every captured API response used to rewrite the whole
-// scmRealmStore:N (~800 KB, ~1 MB+ onChanged payload in every open page) about once a second during Sync.
-// storageSetRealmPatch now merges patches (in order, shallow, same semantics as {...current,...patch}) into a
+// Realm patches are coalesced so captured API responses do not each rewrite the whole scmRealmStore:N (~800 KB)
+// during Sync. storageSetRealmPatch merges patches (in order, shallow, same semantics as {...current,...patch}) into a
 // per-realm buffer and writes at most once per REALM_PATCH_COALESCE_MS. In-worker readers stay exact:
 // readPhysicalRealmStore/stateAllRealms overlay the in-flight + pending patch, and any whole-store write of
 // that realm through storageSetUnlocked (which was built from such a read) absorbs and drops the buffer.
@@ -811,7 +808,7 @@ async function storageSetUnlocked(patch={},options={}){
     const overlayKey=gameOverlaySnapshotStorageKey(active);
     const plannerKey=productionPlannerStateStorageKey(active);
     const existingRaw=await chrome.storage.local.get({[physicalKey]:{},[overlayKey]:null,[plannerKey]:null});
-    // P1: this is an atomic read-modify-write in the commit lane, so absorb the realm's buffered patch here
+    // This is an atomic read-modify-write in the commit lane, so absorb the realm's buffered patch here
     // (its side-key fields are routed like the realmStores path does) and drop the buffer.
     const buffered=options?.keepPendingRealmPatches?null:realmPatchOverlay(active);
     const existing=sanitizePhysicalRealmPayload(buffered?{...(existingRaw?.[physicalKey]||{}),...buffered}:existingRaw?.[physicalKey],active);
@@ -848,7 +845,7 @@ async function storageSetUnlocked(patch={},options={}){
     if(realm==null) continue;
     out[realmStorageKey(realm)]=sanitizePhysicalRealmPayload(value,realm);
     targetRealms.push(realm);
-    // P1: a whole-store write was built from a state()/stateAllRealms() read, which overlays the buffered
+    // A whole-store write was built from a state()/stateAllRealms() read, which overlays the buffered
     // patch, so the buffer is now part of this write.
     if(!options?.keepPendingRealmPatches)dropPendingRealmPatch(realm);
     const diagnostic=value?.fullSyncDiagnostics;
@@ -881,7 +878,7 @@ async function readPhysicalRealmStore(realm){
   const overlayKey=gameOverlaySnapshotStorageKey(n);
   const plannerKey=productionPlannerStateStorageKey(n);
   const data=await chrome.storage.local.get({[key]:null,[diagnosticKey]:null,[overlayKey]:null,[plannerKey]:null});
-  const buffered=realmPatchOverlay(n); // P1: coalesced realm patch not yet written
+  const buffered=realmPatchOverlay(n); // Coalesced realm patch not yet written
   const physical=data?.[key];
   const store=buffered?{...(physical&&typeof physical==='object'?physical:{}),...buffered}:physical;
   const clean=store&&typeof store==='object'?sanitizeRealmStore(store,n):{};
@@ -890,8 +887,8 @@ async function readPhysicalRealmStore(realm){
   if(buffered?.fullSyncDiagnostics&&typeof buffered.fullSyncDiagnostics==='object') clean.fullSyncDiagnostics=buffered.fullSyncDiagnostics;
   if(buffered?.gameOverlaySnapshot&&typeof buffered.gameOverlaySnapshot==='object') clean.gameOverlaySnapshot=buffered.gameOverlaySnapshot;
   clean.__productionPlannerState=plannerKey?sanitizeProductionPlannerState(data?.[plannerKey],n):null;
-  // A completed full-sync diagnostic is a durable proof of completion. Older
-  // 2.5.168 storage can lose the denormalized lastSync field during a later
+  // A completed full-sync diagnostic is a durable proof of completion. Stored
+  // data can lose the denormalized lastSync field during a later
   // Accounting/overlay write, so expose the authoritative completion time and
   // let the next normal realm-store write persist it again.
   if(!clean.lastSync){
@@ -953,13 +950,13 @@ async function stateAllRealms(){
     else if(legacy?.[key]&&typeof legacy[key]==='object')stores[key]=sanitizeRealmStore(legacy[key],r);
     const diagnostic=physical[realmDiagnosticStorageKey(r)];
     if(diagnostic&&typeof diagnostic==='object') stores[key]={...(stores[key]||{}),fullSyncDiagnostics:diagnostic};
-    const buffered=realmPatchOverlay(r); // P1: coalesced realm patch not yet written
+    const buffered=realmPatchOverlay(r); // Coalesced realm patch not yet written
     if(buffered)stores[key]=sanitizeRealmStore({...(stores[key]||{}),...buffered},r);
   }
   return {...DEFAULTS,...base,realmStores:stores};
 }
 
-// R2: read + write are one transaction in the global commit lane. Callers run inside an API-queue job of
+// Read + write are one transaction in the global commit lane. Callers run inside an API-queue job of
 // some realm (possibly not the target realm), never inside withRealmStorageCommit, so this cannot nest the
 // lane; and it does not enqueue into the target realm's API queue (which another realm's job awaiting it
 // could deadlock against). The read overlays any coalesced realm patch, so nothing newer is reverted.
@@ -1172,7 +1169,7 @@ function overlayActiveProductionEventModifier(store,product){
   }
   return Math.max(-99,Math.min(99,modifier));
 }
-// v2.5.345 base rate/level from the game's constants for the phase in the stored auth-data (temporals.economyState),
+// Base rate/level from the game's constants for the phase in the stored auth-data (temporals.economyState),
 // × abundance % for the building when the game has shown it. null when anything is missing.
 function overlayGameBaseRate(store,constants,resourceId,buildingId){
   try{
@@ -1183,7 +1180,7 @@ function overlayGameBaseRate(store,constants,resourceId,buildingId){
     return Number.isFinite(ab)&&ab>0?base*ab/100:base;
   }catch{return null;}
 }
-// v2.5.345 the game's speed formula: rate = base × event × 1/(1 − bonus/100). Frozen plans record it.
+// The game's speed formula: rate = base × event × 1/(1 − bonus/100). Frozen plans record it.
 const OVERLAY_SPEED_FORMULA='game-divide';
 function overlayCompanyProductionModifier(store){
   const n=Number(store?.authData?.authCompany?.productionModifier);
@@ -1222,10 +1219,6 @@ function overlayVwap(store,id,quality,realm){
 function overlayMarketPriceHit(store,id,quality,realm,opts){
   if(!Number.isInteger(Number(realm))||![0,1].includes(Number(realm)))return null;
   return globalThis.SCM_MARKET_CORE.marketPrice(store,Number(realm),id,quality,{...opts,mode:'exact'})||null;
-}
-function overlayCurrentMarketPrice(store,id,quality,realm,opts){
-  if(!Number.isInteger(Number(realm))||![0,1].includes(Number(realm)))return null;
-  return globalThis.SCM_MARKET_CORE.marketPrice(store,Number(realm),id,quality,{...opts,mode:'exact'})?.price??null;
 }
 function overlayIncomingContractMarketComparison(store,contract,realm,opts){
   // One reference for the contract badge, savings and verdict: cheapest at the
@@ -1370,16 +1363,13 @@ function accountingWeekLedgerCacheComplete(store,boundaryMs,recentRows=null){
       return Number.isFinite(ms)&&ms<boundary;
     }));
   if(!coverageProven)return false;
+  // A completed ledger is not ready unless the summary itself is complete.
+  if(!summary || !Array.isArray(summary.netProfit) || !Array.isArray(summary.gross))return false;
   // cashflow/recent is the incremental freshness feed. If its oldest captured
   // transaction is newer than the completed ledger's latest transaction, more
   // than the recent window may have arrived since the full crawl and the
   // durable cache is no longer provably gap-free. Force one authoritative
   // cursor crawl instead of silently losing sales.
-  // A completed ledger is not ready unless the summary itself is complete.
-  // The old check could treat a populated raw ledger as ready even when the
-  // Net/Gross summary had not been committed yet, which allowed Overview to
-  // render a partial result during the sync handoff.
-  if(!summary || !Array.isArray(summary.netProfit) || !Array.isArray(summary.gross))return false;
   if(Array.isArray(recentRows)&&recentRows.length&&Number.isFinite(summaryEnd)){
     const recentDates=recentRows.map(x=>Date.parse(String(x?.datetime||''))).filter(Number.isFinite);
     if(recentDates.length){
@@ -1522,9 +1512,8 @@ async function recordBackgroundJobEvent(realm,event={}){
   const n=validRealmNumber(realm);if(n==null)return {ok:false,error:'Invalid realm for background job history.'};
   const key=realmKeyFromRealm(n);if(!key)return {ok:false,error:'Invalid realm for background job history.'};
   const normalized={id:`${Date.now()}-${Math.random().toString(36).slice(2,8)}`,realm:n,job:String(event.job||'unknown'),trigger:String(event.trigger||'unknown'),startedAt:event.startedAt||new Date().toISOString(),finishedAt:event.finishedAt||new Date().toISOString(),durationMs:Math.max(0,Number(event.durationMs)||0),outcome:['success','partial','failure','skipped','running','rate-limited','deferred-core-sync'].includes(event.outcome)?event.outcome:'failure',requested:Number.isFinite(Number(event.requested))?Number(event.requested):null,fetched:Number.isFinite(Number(event.fetched))?Number(event.fetched):null,refreshed:Number.isFinite(Number(event.refreshed))?Number(event.refreshed):null,checked:Number.isFinite(Number(event.checked))?Number(event.checked):null,failed:Number.isFinite(Number(event.failed))?Number(event.failed):null,cached:Number.isFinite(Number(event.cached))?Number(event.cached):null,stale:Number.isFinite(Number(event.stale))?Number(event.stale):null,error:event.error?String(event.error).slice(0,400):null,details:event.details&&typeof event.details==='object'?event.details:{}};
-  // v2.5.327 mobile: job history lives in its own small key. Appending an entry used to read and rewrite
-  // the whole realm store (several MB) under the realm write lock, several times a minute while the game
-  // was open. Entries for one realm are appended through a serial queue so none are lost.
+  // Job history lives in its own small key so appending an entry does not rewrite the whole realm store under the
+  // realm write lock. Entries for one realm are appended through a serial queue so none are lost.
   const histKey=backgroundJobHistoryKey(n);
   const run=(backgroundJobQueues.get(n)||Promise.resolve()).then(async()=>{
     const raw=(await chrome.storage.local.get({[histKey]:null}))[histKey];
@@ -1538,7 +1527,7 @@ async function recordBackgroundJobEvent(realm,event={}){
   backgroundJobQueues.set(n,run.catch(()=>{}));
   return run;
 }
-// v2.5.331 production cost history lives in its own key (scmProductionCostHistory:<realm>), written through a
+// Production cost history lives in its own key (scmProductionCostHistory:<realm>), written through a
 // serial queue and never awaited by callers, so it can be called from inside a realm-store transaction
 // without touching the realm lock. No network work here.
 const productionCostQueues=new Map();
@@ -1556,10 +1545,10 @@ function queueProductionCostHistory(realm,entries,opts={}){
   productionCostQueues.set(n,run.catch(()=>{}));
   return run.catch(()=>({ok:false}));
 }
-// 2.5.387 Analyze ledger archive: sale rows of every captured cash-flow page + the time each page proves complete.
+// Analyze ledger archive: sale rows of every captured cash-flow page + the time each page proves complete.
 function ledgerArchiveKey(realm){return `scmLedgerArchive:${Number(realm)}`;}
 const ledgerArchiveQueues=new Map();
-// P2: every cash-flow response used to rewrite the ~166 KB archive key. Pages are now batched per realm for
+// Cash-flow pages are batched per realm (not one ~166 KB archive write per response) for
 // LEDGER_ARCHIVE_BATCH_MS and merged in arrival order in one read/write; each caller's promise resolves with
 // the result of the write that contains its pages. flushLedgerArchive(n) writes the batch now.
 const LEDGER_ARCHIVE_BATCH_MS=2000;
@@ -1593,13 +1582,13 @@ function flushLedgerArchive(realm){
 function discardPendingLedgerArchive(){
   for(const [n,batch] of [...ledgerArchivePending.entries()]){if(batch.timer)clearTimeout(batch.timer);batch.resolve({ok:false,discarded:true});ledgerArchivePending.delete(n);}
 }
-// 2.5.388 Daily-walk ledger catch-up: cashflow/recent holds only the newest 30 rows, so on days without a Sync most of
+// Daily-walk ledger catch-up: cashflow/recent holds only the newest 30 rows, so on days without a Sync most of
 // the day's rows were never captured. Walk /cashflow/<id>/ back from the oldest row of the newest archived stretch
 // only until a page reaches the stretch before it (~5 pages a day). Each page goes through saveData, which archives it.
 const LEDGER_CATCHUP_MAX_PAGES=40;
 async function catchUpLedgerArchive(realm,reason='daily-walk'){
   const n=validRealmNumber(realm); if(n==null)return {ok:false,error:'Invalid realm.'};
-  await flushLedgerArchive(n); // the refreshed recent page is archived first (P2: including a pending batch)
+  await flushLedgerArchive(n); // the refreshed recent page is archived first (including a pending batch)
   const plan=globalThis.SCM_ANALYZE_CORE.catchUpPlan((await chrome.storage.local.get({[ledgerArchiveKey(n)]:null}))[ledgerArchiveKey(n)]);
   if(!plan)return {ok:true,pages:0,caughtUp:true};
   let cursor=plan.startId,pages=0,oldest=plan.startAt;const seen=new Set();
@@ -1614,7 +1603,7 @@ async function catchUpLedgerArchive(realm,reason='daily-walk'){
   }
   return {ok:true,pages,caughtUp:!cursor||oldest<=plan.stopAt,capped:pages>=LEDGER_CATCHUP_MAX_PAGES&&oldest>plan.stopAt};
 }
-// v2.5.389 Ledger cursor pages are kept in the realm store only while recent (see SCM_ANALYZE_CORE.pruneLedgerPages);
+// Ledger cursor pages are kept in the realm store only while recent (see SCM_ANALYZE_CORE.pruneLedgerPages);
 // their rows live in scmLedgerArchive. accountingCapture keeps /recent/ only.
 const LEDGER_CURSOR_PAGE_RX=/\/api\/v2\/companies\/me\/cashflow\/\d+\/?$/i;
 function pruneStoredLedgerPages(map){const f=globalThis.SCM_ANALYZE_CORE?.pruneLedgerPages;return f?f(map).map:map;}
@@ -1644,7 +1633,7 @@ async function compactLedgerPagesOnce(){
   await rawStorageSet({[FLAG]:true});
   return {ok:true,...out};
 }
-// 2.5.392 Statement history: the game numbers day statements by age (/day/0/ = last finished day), so the store only
+// Statement history: the game numbers day statements by age (/day/0/ = last finished day), so the store only
 // ever held the latest 14. Every computed day statement is also kept by its own date in scmStatementHistory:<realm>
 // ({ 'income-statement': { '<date>': data }, 'cashflow-statement': …, 'balance-sheet': … }), ~1 KB a day, never pruned.
 const STATEMENT_DAY_RX=/\/api\/v2\/companies\/me\/(income-statement|cashflow-statement|balance-sheet)\/day\/\d+\/?$/;
@@ -1713,22 +1702,22 @@ async function seedProductionCostHistoryOnce(){
   return {ok:true,seeded:out};
 }
 setTimeout(()=>{seedProductionCostHistoryOnce().catch(()=>{});},4000);
-// v2.5.333 notifications. Settings in scmNotifySettings {productionFinished:bool}. Production-finished alerts use the
+// Notifications. Settings in scmNotifySettings (fields: NOTIFY_DEFAULTS). Production-finished alerts use the
 // game's own busy.started + busy.duration; one alarm per running batch, named scm-prodfin:<realm>:<buildingId>:<finishMs>.
-// No network work. Whether the phone shows them depends on the browser's support for extension notifications.
+// Whether the phone shows them depends on the browser's support for extension notifications.
 const NOTIFY_SETTINGS_KEY='scmNotifySettings';
 const NOTIFY_DEFAULTS={productionFinished:true,sales:true,priceTargets:[],bigMove:true,bigMovePct:5,incomingContracts:true,dailySummary:true,dailySummaryTime:'08:00',costChange:true,costChangePct:3,idle:true,idleHours:1,undercut:true,unprofitable:true,jobTrouble:true,economyChange:true};
 async function notifySettings(){const v=(await chrome.storage.local.get({[NOTIFY_SETTINGS_KEY]:null}))[NOTIFY_SETTINGS_KEY];return {...NOTIFY_DEFAULTS,...(v&&typeof v==='object'?v:{})};}
-// v2.5.334 notification state (dedupe/re-arm) in its own key, written through one serial queue.
+// Notification state (dedupe/re-arm) in its own key, written through one serial queue.
 const NOTIFY_STATE_KEY='scmNotifyState';let notifyStateQueue=Promise.resolve();
 function updateNotifyState(mut){const run=notifyStateQueue.then(async()=>{const cur=(await chrome.storage.local.get({[NOTIFY_STATE_KEY]:{}}))[NOTIFY_STATE_KEY]||{};const next=await mut({...cur});if(next)await rawStorageSet({[NOTIFY_STATE_KEY]:next});return next;});notifyStateQueue=run.catch(()=>{});return run;}
 let notifyRecipesMemo=null;
-// v2.5.345 recipe inputs/transport come from the game's constants (scmGameConstants) when present.
+// Recipe inputs/transport come from the game's constants (scmGameConstants) when present.
 async function gameRecipesFromBundle(list){try{const c=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;return globalThis.SCM_TOOLS_CORE.recipesFromGameConstants(list,c);}catch{return Array.isArray(list)?list:[];}}
 globalThis.__scmOwnWriteHooks?.push(items=>{if(Object.prototype.hasOwnProperty.call(items,'scmGameConstants')){notifyRecipesMemo=null;gameOverlayAssetsPromise=null;}});
 async function notifyRecipes(){if(notifyRecipesMemo)return notifyRecipesMemo;try{const list=await gameRecipesFromBundle(await (await fetch(chrome.runtime.getURL('recipes.json'))).json());const byId=new Map(),names=new Map();for(const r of Array.isArray(list)?list:[]){byId.set(Number(r.id),r);names.set(Number(r.id),String(r.name||''));}notifyRecipesMemo={byId,names};}catch{notifyRecipesMemo={byId:new Map(),names:new Map()};}return notifyRecipesMemo;}
 async function notifyRealmStore(realm){return (await chrome.storage.local.get({[`scmRealmStore:${realm}`]:null}))[`scmRealmStore:${realm}`]||{};}
-// 5 + 6: after each SimcoTools current-price update.
+// After each SimcoTools current-price update.
 async function notifyAfterPriceUpdate(realm){
   const n=validRealmNumber(realm);if(n==null)return;const cfg=await notifySettings();
   const wantTargets=Array.isArray(cfg.priceTargets)&&cfg.priceTargets.some(t=>Number(t?.realm??n)===n);
@@ -1742,13 +1731,13 @@ async function notifyAfterPriceUpdate(realm){
     return state;
   });
 }
-// 9: whenever the incoming-contracts list is captured. First capture only records what exists.
+// Whenever the incoming-contracts list is captured. First capture only records what exists.
 async function notifyIncomingContracts(realm,data){
   const n=validRealmNumber(realm);if(n==null)return;const cfg=await notifySettings();if(!cfg.incomingContracts)return;
   const {names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE;
   await updateNotifyState(async state=>{const key=`contracts:${n}`;const r=N.newIncomingContracts(data,state[key],names,n);state[key]=r.seen;for(const f of r.fresh)await scmNotify(`contract-${n}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,f.title,f.message);return state;});
 }
-// 12: daily summary alarm at the chosen local time.
+// Daily summary alarm at the chosen local time.
 async function scheduleDailySummary(){const cfg=await notifySettings();await chrome.alarms.clear('scm-daily-summary');if(cfg.dailySummary)await scmAlarmCreate('scm-daily-summary',{when:globalThis.SCM_NOTIFY_CORE.nextDailyTime(cfg.dailySummaryTime),periodInMinutes:1440});}
 async function fireDailySummary(){
   const cfg=await notifySettings();if(!cfg.dailySummary)return;const {names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE;
@@ -1761,7 +1750,7 @@ async function fireDailySummary(){
   }
 }
 chrome.alarms.onAlarm.addListener(a=>{if(a?.name==='scm-daily-summary')fireDailySummary().catch(()=>{});});
-// v2.5.335 follow-up after a finished batch: idle or not collected. Decided only from building data captured
+// Follow-up after a finished batch: idle or not collected. Decided only from building data captured
 // after the finish time; if none yet, look again in an hour (up to 3 times).
 async function fireFollowUp(name){
   const clearGen=extensionClearGeneration;
@@ -1777,7 +1766,7 @@ async function fireFollowUp(name){
   if(r.title)await scmNotify(`followup-${realm}-${bid}-${finishMs}`,r.title,r.message);
 }
 chrome.alarms.onAlarm.addListener(a=>{if(String(a?.name||'').startsWith('scm-followup:')){forgetFollowupAlarm(a.name).catch(()=>{});fireFollowUp(a.name).catch(()=>{});}});
-// 7 + 8 when an exchange order book is captured (by the game or the Manager); 10 after a warehouse update.
+// When an exchange order book is captured (by the game or the Manager), and after a warehouse update.
 async function notifyOrderBook(realm,resourceId,rows){
   const n=validRealmNumber(realm);if(n==null)return;const cfg=await notifySettings();if(!cfg.undercut&&!cfg.unprofitable)return;
   if(cfg.undercut)await refreshMarketOrders(n);
@@ -1791,7 +1780,7 @@ async function notifyOrderBook(realm,resourceId,rows){
     return state;
   });
 }
-// v2.5.350 sales and accepted contracts from the cash-flow ledger the game/Manager just captured. No network.
+// Sales and accepted contracts from the cash-flow ledger the game/Manager just captured. No network.
 async function notifySales(realm,data){
   const n=validRealmNumber(realm);if(n==null)return;const cfg=await notifySettings();if(!cfg.sales)return;
   const rows=Array.isArray(data?.data)?data.data:(Array.isArray(data)?data:[]);if(!rows.length)return;
@@ -1802,7 +1791,7 @@ async function notifyJobTrouble(realm,event){
   const n=validRealmNumber(realm);if(n==null)return;const cfg=await notifySettings();if(!cfg.jobTrouble)return;
   await updateNotifyState(async state=>{const key=`jobs:${n}`;let pricesAt=null;if(/price|vwap/i.test(String(event?.job||''))){const st=await notifyRealmStore(n);pricesAt=st?.liveMarketPriceData?.updatedAt||null;}const r=globalThis.SCM_NOTIFY_CORE.jobTrouble({counts:state[key]||{},event,realm:n,pricesUpdatedAt:pricesAt});state[key]=r.counts;if(r.fire)await scmNotify(`jobs-${n}-${Date.now()}`,r.fire.title,r.fire.message);return state;});
 }
-// 2: a new production run costs noticeably more/less than the last one (only runs started in the last 24 h).
+// A new production run costs noticeably more/less than the last one (only runs started in the last 24 h).
 async function notifyCostChanges(realm,history,newEntries){
   const n=validRealmNumber(realm);if(n==null||!newEntries.length)return;const cfg=await notifySettings();if(!cfg.costChange)return;
   const {names}=await notifyRecipes();
@@ -1882,9 +1871,8 @@ async function fireProductionFinished(name){
   const b=(Array.isArray(st.buildings)?st.buildings:[]).find(x=>Number(x?.id)===bid)||{id:bid,name:`Building ${bid}`};
   const {names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE;
   if(clearGen!==extensionClearGeneration)return;
-  if(cfg.productionFinished){const r=N.batchFinishedMessage({building:b,store:st,realm,names,...(await marketOwnOpts(st,realm))});await scmNotify(`prodfin-${realm}-${bid}-${m[3]}`,r.title,r.message);}
-  // v2.5.350 'Not enough inputs to repeat a finished batch' removed at the user's request.
-  // 4 + 11: look again idleHours after the finish (idle, or still not collected).
+  {const r=N.batchFinishedMessage({building:b,store:st,realm,names,...(await marketOwnOpts(st,realm))});await scmNotify(`prodfin-${realm}-${bid}-${m[3]}`,r.title,r.message);}
+  // Look again idleHours after the finish (idle, or still not collected).
   const st0=Date.parse(String(b?.busy?.started||''));
   if(cfg.idle&&Number.isFinite(st0)){const h=Math.max(0.25,Number(cfg.idleHours)||1);await createFollowupAlarm(`scm-followup:${realm}:${bid}:${st0}:${m[3]}:0`,Number(m[3])+h*3600e3>Date.now()?Number(m[3])+h*3600e3:Date.now()+60000,clearGen);}
 }
@@ -1893,9 +1881,8 @@ try{chrome.notifications?.onClicked?.addListener(id=>{scmClearAlertBadge();if(St
 function backgroundJobHistoryKey(realm){return `scmBackgroundJobs:${Number(realm)}`;}
 const backgroundJobQueues=new Map();
 
-// v2.5.344 (user's exports 2026-10-23): on a slow phone connection the game's own API answers took 14–70 s,
-// so the background warehouse refresh (8 s × 2 attempts) failed 18 times in an hour and the 10 s overlay poll
-// kept re-firing it. One attempt with a longer page timeout; overlay-triggered refreshes pause after a failure.
+// On a slow phone connection game API answers can take 14–70 s, so the background warehouse refresh makes one
+// attempt with a longer page timeout, and overlay-triggered refreshes pause after a failure.
 const WAREHOUSE_REFRESH_PAGE_TIMEOUT_MS=25000;
 const WAREHOUSE_OVERLAY_FAILURE_BACKOFF_MS=60000;
 const warehouseOverlayBackoffUntil=new Map();
@@ -1920,7 +1907,7 @@ async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000){
     return {ok:true,cached:true,rows:store.warehouseResources.length};
   }
   const companyId=Number(store.authData?.authCompany?.companyId||store.authData?.authCompany?.id);
-  // v2.5.345 nothing to refresh yet (auth-data not captured): a skip, not a failure in the background-jobs count.
+  // Nothing to refresh yet (auth-data not captured): a skip, not a failure in the background-jobs count.
   if(!Number.isFinite(companyId)||companyId<=0)return {ok:false,notReady:true,error:'Realm company ID unavailable.'};
   const activeKey=s.activeRealmKey;
   if(activeKey!==key)return {ok:false,stale:true,error:'Realm is not the active game session.'};
@@ -2007,7 +1994,6 @@ function foldHigherQualityStock(detailRows,producedKeys,keepKeys){
   }
   return out.filter(r=>!drop.has(r));
 }
-globalThis.SCMFoldHigherQualityStock=foldHigherQualityStock;
 
 function overlayProductionRunHours(store){
   const n=Number(store?.productionRunHours);
@@ -2051,12 +2037,11 @@ async function ensureFrozenProductionRatesForRealmUnlocked(realm){
   const key=realmKeyFromRealm(target);
   if(!key)return {ok:false,error:'Invalid realm.'};
   let store={...(latest.realmStores?.[key]||{})};
-  const rootRealm=validRealmNumber(latest?.activeRealmKey!=null?String(latest.activeRealmKey).replace('realm:',''):latest?.selectedRealm);
   const buildings=realmStoredBuildings(store,latest,target);
   if(!buildings.length)return {ok:true,captured:0,requested:0,plans:0};
   const assets=await gameOverlayAssets();
   const companyModifier=Number(store?.authData?.authCompany?.productionModifier);
-  // v2.5.341 game formula: speed bonus divides by (1 − bonus/100).
+  // Game formula: speed bonus divides by (1 − bonus/100).
   const companyFactor=Number.isFinite(companyModifier)?(companyModifier<100?1/(1-companyModifier/100):0):1;
   const productionBuildings=buildings.filter(b=>b&&String(b?.category||'').toLowerCase()==='production');
   const liveProductionIds=new Set(productionBuildings.map(b=>Number(b?.id)).filter(n=>Number.isFinite(n)&&n>0));
@@ -2195,7 +2180,7 @@ async function ensureFrozenProductionRatesForRealmUnlocked(realm){
       }
     }
     if(!(baseRatePerLevel>0)){
-      // v2.5.345 the game's own base rate for the current economy phase (constants), × the building's abundance
+      // The game's own base rate for the current economy phase (constants), × the building's abundance
       // where the game shows one. The bundled normal-economy file is only the last resort (it was stale, e.g. Steak +76%).
       if(gameConstantsForRates===undefined){try{gameConstantsForRates=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants||null;}catch{gameConstantsForRates=null;}}
       const gameBase=overlayGameBaseRate(store,gameConstantsForRates,rid,b?.id);
@@ -2246,7 +2231,6 @@ async function ensureFrozenProductionRatesForRealmUnlocked(realm){
       }
       captured++;
       plans++;
-      latest=verified;
       store={...(verifiedStore||store)};
     }catch(e){
       // Keep the building unresolved rather than manufacturing a fallback rate.
@@ -2428,7 +2412,7 @@ async function buildGameOverlayData(store,realm,globalState){
   const overlayImageStore=await resourceImagesStore();
   const rows=detailRows.map(r=>{
     const file=assets.images[String(r.id)];
-    // v2.5.327: never embed base64 images in the overlay payload when the game URL is known.
+    // Never embed base64 images in the overlay payload when the game URL is known.
     const local=file?'':(overlayImageStore.cache?.[String(r.id)]||store?.resourceImageCache?.[String(r.id)]||store?.resourceImageData?.[String(r.id)]||'');
     const name=String(assets.names.get(String(r.id))||grouped.find(x=>Number(x.id)===Number(r.id))?.name||`Resource #${r.id}`);
     const quality=Number(r.quality)||0;
@@ -2443,7 +2427,7 @@ async function buildGameOverlayData(store,realm,globalState){
     const marketPrice=marketHit?.price??null,marketPriceQuality=marketPrice!=null?quality:null;
     const marketPriceSource=marketPrice!=null?(marketHit.source||null):null,marketPriceStale=marketPrice!=null&&marketHit.stale===true;
     const vwap=overlayVwap(store,r.id,quality,realm);
-    // 2.5.347 production surplus for this resource+quality (game-page Sell helper "Surplus").
+    // Production surplus for this resource+quality (game-page Sell helper "Surplus").
     const surplus=Math.max(0,Number(productionSurplusByKey.get(key))||0);
     return {...r,etaRuns:etaRunsByKey.get(key)||[],contracted:netContracts,incoming,outgoing,leftover:left,difference:left,warehouseOnlyLeft:left,surplus,name,quality,vwap,marketPrice,marketPriceQuality,marketPriceExact:marketPriceQuality===quality,marketPriceSource,marketPriceStale,image:local||(file?`${assets.imageBase}${file}`:'')};
   }).filter(r=>{
@@ -2494,7 +2478,7 @@ function defaultRealmValue(key){
   if(key==='gameLocalStorageSnapshot') return null;
   if(key==='criticalDataBaseline') return {...DEFAULTS.criticalDataBaseline};
   if(key==='marketQueueStatus') return {...DEFAULTS.marketQueueStatus};
-  if(key==='buildingAlarms'||key==='productionEventMonitor'||key==='resourceImageCacheStatus') return {};
+  if(key==='buildingAlarms'||key==='productionEventMonitor') return {};
   if(key==='accountingWeekLedgerStatus') return null;
   if(key==='accountingDayWalkStatus') return null;
   if(key==='accountingDailySeries') return null;
@@ -2721,7 +2705,7 @@ async function ensureRealmStorageMigration(){
       }
       if(storesChanged) await storageSet({realmStores:cleanStores});
       if(Object.keys(extractedPlannerStates).length||Object.keys(extractedOverlaySnapshots).length){try{await rawStorageSet({...extractedPlannerStates,...extractedOverlaySnapshots});}catch{}}
-      // Physical realm stores are authoritative in schema v12+. A leftover
+      // Physical realm stores are authoritative. A leftover
       // root realmStores blob is stale legacy data and must not remain available
       // to any future fallback path or storage export.
       try{
@@ -2800,7 +2784,7 @@ async function ensureRealmStorageMigration(){
     const active=validRealmNumber(s.activeRealmKey?.replace(/^realm:/,'')??rootRealm??selected);
     const patch={realmStores:migrated,realmIsolationSchemaVersion:REALM_ISOLATION_SCHEMA,activeRealmKey:active!=null?realmKeyFromRealm(active):null,selectedRealm:selected!=null?selected:null};
     // Clear every realm-scoped root mirror. It will be rehydrated from the
-    // selected realm store by activateRealmByRealm below.
+    // selected realm store by activateRealmByRealmUnlocked below.
     for(const k of REALM_SCOPED_KEYS) patch[k]=defaultRealmValue(k);
     await storageSet(patch);
     // Physical realm stores are now authoritative. Remove the old monolithic
@@ -2836,7 +2820,6 @@ function isRealmSensitiveAccountingUrl(url){return /\/api\/(?:v2\/companies\/(?:
 // Serialize their storage transactions so one response cannot overwrite the
 // warehouse/endpoint data written by another response that was captured a
 // moment earlier. This is especially important during the 5-page UI Sync.
-const apiStorageQueues=new Map();
 const apiStorageCommitQueues=new Map();
 const apiStorageSchedulers=new Map();
 function shouldPersistPassiveApiCaptureDuringSync(session,url,method='GET'){
@@ -2860,11 +2843,8 @@ function enqueueApiStorage(task,realm=null,options={}){
   const key=validRealmNumber(realm)!=null?`realm:${validRealmNumber(realm)}`:'unscoped';
   let scheduler=apiStorageSchedulers.get(key);
   if(!scheduler){
-    scheduler={queue:[],running:false,idlePromise:Promise.resolve(),resolveIdle:null};
+    scheduler={queue:[],running:false};
     apiStorageSchedulers.set(key,scheduler);
-  }
-  if(!scheduler.running&&!scheduler.queue.length){
-    scheduler.idlePromise=new Promise(resolve=>{scheduler.resolveIdle=resolve;});
   }
   const job={task,realm,priority:Boolean(options?.priority),url:String(options?.url||''),resolve:null,reject:null};
   const result=new Promise((resolve,reject)=>{job.resolve=resolve;job.reject=reject;});
@@ -2876,7 +2856,6 @@ function enqueueApiStorage(task,realm=null,options={}){
     if(lastSameUrl>=0)insertAt=Math.max(insertAt,lastSameUrl+1);
     scheduler.queue.splice(insertAt,0,job);
   }else scheduler.queue.push(job);
-  apiStorageQueues.set(key,scheduler.idlePromise);
   if(!scheduler.running)runApiStorageScheduler(key,scheduler);
   return result;
 }
@@ -2891,16 +2870,12 @@ async function runApiStorageScheduler(key,scheduler){
     }
   }finally{
     scheduler.running=false;
-    if(!scheduler.queue.length){
-      scheduler.resolveIdle?.();
-      if(apiStorageQueues.get(key)===scheduler.idlePromise)apiStorageQueues.delete(key);
-    }else runApiStorageScheduler(key,scheduler);
+    if(scheduler.queue.length)runApiStorageScheduler(key,scheduler);
   }
 }
 // Barrier, not "wait until idle": resolve once every job queued before this
 // call has committed. Passive game captures keep arriving while the player
-// browses, so waiting for a fully idle queue could starve Sync (R2 2.5.377:
-// "API storage queue drain timed out after 20 seconds" on a 5.9 MB store).
+// browses, so waiting for a fully idle queue could starve Sync.
 function apiStorageQueueForRealm(realm){
   const n=validRealmNumber(realm);
   const scheduler=apiStorageSchedulers.get(`realm:${n}`);
@@ -2970,10 +2945,9 @@ async function saveEndpointUnlocked(url,method='GET',captureRealm=null,commit=tr
 async function saveEndpoint(url,method='GET',captureRealm=null){
   return enqueueApiStorage(()=>saveEndpointUnlocked(url,method,captureRealm),captureRealm);
 }
-// v2.5.361 performance: every request the game makes (dozens per page) sent API_SEEN, and each one rewrote the whole
-// realm store (~1 MB) just to stamp "seen at" in the endpoint list, which also pushed that store to every open page.
-// Now seen endpoints are collected for 20 s and written once; an endpoint already listed and seen in the last 10 min is
-// not written again.
+// API_SEEN arrives for every game request (dozens per page). Seen endpoints are collected for 20 s and written once,
+// so the realm store is not rewritten per request; an endpoint already listed and seen in the last 10 min is not
+// written again.
 const pendingEndpointSeen=new Map();let pendingEndpointSeenTimer=0;
 function queueEndpointSeen(url,method='GET',captureRealm=null){
   const n=validRealmNumber(captureRealm);
@@ -3117,7 +3091,7 @@ async function saveMarketCache(resource, value, receivedAt, capturedRealm=null){
 }
 async function saveResourceCatalog(catalog, receivedAt){
   if(!catalog||typeof catalog!=='object')return;
-  // P4: only the realm is needed here; the full store is read once, inside the lock.
+  // Only the realm is needed here; the full store is read once, inside the lock.
   const s={authData:DEFAULTS.authData,...(await chrome.storage.local.get({activeRealmKey:null}))}; // same fields state() gave here
   const realm=realmNumberFromKey(s.activeRealmKey||identityFromAuth(s.authData)); if(realm==null)return;
   return withRealmWriteLock(realm,async()=>{
@@ -3300,13 +3274,6 @@ async function saveGameStateUnlocked(message) {
   const region = message?.region && typeof message.region === 'object' ? message.region : null;
   const patch = {};
   if (warehouse) {
-    // Once the game has supplied a current /api/v3/resources/<companyId>/
-    // response, use that response as the authoritative set of inventory
-    // resource/quality keys. The game's localStorage snapshot can retain stale
-    // rows after a quality is removed; merging that snapshot as authoritative
-    // would re-introduce those rows (for example an old EC quality).
-    // Preserve any richer cost fields from the local snapshot for matching
-    // rows, but never let localStorage add keys absent from the API snapshot.
     // A fresh game-localStorage snapshot is the fastest live stock signal.
     // Do not wait for, or overwrite it with, an older API snapshot: doing that
     // made newly gathered resources appear late in the Manager. The API capture
@@ -3500,7 +3467,7 @@ const ACCOUNTING_SYNC_PATHS=[
 const ACCOUNTING_REFRESH_MAX_AGE_MS=5*60*1000;
 const ACCOUNTING_REFRESH_CONCURRENCY=4;
 const ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX='scm-accounting-week-refresh-r';
-// v2.5.370 After Sync, walk the game's Accounting page: Day → day buttons 0–6 (the game offers 0–13). Each tap counts
+// After Sync, walk the game's Accounting page: Day → day buttons 0–6 (the game offers 0–13). Each tap counts
 // only when the game's own /income-statement/day/<n>/ response is captured for this realm. Buttons are found by the
 // page structure (period bar = <label> + 4 mode buttons + 14 day buttons), never by their text (dates are locale text).
 const ACCOUNTING_DAY_WALK_ALARM_PREFIX='scm-accounting-day-walk-r';
@@ -3508,7 +3475,7 @@ const ACCOUNTING_DAY_WALK_DAYS=7;
 const ACCOUNTING_DAY_WALK_WAIT_MS=45000;
 const accountingDayWalkRunning=new Set();
 const dayWalkPageReturns=new Map(); // realm -> the page its Accounting day walk moved the tab away from
-// v2.5.371 Daily scheduled Accounting walk (user setting scmAccountingWalkSchedule {enabled, offsetMin, realm}).
+// Daily scheduled Accounting walk (user setting scmAccountingWalkSchedule {enabled, offsetMin, realm}).
 // Runs offsetMin after the time the game last finished the daily statements (the captured current income
 // statement's `date`), so it follows the game's rollover (and daylight-saving changes) instead of a fixed clock.
 const ACCOUNTING_WALK_DAILY_ALARM='scm-accounting-walk-daily';
@@ -3602,9 +3569,6 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
   const tab=await simTab();
   if(!tab?.id)return {ok:false,realm,error:'Open Sim Companies in a browser tab before refreshing Accounting.'};
   const current=await state(realm);
-  const key=realmKeyFromRealm(realm);
-  const store=current.realmStores?.[key]||{};
-  const companyId=Number(store.authData?.authCompany?.companyId||store.authData?.authCompany?.id||current.authData?.authCompany?.companyId||current.authData?.authCompany?.id)||0;
   const paths=ACCOUNTING_SYNC_PATHS.slice();
   const pending=force?paths:paths.filter(path=>!accountingEndpointFreshForRealm(current,path,realm));
   if(!pending.length)return {ok:true,realm,reason,requested:0,successful:paths.length,total:paths.length,skippedFresh:true};
@@ -3661,7 +3625,7 @@ function endpointRecordWithFailedAttempt(old,incomingStatus,realm){
 }
 async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=null,onTiming=null){
   if(!url?.startsWith('/api/'))return;
-  // v2.5.442: never store replies the Manager does not read (see SCM_STORAGE_CORE.UNUSED_ENDPOINT).
+  // Never store replies the Manager does not read (see SCM_STORAGE_CORE.UNUSED_ENDPOINT).
   if(globalThis.SCM_STORAGE_CORE?.UNUSED_ENDPOINT?.test(String(url||'')))return;
   // A successful GET that is not data (text, null, a boolean, an unlisted number), from any writer: it never replaces a record.
   if(Number(status)>=200&&Number(status)<300&&String(method||'GET').toUpperCase()==='GET'&&!endpointDataIsValid(url,data))return;
@@ -3718,10 +3682,10 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
       return;
     }
   }
-  // v2.5.334 new incoming contract notification (own state key, not awaited, no network).
+  // New incoming contract notification (own state key, not awaited, no network).
   if(incomingContractRealm&&Number(status)>=200&&Number(status)<300)notifyIncomingContracts(validRealmNumber(incomingContractRealm[1]),data).catch(()=>{});
   if(Number(status)>=200&&Number(status)<300&&capturedRealm!=null)logGameCapture(capturedRealm,url);
-  // v2.5.353 also on auth-data: on the phone the game does not load the buildings list at start (user's API
+  // Also on auth-data: on the phone the game does not load the buildings list at start (user's API
   // capture 2026-10-24), but it loads auth-data on every page load and every 3 min. Uses the stored buildings.
   {const isB=/\/api\/v2\/companies\/me\/buildings\/?(?:\?.*)?$/i.test(String(url||'')),isA=/\/api\/v3\/companies\/auth-data\//i.test(String(url||''));const r=capturedRealm??(isA?responseRealm:null);
    if((isB||isA)&&Number(status)>=200&&Number(status)<300&&r!=null)setTimeout(()=>{refreshAbundanceIfStale(r,isA?'game-auth-data':'game-buildings').catch(()=>{});},3000);}
@@ -3734,7 +3698,7 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
     await appendRealmQuarantine(validRealmNumber(before.selectedRealm??before.activeRealmKey?.replace(/^realm:/,'')),'apiData',{url,method:String(method||'GET').toUpperCase(),status:Number(status)||0,captureRealm:null,expectedRealm:validRealmNumber(before.selectedRealm),reason:'Accounting response missing capture realm; quarantined to prevent cross-realm contamination'});
     return;
   }
-  // v2.5.345 a game response with no realm tag and nothing in it that proves its realm is never filed under the
+  // A game response with no realm tag and nothing in it that proves its realm is never filed under the
   // active (last-synced) realm: that put R1 buildings/warehouse into the R2 store. page-hook now holds such
   // responses until the game's auth-data names the realm, so this only catches stragglers.
   if(!captureSession&&capturedRealm==null&&responseRealm==null&&companyRealm==null&&buildingRealm==null&&explicitUrlRealm==null&&switchHint==null){
@@ -3743,8 +3707,8 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   }
   const targetRealm=captureSession?.realm??responseRealm??capturedRealm??companyRealm??buildingRealm??explicitUrlRealm??switchHint??realmNumberFromKey(before.activeRealmKey||identityFromAuth(before.authData));
   const targetKey=targetRealm!=null?realmKeyFromRealm(targetRealm):null;
-  // v2.5.389 one read of the target realm store serves both the endpoint list and the patch (each read was a full store).
-  // R3: a capture with no realm tag runs in the 'unscoped' API queue, but its target realm (proven by the
+  // One read of the target realm store serves both the endpoint list and the patch.
+  // A capture with no realm tag runs in the 'unscoped' API queue, but its target realm (proven by the
   // response, company, building, URL or switch hint) has its own queue. Building whole maps (endpointData,
   // sellingHistory, ...) from a read taken outside that queue could overwrite a newer write made there, so the
   // read-build-commit tail runs in the target realm's queue. Deadlock-free: only the unscoped queue waits on a
@@ -3804,7 +3768,7 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
     (preserveCompletedStatement
       ?{...preservedEntry,lastAttempt:{status:incomingStatus,receivedAt:new Date().toISOString(),captureRealm:targetRealm}}
       :{status,data,receivedAt:new Date().toISOString(),captureRealm:targetRealm})};
-  // v2.5.389 ledger cursor pages: endpointData keeps only recent ones; accountingCapture never keeps them (rows are archived).
+  // Ledger cursor pages: endpointData keeps only recent ones; accountingCapture never keeps them (rows are archived).
   const ledgerCursorPage=LEDGER_CURSOR_PAGE_RX.test(String(url||''));
   const patch={endpointData:ledgerCursorPage?pruneStoredLedgerPages(endpointData):endpointData};
   if(isRealmSensitiveAccountingUrl(url) && !ledgerCursorPage && incomingStatus>=200 && incomingStatus<300 && data!=null){
@@ -3855,7 +3819,7 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
     }
   }
   {
-    // v2.5.331 production cost history: every past batch from the building history endpoint.
+    // Production cost history: every past batch from the building history endpoint.
     const hm=String(url||'').match(/\/api\/v2\/companies\/buildings\/(\d+)\/history\/?(?:\?.*)?$/i);
     if(hm&&incomingStatus>=200&&incomingStatus<300&&Array.isArray(data)){
       const bid=Number(hm[1]);const bn=(Array.isArray(working?.buildings)?working.buildings:[]).find(x=>Number(x?.id)===bid)?.name||'';
@@ -3865,9 +3829,6 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   if(isResourceUrl(url)){
     const rows=normalizeWarehouse(data);
     if(looksLikeWarehouseRows(rows)){
-      // Keep quantity/quality from the game's local snapshot while preserving
-      // richer cost fields from the resource API. Never discard a field merely
-      // because the later response omits it.
       const latestGameCapturedAt=Date.parse(String(working?.warehouseCapture?.gameStateCapturedAt||working?.warehouseCapture?.receivedAt||''));
       const nowIso=new Date().toISOString();
       const gameSnapshotIsFresh=working?.warehouseCapture?.source==='game-localStorage-live' && Number.isFinite(latestGameCapturedAt) && Date.now()-latestGameCapturedAt<5000;
@@ -4009,7 +3970,7 @@ function endpointPayloadsEqual(left,right){
 async function verifyDurableEndpointWrite(realm,path,startedAtMs,expectedData=null,expectedStatus=null,allowPreserved=false){
   const n=validRealmNumber(realm);
   if(n==null||!String(path||'').startsWith('/api/'))return {ok:false,reason:'invalid-realm-or-endpoint'};
-  // P1: durability means the physical key, so write the coalesced realm patch first (commit lane; callers of
+  // Durability means the physical key, so write the coalesced realm patch first (commit lane; callers of
   // this verifier are API-queue jobs or Sync, never a withRealmStorageCommit task).
   await flushRealmPatches(n);
   const physicalKey=realmStorageKey(n);
@@ -4030,14 +3991,14 @@ async function verifyDurableEndpointWrite(realm,path,startedAtMs,expectedData=nu
   if(expectedData!=null&&freshRecord&&!endpointPayloadsEqual(entry.data,expectedData))return {ok:false,reason:'stored-payload-mismatch'};
   return {ok:true,realm:n,path,status,receivedAt:entry.receivedAt||null,lastAttemptAt:entry.lastAttempt?.receivedAt||null,preservedPriorData:!freshRecord&&freshAttempt};
 }
-// v2.5.344: callers may pass {timeoutMs, attempts}. The page hook aborts its fetch at timeoutMs and the
+// Callers may pass {timeoutMs, attempts}. The page hook aborts its fetch at timeoutMs and the
 // background waits a short grace beyond it, so a slow game response is reported by the page, not cut off here.
 const PAGE_GET_BACKGROUND_GRACE_MS=2000;
 async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticLabel=null, options=null){
   const customTimeout=Number(options?.timeoutMs);
   const hasCustomTimeout=Number.isFinite(customTimeout)&&customTimeout>0;
   const timeoutMs=hasCustomTimeout?customTimeout:SYNC_PAGE_API_TIMEOUT_MS;
-  // v2.5.345 the page is always told the timeout (it used to fall back to its own 8 s for default callers).
+  // The page is always told the timeout.
   const raceMs=timeoutMs+PAGE_GET_BACKGROUND_GRACE_MS;
   const customAttempts=Number(options?.attempts);
   const attempts=Number.isInteger(customAttempts)&&customAttempts>0?customAttempts:SYNC_PAGE_API_ATTEMPTS;
@@ -4064,7 +4025,7 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
         new Promise((_,reject)=>setTimeout(()=>reject(new Error('Sim Companies page bridge timed out.')),raceMs))
       ]);
       traceDiag('pageget-response',{attempt,tabId:tab.id,ok:!!r?.ok,status:r?.status||0,error:r?.error||null});
-      // v2.5.345 a /me/ answer from a tab that is in the other realm belongs to that realm: never hand it to a
+      // A /me/ answer from a tab that is in the other realm belongs to that realm: never hand it to a
       // caller that will file it under targetRealm. (auth-data is exempt: Sync checks it and explains the mismatch.)
       const tr=validRealmNumber(targetRealm),rr=validRealmNumber(r?.captureRealm);
       if(r?.ok&&tr!=null&&rr==null&&/\/me\//.test(String(path))&&!/\/api\/v3\/companies\/auth-data\//.test(String(path))){traceDiag('pageget-realm-unknown',{attempt,tabId:tab.id,targetRealm:tr});return {ok:false,status:0,error:'The game tab has not shown which realm it is in yet.',realmUnknown:true};}
@@ -4123,7 +4084,7 @@ async function fetchBuildingHistoryForRealm(realm, buildingId){
   return {ok:true,cached:false,rows:Array.isArray(response.data)?response.data.length:0};
 }
 
-// v2.5.332 the game's Profit Calculator "Assumed wholesale price (based on the market)" is the cheapest exchange
+// The game's Profit Calculator "Assumed wholesale price (based on the market)" is the cheapest exchange
 // listing of ANY quality (user-verified 2026-10-23: $2,230 = cheapest Bulldozer listing, a Q0). The building card
 // asks for a fresh order book through the game tab: same request the Exchange page makes. Network first, then saveData
 // (which takes the realm lock) — no lock is held while fetching. One fetch per product per 5 min.
@@ -4310,7 +4271,7 @@ function filterVwapRowsToWarehouse(vwapRows, warehouseRows){
   const keys=warehouseVwapKeys(warehouseRows);
   return (vwapRows||[]).filter(r=>keys.has(simcoVwapHistoryKey(r.resourceId,r.quality)));
 }
-// v2.5.320: price observation log for the Tools tab (movers / price history). Kept under its own
+// Price observation log for the Tools tab (movers / price history). Kept under its own
 // storage key per realm so it never touches the realm store or sync write paths. Failures are swallowed.
 let priceLogQueue=Promise.resolve();
 function recordPriceObservations(realm,rows,atIso){
@@ -4558,8 +4519,8 @@ function vwapDatasetSignature(rows){
     .join('|');
 }
 
-// v2.5.381 SimcoTools / Sim Companies publish VWAP once a day; the old 15-minute cache downloaded the full 989-row
-// dataset after every Sync and hourly cycle (R2: 3 downloads in 20 min, ~9 s + a 6 MB store write each).
+// SimcoTools / Sim Companies publish VWAP once a day; each download is the full ~989-row dataset plus a large store
+// write.
 // After a download that CHANGED the data, the next one waits 20 h; while the data is unchanged (not published yet),
 // retry no sooner than every 3 h. That converges on ~1-3 downloads a day, at most ~3 h after the daily update.
 const VWAP_AFTER_CHANGE_MS=20*3600e3;
@@ -4586,7 +4547,6 @@ async function runVwapSyncUnlocked(options={}){
   const warehouseRows=Array.isArray(options.warehouseRows)&&options.warehouseRows.length?options.warehouseRows:(Array.isArray(targetStore.warehouseResources)?targetStore.warehouseResources:[]);
   const cached=targetStore.vwapData||null;
   const cachedRows=Array.isArray(cached?.rows)&&Number(cached?.sourceRealm)===realm?cached.rows:[];
-  const cachedAt=Date.parse(String(cached?.fetchedAt||''));
   const cacheFresh=!options.force&&vwapCacheFresh(cached,Date.now())&&!cached?.stale&&!cached?.fallback&&Number(cached?.sourceRealm)===realm;
   const today=new Date().toISOString().slice(0,10);
   if(cachedRows.length&&cacheFresh){
@@ -4713,7 +4673,7 @@ function normalizeSimcoMarketSnapshot(data,resourceId,quality){
   const dailyCandleVolume=extractSimcoNumber(lastDay,['volume','tradeVolume','quantity','count']);
   return {resourceId:Number(resourceId),quality:Number(quality),price,volume,volumePeriod,lastTrade,open,close,high,low,candleVolume:candleVolume??dailyCandleVolume,vwap:fallbackVwap,trend:simcoTrendFromSummary(root),raw};
 }
-// v2.5.330: SimcoTools' summary already carries the recent trade closes and the
+// SimcoTools' summary already carries the recent trade closes and the
 // day-over-day VWAP change. Keep a compact copy so Price movers / Price history have
 // real 24 h data immediately instead of waiting days for the Manager's own snapshots.
 function simcoTrendFromSummary(root){
@@ -4789,7 +4749,7 @@ function validPositiveMarketNumber(value){
   const n=Number(value);
   return Number.isFinite(n)&&n>0?n:null;
 }
-// v2.5.330: Price history for one product/quality from SimcoTools (daily candles +
+// Price history for one product/quality from SimcoTools (daily candles +
 // recent trade closes). Cached per realm in its own storage key; no storage lock is
 // held while fetching.
 const PRICE_HISTORY_TTL_MS=3*60*60*1000;
@@ -4939,7 +4899,7 @@ async function runLiveMarketRefreshUnlocked(realmArg=null){
   await withRealmWriteLock(realm,async()=>{const latest=await state(realm),stores={...(latest.realmStores||{})},store={...(stores[key]||{})};stores[key]={...store,liveMarketPriceData:priceData,liveMarketProductCache:productCache};const rootPatch=key===latest.activeRealmKey?{liveMarketPriceData:priceData,liveMarketProductCache:productCache}:{};await storageSet({realmStores:stores,...rootPatch});});
   scheduleGameOverlayRefreshNotification(realm,150);
   const finishedAt=new Date().toISOString(),durationMs=Date.now()-jobStartedMs;
-  // v2.5.328: nothing downloaded because every price was still fresh (<15 min) is a skip, not a failure.
+  // Nothing downloaded because every price was still fresh (<15 min) is a skip, not a failure.
   const outcome=out.length?(failures.length?'partial':'success'):((freshCacheHits>0&&!failures.length)?'skipped':'failure');
   await recordBackgroundJobEvent(realm,{job:'market-current-price-stage',trigger:'scheduled-or-message',startedAt:jobStartedAt,finishedAt,durationMs,outcome,requested:pairs.length,fetched:out.length,refreshed:out.length,checked:pairs.length-failures.filter(f=>/cooldown/i.test(String(f.error||''))).length,cacheHits:freshCacheHits,cached:priceRows.filter(row=>row.stale).length,stale:priceRows.filter(row=>row.stale).length,error:outcome==='failure'?'No fresh current-price data returned.':null,details:{failed:failures.length,rateLimited:failures.filter(f=>f.rateLimited).length}}).catch(()=>{});
   if(outcome!=='failure')notifyAfterPriceUpdate(realm).catch(()=>{});
@@ -4960,10 +4920,8 @@ async function runLiveMarketRefresh(realmArg=null){
   return run;
 }
 
-// v2.5.328: the VWAP sync used to run entirely inside the realm storage queue, including its SimcoTools
-// downloads (hundreds of spaced requests, rate-limit cooldowns of minutes). While it ran, every other write
-// for that realm waited — so collecting resources in the game did not update the warehouse or the overlay
-// until the market download finished. The network work now runs outside the queue; each storage write is
+// The VWAP sync's network work (SimcoTools downloads: hundreds of spaced requests, rate-limit cooldowns) runs outside
+// the realm storage queue, so game captures keep updating the warehouse and overlay meanwhile; each storage write is
 // its own short queued transaction. VWAP runs are still serialized with each other.
 let vwapSyncTail=Promise.resolve();
 function vwapLockedStatus(patch={},realmArg=null){const r=validRealmNumber(realmArg??patch?.vwapRealm);return enqueueApiStorage(()=>setVwapStatusUnlocked(patch,realmArg),r);}
@@ -4981,7 +4939,7 @@ async function refreshRealmVwapDaily(reason='scheduled',realmArg=null){
   const s=await state();
   const realm=validRealmNumber(realmArg??s.activeRealmKey?.replace(/^realm:/,'')??s.authData?.authCompany?.realmId);
   if(realm==null)return {ok:false,error:'No active realm available for VWAP refresh.'};
-  // Legacy callers are redirected to the shared staged scheduler; this helper
+  // Redirect to the shared staged scheduler; this helper
   // must never start an independent SimcoTools request burst.
   return scheduleMarketCycle(realm,`legacy-vwap-${reason}`);
 }
@@ -5091,14 +5049,6 @@ async function ensureVwapWatchAlarm(reason='ensure'){
   }catch(e){return {ok:false,created:false,error:e?.message||String(e),reason};}
 }
 
-
-
-
-
-
-
-
-
 const RESOURCE_IMAGE_CACHE_TTL_MS = 7*24*60*60*1000;
 let resourceImageManifestPromise=null;
 async function resourceImageManifest(){
@@ -5124,9 +5074,8 @@ async function migrateResourceImageCache(){
   const imgs=await resourceImagesStore();
   return {cache:{...imgs.cache,...(store.resourceImageCache||{}),...(store.resourceImageData||{})},meta:{...imgs.meta,...(store.resourceImageMeta||{})},key};
 }
-// v2.5.361 performance: images are written to their own key only (scmResourceImages). Each image used to rewrite the
-// ~1 MB realm store and the ~2 MB image key, and read the full state three times; the weekly validation (also 1 min
-// after every extension update) did that for ~150 images in a row, flooding every open page with storage events.
+// Images are written to their own key only (scmResourceImages), never through the realm store, so the weekly
+// validation of ~150 images does not flood open pages with storage events.
 async function saveResourceImages(cachePatch={},metaPatch={}){
   if(!Object.keys(cachePatch).length&&!Object.keys(metaPatch).length)return;
   return withRealmStorageCommit(async()=>{
@@ -5136,7 +5085,7 @@ async function saveResourceImages(cachePatch={},metaPatch={}){
     resourceImagesMemo={cache:next.cache,meta:next.meta};
   });
 }
-// v2.5.379 the game's own image path per resource (market ticker: {kind,image}). The bundled manifest only guesses
+// The game's own image path per resource (market ticker: {kind,image}). The bundled manifest only guesses
 // file names; 31 of 151 guesses were wrong (e.g. smartphones.png vs the game's smart-phones.png) and never loaded.
 function capturedResourceImages(store){
   const out={};
@@ -5171,14 +5120,13 @@ async function fetchAndCacheResourceImage(id,{forceValidate=false,batch=null}={}
     const hash=await sha256Bytes(bytes);
     const changed=Boolean(cache[sid]&&previous.sha256&&previous.sha256!==hash);
     const dataUrl=bytesToDataUrl(bytes,mime);
-    let changedFinal=changed, validatedAt=new Date(now).toISOString();
-    changedFinal=Boolean(cache[sid]&&previous.sha256&&previous.sha256!==hash);
+    const validatedAt=new Date(now).toISOString();
     const sameImage=Boolean(cache[sid]&&previous.sha256===hash);
-    const metaNext={url,filename,sha256:hash,validatedAt,updatedAt:changedFinal||!previous.sha256?validatedAt:(previous.updatedAt||validatedAt),status:'verified'};
+    const metaNext={url,filename,sha256:hash,validatedAt,updatedAt:changed||!previous.sha256?validatedAt:(previous.updatedAt||validatedAt),status:'verified'};
     // unchanged image: only the small meta entry is updated (no 2 MB rewrite of the image data)
     if(batch){if(!sameImage)batch.cache[sid]=dataUrl;batch.meta[sid]=metaNext;}
     else await saveResourceImages(sameImage?{}:{[sid]:dataUrl},{[sid]:metaNext});
-    return {ok:true,dataUrl,cached:false,changed:changedFinal,validatedAt,url};
+    return {ok:true,dataUrl,cached:false,changed,validatedAt,url};
   }catch(e){
     if(cache[sid]) return {ok:true,dataUrl:cache[sid],cached:true,stale:true,error:e?.message||String(e)};
     return {ok:false,error:e?.message||String(e)};
@@ -5189,7 +5137,7 @@ async function syncAllResourceImages({forceValidate=false}={}){
   const manifest=await resourceImageManifest();
   const ids=Object.keys(manifest?.resources||{}).map(Number).filter(Number.isFinite);
   let updated=0,verified=0,failed=0;
-  // v2.5.361 one state read and ONE image write for the whole run (was one full read + two big writes per image).
+  // One state read and ONE image write for the whole run.
   const base=await migrateResourceImageCache();const s0=await state();const catalog=(base.key&&s0.realmStores?.[base.key]?.resourceCatalog)||s0.resourceCatalog||{};
   const batch={base,catalog,captured:capturedResourceImages(base.key&&s0.realmStores?.[base.key]),cache:{},meta:{}};
   const queue=[...ids], workers=Array.from({length:4},async()=>{
@@ -5227,7 +5175,6 @@ function criticalContractRowsFromStore(store){
   return rows;
 }
 function criticalDataCounts(store){
-  const ep=store?.endpointData&&typeof store.endpointData==='object'?store.endpointData:{};
   const contracts=criticalContractRowsFromStore(store).length;
   const vwap=Array.isArray(store?.vwapData?.rows)?store.vwapData.rows.length:0;
   return {contracts,vwap};
@@ -5277,7 +5224,7 @@ async function runCriticalDataGuard(reason='scheduled'){
 }
 
 const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX,ACCOUNTING_DAY_WALK_ALARM_PREFIX,ACCOUNTING_WALK_DAILY_ALARM,SYNC_AUTO_RETRY_ALARM_PREFIX];
-// v2.5.345 Chrome drops an extension's alarms when it is updated (and may on a browser restart), so the alarms that
+// Chrome drops an extension's alarms when it is updated (and may on a browser restart), so the alarms that
 // carry your state are re-created from storage: building reminders (buildingAlarms) and batch-finished alerts
 // (from the stored buildings). Storage reads + alarm calls only, no network, no lock.
 const FOLLOWUP_ALARMS_KEY='scmFollowupAlarms';
@@ -5332,7 +5279,7 @@ async function restorePersistedAlarms(reason='restore'){
         const name=`scm-building-${n}-${bid}`;if(!(await chrome.alarms.get(name))){await scmAlarmCreate(name,{when});out.buildingReminders++;}
       }
       if(Array.isArray(st.buildings)&&st.buildings.length)out.production.push(await scheduleProductionFinishAlarms(n,st.buildings));
-      // v2.5.370 a scheduled / interrupted Accounting day walk survives an update or restart.
+      // A scheduled / interrupted Accounting day walk survives an update or restart.
       const walk=st.accountingDayWalkStatus;
       if(walk&&(walk.status==='scheduled'||walk.status==='running')){const name=`${ACCOUNTING_DAY_WALK_ALARM_PREFIX}${n}`;if(!(await chrome.alarms.get(name))){await scmAlarmCreate(name,{when:Date.now()+15000});out.accountingDayWalk=(out.accountingDayWalk||0)+1;}}
       // The current-week ledger refresh that was waiting or retrying has the same problem.
@@ -5342,8 +5289,8 @@ async function restorePersistedAlarms(reason='restore'){
   }
   return out;
 }
-// v2.5.439 storage retention (user: "cut the storage to 90 days"). One pass over the time-series families; every
-// rule and what reads each family is in storage-core.js / research_notes/storage_inventory.md. Each standalone key is
+// Storage retention: 90 days. One pass over the time-series families; every
+// rule and what reads each family is in storage-core.js. Each standalone key is
 // pruned inside its own writer queue (no lost appends) and the realm-store fields under the realm storage queue.
 // Only keys that changed are written. Settings, tokens, snapshots, alarms, saved contracts and planner state are
 // never read here. Safe to run any number of times; a corrupt value is left as it is.
@@ -5426,9 +5373,8 @@ chrome.runtime.onInstalled.addListener(async()=>{
   });
   await scmLifecycleStep('installed:live-bridge-token',()=>migrateLiveBridgeToken());
   await scmLifecycleStep('installed:realm-migration',()=>ensureRealmStorageMigration());
-  // v2.5.345 an update used to clear every alarm, dropping the building reminders you set, batch-finished
-  // alerts, follow-ups, the daily summary and the constants refresh. Only the scheduler alarms re-created below
-  // (and retired legacy ones) are cleared now.
+  // Only the scheduler alarms re-created below (and retired legacy ones) are cleared; building reminders,
+  // batch-finished alerts, follow-ups, the daily summary and the constants refresh survive an update.
   await scmLifecycleStep('installed:clear-alarms',async()=>{for(const a of await chrome.alarms.getAll()){if(!INSTALL_KEEP_ALARM_PREFIXES.some(p=>String(a?.name||'').startsWith(p)))await chrome.alarms.clear(a.name);}});
   await scmLifecycleStep('installed:live-market-alarm',()=>ensureLiveMarketRefreshAlarm('installed'));
   await scmLifecycleStep('installed:order-book-alarm',()=>ensureOrderBookRefreshAlarm());
@@ -5442,7 +5388,7 @@ chrome.runtime.onInstalled.addListener(async()=>{
   await scmLifecycleStep('installed:storage-prune',()=>scmPruneStorage({reason:'installed'}));
   await scmLifecycleStep('installed:restore-alarms',()=>restorePersistedAlarms('installed'));
   await scmLifecycleStep('installed:accounting-walk',()=>ensureAccountingWalkSchedule('installed'));
-  // R4: an update restarts the worker too; a Sync interrupted by it must not stay "running" (jobs <5 min old are skipped).
+  // An update restarts the worker too; a Sync interrupted by it must not stay "running" (jobs <5 min old are skipped).
   await scmLifecycleStep('installed:recover-sync',()=>recoverInterruptedSyncJobs('installed'));
   syncAllResourceImages({forceValidate:false}).catch(()=>{});
   await scmLifecycleStep('installed:market-cycle',async()=>{
@@ -5510,21 +5456,6 @@ chrome.alarms.onAlarm.addListener(async a=>{
     }catch(e){logError('alarm:building',e);return;}
   }
 
-  const buildingEnrichMatch=String(a?.name||'').match(/^scm-building-enrich-r([01])$/);
-  if(buildingEnrichMatch){
-    const realm=Number(buildingEnrichMatch[1]);
-    try{
-      if(syncSessionForRealm(realm)){
-        const name=`scm-building-enrich-r${realm}`;
-        await scmAlarmCreate(name,{when:Date.now()+5000});
-        return;
-      }
-      await postSyncBuildingUiRefresh(realm,()=>{}).catch(()=>{});
-      try{scheduleGameOverlayRefreshNotification(realm,150);}catch{}
-    }catch{}
-    return;
-  }
-
   const syncRetryMatch=String(a?.name||'').match(/^scm-sync-retry-r([01])$/);
   if(syncRetryMatch){
     const realm=Number(syncRetryMatch[1]);
@@ -5567,13 +5498,11 @@ chrome.alarms.onAlarm.addListener(async a=>{
 
   const marketStageMatch=String(a?.name||'').match(/^scm-market-stage-r([01])-(vwap|prices)$/);
   if(marketStageMatch){await runMarketStage(Number(marketStageMatch[1]),marketStageMatch[2],'alarm').catch(e=>logError('alarm:market-stage',e));return;}
-  const legacyPostSyncMatch=String(a?.name||'').match(/^scm-post-sync-market-r([01])$/);
-  if(legacyPostSyncMatch){await runMarketStage(Number(legacyPostSyncMatch[1]),'vwap','legacy-post-sync-alarm').catch(()=>{});return;}
   if(a.name===LIVE_MARKET_REFRESH_ALARM_NAME){ await runScheduledLiveMarketRefresh('hourly-market-cycle').catch(()=>{}); return; }
   if(a.name===ORDER_BOOK_REFRESH_ALARM){ if(await scmOrderBookShouldThrottle())return; await runOrderBookRefreshFiring().catch(e=>logError('order-book-refresh',e)); return; }
   if(a.name==='scm-storage-prune'){ await scmPruneStorage({reason:'daily-alarm'}).catch(()=>{}); return; }
   if(a.name===CRITICAL_DATA_GUARD_ALARM){ await runCriticalDataGuard('scheduled').catch(()=>{}); return; }
-  if(a.name==='scm-vwap-daily'||a.name==='scm-vwap-retry'){
+  if(a.name==='scm-vwap-daily'){
     await runScheduledLiveMarketRefresh('legacy-vwap-alarm').catch(()=>{});
   }
   if(a.name==='scm-production-events-daily') scanOpenGameTabsForProductionEvents('daily').catch(()=>{});
@@ -5583,7 +5512,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
     // occur only in the staged market-sync pipeline.
     await chrome.alarms.clear(VWAP_WATCH_ALARM_NAME).catch(()=>{});
   }
-  // v2.5.361 the install/update handler re-creates this alarm 1 min after every update; re-validate at most once a week.
+  // The install/update handler re-creates this alarm 1 min after every update; re-validate at most once a week.
   if(a.name==='scm-resource-image-validation') (async()=>{const r=await chrome.storage.local.get({scmResourceImagesValidatedAt:0});if(Date.now()-Number(r.scmResourceImagesValidatedAt||0)<6.5*24*3600e3)return;const res=await syncAllResourceImages({forceValidate:true});if(res?.ok)await rawStorageSet({scmResourceImagesValidatedAt:Date.now()});})().catch(()=>{});
 });
 function endpointCapturedAfter(s,target,sinceMs){
@@ -5831,7 +5760,7 @@ setTimeout(()=>{recoverPendingPageReturns().catch(()=>{});},0);
 async function restoreGamePageBounded(pageReturn,label='Return to the starting page'){
   if(!pageReturn)return null;
   try{return await withSyncTimeout(pageReturn.restore(),SYNC_RETURN_TIMEOUT_MS,label);}
-  catch(e){try{pageReturn.onError?.(e);}catch{}return {error:e?.message||String(e)};}
+  catch(e){return {error:e?.message||String(e)};}
 }
 // How long a walked page gets to show its traffic. Responses are what matter: a burst followed by a quiet gap means
 // the page has loaded; a confirmed page with no traffic at all is given up on sooner than one still talking.
@@ -6000,8 +5929,8 @@ async function accountingPeriodStep(tabId,op,index=0){
   const res=await Promise.race([run,timeout]).catch(e=>[{result:{ok:false,error:e?.message||String(e)}}]);
   return res?.[0]?.result||{ok:false,error:'Accounting page script did not return.'};
 }
-// v2.5.389 The day walk drives the game page and floods the storage queue; it stops as soon as a Sync starts and
-// re-runs after it (it used to keep walking over the Sync and end 0/7).
+// The day walk drives the game page and floods the storage queue; it stops as soon as a Sync starts and
+// re-runs after it.
 class AccountingWalkYield extends Error{constructor(){super('Sync started; the Accounting walk will run again after it.');}}
 async function waitForAccountingDayCapture(realm,dayIndex,sinceMs,timeoutMs=ACCOUNTING_DAY_WALK_WAIT_MS){
   const path=`/api/v2/companies/me/income-statement/day/${dayIndex}/`;
@@ -6209,7 +6138,6 @@ function findMovedEndpoint(path,captured,knownPaths=[],sinceMs=0){
   // Matching structure cannot prove it is the same data, so a rename is reported and never stored.
   return matches.length===1?{suspected:matches[0]}:null;
 }
-globalThis.SCMFindMovedEndpoint=findMovedEndpoint;
 async function syncNow(requestedRealm=null,{fullWalk=false}={}){
   const startedAt=Date.now();
   // Remains null during the active capture and becomes authoritative only
@@ -6332,10 +6260,10 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     if(!authBoundary?.ok) throw new Error(`Could not verify the game session for ${realmDisplayNumber(selected)||'selected realm'} before sync (HTTP ${authBoundary?.status||0}).`);
     if(authRealm!==selected) throw new Error(`Game session is still ${realmDisplayNumber(authRealm)||'an unknown realm'}; selected sync target is ${realmDisplayNumber(selected)||'the selected realm'}. Switch the game first, then Sync again.`);
     trace('auth-verified',{realm:selected,captureRealm:validRealmNumber(authBoundary.captureRealm),status:Number(authBoundary.status)||0});
-    // v2.5.339 the explicit auth-data GET bypasses saveData, so record the economy phase from it here
+    // The explicit auth-data GET bypasses saveData, so record the economy phase from it here
     // (storage only; seeded from the previously stored auth-data).
     try{const es=await state(selected);const ek=realmKeyFromRealm(selected);await recordEconomyState(selected,es?.realmStores?.[ek]?.endpointData?.['/api/v3/companies/auth-data/']||null,authBoundary.data);trace('economy-state-recorded',{realm:selected,economyState:Number(authBoundary.data?.temporals?.economyState)});}catch{}
-    // v2.5.389 Sync's own writes go ahead of queued passive game captures (they waited 88 s behind them) and are bounded.
+    // Sync's own writes go ahead of queued passive game captures and are bounded.
     await withSyncTimeout(saveData('/api/v3/companies/auth-data/',authBoundary.data,authBoundary.status,'GET',selected,null,{priorityOnly:true}),SYNC_PERSIST_VERIFY_TIMEOUT_MS,'Save game session');
     await withSyncTimeout(activateRealmByRealm(selected,authBoundary.data?.authCompany?authBoundary.data:null,{priority:true}),SYNC_PERSIST_VERIFY_TIMEOUT_MS,'Activate realm');
     const activated=await state();
@@ -6389,12 +6317,10 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const status=Number(first?.status)||0;
       if(walked?.suspected){
         // Same structure cannot prove same data (a market response once overwrote contract data), so report only.
-        (session.suspectedMoves||(session.suspectedMoves={}))[path]=walked.suspected;
         trace('endpoint-suspected-move',{path,suspected:walked.suspected});
         session.warnings?.push(`${path} (HTTP ${status}) may have moved to ${walked.suspected}; not adopted`);
       }else if(endpointIsScalar(stored[path])||SCALAR_ENDPOINT_RX.test(path)){
         // A single number has no structure to compare, so a rename cannot be traced. Say so; never guess.
-        (session.untraceable||(session.untraceable={}))[path]=status;
         trace('endpoint-untraceable',{path,status,reason:'scalar-response'});
         session.warnings?.push(`${path} failed (HTTP ${status}); it returns a single number, so a new address cannot be identified automatically and none was guessed`);
       }else{
@@ -6469,9 +6395,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       walkSinceMs=targetStartedAt;
       session.walkCaptures={};
       // Do not rewrite the full realm store just to persist a transient step.
-      // The old per-target job/status writes caused expensive mobile storage
-      // churn for large realm stores. Keep the durable job at sync start/final
-      // commit and expose progress through the trace instead.
+      // Keep the durable job at sync start/final commit and expose progress
+      // through the trace instead.
 
       if(session.cancelled)throw new SyncCancelledByClear();
       const currentTab=await simTab();
@@ -6549,7 +6474,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         await Promise.all(accountingResults);
         directResults.sort((a,b)=>authoritativePaths.indexOf(a.path)-authoritativePaths.indexOf(b.path));
       }else if(target.name==='Contracts'){
-        // These targets have only two independent endpoints. Fetch them in
+        // Contracts has only two independent endpoints. Fetch them in
         // parallel; realm-scoped storage commits remain serialized by the API
         // queue, so concurrency improves latency without mixing stores.
         await Promise.all(authoritativePaths.map(async path=>{
@@ -6559,10 +6484,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
             const ok=await recordAuthoritative(path,response,row);
             directResults.push({path,ok,status:Number(response?.status)||0,captureRealm:validRealmNumber(response?.captureRealm),error:response?.error||null});
             trace(ok?'authoritative-success':'authoritative-failure',{name:target.name,path,status:Number(response?.status)||0,captureRealm:validRealmNumber(response?.captureRealm)});
-            if(target.name==='Contracts' && path.includes('/contracts-incoming/') && ok){
+            if(path.includes('/contracts-incoming/') && ok){
               row.endpoint=path;
-            }else if(target.name!=='Contracts' && ok){
-              row.endpoint=row.endpoint||path;
             }
           }catch(e){
             trace('authoritative-error',{name:target.name,path,error:e?.message||String(e)});
@@ -6579,9 +6502,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
             const ok=await recordAuthoritative(path,response,row);
             directResults.push({path,ok,status:Number(response?.status)||0,captureRealm:validRealmNumber(response?.captureRealm),error:response?.error||null});
             trace(ok?'authoritative-success':'authoritative-failure',{name:target.name,path,status:Number(response?.status)||0,captureRealm:validRealmNumber(response?.captureRealm)});
-            if(target.name==='Contracts' && path.includes('/contracts-incoming/') && ok){
-              row.endpoint=path;
-            }else if(target.name!=='Contracts' && ok){
+            if(ok){
               row.endpoint=path;
             }
           }catch(e){
@@ -6957,7 +6878,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     },selected),5000,'Final Sync diagnostic persistence');
 
     await withSyncTimeout(enqueueApiStorage(async()=>{
-      const finalPersist=await state(selected); // v2.5.345 the synced realm's own store, even if the tab switched realms meanwhile
+      const finalPersist=await state(selected); // The synced realm's own store, even if the tab switched realms meanwhile
       const finalStores={...(finalPersist.realmStores||{})};
       finalStores[key]={...(finalStores[key]||{}),syncStatus:finalStatus,syncError:finalSyncError,lastSync:finishedAt,fullSyncJob:null,executivesSyncSummary:executivesSummary};
       await storageSet({activeRealmKey:key,selectedRealm:selected,syncStatus:finalStatus,syncError:finalSyncError,lastSync:finishedAt,fullSyncJob:null,realmStores:finalStores});
@@ -6975,13 +6896,10 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     }
     if(requiredOk){
       // Final realm-local commit: the selected realm store is authoritative.
-      // IMPORTANT: after the split-sync change, Sync writes directly into the
-      // realm container while the root remains the previous live mirror. Calling
-      // persistActiveRealm() here reverses that direction and can overwrite fresh
-      // Buildings/Warehouse/endpoint data with the stale root snapshot. Hydrate
-      // the root FROM the committed realm store before handing the capture lock
-      // to the optional post-sync UI refresh. This closes the handoff race where
-      // another Sync could observe a still-finalizing root while the tail starts.
+      // Hydrate the root FROM the committed realm store (never the reverse, which
+      // could overwrite fresh data with the stale root) before handing the capture
+      // lock to the optional post-sync UI refresh, so another Sync cannot observe
+      // a still-finalizing root while the tail starts.
       const committedBeforeHydrate=await state(selected);
       const committedStoreBeforeHydrate=committedBeforeHydrate.realmStores?.[key]||{};
       await activateRealmByRealm(selected, committedStoreBeforeHydrate.authData?.authCompany ? committedStoreBeforeHydrate.authData : null);
@@ -7069,7 +6987,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     // Nothing of this run may reach storage after a clear, not even its failure status.
     if(e instanceof SyncCancelledByClear)return {ok:false,cancelled:true,error,realm:selected};
     syncTrace.push({at:Date.now(),type:'sync-exception',error});
-    // R1: mark the realm this run was syncing (the stored selectedRealm can name the other realm by now).
+    // Mark the realm this run was syncing (the stored selectedRealm can name the other realm by now).
     const sel=ownsSyncSession&&validRealmNumber(selected)!=null?validRealmNumber(selected):validRealmNumber((await chrome.storage.local.get({selectedRealm:null})).selectedRealm);
     if(sel!=null){
       const status=`Sync failed · ${realmDisplayNumber(sel)||'selected realm'}`;
@@ -7078,14 +6996,14 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         const failedState=await state(sel);
         const failedStore=failedState.realmStores?.[realmKeyFromRealm(sel)]||{};
         const finishedAt=new Date().toISOString();
-        await withSyncTimeout(saveFullSyncDiagnostic({realm:sel,mode:'api-first-sync-with-ui-fallback',status,syncError:error,walkResults:[],endpointCount:Object.keys(failedStore.endpointData||{}).length,warehouseRows:Array.isArray(failedStore.warehouseResources)?failedStore.warehouseResources.length:0,startedAt,finishedAt,error,syncTrace:typeof syncTrace!=='undefined'?syncTrace:[]},sel),5000,'Sync failure diagnostic persistence').catch(()=>{});
+        await withSyncTimeout(saveFullSyncDiagnostic({realm:sel,mode:'api-first-sync-with-ui-fallback',status,syncError:error,walkResults:[],endpointCount:Object.keys(failedStore.endpointData||{}).length,warehouseRows:Array.isArray(failedStore.warehouseResources)?failedStore.warehouseResources.length:0,startedAt,finishedAt,error,syncTrace},sel),5000,'Sync failure diagnostic persistence').catch(()=>{});
         await withSyncTimeout(clearFullSyncJob(sel,{syncStatus:status,syncError:error}),5000,'Sync failure job cleanup').catch(()=>{});
       }catch{}
     }else await storageSet({syncStatus:'Sync failed',syncError:error,fullSyncJob:null});
     return {ok:false,error,realm:sel};
   }finally{
     const clearedDuringRun=ownsSyncSession&&selected!=null&&realmSyncSessions.get(selected)?.cancelled===true;
-    // P1: Sync end makes every coalesced realm patch physical (bounded so it cannot hold SYNC_NOW open).
+    // Sync end makes every coalesced realm patch physical (bounded so it cannot hold SYNC_NOW open).
     if(ownsSyncSession && selected!=null && !clearedDuringRun) await withSyncTimeout(flushRealmPatches(selected),5000,'Sync end realm patch flush').catch(()=>{});
     // Page-hook cleanup is best-effort after terminal status has been written.
     // A missing content-script response must not keep SYNC_NOW pending or leave
@@ -7211,8 +7129,8 @@ function buildLiveBridgePayload(s, realm, store, overlay){
   };
 }
 // Live bridge token lives in chrome.storage.session (TRUSTED_CONTEXTS: never visible to content
-// scripts, never in storage.local backups). Session storage clears on browser restart, so storage.local
-// keeps only a non-secret liveBridge.tokenSet flag that lets Settings ask the user to re-enter it.
+// scripts, never in storage.local backups). Session storage clears on browser restart, so the token is restored
+// from an extension-origin IndexedDB backup (below); storage.local keeps only a non-secret liveBridge.tokenSet flag.
 const LIVE_BRIDGE_TOKEN_SESSION_KEY='scmLiveBridgeToken';
 // Legacy storage.local key (readable by content scripts); migrated into extension-origin IndexedDB.
 const LIVE_BRIDGE_TOKEN_BACKUP_KEY='scmLiveBridgeTokenBackup';
@@ -7277,10 +7195,7 @@ function overlaySnapshotSignature(data){
   const rows=Array.isArray(data?.rows)?data.rows:[];
   // The persisted snapshot is also the source for the in-game Copy Left UI.
   // Include every presentation field that can change the copied text, especially
-  // resource+quality VWAP.  The old signature ignored VWAP, so a fresh overlay
-  // could calculate prices correctly but persist no change when the only new
-  // field was `vwap`; the browser would then keep receiving the price-less
-  // snapshot indefinitely.
+  // resource+quality VWAP, or a change that only affects `vwap` would not be persisted.
   return JSON.stringify({
     realm:Number(data?.realm),
     contractSource:String(data?.contractSource||''),
@@ -7317,7 +7232,7 @@ async function persistGameOverlaySnapshot(realm,data){
   gameOverlaySnapshotMemo.set(n,next);
   // The game-page saved-contract helper caches computed quantities briefly.
   // Invalidate it whenever the authoritative stock/demand/contract snapshot changes.
-  if(typeof contractHelperCache!=='undefined')contractHelperCache.delete(n);
+  contractHelperCache.delete(n);
 }
 async function stripOverlayEmbeddedImages(v){
   if(!v||typeof v!=='object')return v;
@@ -7333,7 +7248,7 @@ function lastGoodGameOverlaySnapshot(source,realm){
   const snap=source?.rows?source:(source?.gameOverlaySnapshot||null);
   if(!snap||Number(snap.realm)!==Number(realm)||!Array.isArray(snap.rows)||!snap.rows.length)return null;
   // Sanitize a legacy cached snapshot before the asynchronous heavy refresh.
-  // v2.5.214 could persist an incoming-only, non-produced row such as R1 Water.
+  // Could persist an incoming-only, non-produced row such as R1 Water.
   // Do not let that stale row remain visible during the refresh window.
   const currentSavedContractSchema=String(snap.contractSource||'')==='manager-saved-contracts-only';
   if(currentSavedContractSchema){
@@ -7364,7 +7279,7 @@ const GAME_OVERLAY_MANUAL_REFRESH_GAP_MS=15000;
 const gameOverlayManualRefreshAt=new Map(); // realm → last accepted REFRESH_GAME_OVERLAY_NOW (ms)
 const gameOverlayRefreshPromises=new Map();
 const gameOverlayLastRefreshAt=new Map();
-// v2.5.327 mobile: the game page polls GET_GAME_OVERLAY_DATA every 10 s. Each heavy rebuild reads the realm
+// The game page polls GET_GAME_OVERLAY_DATA every 10 s. Each heavy rebuild reads the realm
 // store, recomputes the overlay and fetches the warehouse through the page. Rebuild when data actually
 // changed (any path that saves warehouse/building/contract data marks the realm dirty) or at most every
 // GAME_OVERLAY_REFRESH_MS otherwise. The last snapshot is served from memory instead of storage.
@@ -7374,7 +7289,7 @@ globalThis.__scmOwnWriteHooks?.push(items=>{for(const k of Object.keys(items)){c
 const contractHelperCache=new Map();
 const gameOverlayNotifyTimers=new Map();
 const warehouseMutationRefreshTimers=new Map();
-// v2.5.328: several quick actions ("accept all" across buildings) are batched into one warehouse fetch.
+// Several quick actions ("accept all" across buildings) are batched into one warehouse fetch.
 // If an action lands while a fetch is already running, one more fetch runs afterwards so it is never missed.
 const warehouseMutationLastAt=new Map();
 function scheduleWarehouseRefreshAfterStockMutation(realm,delayMs=300){
@@ -7434,7 +7349,7 @@ function scheduleGameOverlayRefreshNotification(realm,delayMs=650,{markDirty=tru
   const timer=setTimeout(()=>{
     gameOverlayNotifyTimers.delete(n);
     if(coreSyncActive()){deferUntilSyncEnds(`overlay:${n}`,()=>scheduleGameOverlayRefreshNotification(n,150,{markDirty:false}));return;}
-    // P1: pages re-read after this notice; make the coalesced realm patch physical first.
+    // Pages re-read after this notice; make the coalesced realm patch physical first.
     flushRealmPatches(n).catch(()=>{}).then(()=>notifyGameOverlayRefresh(n)).catch(()=>{});
   },Math.max(150,Number(delayMs)||650));
   gameOverlayNotifyTimers.set(n,timer);
@@ -7444,7 +7359,7 @@ async function refreshGameOverlayDataHeavy(realm){
   const n=validRealmNumber(realm);
   if(n==null)return {ok:false,error:'No game realm available.'};
   const existing=gameOverlayRefreshPromises.get(n);
-  // v2.5.328: data changed while an older rebuild is running -> that rebuild used the old stock; run one
+  // Data changed while an older rebuild is running -> that rebuild used the old stock; run one
   // more as soon as it finishes instead of waiting for a later poll.
   if(existing)return gameOverlayDirty.has(n)?existing.catch(()=>{}).then(()=>refreshGameOverlayDataHeavy(n)):existing;
   gameOverlayDirty.delete(n);
@@ -7496,9 +7411,7 @@ async function refreshGameOverlayDataHeavy(realm){
 }
 
 
-// v2.5.102: realm-scoped data provider for the in-game helper overlays.
-// This is presentation data only; production/planner/construction calculations
-// remain in their existing code paths.
+// Realm-scoped data for the in-game helper overlays (presentation data only).
 function helperLatestEndpoint(store, rx){
   const entries=Object.entries(store?.endpointData||{}).filter(([url,v])=>rx.test(String(url||''))&&Number(v?.status)>=200&&Number(v?.status)<300&&v?.data!=null);
   entries.sort((a,b)=>Date.parse(b[1]?.receivedAt||0)-Date.parse(a[1]?.receivedAt||0));
@@ -7519,7 +7432,6 @@ chrome.tabs.onUpdated.addListener((tabId,changeInfo,tab)=>{
 });
 
 
-const jsDiagnosticPending = new Map();
 
 function diffStringSet(previous=[], current=[]){
   const a=new Set(Array.isArray(previous)?previous.map(String):[]);
@@ -7616,7 +7528,7 @@ async function runQuickJavascriptDiagnostic(tab){
     return {ok:false,error:e?.message||String(e)};
   }
 }
-async function requestJavascriptDiagnostic(send){
+async function requestJavascriptDiagnostic(){
   const tabs=await chrome.tabs.query({active:true,lastFocusedWindow:true});
   let candidates=(tabs||[]).filter(t=>/^https:\/\/(?:www\.)?simcompanies\.com\//i.test(String(t.url||'')));
   if(!candidates.length)candidates=await chrome.tabs.query({url:['https://www.simcompanies.com/*','https://simcompanies.com/*']});
@@ -7646,7 +7558,7 @@ async function requestJavascriptDiagnostic(send){
   return {ok:true,skipped:true,realm:validRealmNumber(candidates?.[0]?.url?.match(/\/rc\/(\d+)\//)?.[1]),diagnostic:null,source:'runtime-diagnostic-skipped',message:'Runtime diagnostic was skipped because the game page was busy.'};
 }
 
-// v2.5.436 in-app self-test (Settings → Run self-test). READ-ONLY toward the game: at most one GET through the
+// In-app self-test (Settings → Run self-test). READ-ONLY toward the game: at most one GET through the
 // existing page path (pageGet), with its own cooldown; no orders, no game writes, no heavy jobs.
 const scmSelfTestSeen={apiSeenAt:null,apiDataAt:null};
 let scmSelfTestLiveAt=0;
@@ -7734,7 +7646,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='CLEAR_ERROR_LOG'){clearErrorLog().then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_CLEAR_ALERT_BADGE'){if(!scmIsExtensionPageSender(sender))return false;scmClearAlertBadge().then(()=>send({ok:true})).catch(()=>send({ok:false}));return true;}
   if(m?.type==='SET_ACCOUNTING_WALK_SCHEDULE'){(async()=>{const realm=validRealmNumber(m.realm);const patch={enabled:Boolean(m.enabled),offsetMin:accountingWalkOffset(m.offsetMin),attempt:0,retryAt:null};if(realm!=null)patch.realm=realm;await writeAccountingWalkSchedule(patch);const r=await ensureAccountingWalkSchedule('user');return {...r,schedule:await readAccountingWalkSchedule()};})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
-  // 2.5.393 CSV import from Analyze → Data: statements by date and ledger rows; captured data always wins.
+  // CSV import from Analyze → Data: statements by date and ledger rows; captured data always wins.
   if(m?.type==='IMPORT_CSV_STATEMENTS'){(async()=>{const realm=validRealmNumber(m.realm);if(realm==null)return {ok:false,error:'Pick a realm first.'};if(!/^(income-statement|cashflow-statement|balance-sheet)$/.test(String(m.field||'')))return {ok:false,error:'Unknown statement.'};return queueStatementHistory(realm,(Array.isArray(m.items)?m.items:[]).map(data=>({kind:m.field,data})),{keep:true});})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='IMPORT_CSV_LEDGER'){(async()=>{const n=validRealmNumber(m.realm);if(n==null)return {ok:false,error:'Pick a realm first.'};const key=ledgerArchiveKey(n);
     const run=(ledgerArchiveQueues.get(n)||Promise.resolve()).then(async()=>{const a=(await chrome.storage.local.get({[key]:null}))[key];const {added,...out}=globalThis.SCM_ANALYZE_CORE.archiveImport(a,m.rows);await rawStorageSet({[key]:out});return {ok:true,added};});
@@ -7755,9 +7667,6 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     (async()=>{
       try{
         const saved=await saveJavascriptDiagnostic(m.diagnostic,m.diagnostic?.runtime?.realm);
-        const requestId=String(m.requestId||'');
-        const pending=jsDiagnosticPending.get(requestId);
-        if(pending){pending.resolve(saved);}
         send(saved);
       }catch(e){send({ok:false,error:e?.message||String(e)});}
     })();
@@ -7831,8 +7740,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
           value={...value,realm:Number(value.realm??realm)};
           if(Number(value.realm)!==realm){send({ok:false,error:'Accounting snapshot realm mismatch.'});return;}
         }else if(field==='accountingDailySeries'){
-          // v2.5.377: per-day figures Manager already read (Day statements / balance sheets), newest 120 days.
-          // v2.5.382: + Cost of goods sold, Freight out, Exchange fees, Executives cost, Total change in cash.
+          // Per-day figures Manager already read (Day statements / balance sheets), newest 120 days.
           const days=value&&typeof value.days==='object'&&!Array.isArray(value.days)?value.days:null;
           if(!days){send({ok:false,error:'Invalid accounting series.'});return;}
           const num=v=>v==null||v===''||!Number.isFinite(Number(v))?undefined:Number(v);
@@ -7886,7 +7794,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     })(); return true;
   }
   if(m?.type==='GET_GAME_OVERLAY_DATA'){
-    // v2.5.327 mobile: the game page polls this every 10 s. Replace embedded base64 images with the
+    // The game page polls this every 10 s. Replace embedded base64 images with the
     // game's own image URL (already cached by the game page), including in older stored snapshots.
     const reply=send;
     send=async(v)=>{try{reply(await stripOverlayEmbeddedImages(v));}catch{reply(v);}};
@@ -7934,9 +7842,6 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       try{const realm=validRealmNumber(m.realm);const r=await getRealmBuildingVwapData(realm,m.resourceName,m.quality);send(r);}catch(e){send({ok:false,error:e?.message||String(e)});}
     })(); return true;
   }
-  // v2.5.359 #4 smart sell price for the game's Sell page: cheapest competing listing (quality ≥ the lot's, your own
-  // listings left out), 7-day daily VWAP range of id:quality, your warehouse cost, fee from your listings. An order book
-  // older than 15 min is refreshed through the game tab (throttled 5 min per product, no lock held while fetching).
   // Game-page "My listings" card: your own exchange listings (scmMarketOrders:<realm>) with names, images and the
   // realm's cached VWAP. refresh:true asks refreshMarketOrders (maxAge 0, no lock) at most every 12 s per realm,
   // without waiting; the card follows the storage key through chrome.storage.onChanged. A game action also reads
@@ -7987,6 +7892,9 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       }catch(e){send({ok:false,error:e?.message||String(e)});}
     })(); return true;
   }
+  // Smart sell price for the game's Sell page: cheapest competing listing (quality ≥ the lot's, your own
+  // listings left out), 7-day daily VWAP range of id:quality, your warehouse cost, fee from your listings. An order book
+  // older than 15 min is refreshed through the game tab (throttled 5 min per product, no lock held while fetching).
   if(m?.type==='GET_SELL_PRICE_INFO'){
     (async()=>{
       try{
@@ -8017,13 +7925,13 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const s=await state(requestedRealm);
         const inferredRealm=requestedRealm!=null?requestedRealm:(s.activeRealmKey?Number(String(s.activeRealmKey).replace('realm:','')):validRealmNumber(s.authData?.authCompany?.realmId));
         const realm=validRealmNumber(inferredRealm); if(realm==null){send({ok:false,error:'No realm.'});return;}
-        // P3: state(requestedRealm) / state() of the active realm already is this realm's state; read again
+        // State(requestedRealm) / state() of the active realm already is this realm's state; read again
         // only when the realm came from authData (no active realm, so the first read had no realm store).
         const realmState=(requestedRealm!=null||(s.activeRealmKey&&realmNumberFromKey(s.activeRealmKey)===realm))?s:await state(realm);
         const key=realmKeyFromRealm(realm),store={...(realmState.realmStores?.[key]||{})};
         const incomingRaw=helperLatestEndpoint(store,/\/api\/v3\/contracts-incoming\/\d+\/me\/?$/i);
         const incoming=helperArray(incomingRaw,['incomingContracts','data','items','results']).map(c=>({id:Number(c?.id),kind:Number(c?.kind),quality:Number(c?.quality)||0,quantity:Number(c?.quantity)||0,price:Number(c?.price)||0,company:String(c?.seller?.company||c?.company||'Unknown seller'),datetime:c?.datetime||null})).filter(c=>Number.isFinite(c.id));
-        // v2.5.359 #6 verdict: same reference as the badge, market-core at quality ≥ the contract's (order book < 6 h first; refreshed
+        // Verdict: same reference as the badge, market-core at quality ≥ the contract's (order book < 6 h first; refreshed
         // through the game tab when older than 15 min, ≤ 3 products per pass, throttled 5 min each) and your warehouse cost.
         const C=globalThis.SCM_TOOLS_CORE,lots=Array.isArray(store.warehouseResources)?store.warehouseResources:[];let asked=0;
         const marketOwn=await marketOwnOpts(store,realm);
@@ -8198,8 +8106,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
           // is queued through the staged scheduler and never blocks this request.
           refreshInBackground=true;
         }else if(!fresh){refreshInBackground=true;}
-        const latestState=s; // v2.5.319: reuse the snapshot already read above (was a second full storage read)
-        const latestStore={...(latestState.realmStores?.[key]||{})};
+        const latestStore={...(s.realmStores?.[key]||{})};
         const eid=Number.isFinite(Number(inferredResourceId))?Number(inferredResourceId):null;
         let marketRows=[];
         if(eid!=null){
@@ -8231,14 +8138,14 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         // Bounded: writes already queued get a moment to finish, but a stuck one cannot hold the clear up.
         const drains=[0,1].map(r=>apiStorageQueueForRealm(r));
         await withSyncTimeout(Promise.all([...drains,realmStorageCommitTail]),5000,'Writes before clear').catch(()=>{});
-        // R5/P1: buffered writes must not land after the clear and resurrect cleared data.
+        // Buffered writes must not land after the clear and resurrect cleared data.
         discardAllRealmPatches();discardPendingLedgerArchive();
         pendingEndpointSeen.clear();
         pendingBuildingCollects.clear();if(buildingCollectFlushTimer){clearTimeout(buildingCollectFlushTimer);buildingCollectFlushTimer=null;} // collect stamps (scmBuildingCollects:N) go with the clear below
         await withRealmStorageCommit(()=>chrome.storage.local.clear());
         await scmNetClearAllEvents().catch(()=>{});
         await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY).catch(()=>{});await chrome.storage.local.remove(LIVE_BRIDGE_TOKEN_BACKUP_KEY).catch(()=>{});await liveBridgeBackupClear(); // session token + IDB backup
-        // R5: in-memory copies of cleared data would otherwise be served (and written back) until the worker restarts.
+        // In-memory copies of cleared data would otherwise be served (and written back) until the worker restarts.
         resourceImagesMemo=null;notifyRecipesMemo=null;gameOverlayAssetsPromise=null;
         gameOverlaySnapshotMemo.clear();contractHelperCache.clear();
         gameOverlayLastRefreshAt.clear();gameOverlayDirty.clear();warehouseMutationLastAt.clear();warehouseOverlayBackoffUntil.clear();
@@ -8249,7 +8156,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         await ensureStandingAlarms();
         await ensureVwapWatchAlarm('clear-extension-data');
         await ensureCriticalDataGuard('clear-extension-data');
-        await ensureLiveMarketRefreshAlarm('clear-extension-data'); // R5: clearAll removed it too
+        await ensureLiveMarketRefreshAlarm('clear-extension-data'); // ClearAll removed it too
         await ensureOrderBookRefreshAlarm();
         send({ok:true});
       }catch(e){send({ok:false,error:e?.message||String(e)});}
@@ -8345,7 +8252,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     return true;
   }
   if(m?.type==='GAME_CONFIG'){
-    // v2.5.341 game config (executive training/settling times) for the admin-overhead calculation. Storage only.
+    // Game config (executive training/settling times) for the admin-overhead calculation. Storage only.
     (async()=>{const c={};for(const k of ['executivesTimeToTrainS','executivesTimeToSettleInS']){const n=Number(m?.config?.[k]);if(Number.isFinite(n)&&n>0)c[k]=n;}
       if(Object.keys(c).length)await rawStorageSet({scmGameConfig:{...c,at:new Date().toISOString()}});send({ok:true});})().catch(e=>send({ok:false,error:String(e?.message||e)}));
     return true;
@@ -8365,8 +8272,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     return true;
   }
   if(m?.type==='STOCK_MUTATION_COMPLETE'){
-    // v2.5.328: an untagged action belongs to the active realm. (validRealmNumber(null) is 0, which used to
-    // refresh R1 while the player was in R2 — rejected as "not the active realm", so nothing updated.)
+    // An untagged action belongs to the active realm. Check for null first: validRealmNumber(null) is 0 (R1).
     (async()=>{let realm=(m.captureRealm===null||m.captureRealm===undefined||m.captureRealm==='')?null:validRealmNumber(m.captureRealm);
       // A building collect is stamped at once (no reply is read); an id that is not a stored building writes nothing.
       if(String(m.method||'').toUpperCase()==='POST'&&collectTakeBuildingIdFromUrl(m.url)!=null){try{noteBuildingTake(m.url,realm);}catch{}}
@@ -8445,7 +8351,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='SCM_TEST_DAILY_SUMMARY'){fireDailySummary().then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_TEST_NOTIFICATION'){scmNotify(`test-${Date.now()}`,'Sim Companies Manager','Test notification — if you can read this, alerts work on this phone.').then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_NOTIFY_SETTINGS'){(async()=>{try{if(m.set&&typeof m.set==='object'){const cur=await notifySettings();await rawStorageSet({[NOTIFY_SETTINGS_KEY]:{...cur,...m.set}});await scheduleDailySummary();for(const n of [0,1]){const st=(await chrome.storage.local.get({[`scmRealmStore:${n}`]:null}))[`scmRealmStore:${n}`];if(st)await scheduleProductionFinishAlarms(n,st.buildings);}}const prodfin=(await chrome.alarms.getAll()).filter(x=>String(x.name).startsWith('scm-prodfin:'));const nameStores={};for(const a of prodfin){const r=String(a.name).split(':')[1];if(!(r in nameStores))nameStores[r]=(await chrome.storage.local.get({[`scmRealmStore:${r}`]:null}))[`scmRealmStore:${r}`]||{};}
-// v2.5.345 building names for the Alerts "Next" line (the dashboard rendered it before its own state had loaded).
+// Building names for the Alerts "Next" line (the dashboard rendered it before its own state had loaded).
 const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(Array.isArray(nameStores[r]?.buildings)?nameStores[r].buildings:[]).find(y=>String(y?.id)===bid);return {name:x.name,when:x.scheduledTime,buildingName:b?.name?String(b.name):null};});const daily=await chrome.alarms.get('scm-daily-summary');send({ok:true,settings:await notifySettings(),available:!!chrome.notifications?.create,alarms,dailyAt:daily?.scheduledTime||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;}
   if(m?.type==='FETCH_EXCHANGE_ORDER_BOOK'){fetchExchangeOrderBookForRealm(m.realm,m.resourceId).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='FETCH_BUILDING_HISTORY'){fetchBuildingHistoryForRealm(m.realm,m.buildingId).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
@@ -8563,7 +8469,7 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
 
 ensureRealmStorageMigration().catch(()=>{});
 
-// v2.5.327: one-time (idempotent) move of resource images out of the realm stores.
+// One-time (idempotent) move of resource images out of the realm stores.
 moveResourceImagesOutOfRealmStores().catch(e=>console.debug('resource image move skipped',e));
-// v2.5.327: stored overlay snapshots no longer carry base64 images (~450 KB -> ~12 KB per realm).
+// Stored overlay snapshots no longer carry base64 images (~450 KB -> ~12 KB per realm).
 (async()=>{for(const r of [0,1]){try{const k=gameOverlaySnapshotStorageKey(r);const v=(await chrome.storage.local.get({[k]:null}))[k];if(!v)continue;const s=await stripOverlayEmbeddedImages(v);if(s!==v)await rawStorageSet({[k]:s});}catch(e){console.debug('overlay snapshot cleanup skipped',e);}}})();
