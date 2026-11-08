@@ -2147,3 +2147,6 @@ html.scm-mobile table.mobile-cards tr:has(>td[colspan]:only-child){border:0!impo
 /* v2.5.449 Production tab Deficit/Surplus on phones: Amount column wide enough for +11,501.443, rows padded like the head, amounts right-aligned in their column */
 @media(max-width:600px){.production-page .planner-summary-table-head,.production-page .planner-summary-row{grid-template-columns:minmax(0,1fr) 84px 104px!important;padding-left:8px!important;padding-right:8px!important;column-gap:6px!important}}
 .production-page .planner-summary-row>strong{margin-left:0!important;text-align:right;min-width:0}
+
+/* v2.5.450 building under construction */
+.production-page .owned-building-construction b{color:var(--t-warn)}

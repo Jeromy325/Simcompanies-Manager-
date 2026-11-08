@@ -1843,6 +1843,7 @@ function productionFinishAlarms(realm,buildings){
   for(const b of Array.isArray(buildings)?buildings:[]){
     const st=Date.parse(String(b?.busy?.started||'')),dur=Number(b?.busy?.duration);
     if(!(Number(b?.id)>0)||!Number.isFinite(st)||!(dur>0))continue;
+    if(String(b?.busy?.category||'')==='b')continue; // v2.5.450 construction / upgrade, not a production batch
     const finish=st+dur*1000;
     out.push({name:`scm-prodfin:${realm}:${Number(b.id)}:${finish}`,when:finish,buildingId:Number(b.id)});
   }
