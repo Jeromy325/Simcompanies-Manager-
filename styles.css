@@ -2073,9 +2073,9 @@ th{font-family:var(--t-num);text-transform:uppercase;letter-spacing:.02em;font-s
 .ov-half .warehouse-table td:first-child *{font-family:inherit!important}
 .ov-half .product-cell{min-width:0!important;gap:8px}
 .ov-half .resource-icon{width:28px!important;height:28px!important;flex:0 0 28px}
-.planner-summary-row{display:flex!important;align-items:center}
-.planner-summary-row span{flex:1 1 auto;min-width:0}
-.planner-summary-row strong{flex:0 0 auto;margin-left:auto}
+.ov-production .planner-summary-row{display:flex!important;align-items:center}
+.ov-production .planner-summary-row>span{flex:1 1 auto;min-width:0}
+.ov-production .planner-summary-row>strong{flex:0 0 auto;margin-left:auto}
 .deficit-card .planner-summary-row strong{color:var(--t-neg)!important}.surplus-card .planner-summary-row strong{color:var(--t-pos)!important}
 .planner-output-product{justify-content:flex-start}
 .ov-half .warehouse-table td:first-child *{font-family:Inter,"Segoe UI",system-ui,sans-serif!important}
@@ -2144,3 +2144,6 @@ html.scm-mobile table.mobile-cards tr:has(>td[colspan]:only-child){border:0!impo
 .market-toolbar{padding:8px 12px!important;border-radius:var(--t-r)!important}
 /* chart icons neutral (orange is for live dots / active tab / card-title dots only) */
 .acct-chart-open{color:var(--t-text3)!important}.acct-chart-open:hover{color:var(--t-text)!important}
+/* v2.5.449 Production tab Deficit/Surplus on phones: Amount column wide enough for +11,501.443, rows padded like the head, amounts right-aligned in their column */
+@media(max-width:600px){.production-page .planner-summary-table-head,.production-page .planner-summary-row{grid-template-columns:minmax(0,1fr) 84px 104px!important;padding-left:8px!important;padding-right:8px!important;column-gap:6px!important}}
+.production-page .planner-summary-row>strong{margin-left:0!important;text-align:right;min-width:0}

@@ -515,6 +515,44 @@
     return quantities;
   }
 
+  // Overlay rows are per resource+quality. Stock at a quality the company does not produce is folded into the produced
+  // row it can serve, so that row's Warehouse counts all usable stock while Demand stays the full plan:
+  //  - higher quality -> the nearest LOWER produced quality (higher quality can always stand in for lower), as before;
+  //  - lower quality  -> the nearest HIGHER produced quality, but only when some recipe accepts it, i.e. quality >= the
+  //    lowest minQuality among that resource's demand rows (inputs may be one quality below the product).
+  // Stock below every demand's minQuality is never counted. Produced rows and rows with a saved contract (keepKeys) stay.
+  const foldQualityStock = (detailRows = [], producedKeys = new Set(), keepKeys = null, demandRows = []) => {
+    const out = (Array.isArray(detailRows) ? detailRows : []).map(r => ({...r}));
+    const byKey = new Map(out.map(r => [`${Number(r.id)}:${Number(r.quality) || 0}`, r]));
+    const minNeed = new Map();
+    for (const d of Array.isArray(demandRows) ? demandRows : []) {
+      const id = Number(d?.id), mq = Math.max(0, Number(d?.minQuality) || 0);
+      if (!Number.isFinite(id) || !(Number(d?.amount) > 0)) continue;
+      minNeed.set(id, minNeed.has(id) ? Math.min(minNeed.get(id), mq) : mq);
+    }
+    const produced = [...(producedKeys || [])].map(k => String(k).split(':').map(Number));
+    const drop = new Set();
+    for (const r of out) {
+      const id = Number(r.id), q = Number(r.quality) || 0, key = `${id}:${q}`;
+      if (producedKeys?.has?.(key) || keepKeys?.has?.(key)) continue;
+      let tq = null;
+      for (const [i, pq] of produced) if (i === id && pq < q && (tq == null || pq > tq)) tq = pq;
+      if (tq == null && minNeed.has(id) && q >= minNeed.get(id)) {
+        for (const [i, pq] of produced) if (i === id && pq > q && (tq == null || pq < tq)) tq = pq;
+      }
+      const t = tq != null ? byKey.get(`${id}:${tq}`) : null;
+      if (!t || t === r) continue;
+      for (const f of ['warehouse', 'produced', 'incoming', 'demand', 'contracted', 'leftover', 'warehouseOnlyLeft']) t[f] = (Number(t[f]) || 0) + (Number(r[f]) || 0);
+      if ((Number(r.warehouse) || 0) > 0) {
+        t.substituteQualities = [...new Set([...(t.substituteQualities || []), q])].sort((x, y) => x - y);
+        if (!t.warehouseByQuality) t.warehouseByQuality = [{quality: Number(t.quality) || 0, amount: (Number(t.warehouse) || 0) - (Number(r.warehouse) || 0)}];
+        t.warehouseByQuality.push({quality: q, amount: Number(r.warehouse) || 0});
+        t.warehouseByQuality.sort((x, y) => y.quality - x.quality);
+      }
+      drop.add(r);
+    }
+    return out.filter(r => !drop.has(r));
+  };
   globalThis.SCMPlannerCore = Object.freeze({
     clampDiscount,
     roundCurrencyUp,
@@ -535,6 +573,7 @@
     productionSurplusByKey,
     productionBalance,
     balanceSupplyDemandContracts,
+    foldQualityStock,
     resolveSavedContractQuantities,
     savedContractIsCustomPrice,
     savedContractCurrentPrice,

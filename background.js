@@ -1976,25 +1976,6 @@ async function getRealmBuildingVwapData(realm,resourceName,quality){
   return {ok:true,realm:n,resourceId:id,resourceName:assets.names.get(String(id))||targetName,quality:Number.isFinite(q)?q:null,rows:rows.slice(0,12),selected:rows.find(r=>Number(r.quality)===q)||null,image:file?`${assets.imageBase}${file}`:''};
 }
 
-function foldHigherQualityStock(detailRows,producedKeys,keepKeys){
-  const out=detailRows.map(r=>({...r}));
-  const byKey=new Map(out.map(r=>[`${Number(r.id)}:${Number(r.quality)||0}`,r]));
-  const drop=new Set();
-  for(const r of out){
-    const id=Number(r.id),q=Number(r.quality)||0,key=`${id}:${q}`;
-    if(producedKeys.has(key)||keepKeys?.has?.(key))continue;
-    let target=null;
-    for(const k of producedKeys){const [i,pq]=k.split(':').map(Number);if(i===id&&pq<q&&(!target||pq>target.q))target={q:pq};}
-    const t=target&&byKey.get(`${id}:${target.q}`);
-    if(!t)continue;
-    for(const f of ['warehouse','produced','incoming','demand','contracted','leftover','warehouseOnlyLeft'])t[f]=(Number(t[f])||0)+(Number(r[f])||0);
-    if((Number(r.warehouse)||0)>0)t.substituteQualities=[...new Set([...(t.substituteQualities||[]),q])].sort((x,y)=>x-y);
-    if((Number(r.warehouse)||0)>0){if(!t.warehouseByQuality)t.warehouseByQuality=[{quality:Number(t.quality)||0,amount:(Number(t.warehouse)||0)-(Number(r.warehouse)||0)}];t.warehouseByQuality.push({quality:q,amount:Number(r.warehouse)||0});}
-    drop.add(r);
-  }
-  return out.filter(r=>!drop.has(r));
-}
-
 function overlayProductionRunHours(store){
   const n=Number(store?.productionRunHours);
   return Number.isFinite(n)?Math.min(48,Math.max(1,n)):24;
@@ -2384,10 +2365,11 @@ async function buildGameOverlayData(store,realm,globalState){
   // resource at Q1/Q2. The overlay must never surface those input qualities as
   // if they were company-produced outputs.
   const producedResourceQualities=new Set((productionRows||[]).map(r=>{const id=Number(r?.id),quality=Math.max(0,Number(r?.quality??r?.minQuality)||0);return Number.isFinite(id)&&id>0?`${id}:${quality}`:null;}).filter(Boolean));
+  // v2.5.449 any usable other-quality stock (higher, or lower but >= a recipe's minQuality) is folded into a produced row.
   // Bought higher-quality stock of a produced resource (e.g. Q4 engines when the
   // company makes Q2) is folded into the nearest lower produced quality row, so
   // that row's Warehouse counts all usable stock and Demand stays the full plan.
-  detailRows=foldHigherQualityStock(detailRows,producedResourceQualities,savedContractKeys);
+  detailRows=core?.foldQualityStock?core.foldQualityStock(detailRows,producedResourceQualities,savedContractKeys,demandRows):detailRows;
   // Countdown input: only plan buildings running this product right now, from this realm's own plan and buildings.
   // The game run data says what reaches the warehouse: amountAvailableNow is produced and not collected, amount is what
   // the run still makes (as of the last collect). A collect seen after the buildings snapshot (collect stamp) leaves only

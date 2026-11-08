@@ -3682,16 +3682,16 @@ function overviewWarehouseCard(s,rows){
   return `<div class="overview-section ov-half ov-warehouse" data-collapse-default="open">${ovHead('Warehouse','Largest stock lines by value',`${all.length} line${all.length===1?'':'s'}`)}${body}${ovGoto('warehouse',`All ${all.length} lines in`,'Warehouse')}</div>`;
 }
 function overviewProductionCard(s){
-  const bs=buildingArrayFromState(s),busy=bs.filter(b=>b?.busy?.resource);
+  // Production buildings only (category 'production', as background.js / diagnosticProducedKeys): the Academy, Bank and
+  // other non-production buildings are not idle. A building that is expanding (construction / upgrade) is counted apart.
+  const all=buildingArrayFromState(s),prod=all.filter(b=>String(b?.category||'').toLowerCase()==='production');
+  const expanding=prod.filter(b=>b?.busy?.expanding),busy=prod.filter(b=>!b?.busy?.expanding&&b?.busy?.resource),idle=prod.length-expanding.length-busy.length;
   const stat=(l,v)=>`<div class="overview-stat-card"><span>${escapeHtml(l)}</span><strong>${escapeHtml(String(v))}</strong></div>`;
-  const tiles=`<div class="overview-stat-grid overview-stat-grid-compact">${stat('Buildings',bs.length||'—')}${stat('Producing',bs.length?busy.length:'—')}${stat('Idle',bs.length?bs.length-busy.length:'—')}</div>`;
+  const has=prod.length>0;
+  const tiles=`<div class="overview-stat-grid ${expanding.length?'':'overview-stat-grid-compact'}">${stat('Production buildings',has?prod.length:'—')}${stat('Producing',has?busy.length:'—')}${stat('Idle',has?idle:'—')}${expanding.length?stat('Upgrading',expanding.length):''}</div>`;
   const making=busy.slice(0,4).map(b=>{const r=b.busy.resource;const id=Number(r?.kind);const name=String(r?.name||(Number.isFinite(id)?resourceName({kind:id},s):'—'));return `<div class="planner-summary-row"><span>${escapeHtml(buildingName(b,s))}<small>Lv ${escapeHtml(String(buildingLevel(b)))}</small></span><strong>${escapeHtml(name)}${r?.quality!=null?` Q${escapeHtml(String(r.quality))}`:''}</strong></div>`;}).join('');
-  const plan=savedContractPlanForState(s),hours=Number(plan?.hours);
-  const side=(list,field,type)=>{const items=(Array.isArray(list)?list:[]).filter(x=>Number(x?.[field])>0).sort((a,b)=>Number(b[field])-Number(a[field])).slice(0,3);
-    return `<div class="planner-summary-card ${type}-card"><div class="planner-summary-head"><span>${type==='deficit'?'Deficit':'Surplus'}</span><span>${(Array.isArray(list)?list:[]).length}</span></div>${items.length?items.map(x=>`<div class="planner-summary-row"><span>${escapeHtml(String(x.name||'—'))}<small>Q${escapeHtml(String(x.quality??0))}</small></span><strong>${type==='deficit'?'-':'+'}${num(Number(x[field]))}</strong></div>`).join(''):'<div class="planner-summary-empty">None</div>'}</div>`;};
-  const balance=plan?`<div class="planner-summary-grid ov-prod-balance">${side(plan.deficits,'deficit','deficit')}${side(plan.surpluses,'surplus','surplus')}</div>`:'<div class="overview-selling-empty">Open Production once to calculate deficit and surplus.</div>';
-  const sub=bs.length?`${bs.length} building${bs.length===1?'':'s'} · ${busy.length} producing`:'Waiting for building data';
-  return `<div class="overview-section ov-wide ov-production" data-collapse-default="open">${ovHead('Production',sub,plan&&Number.isFinite(hours)&&hours>0?`Balance over ${num(hours)} h run`:'')}${tiles}${making?`<div class="ov-making">${making}</div>`:''}${balance}${ovGoto('production','Buildings, inputs and planner in','Production')}</div>`;
+  const sub=has?`${prod.length} production building${prod.length===1?'':'s'} · ${busy.length} producing${expanding.length?` · ${expanding.length} upgrading`:''}`:'Waiting for building data';
+  return `<div class="overview-section ov-wide ov-production" data-collapse-default="open">${ovHead('Production',sub,busy.length>4?`Showing 4 of ${busy.length}`:'')}${tiles}${making?`<div class="ov-making">${making}</div>`:''}${ovGoto('production','Buildings, inputs, deficit and surplus in','Production')}</div>`;
 }
 function render(s){
   const currentKey=__scmState?.activeRealmKey!=null?String(__scmState.activeRealmKey):'';
