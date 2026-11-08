@@ -1858,3 +1858,154 @@ tbody tr:hover td{background:var(--surface-2)}
 #contractMwapNote{display:block;margin-top:3px;font-size:10px;color:#e8a34a}#contractMwapNote:empty{display:none}td .market-inline-vwap{display:block;white-space:normal}
 /* v2.5.438 Self-test results (options + dashboard Settings) */
 .self-test-results{list-style:none;padding:0;margin:8px 0;max-width:100%}.self-test-results li{padding:6px 8px;margin:4px 0;border-left:4px solid #888;overflow-wrap:anywhere;word-break:break-word}.self-test-results .st-pass{border-color:#2e7d32}.self-test-results .st-warn{border-color:#b26a00}.self-test-results .st-fail{border-color:#c62828}.self-test-results .st-skip{border-color:#777}.self-test-results b{display:inline-block;min-width:3.2em}
+
+/* ===== v2.5.447 Trading desk theme (append LAST). Presentation only: near-black, amber accent, monospace numbers, 8pt spacing, aligned Overview grid. ===== */
+:root{--t-bg:#0a0a0a;--t-s1:#111111;--t-s2:#151515;--t-s3:#1c1c1c;--t-border:#262626;--t-text:#e8e6e1;--t-text2:#9c9a94;--t-text3:#6b6964;
+  --t-accent:#f5a524;--t-accent-ink:#0a0a0a;--t-pos:#4cc17c;--t-neg:#ff5a4e;--t-warn:#e8b04a;--t-r:3px;--t-r-sm:2px;
+  --t-num:"JetBrains Mono","Cascadia Mono",Consolas,ui-monospace,monospace;
+  --bg:var(--t-bg);--surface-1:var(--t-s1);--surface-2:var(--t-s2);--surface-3:var(--t-s3);--border:var(--t-border);--border-strong:var(--t-border);
+  --text:var(--t-text);--text-2:var(--t-text2);--text-3:var(--t-text3);--accent:var(--t-accent);--accent-text:var(--t-accent-ink);--pos:var(--t-pos);--neg:var(--t-neg);--warn:var(--t-warn);
+  --panel:var(--t-s1);--line:var(--t-border);--muted:var(--t-text2);--r-sm:var(--t-r-sm);--r-md:var(--t-r);
+  font-family:Inter,"Segoe UI",system-ui,sans-serif;background:var(--t-bg);color:var(--t-text)}
+html,body{background:var(--t-bg);color:var(--t-text)}
+.panel,.card,.hero,.overview-section,.statement-card,.planner-main-card,.planner-summary-card,.finance-card,.owned-building-card,.overview-stat-card,.planner-output-product,.planner-output-stat,.contract-card,.topbar{box-shadow:none!important}
+.shell{max-width:1280px;padding:24px 32px}
+.positive,.change-up,.finance-change.change-up *{color:var(--t-pos)!important}
+.negative,.change-down,.finance-change.change-down *{color:var(--t-neg)!important}
+strong{font-variant-numeric:tabular-nums}
+
+/* header */
+.topbar{background:var(--t-s1);border:1px solid var(--t-border);border-radius:var(--t-r);padding:16px;margin-bottom:16px;gap:16px}
+.company-logo-top{width:40px;height:40px;border-radius:var(--t-r-sm);border:1px solid var(--t-border);background:var(--t-s2)}
+.topbar h1{font-size:18px;font-weight:600;letter-spacing:0}
+.company-meta{color:var(--t-text3);font-size:12px;gap:8px}.company-meta span+span{border-left:1px solid var(--t-border);padding-left:8px}
+.realm-view-status{background:transparent;border:0;padding:0;font-size:12px}
+.realm-view-status.live{color:var(--t-pos)}.realm-view-status.saved{color:var(--t-warn)}
+.realm-view-status.live::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--t-pos);margin-right:6px;vertical-align:1px}
+
+/* controls */
+button,input,select{border-radius:var(--t-r-sm)}
+button{background:var(--t-s2);border-color:var(--t-border);color:var(--t-text);font-weight:500}
+#sync,button.primary{background:var(--t-accent);border-color:var(--t-accent);color:var(--t-accent-ink)}
+#sync:hover,button.primary:hover{background:#ffb83f}
+select,input{background:var(--t-bg);border-color:var(--t-border);color:var(--t-text)}
+
+/* tabs */
+nav{border-bottom:1px solid var(--t-border);margin:0 0 24px;gap:0}
+.tab{padding:0 16px;min-height:40px;color:var(--t-text2);font-weight:500}
+.tab.active{color:var(--t-accent);border-bottom-color:var(--t-accent)}
+
+/* headings */
+h2{font-size:20px;font-weight:600;letter-spacing:-.01em}
+h3{font-size:14px;font-weight:600}
+.section-head{margin:0 0 16px}
+.section-head p{color:var(--t-text2);font-size:13px}
+.overview-realm-badge,.accounting-period-badge,.overview-section-badge,.owned-building-count{background:transparent!important;border:0!important;border-radius:0!important;color:var(--t-text3)!important;font-size:12px!important;padding:0!important;min-width:0!important}
+.accounting-period-badge{text-align:right}
+.accounting-period-badge strong{font-size:13px!important;color:var(--t-text2)!important}.accounting-period-badge span{font-size:12px!important;margin-top:2px!important}
+
+/* surfaces: one flat border, small radius */
+.panel,.card,.hero,.overview-section,.statement-card,.planner-main-card,.planner-summary-card,.finance-card,.owned-building-card,.overview-stat-card,.planner-output-product,.planner-output-stat,.contract-card{
+  background:var(--t-s1);border:1px solid var(--t-border);border-radius:var(--t-r)}
+.panel .panel,.planner-main-card,.finance-card,.planner-output-product,.planner-output-stat{background:var(--t-s2)}
+.panel{padding:16px;margin-bottom:16px}
+
+/* overview: 12-col grid, equal halves, rankings side by side */
+.overview-grid{display:grid!important;grid-template-columns:repeat(12,minmax(0,1fr))!important;gap:16px!important;align-items:stretch!important}
+.overview-grid>.overview-section{grid-column:span 6!important;margin:0!important;padding:16px!important;display:flex;flex-direction:column}
+.overview-resource-ranking-stack{grid-column:1/-1!important;display:grid!important;grid-template-columns:1fr 1fr;gap:16px}
+.overview-resource-ranking-stack>.overview-section{margin:0!important;padding:16px!important}
+.overview-section-head{margin:0 0 16px!important;align-items:flex-start!important}
+.overview-section-head h3{font-size:12px!important;margin:0 0 4px!important;text-transform:uppercase;letter-spacing:.06em;color:var(--t-accent)}
+.overview-section-head span{font-size:12px!important;color:var(--t-text3)!important}
+.overview-stat-grid,.overview-stat-grid-compact{grid-template-columns:repeat(var(--cols,4),minmax(0,1fr))!important;gap:0!important;border:1px solid var(--t-border);border-radius:var(--t-r);flex:1}
+.overview-stat-grid-compact{--cols:3}
+.overview-stat-card{padding:16px!important;min-height:72px;display:flex;flex-direction:column;border:0!important;border-right:1px solid var(--t-border)!important;border-radius:0!important;background:transparent!important}
+.overview-stat-card:last-child{border-right:0!important}
+.overview-stat-card span{font-size:12px!important;color:var(--t-text2)!important;margin:0 0 8px!important}
+.overview-stat-card strong{font-size:20px!important;font-weight:600;font-family:var(--t-num)}
+.overview-stat-card small{font-size:12px!important;color:var(--t-text3)!important;margin-top:auto!important;padding-top:4px}
+.overview-selling-list{gap:0!important}
+.overview-selling-row{grid-template-columns:24px 24px minmax(0,1fr) 88px 104px!important;gap:8px!important;padding:4px 0!important;border:0!important;border-bottom:1px solid var(--t-border)!important;border-radius:0!important;background:transparent!important;min-height:36px}
+.overview-selling-row:last-child{border-bottom:0!important}
+.overview-rank{font-size:12px!important;color:var(--t-text3)!important;font-weight:500!important;font-family:var(--t-num)}
+.overview-resource-icon{width:24px!important;height:24px!important;border-radius:var(--t-r-sm)!important;background:var(--t-s2)!important;border:1px solid var(--t-border)!important}
+.overview-selling-name{font-size:13px!important}
+.overview-selling-quantity small,.overview-selling-profit small{font-size:11px!important;text-transform:none!important;letter-spacing:0!important;color:var(--t-text3)!important}
+.overview-selling-quantity strong,.overview-selling-profit strong{font-size:13px!important;font-family:var(--t-num);font-weight:600}
+
+/* accounting: plain status line, small indicators */
+.accounting-head{margin-bottom:16px!important;align-items:end!important}
+.accounting-title h2{font-size:20px!important;margin:0!important;font-weight:600!important;letter-spacing:-.01em!important}
+.accounting-title p{font-size:13px!important;color:var(--t-text2)!important;margin-top:4px!important}
+.accounting-financial-panel{padding:16px!important;background:var(--t-s1)!important;border-radius:var(--t-r)!important}
+.accounting-live{height:auto!important;border:0!important;border-radius:0!important;padding:0 0 16px!important;margin:0 0 16px!important;border-bottom:1px solid var(--t-border)!important;font-size:12px!important;gap:8px!important}
+.accounting-live strong{font-size:12px!important;color:var(--t-pos)!important;letter-spacing:.06em;text-transform:uppercase}
+.accounting-live-dot{width:6px!important;height:6px!important;flex-basis:6px!important;background:var(--t-pos)!important;box-shadow:none!important}
+.accounting-live-divider{height:12px!important;width:1px!important;background:var(--t-border)!important}
+.finance-card-grid{gap:16px!important}
+.finance-card{min-height:0!important;padding:16px!important;border-radius:var(--t-r)!important}
+.finance-card .finance-label{font-size:12px!important;color:var(--t-text2)!important;margin-bottom:8px!important}
+.finance-card .finance-value{font-size:24px!important;font-weight:600!important;font-family:var(--t-num);color:var(--t-text)!important}
+.finance-change{min-height:0!important;gap:8px!important;margin-top:8px!important}
+.finance-card .finance-change-arrow{font-size:12px!important;width:auto!important;flex:0 0 auto!important;line-height:1!important}
+.finance-change-values{flex-direction:row!important;gap:8px;align-items:baseline}
+.finance-change-values strong{font-size:13px!important;font-weight:600!important;font-family:var(--t-num)}
+.finance-change-values small{font-size:13px!important;font-weight:500!important;margin:0!important;opacity:.8}
+
+/* tables (stacked .mobile-cards tables on phones keep their own layout) */
+th{background:transparent;color:var(--t-text3);font-size:12px;text-transform:none;letter-spacing:0;font-weight:500;border-bottom-color:var(--t-border)}
+html:not(.scm-mobile) td,html.scm-mobile table:not(.mobile-cards) td{padding:4px 8px;height:36px;border-bottom-color:var(--t-border);font-family:var(--t-num)}
+td:first-child{font-family:inherit}
+.warehouse-table td:first-child,.warehouse-table th:first-child{background:var(--t-s1)}
+.resource-icon{border-radius:var(--t-r-sm);background:var(--t-s2);border-color:var(--t-border)}
+
+/* production */
+.production-shell{background:var(--t-s1)!important;padding:16px!important}
+.owned-buildings-heading{margin-bottom:16px!important}
+.owned-buildings-strip{gap:8px!important;padding-bottom:16px!important}
+.owned-building-card{background:var(--t-s2)!important;border-radius:var(--t-r)!important}
+.owned-building-card.active{border-color:var(--t-accent)!important}
+.owned-building-level{background:transparent!important;border:1px solid var(--t-border)!important;border-radius:var(--t-r-sm)!important;color:var(--t-text2)!important}
+.owned-building-product.is-producing{color:var(--t-pos)!important}
+.planner-section-label{text-transform:uppercase;letter-spacing:.06em;font-size:12px!important}
+.planner-section-label span{color:var(--t-text3)!important;font-weight:400!important}
+.planner-output-stat strong{font-family:var(--t-num)}
+.planner-summary-head{background:transparent!important;font-size:12px!important;border-bottom:1px solid var(--t-border)}
+.deficit-card .planner-summary-head{color:var(--t-neg)!important}.surplus-card .planner-summary-head{color:var(--t-pos)!important}
+.planner-summary-card.deficit-card,.planner-summary-card.surplus-card{border-color:var(--t-border)!important;border-radius:var(--t-r)!important}
+.planner-summary-card.deficit-card{border-left:2px solid var(--t-neg)!important}.planner-summary-card.surplus-card{border-left:2px solid var(--t-pos)!important}
+.planner-summary-row{border-top:0!important}
+.planner-summary-row strong{font-family:var(--t-num)}
+
+/* phone */
+@media(max-width:600px){
+  .shell{padding:8px 16px}
+  .topbar{padding:16px;gap:16px}
+  nav{margin-bottom:16px}
+  .overview-grid>.overview-section{grid-column:1/-1!important}
+  .overview-resource-ranking-stack{grid-template-columns:1fr}
+  .overview-stat-grid{--cols:2!important}
+  .overview-stat-card{min-height:72px;padding:8px 16px!important;justify-content:center;border-right:0!important;border-bottom:1px solid var(--t-border)!important}
+  .overview-stat-grid .overview-stat-card:nth-child(odd){border-right:1px solid var(--t-border)!important}
+  .overview-stat-grid .overview-stat-card:nth-last-child(-n+2){border-bottom:0!important}
+  .overview-stat-grid-compact{--cols:3!important}
+  .overview-stat-grid-compact .overview-stat-card{padding:8px!important;border-bottom:0!important;border-right:1px solid var(--t-border)!important}
+  .overview-stat-grid-compact .overview-stat-card:last-child{border-right:0!important}
+  .overview-stat-grid-compact .overview-stat-card strong{font-size:16px!important}
+  .overview-selling-row{grid-template-columns:16px 24px minmax(0,1fr) 72px 104px!important;gap:6px!important}
+  .overview-selling-quantity strong,.overview-selling-profit strong{font-size:12px!important}
+  .finance-card-grid{grid-template-columns:1fr!important}
+  .finance-card .finance-value{font-size:20px!important}
+  .accounting-head{grid-template-columns:1fr!important}
+  .accounting-period-badge{text-align:left;justify-self:start!important}
+  .planner-summary-grid{grid-template-columns:1fr!important}
+}
+/* desk: overrides for older layers that use higher specificity */
+.warehouse-table{min-width:100%}
+.warehouse-page .warehouse-table td:first-child,.warehouse-page .warehouse-table th:first-child,.warehouse-table th{background:var(--t-s1)!important}
+html.scm-mobile table.mobile-cards tr{background:var(--t-s2);border-color:var(--t-border);border-radius:var(--t-r)}
+.accounting-live{background:transparent!important}
+nav{background:var(--t-bg)!important}
+@media(min-width:601px){.header-actions,.header-buttons,.sync-column{flex-direction:row!important;align-items:center!important;gap:8px}.header-actions .realm-switcher{margin:0}}
+.realm-switcher select,.header-actions .realm-switcher select{background:var(--t-bg)!important;border-color:var(--t-border)!important;color:var(--t-text)!important}
