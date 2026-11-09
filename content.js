@@ -1502,7 +1502,7 @@ function scmPageTextNoLayout(){
     const render=()=>{
       lstyle();
       const pill=document.getElementById(PILL);
-      if(!L.open){document.getElementById(CARD)?.remove();const p=ensure(PILL,'button');p.type='button';p.setAttribute('aria-label','Show my listings and outgoing contracts');const n=L.data?.rows?.length,c=L.cdata?.rows?.length;p.textContent=`Listings${Number.isFinite(n)?' '+n:''} · Contracts${Number.isFinite(c)?' '+c:''}`;placeSaved(p);return;}
+      if(!L.open){document.getElementById(CARD)?.remove();const p=ensure(PILL,'button');p.type='button';p.setAttribute('aria-label','Show my listings and outgoing contracts');const n=L.data?.rows?.length,c=L.cdata?.rows?.length;p.textContent=`Listings${Number.isFinite(n)?' '+n:''} · Contracts${Number.isFinite(c)?' '+c:''}`;if(drag?.el!==p)placeSaved(p);return;}
       pill?.remove();
       const card=ensure(CARD,'section');const realm=currentRealm();
       const title=`${realm!=null?`R${realm+1}`:'Game'} · Listings & contracts`;
@@ -1510,7 +1510,7 @@ function scmPageTextNoLayout(){
       const sec1=section('listings','My listings','listing',L.data,realm,agoL,{realm:'Checking which realm this game tab is in…',loading:'Loading your listings…',missing:'Your listings have not been read yet. They load once the game has told the Manager your company.',empty:'Nothing listed on the exchange.'},true,warn);
       const sec2=section('contracts','Outgoing contracts','contract',L.cdata,realm,agoC,{realm:'Checking which realm this game tab is in…',loading:'Loading your contracts…',missing:'Outgoing contracts have not been captured yet. Open your contracts in the game (or run Sync) and they appear here.',empty:'No outgoing contracts.'},false,'');
       card.innerHTML=`<div class="scm-ls-head"><span class="scm-ls-grip" aria-hidden="true">⠿</span><span class="scm-ls-title">${esc(title)}</span><button type="button" class="scm-ls-close" aria-label="Close my listings and outgoing contracts">×</button></div>${sec1}${sec2}`;
-      applyMin(card);placeSaved(card);
+      applyMin(card);if(drag?.el!==card)placeSaved(card);
     };
     // `at` of the contracts is left out of the signature: a read with the same contracts only updates the "captured X ago" text
     const signature=()=>{const d=L.data,c=L.cdata;return JSON.stringify([currentRealm(),L.open,d?.realm,d?.at,d?.missing,d?.refreshError?.error||null,(d?.rows||[]).map(r=>[r.id,r.kind,r.quality,r.quantity,r.price,r.vwap,r.image]),c?.realm,c?.missing,(c?.rows||[]).map(r=>[r.id,r.kind,r.quality,r.quantity,r.price])]);};

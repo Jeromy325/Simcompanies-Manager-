@@ -408,36 +408,95 @@ async function notifyGameCardsKeyChanged(key){
     for(const t of tabs){if(t?.id!=null)chrome.tabs.sendMessage(t.id,{type:'SCM_CARD_KEY_CHANGED',key}).catch(()=>{});}
   }catch{}
 }
-const ownListingsRefreshAt=new Map(); // realm → last GET_OWN_LISTINGS_DATA refresh request (ms)
 const ownListingsRefreshError=new Map(); // realm → {error,at} of the last failed refreshMarketOrders (cleared on success; memory only)
+// One gate for every own-listings read (card refresh, game action, overlay refresh, Sync tail, undercut check), per
+// realm: one read in flight (callers share it); at least 15 s between network reads whatever the caller or maxAgeMs;
+// after a failed read the next waits 15 s, 30 s, then 60 s (cleared on success). A card / game-action call inside
+// the gap or backoff gets ONE coalesced trailing read at its end (never dropped); a background call (Sync tail,
+// undercut check, opts.background) just uses the stored scmMarketOrders. Gap/backoff state is kept in storage.session
+// (scmMarketOrdersGate:<realm>, memory fallback) so a restarted service worker keeps it. Quiet skip (no request, no
+// Activity entry, no backoff step): no game tab, the tab is in the other realm, or (background calls only) the game
+// tab is not the active tab in its window.
+const MARKET_ORDERS_GAP_MS=15000,MARKET_ORDERS_BACKOFF_MS=[15000,30000,60000],MARKET_ORDERS_GATE_KEY='scmMarketOrdersGate:';
+const marketOrdersGateMem=new Map(),marketOrdersInFlight=new Map(),marketOrdersTrailing=new Map(),marketOrdersNetStart=new Map();
+async function marketOrdersGateGet(r){const key=MARKET_ORDERS_GATE_KEY+r;try{if(chrome.storage?.session){const v=(await chrome.storage.session.get(key))?.[key];return v&&typeof v==='object'?v:null;}}catch{}return marketOrdersGateMem.get(r)||null;}
+async function marketOrdersGateSet(r,v){const key=MARKET_ORDERS_GATE_KEY+r;marketOrdersGateMem.set(r,v);try{if(chrome.storage?.session)await chrome.storage.session.set({[key]:v});}catch{}}
+// Why a read must not go out now (null = go). Asks the tab's content script which realm it is in (BRIDGE_STATUS,
+// local message, no network); an unknown realm goes ahead and pageGet's own realm check decides.
+async function marketOrdersTabSkip(r,background){
+  let tab=null;try{tab=await simTab();}catch{}
+  if(!tab?.id)return 'no-game-tab';
+  if(background&&!tab.active)return 'game-tab-not-active';
+  let b=null;try{b=await Promise.race([chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),new Promise(res=>setTimeout(()=>res(null),1500))]);}catch{}
+  const tabRealm=b?.realm===0||b?.realm===1?b.realm:null;
+  return tabRealm!=null&&tabRealm!==r?'other-realm':null;
+}
+function scheduleMarketOrdersTrailing(r,atMs){
+  const prev=marketOrdersTrailing.get(r);
+  if(prev&&prev.at>=atMs)return;
+  if(prev)clearTimeout(prev.id);
+  const e={at:atMs,id:0};
+  e.id=setTimeout(()=>{if(marketOrdersTrailing.get(r)===e)marketOrdersTrailing.delete(r);refreshMarketOrders(r,0).catch(()=>{});},Math.max(0,atMs-Date.now())+25);
+  marketOrdersTrailing.set(r,e);
+}
 // Read through the game tab (pageGet): a plain service-worker fetch of this URL now gets a Cloudflare 403 page.
-async function refreshMarketOrders(realm,maxAgeMs=5*60000){
+async function refreshMarketOrders(realm,maxAgeMs=5*60000,opts=null){
   const r=validRealmNumber(realm);if(r==null)return {ok:false};
+  const k=`scmMarketOrders:${r}`;let cur=null;
+  try{cur=(await chrome.storage.local.get({[k]:null}))[k];}catch(e){return {ok:false,error:String(e?.message||e)};}
+  if(cur&&Date.now()-Date.parse(cur.at||0)<maxAgeMs)return {ok:true,cached:true};
+  // A card / game-action call while a read is already on the wire may carry a change that read missed: one
+  // trailing read at the end of that read's gap.
+  const running=marketOrdersInFlight.get(r);
+  if(running){const s=marketOrdersNetStart.get(r);if(s&&!opts?.background)scheduleMarketOrdersTrailing(r,Math.max(s+MARKET_ORDERS_GAP_MS,Date.now()+1000));return running;}
+  const p=marketOrdersReadOnce(r,cur,Boolean(opts?.background)).finally(()=>{if(marketOrdersInFlight.get(r)===p){marketOrdersInFlight.delete(r);marketOrdersNetStart.delete(r);}});
+  marketOrdersInFlight.set(r,p);
+  return p;
+}
+async function marketOrdersReadOnce(r,cur,background){
   const k=`scmMarketOrders:${r}`;
-  const fail=(error)=>{ownListingsRefreshError.set(r,{error,at:new Date().toISOString()});logActivity(r,'market-orders','failure',{},error);notifyGameCardsKeyChanged(k);return {ok:false,error};};
+  let gate={},lastAt=0;
+  const fail=async(error)=>{
+    ownListingsRefreshError.set(r,{error,at:new Date().toISOString()});
+    const failures=Math.min(MARKET_ORDERS_BACKOFF_MS.length,(Number(gate.failures)||0)+1);
+    await marketOrdersGateSet(r,{lastAt:lastAt||Number(gate.lastAt)||0,failures,nextAt:Date.now()+MARKET_ORDERS_BACKOFF_MS[failures-1],error,at:new Date().toISOString()});
+    logActivity(r,'market-orders','failure',{},error);notifyGameCardsKeyChanged(k);return {ok:false,error};
+  };
   try{
-    const cur=(await chrome.storage.local.get({[k]:null}))[k];
-    if(cur&&Date.now()-Date.parse(cur.at||0)<maxAgeMs)return {ok:true,cached:true};
+    gate=(await marketOrdersGateGet(r))||{};
+    const now=Date.now(),backoffAt=Number(gate.nextAt)||0,gapAt=(Number(gate.lastAt)||0)+MARKET_ORDERS_GAP_MS,waitUntil=Math.max(backoffAt,gapAt);
+    if(waitUntil>now){
+      const res=backoffAt>now?{ok:false,backoff:true,skipped:true,reason:'backoff',error:gate.error||null,nextAt:backoffAt}:{ok:true,throttled:true,skipped:true,reason:'gap',nextAt:waitUntil};
+      if(background)return res;
+      const skip=await marketOrdersTabSkip(r,false);if(skip)return {ok:false,skipped:true,reason:skip};
+      scheduleMarketOrdersTrailing(r,waitUntil);
+      return {...res,trailingAt:waitUntil};
+    }
+    const skip=await marketOrdersTabSkip(r,background);if(skip)return {ok:false,skipped:true,reason:skip};
     // Company id of THIS realm: the realm store's authCompany when its realm is r (or not stated), else the id kept
     // in the small orders key from an earlier read. An authCompany that says another realm is never used.
     const st=await notifyRealmStore(r),ac=st?.authData?.authCompany;
     const acRealm=validRealmNumber(ac?.realmId??ac?.realm??st?.authData?.realmId??st?.authData?.realm);
     const storeCid=acRealm==null||acRealm===r?Number(ac?.companyId??ac?.id)||0:0;
     const cid=storeCid>0?storeCid:Number(cur?.companyId)||0;
-    if(!(cid>0))return fail('company id not captured');
+    if(!(cid>0))return await fail('company id not captured');
+    lastAt=Date.now();marketOrdersNetStart.set(r,lastAt);await marketOrdersGateSet(r,{...gate,lastAt});
     const x=await pageGet(`/api/v2/companies/${cid}/market-orders/`,r,null,'own-listings-card',{timeoutMs:8000,attempts:1});
-    if(!x?.ok||x.data==null)return fail(x?.error||`HTTP ${x?.status||0}`);
-    if(!Array.isArray(x.data)&&!(x.data&&typeof x.data==='object'&&['data','items','results','orders','marketOrders'].some(f=>Array.isArray(x.data[f]))))return fail('not a list');
+    // The tab moved to the other realm meanwhile: quiet skip (the gap still counts, no backoff step, no log).
+    if(x?.realmMismatch)return {ok:false,skipped:true,reason:'other-realm'};
+    if(!x?.ok||x.data==null)return await fail(x?.error||`HTTP ${x?.status||0}`);
+    if(!Array.isArray(x.data)&&!(x.data&&typeof x.data==='object'&&['data','items','results','orders','marketOrders'].some(f=>Array.isArray(x.data[f]))))return await fail('not a list');
     const orders=helperArray(x.data,['data','items','results','orders','marketOrders']);
-    await rawStorageSet({[k]:{companyId:cid,orders,at:new Date().toISOString()}});ownListingsRefreshError.delete(r);notifyGameCardsKeyChanged(k);
+    await rawStorageSet({[k]:{companyId:cid,orders,at:new Date().toISOString()}});ownListingsRefreshError.delete(r);
+    await marketOrdersGateSet(r,{lastAt});notifyGameCardsKeyChanged(k);
     logActivity(r,'market-orders','success',{rows:orders.length});
     return {ok:true};
-  }catch(e){return fail(String(e?.message||e));}
+  }catch(e){return await fail(String(e?.message||e));}
 }
 // Your outgoing contracts read through the game tab into a small key scmOutgoingContracts:<realm>
 // ({data,at}); the game-page card is told it changed by an SCM_CARD_KEY_CHANGED message, without touching the large
 // realm store. A Manager pageGet is not captured by the page hook, so this never rewrites endpointData. No lock held.
-const OWN_LISTINGS_REFRESH_GAP_MS=12000,OUTGOING_CONTRACTS_REFRESH_GAP_MS=12000,OUTGOING_CONTRACTS_FRESH_MS=60000;
+const OUTGOING_CONTRACTS_REFRESH_GAP_MS=12000,OUTGOING_CONTRACTS_FRESH_MS=60000;
 const outgoingContractsRefreshAt=new Map(); // realm → last page read (ms)
 async function refreshOutgoingContracts(realm,minGapMs=OUTGOING_CONTRACTS_REFRESH_GAP_MS){
   const r=validRealmNumber(realm);if(r==null)return {ok:false};
@@ -458,8 +517,7 @@ function scheduleOwnOrdersRefresh(realm,delayMs=800){
   clearTimeout(ownOrdersRefreshTimers.get(n));
   ownOrdersRefreshTimers.set(n,setTimeout(()=>{
     ownOrdersRefreshTimers.delete(n);
-    ownListingsRefreshAt.set(n,Date.now());
-    refreshMarketOrders(n,0).catch(()=>{});
+    refreshMarketOrders(n,0).catch(()=>{}); // through the gate: within 15 s of the last read → one trailing read
     refreshOutgoingContracts(n,0).catch(()=>{});
   },delayMs));
 }
@@ -1643,7 +1701,7 @@ chrome.alarms.onAlarm.addListener(a=>{if(String(a?.name||'').startsWith('scm-fol
 // When an exchange order book is captured (by the game or the Manager), and after a warehouse update.
 async function notifyOrderBook(realm,resourceId,rows){
   const n=validRealmNumber(realm);if(n==null)return;const cfg=await notifySettings();if(!cfg.undercut&&!cfg.unprofitable)return;
-  if(cfg.undercut)await refreshMarketOrders(n);
+  if(cfg.undercut)await refreshMarketOrders(n,undefined,{background:true}); // gated; when skipped the stored listings below are used
   const st=await notifyRealmStore(n);const {names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE;
   const companyId=st?.authData?.authCompany?.id??st?.authData?.authCompany?.companyId;
   const mo=(await chrome.storage.local.get({[`scmMarketOrders:${n}`]:null}))[`scmMarketOrders:${n}`];
@@ -6354,7 +6412,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const committedStore=committed.realmStores?.[key]||{};
       trace('realm-store-commit',{realm:selected,endpointCount:Object.keys(committedStore.endpointData||{}).length,warehouseRows:Array.isArray(committedStore.warehouseResources)?committedStore.warehouseResources.length:0,fullSyncStatus:committedStore.syncStatus||null});
       trace('sync-complete',{ok:true,successful,failed,total,elapsedMs:Date.now()-startedAt});
-      refreshMarketOrders(selected,0).catch(()=>{});refreshGameConstants().catch(()=>{});
+      refreshMarketOrders(selected,0,{background:true}).catch(()=>{});refreshGameConstants().catch(()=>{});
       // Awaited (bounded) so its failures can reach this run's status; the final status is written again after the tail.
       try{
         const extra=await withSyncTimeout(refreshExtraGameData(selected,{movedReads:session.movedReads||null,captured:session.abundanceCaptures||null}),15000,'After-Sync reads');
@@ -7236,15 +7294,14 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     })(); return true;
   }
   // Game-page "My listings" card: your own exchange listings (scmMarketOrders:<realm>) with names, images and the
-  // realm's cached VWAP. refresh:true asks refreshMarketOrders (maxAge 0, no lock) at most every 12 s per realm,
+  // realm's cached VWAP. refresh:true asks refreshMarketOrders (maxAge 0, no lock; its gate reads at most once per 15 s per realm),
   // without waiting; the card is told the key changed by an SCM_CARD_KEY_CHANGED message. A game action also reads
   // it at once (scheduleOwnOrdersRefresh).
   if(m?.type==='GET_OWN_LISTINGS_DATA'){
     (async()=>{
       try{
         const realm=validRealmNumber(m.realm);if(realm==null){send({ok:false,error:'No realm.'});return;}
-        const now=Date.now();
-        if(m.refresh&&now-(ownListingsRefreshAt.get(realm)||0)>=OWN_LISTINGS_REFRESH_GAP_MS){ownListingsRefreshAt.set(realm,now);refreshMarketOrders(realm,0).catch(()=>{});}
+        if(m.refresh)refreshMarketOrders(realm,0).catch(()=>{});
         const k=`scmMarketOrders:${realm}`;const mo=(await chrome.storage.local.get({[k]:null}))[k];
         // refreshError: the last refresh failed (message + when), so old or empty rows are not real "0 listings".
         const refreshError=ownListingsRefreshError.get(realm)||null;
@@ -7519,7 +7576,9 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         resourceImagesMemo=null;notifyRecipesMemo=null;gameOverlayAssetsPromise=null;
         gameOverlaySnapshotMemo.clear();contractHelperCache.clear();
         gameOverlayLastRefreshAt.clear();gameOverlayDirty.clear();warehouseMutationLastAt.clear();warehouseOverlayBackoffUntil.clear();
-        ownListingsRefreshAt.clear();outgoingContractsRefreshAt.clear();abundanceAutoState.clear();gameCaptureLogAt.clear();gameOverlayManualRefreshAt.clear();
+        marketOrdersGateMem.clear();for(const t of marketOrdersTrailing.values())clearTimeout(t.id);marketOrdersTrailing.clear();
+        await chrome.storage.session?.remove([MARKET_ORDERS_GATE_KEY+0,MARKET_ORDERS_GATE_KEY+1]).catch(()=>{});
+        outgoingContractsRefreshAt.clear();abundanceAutoState.clear();gameCaptureLogAt.clear();gameOverlayManualRefreshAt.clear();
         realmStorageMigrationChecked=false;realmMigrationPromise=null;
         const resetDefaults={...DEFAULTS,selectedRealm:null,activeRealmKey:null,vwapStatus:{message:'Waiting for VWAP sync.'},marketQueueStatus:{message:'Waiting for the logged-in Sim Companies tab.',updatedAt:new Date().toISOString()},resourceImageData:{}};
         await storageSet(resetDefaults);
