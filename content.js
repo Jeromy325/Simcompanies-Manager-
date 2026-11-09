@@ -1385,11 +1385,11 @@ function scmPageTextNoLayout(){
   // Every game-page card can be minimised to its header (− / +); remembered per card in page localStorage.
   // (Stock After Demand & Contracts already collapses to ›, the monitor to a dot, Network capture to its bar.)
   const MIN_KEY='scm-card-min-v1';
-  const MIN_CARDS={'scm-left-copy-card':'.scm-left-copy-head','scm-contract-helper-card':'.scm-ch-head','scm-sell-qty-card':'.scm-sq-head','scm-listings-card':'.scm-ls-head','scm-contracts-card':'.scm-ls-head'};
+  const MIN_CARDS={'scm-left-copy-card':'.scm-left-copy-head','scm-contract-helper-card':'.scm-ch-head','scm-sell-qty-card':'.scm-sq-head','scm-listings-card':'.scm-ls-head'};
   const minRead=()=>{try{const v=JSON.parse(localStorage.getItem(MIN_KEY)||'{}');return v&&typeof v==='object'?v:{};}catch{return {};}};
   const applyMin=card=>{
     if(!card||!MIN_CARDS[card.id])return;
-    if(!document.getElementById('scm-min-style')){const st=document.createElement('style');st.id='scm-min-style';st.textContent='#scm-left-copy-card.scm-card-min>:not(.scm-left-copy-head),#scm-contract-helper-card.scm-card-min>:not(.scm-ch-head),#scm-sell-qty-card.scm-card-min>:not(.scm-sq-head),#scm-listings-card.scm-card-min>:not(.scm-ls-head),#scm-contracts-card.scm-card-min>:not(.scm-ls-head){display:none!important}.scm-min-btn{background:#292625;color:#efeeed;border:1px solid #44403e;border-radius:6px;min-width:26px;height:24px;padding:0 6px;font:14px/1 system-ui,sans-serif;cursor:pointer;flex:0 0 auto;margin-left:auto}.scm-min-btn+button{margin-left:4px}.scm-card-min{max-height:none!important}';(document.head||document.documentElement).appendChild(st);}
+    if(!document.getElementById('scm-min-style')){const st=document.createElement('style');st.id='scm-min-style';st.textContent='#scm-left-copy-card.scm-card-min>:not(.scm-left-copy-head),#scm-contract-helper-card.scm-card-min>:not(.scm-ch-head),#scm-sell-qty-card.scm-card-min>:not(.scm-sq-head),#scm-listings-card.scm-card-min>:not(.scm-ls-head){display:none!important}.scm-min-btn{background:#292625;color:#efeeed;border:1px solid #44403e;border-radius:6px;min-width:26px;height:24px;padding:0 6px;font:14px/1 system-ui,sans-serif;cursor:pointer;flex:0 0 auto;margin-left:auto}.scm-min-btn+button{margin-left:4px}.scm-card-min{max-height:none!important}';(document.head||document.documentElement).appendChild(st);}
     const head=card.querySelector(':scope>'+MIN_CARDS[card.id]);if(!head)return;
     let b=head.querySelector(':scope>[data-scm-min]');
     if(!b){b=document.createElement('button');b.type='button';b.className='scm-min-btn';b.dataset.scmMin='1';const close=head.querySelector(':scope>button');if(close)head.insertBefore(b,close);else head.appendChild(b);}
@@ -1438,34 +1438,46 @@ function scmPageTextNoLayout(){
     if(S.positionRaf)return;
     S.positionRaf=requestAnimationFrame(()=>{S.positionRaf=0;try{position();}catch{}});
   };
-  // "My listings" card: your own exchange listings (background GET_OWN_LISTINGS_DATA over scmMarketOrders:<realm>).
-  // Drag by the header (pointer events, touch too), − / + minimise (scm-card-min-v1), × closes to a small "Listings"
-  // pill on the right edge (draggable; tap reopens). Open state in page localStorage scm-listings-card-v1, positions in
-  // scmCardPos:scm-listings-card / scmCardPos:scm-listings-pill. No MutationObserver: it lives on <html>, outside the
-  // game's React root; it re-renders only when the data signature changes; "updated X ago" is one text node per 30 s.
+  // "Listings & contracts" card: ONE floating card with two separated sections, "My listings" on top and "Outgoing
+  // contracts" below. Data: background GET_OWN_LISTINGS_DATA (scmMarketOrders:<realm>) and GET_OUTGOING_CONTRACTS_DATA
+  // (game capture or the Manager's read, scmOutgoingContracts:<realm>); each section has its own seq guard and its own
+  // "updated/captured X ago". Drag by the header (pointer events, touch too), - / + minimise (scm-card-min-v1), x closes
+  // to one small pill on the right edge (draggable; tap reopens). Open state in page localStorage scm-lc-card-v1 (first
+  // run: open if either old key scm-listings-card-v1 / scm-contracts-card-v1 was open), position in
+  // scmCardPos:scm-listings-card / scmCardPos:scm-listings-pill (ids kept so saved positions carry over). No
+  // MutationObserver: it lives on <html>, outside the game's React root; it re-renders only when a section's data
+  // signature changes; the "ago" texts are updated in place every 30 s.
   const Listings=(()=>{
-    const CARD='scm-listings-card',PILL='scm-listings-pill',OPEN_KEY='scm-listings-card-v1';
-    const L={open:true,data:null,realm:null,sig:'',seq:0,changeTimer:0,agoTimer:0,started:false,noClickUntil:0};
-    try{const v=JSON.parse(localStorage.getItem(OPEN_KEY)||'null');if(v&&typeof v.open==='boolean')L.open=v.open;}catch{}
+    const CARD='scm-listings-card',PILL='scm-listings-pill',OPEN_KEY='scm-lc-card-v1';
+    const L={open:true,data:null,cdata:null,realm:null,sig:'',seq:0,cseq:0,changeTimer:0,cchangeTimer:0,agoTimer:0,refreshTimer:0,started:false,noClickUntil:0};
+    try{
+      const v=JSON.parse(localStorage.getItem(OPEN_KEY)||'null');
+      if(v&&typeof v.open==='boolean')L.open=v.open;
+      else{const old=k=>{try{const o=JSON.parse(localStorage.getItem(k)||'null');return o&&typeof o.open==='boolean'?o.open:null;}catch{return null;}};const a=old('scm-listings-card-v1'),b=old('scm-contracts-card-v1');if(a!=null||b!=null)L.open=!!(a||b);}
+    }catch{}
     const saveOpen=()=>{try{localStorage.setItem(OPEN_KEY,JSON.stringify({open:L.open}));}catch{}};
     const readPos=id=>{try{const v=JSON.parse(localStorage.getItem('scmCardPos:'+id)||'null');return v&&Number.isFinite(v.x)&&Number.isFinite(v.y)?v:null;}catch{return null;}};
-    const ago=iso=>{const t=Date.parse(String(iso||''));if(!Number.isFinite(t))return 'not read yet';const s=Math.max(0,Math.round((Date.now()-t)/1000));return s<60?'updated just now':s<3600?`updated ${Math.floor(s/60)} min ago`:s<86400?`updated ${Math.floor(s/3600)} h ago`:`updated ${Math.floor(s/86400)} d ago`;};
+    const agoOf=(iso,none,word)=>{const t=Date.parse(String(iso||''));if(!Number.isFinite(t))return none;const s=Math.max(0,Math.round((Date.now()-t)/1000));return s<60?`${word} just now`:s<3600?`${word} ${Math.floor(s/60)} min ago`:s<86400?`${word} ${Math.floor(s/3600)} h ago`:`${word} ${Math.floor(s/86400)} d ago`;};
+    const agoL=iso=>agoOf(iso,'not read yet','updated'),agoC=iso=>agoOf(iso,'not captured yet','captured');
     const lstyle=()=>{
       if(document.getElementById('scm-listings-style'))return;
       const st=document.createElement('style');st.id='scm-listings-style';
-      st.textContent=`#scm-listings-card,#scm-contracts-card{position:fixed;z-index:2147483000;box-sizing:border-box;width:min(340px,calc(100vw - 10px));max-height:55vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;touch-action:pan-y;background:rgba(16,15,15,.97);color:#efeeed;border:1px solid #3d3a38;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.30);font:12px/1.3 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:6px;pointer-events:auto}
-#scm-listings-card *,#scm-contracts-card *{box-sizing:border-box}#scm-listings-card.scm-card-min,#scm-contracts-card.scm-card-min{overflow:hidden}
+      st.textContent=`#scm-listings-card{position:fixed;z-index:2147483000;box-sizing:border-box;width:min(340px,calc(100vw - 10px));max-height:55vh;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;touch-action:pan-y;background:rgba(16,15,15,.97);color:#efeeed;border:1px solid #3d3a38;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.30);font:12px/1.3 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:6px;pointer-events:auto}
+#scm-listings-card *{box-sizing:border-box}#scm-listings-card.scm-card-min{overflow:hidden}
 .scm-ls-head{display:flex;align-items:center;gap:5px;min-height:28px;cursor:move;touch-action:none;-webkit-user-select:none;user-select:none;position:sticky;top:-6px;z-index:2;margin:-6px -6px 0;padding:6px;background:rgba(16,15,15,.98)}
-#scm-listings-card:not(.scm-card-min) .scm-ls-head,#scm-contracts-card:not(.scm-card-min) .scm-ls-head{border-bottom:1px solid #3a3736}
+#scm-listings-card:not(.scm-card-min) .scm-ls-head{border-bottom:1px solid #3a3736}
 .scm-ls-grip{color:#98928f;font-size:14px;line-height:1}.scm-ls-title{flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .scm-ls-close{width:26px;height:26px;min-width:26px;border:1px solid #514d4b;border-radius:5px;background:#242221;color:#efeeed;font:700 14px/1 system-ui;cursor:pointer;padding:0;display:inline-flex;align-items:center;justify-content:center}
-.scm-ls-sum{display:flex;justify-content:space-between;gap:6px;color:#afaaa8;font-size:11px;margin:5px 1px 0}.scm-ls-sum b{color:#efeeed;font-weight:600}
+.scm-ls-sec+.scm-ls-sec{margin-top:10px;padding-top:8px;border-top:2px solid #4a4644}
+.scm-ls-sech{margin:6px 1px 0;color:#efeeed;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}.scm-ls-sec+.scm-ls-sec .scm-ls-sech{margin-top:0}
+.scm-ls-sum{display:flex;justify-content:space-between;gap:6px;color:#afaaa8;font-size:11px;margin:3px 1px 0}.scm-ls-sum b{color:#efeeed;font-weight:600}
+.scm-ls-warn{color:#f0c674;font-size:11px;margin:4px 1px 0}
 .scm-ls-row{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:2px 6px;align-items:center;margin-top:4px;padding:5px 6px;border:1px solid #3a3736;border-radius:4px;background:#191817}
 .scm-ls-row img,.scm-ls-noimg{width:20px;height:20px;object-fit:contain;grid-row:1/3}.scm-ls-name{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .scm-ls-total{text-align:right;white-space:nowrap;font-weight:600}.scm-ls-sub{color:#afaaa8;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .scm-ls-vs{text-align:right;white-space:nowrap;font-size:11px;color:#afaaa8}.scm-ls-vs.hi{color:#f0c674}.scm-ls-vs.lo{color:#f5a37a}
 .scm-ls-none{color:#afaaa8;font-size:11px;padding:10px 4px;text-align:center}
-#scm-listings-pill,#scm-contracts-pill{position:fixed;z-index:2147483000;box-sizing:border-box;border:1px solid #514d4b;border-radius:14px;background:rgba(36,34,33,.9);color:#e9e8e8;font:700 11px/1 system-ui,-apple-system,sans-serif;padding:6px 9px;min-height:26px;cursor:pointer;touch-action:none;-webkit-user-select:none;user-select:none;box-shadow:0 3px 10px rgba(0,0,0,.3);opacity:.85}`;
+#scm-listings-pill{position:fixed;z-index:2147483000;box-sizing:border-box;border:1px solid #514d4b;border-radius:14px;background:rgba(36,34,33,.9);color:#e9e8e8;font:700 11px/1 system-ui,-apple-system,sans-serif;padding:6px 9px;min-height:26px;cursor:pointer;touch-action:none;-webkit-user-select:none;user-select:none;box-shadow:0 3px 10px rgba(0,0,0,.3);opacity:.85}`;
       (document.head||document.documentElement).appendChild(st);
     };
     // Card: default top-right under the game header; pill: right edge, a little below the middle (clear of the
@@ -1474,29 +1486,39 @@ function scmPageTextNoLayout(){
     const defaultPos=el=>el.id===CARD?{x:window.innerWidth-(el.offsetWidth||340)-5,y:Math.round(headerBottom()+40)}:{x:window.innerWidth-(el.offsetWidth||80)-4,y:Math.round(window.innerHeight*.58)};
     const placeSaved=el=>{if(el)place(el,readPos(el.id)||defaultPos(el));};
     const ensure=(id,tag)=>{let el=document.getElementById(id);if(el&&document.documentElement.contains(el))return el;el=document.createElement(tag);el.id=id;el.dataset.scmOwned='1';document.documentElement.appendChild(el);return el;};
-    const rowHtml=r=>{
-      const vs=Number.isFinite(r.vsVwapPct)?r.vsVwapPct:null;const cls=vs==null||Math.abs(vs)<1?'':vs>0?'hi':'lo';
+    const byTotal=d=>Array.isArray(d?.rows)?[...d.rows].sort((a,b)=>b.total-a.total||String(a.name).localeCompare(String(b.name))||a.quality-b.quality):[];
+    const rowHtml=(r,withVs)=>{
+      const vs=withVs&&Number.isFinite(r.vsVwapPct)?r.vsVwapPct:null;const cls=vs==null||Math.abs(vs)<1?'':vs>0?'hi':'lo';
       return `<div class="scm-ls-row">${r.image?`<img src="${esc(r.image)}" alt="" loading="lazy">`:'<span class="scm-ls-noimg"></span>'}<span class="scm-ls-name">${esc(r.name)} <span class="scm-ls-q">Q${esc(r.quality)}</span></span><span class="scm-ls-total">${money(r.total)}</span><span class="scm-ls-sub">${num(r.quantity)} × ${money(r.price)}</span><span class="scm-ls-vs ${cls}">${vs==null?'':`${vs>0?'+':''}${vs.toFixed(1)}% vs VWAP`}</span></div>`;
+    };
+    const section=(key,heading,noun,d,realm,agoFn,msgs,withVs,warn)=>{
+      const rows=byTotal(d),total=rows.reduce((a,r)=>a+(Number(r.total)||0),0);
+      const body=realm==null?`<div class="scm-ls-none">${msgs.realm}</div>`
+        :!d?`<div class="scm-ls-none">${msgs.loading}</div>`
+        :d.missing?`<div class="scm-ls-none">${msgs.missing}</div>`
+        :`<div class="scm-ls-sum"><span><b>${rows.length}</b> ${noun}${rows.length===1?'':'s'} · <b>${money(total)}</b></span><span class="scm-ls-ago" data-ago="${key}">${esc(agoFn(d.at))}</span></div>${rows.length?rows.map(r=>rowHtml(r,withVs)).join(''):`<div class="scm-ls-none">${msgs.empty}</div>`}`;
+      return `<div class="scm-ls-sec" data-sec="${key}"><div class="scm-ls-sech">${heading}</div>${warn?`<div class="scm-ls-warn">${esc(warn)}</div>`:''}${body}</div>`;
     };
     const render=()=>{
       lstyle();
       const pill=document.getElementById(PILL);
-      if(!L.open){document.getElementById(CARD)?.remove();const p=ensure(PILL,'button');p.type='button';p.setAttribute('aria-label','Show my exchange listings');const n=L.data?.rows?.length;p.textContent=Number.isFinite(n)&&n>0?`Listings ${n}`:'Listings';placeSaved(p);return;}
+      if(!L.open){document.getElementById(CARD)?.remove();const p=ensure(PILL,'button');p.type='button';p.setAttribute('aria-label','Show my listings and outgoing contracts');const n=L.data?.rows?.length,c=L.cdata?.rows?.length;p.textContent=`Listings${Number.isFinite(n)?' '+n:''} · Contracts${Number.isFinite(c)?' '+c:''}`;placeSaved(p);return;}
       pill?.remove();
-      const card=ensure(CARD,'section');const d=L.data,realm=currentRealm();
-      const rows=Array.isArray(d?.rows)?[...d.rows].sort((a,b)=>b.total-a.total||String(a.name).localeCompare(String(b.name))||a.quality-b.quality):[];
-      const total=rows.reduce((a,r)=>a+(Number(r.total)||0),0);
-      const title=`${realm!=null?`R${realm+1}`:'Game'} · My listings`;
-      const body=realm==null?'<div class="scm-ls-none">Checking which realm this game tab is in…</div>'
-        :!d?'<div class="scm-ls-none">Loading your listings…</div>'
-        :d.missing?'<div class="scm-ls-none">Your listings have not been read yet. They load once the game has told the Manager your company.</div>'
-        :`<div class="scm-ls-sum"><span><b>${rows.length}</b> listing${rows.length===1?'':'s'} · <b>${money(total)}</b></span><span class="scm-ls-ago">${esc(ago(d.at))}</span></div>${rows.length?rows.map(rowHtml).join(''):'<div class="scm-ls-none">Nothing listed on the exchange.</div>'}`;
-      card.innerHTML=`<div class="scm-ls-head"><span class="scm-ls-grip" aria-hidden="true">⠿</span><span class="scm-ls-title">${esc(title)}</span><button type="button" class="scm-ls-close" aria-label="Close my listings">×</button></div>${body}`;
+      const card=ensure(CARD,'section');const realm=currentRealm();
+      const title=`${realm!=null?`R${realm+1}`:'Game'} · Listings & contracts`;
+      const re=L.data?.refreshError;const warn=re&&re.error?`Couldn't update: ${re.error}`:'';
+      const sec1=section('listings','My listings','listing',L.data,realm,agoL,{realm:'Checking which realm this game tab is in…',loading:'Loading your listings…',missing:'Your listings have not been read yet. They load once the game has told the Manager your company.',empty:'Nothing listed on the exchange.'},true,warn);
+      const sec2=section('contracts','Outgoing contracts','contract',L.cdata,realm,agoC,{realm:'Checking which realm this game tab is in…',loading:'Loading your contracts…',missing:'Outgoing contracts have not been captured yet. Open your contracts in the game (or run Sync) and they appear here.',empty:'No outgoing contracts.'},false,'');
+      card.innerHTML=`<div class="scm-ls-head"><span class="scm-ls-grip" aria-hidden="true">⠿</span><span class="scm-ls-title">${esc(title)}</span><button type="button" class="scm-ls-close" aria-label="Close my listings and outgoing contracts">×</button></div>${sec1}${sec2}`;
       applyMin(card);placeSaved(card);
     };
-    const signature=d=>JSON.stringify([currentRealm(),d?.realm,d?.at,d?.missing,(d?.rows||[]).map(r=>[r.id,r.kind,r.quality,r.quantity,r.price,r.vwap,r.image])]);
-    const paint=()=>{const s=signature(L.data)+L.open;const have=document.getElementById(L.open?CARD:PILL);if(s===L.sig&&have)return;L.sig=s;render();};
-    const request=(refresh=false)=>{
+    // `at` of the contracts is left out of the signature: a read with the same contracts only updates the "captured X ago" text
+    const signature=()=>{const d=L.data,c=L.cdata;return JSON.stringify([currentRealm(),L.open,d?.realm,d?.at,d?.missing,d?.refreshError?.error||null,(d?.rows||[]).map(r=>[r.id,r.kind,r.quality,r.quantity,r.price,r.vwap,r.image]),c?.realm,c?.missing,(c?.rows||[]).map(r=>[r.id,r.kind,r.quality,r.quantity,r.price])]);};
+    const updateAgo=()=>{const root=document.getElementById(CARD);if(!root)return;const a=root.querySelector('[data-ago="listings"]'),b=root.querySelector('[data-ago="contracts"]');if(a&&L.data)a.textContent=agoL(L.data.at);if(b&&L.cdata)b.textContent=agoC(L.cdata.at);};
+    const paint=()=>{const s=signature();const have=document.getElementById(L.open?CARD:PILL);
+      if(s===L.sig&&have){if(L.open)updateAgo();return;}
+      L.sig=s;render();};
+    const requestL=(refresh=false)=>{
       if(!L.open&&!refresh)return;
       const realm=currentRealm();if(realm==null){paint();return;}
       const seq=++L.seq;
@@ -1505,7 +1527,17 @@ function scmPageTextNoLayout(){
         L.data=r;paint();
       });}catch{}
     };
-    const tickAgo=()=>{if(document.hidden||!L.open)return;const el=document.querySelector('#scm-listings-card .scm-ls-ago');if(el&&L.data)el.textContent=ago(L.data.at);if(!document.getElementById(CARD))paint();};
+    // contracts: a read through the game tab only while the card is open; closed, the pill count uses the stored data
+    const requestC=(refresh=false)=>{
+      const realm=currentRealm();if(realm==null){paint();return;}
+      const seq=++L.cseq;
+      try{chrome.runtime.sendMessage({type:'GET_OUTGOING_CONTRACTS_DATA',realm,refresh:!!(refresh&&L.open)},r=>{
+        if(chrome.runtime.lastError||seq!==L.cseq||currentRealm()!==realm||!r?.ok||Number(r.realm)!==realm)return;
+        L.cdata=r;paint();
+      });}catch{}
+    };
+    const request=(refresh=false)=>{requestL(refresh);if(L.open||refresh)requestC(refresh);};
+    const tickAgo=()=>{if(document.hidden||!L.open)return;updateAgo();if(!document.getElementById(CARD))paint();};
     const setOpen=open=>{L.open=open;saveOpen();L.sig='';paint();if(open)request(true);};
     // drag (card header / pill), clamped; a tap on the pill reopens the card
     let drag=null;
@@ -1525,104 +1557,21 @@ function scmPageTextNoLayout(){
       if(e.target.closest?.('#scm-listings-pill')){e.preventDefault();e.stopPropagation();setOpen(true);}
     },true);
     window.addEventListener('resize',()=>{placeSaved(document.getElementById(CARD));placeSaved(document.getElementById(PILL));},{passive:true});
-    // Background tells us when the small key changes (no storage.onChanged: it would deliver every large realm-store write).
+    // Background tells us when a small key changes (no storage.onChanged: it would deliver every large realm-store write).
     chrome.runtime?.onMessage?.addListener((msg)=>{
       if(msg?.type!=='SCM_CARD_KEY_CHANGED')return false;
-      const realm=currentRealm();if(realm==null||msg.key!==`scmMarketOrders:${realm}`||!L.open)return false;
-      clearTimeout(L.changeTimer);L.changeTimer=setTimeout(()=>request(false),300);return false;
+      const realm=currentRealm();if(realm==null||!L.open)return false;
+      if(msg.key===`scmMarketOrders:${realm}`){clearTimeout(L.changeTimer);L.changeTimer=setTimeout(()=>requestL(false),300);}
+      else if(msg.key===`scmOutgoingContracts:${realm}`){clearTimeout(L.cchangeTimer);L.cchangeTimer=setTimeout(()=>requestC(false),300);}
+      return false;
     });
     document.addEventListener('visibilitychange',()=>{if(!document.hidden&&L.open){request(true);tickAgo();}});
     // the game re-announces its realm on every state update; act only on a real change
-    window.addEventListener('scm-game-realm-change',()=>{const r=currentRealm();if(r===L.realm)return;L.realm=r;L.data=null;L.seq++;paint();request(true);});
+    window.addEventListener('scm-game-realm-change',()=>{const r=currentRealm();if(r===L.realm)return;L.realm=r;L.data=null;L.cdata=null;L.seq++;L.cseq++;paint();request(true);});
     const start=()=>{if(L.started||!isSimCompaniesPage())return;L.started=true;L.realm=currentRealm();paint();request(true);L.agoTimer=setInterval(tickAgo,30000);L.refreshTimer=setInterval(()=>{if(!document.hidden&&L.open)request(true);},15000);};
     return {start,style:lstyle};
   })();
   if(document.readyState!=='loading')Listings.start();else document.addEventListener('DOMContentLoaded',()=>Listings.start(),{once:true});
-  // "Outgoing contracts" card: its own card, pill and saved position, beside (not inside) My listings. Shows the game's
-  // outgoing contracts for this realm (background GET_OUTGOING_CONTRACTS_DATA): the game's own capture or the
-  // Manager's read through the game tab (scmOutgoingContracts:<realm>), whichever is newer. It asks for a read when it
-  // opens, every 15 s while visible and when the tab becomes visible; a game action reads at once (background); it
-  // follows the small key through the background's SCM_CARD_KEY_CHANGED message. "captured X ago" says how old the
-  // data is.
-  const Contracts=(()=>{
-    const CARD='scm-contracts-card',PILL='scm-contracts-pill',OPEN_KEY='scm-contracts-card-v1';
-    const C={open:Math.min(window.innerWidth,screen.width)>=768,data:null,realm:null,sig:'',seq:0,changeTimer:0,agoTimer:0,refreshTimer:0,started:false,noClickUntil:0};
-    try{const v=JSON.parse(localStorage.getItem(OPEN_KEY)||'null');if(v&&typeof v.open==='boolean')C.open=v.open;}catch{}
-    const saveOpen=()=>{try{localStorage.setItem(OPEN_KEY,JSON.stringify({open:C.open}));}catch{}};
-    const readPos=id=>{try{const v=JSON.parse(localStorage.getItem('scmCardPos:'+id)||'null');return v&&Number.isFinite(v.x)&&Number.isFinite(v.y)?v:null;}catch{return null;}};
-    const ago=iso=>{const t=Date.parse(String(iso||''));if(!Number.isFinite(t))return 'not captured yet';const s=Math.max(0,Math.round((Date.now()-t)/1000));return s<60?'captured just now':s<3600?`captured ${Math.floor(s/60)} min ago`:s<86400?`captured ${Math.floor(s/3600)} h ago`:`captured ${Math.floor(s/86400)} d ago`;};
-    // Card: under My listings when that card is in its default place; pill: right edge, below the listings pill.
-    const place=(el,pos)=>{if(!el)return;el.style.right='auto';el.style.bottom='auto';placeCard(el,pos.x,pos.y);};
-    const defaultPos=el=>{
-      if(el.id===CARD){const l=document.getElementById('scm-listings-card');const top=l?l.getBoundingClientRect().bottom+6:headerBottom()+40;return {x:window.innerWidth-(el.offsetWidth||340)-5,y:Math.round(top)};}
-      return {x:window.innerWidth-(el.offsetWidth||80)-4,y:Math.round(window.innerHeight*.58)+34};
-    };
-    const placeSaved=el=>{if(el)place(el,readPos(el.id)||defaultPos(el));};
-    const ensure=(id,tag)=>{let el=document.getElementById(id);if(el&&document.documentElement.contains(el))return el;el=document.createElement(tag);el.id=id;el.dataset.scmOwned='1';document.documentElement.appendChild(el);return el;};
-    const rowHtml=r=>`<div class="scm-ls-row">${r.image?`<img src="${esc(r.image)}" alt="" loading="lazy">`:'<span class="scm-ls-noimg"></span>'}<span class="scm-ls-name">${esc(r.name)} <span class="scm-ls-q">Q${esc(r.quality)}</span></span><span class="scm-ls-total">${money(r.total)}</span><span class="scm-ls-sub">${num(r.quantity)} × ${money(r.price)}</span><span class="scm-ls-vs"></span></div>`;
-    const render=()=>{
-      Listings.style();
-      const pill=document.getElementById(PILL);
-      if(!C.open){document.getElementById(CARD)?.remove();const p=ensure(PILL,'button');p.type='button';p.setAttribute('aria-label','Show my outgoing contracts');const n=C.data?.rows?.length;p.textContent=Number.isFinite(n)&&n>0?`Contracts ${n}`:'Contracts';placeSaved(p);return;}
-      pill?.remove();
-      const card=ensure(CARD,'section');const d=C.data,realm=currentRealm();
-      const rows=Array.isArray(d?.rows)?[...d.rows].sort((a,b)=>b.total-a.total||String(a.name).localeCompare(String(b.name))||a.quality-b.quality):[];
-      const total=rows.reduce((a,r)=>a+(Number(r.total)||0),0);
-      const title=`${realm!=null?`R${realm+1}`:'Game'} · Outgoing contracts`;
-      const body=realm==null?'<div class="scm-ls-none">Checking which realm this game tab is in…</div>'
-        :!d?'<div class="scm-ls-none">Loading your contracts…</div>'
-        :d.missing?'<div class="scm-ls-none">Outgoing contracts have not been captured yet. Open your contracts in the game (or run Sync) and they appear here.</div>'
-        :`<div class="scm-ls-sum"><span><b>${rows.length}</b> contract${rows.length===1?'':'s'} · <b>${money(total)}</b></span><span class="scm-ls-ago">${esc(ago(d.at))}</span></div>${rows.length?rows.map(rowHtml).join(''):'<div class="scm-ls-none">No outgoing contracts.</div>'}`;
-      card.innerHTML=`<div class="scm-ls-head"><span class="scm-ls-grip" aria-hidden="true">⠿</span><span class="scm-ls-title">${esc(title)}</span><button type="button" class="scm-ls-close" aria-label="Close my outgoing contracts">×</button></div>${body}`;
-      applyMin(card);placeSaved(card);
-    };
-    // `at` is left out of the signature: a read with the same contracts only updates the "captured X ago" text
-    const signature=d=>JSON.stringify([currentRealm(),d?.realm,d?.missing,(d?.rows||[]).map(r=>[r.id,r.kind,r.quality,r.quantity,r.price])]);
-    const paint=()=>{const s=signature(C.data)+C.open;const have=document.getElementById(C.open?CARD:PILL);
-      if(s===C.sig&&have){const el=C.open&&C.data&&have.querySelector('.scm-ls-ago');if(el)el.textContent=ago(C.data.at);return;}
-      C.sig=s;render();};
-    const request=(refresh=false)=>{
-      if(!C.open)return;
-      const realm=currentRealm();if(realm==null){paint();return;}
-      const seq=++C.seq;
-      try{chrome.runtime.sendMessage({type:'GET_OUTGOING_CONTRACTS_DATA',realm,refresh},r=>{
-        if(chrome.runtime.lastError||seq!==C.seq||currentRealm()!==realm||!r?.ok||Number(r.realm)!==realm)return;
-        C.data=r;paint();
-      });}catch{}
-    };
-    const tickAgo=()=>{if(document.hidden||!C.open)return;const el=document.querySelector('#scm-contracts-card .scm-ls-ago');if(el&&C.data)el.textContent=ago(C.data.at);if(!document.getElementById(CARD))paint();};
-    const setOpen=open=>{C.open=open;saveOpen();C.sig='';paint();if(open)request(true);};
-    // drag (card header / pill), clamped; a tap on the pill reopens the card
-    let drag=null;
-    document.addEventListener('pointerdown',e=>{
-      const t=e.target;const el=t?.closest?.('#scm-contracts-pill')||(t?.closest?.('#scm-contracts-card .scm-ls-head')&&!t.closest('button')?document.getElementById(CARD):null);if(!el)return;
-      if(e.pointerType==='mouse'&&e.button!==0)return;
-      const r=el.getBoundingClientRect();drag={el,pid:e.pointerId,sx:e.clientX,sy:e.clientY,dx:e.clientX-r.left,dy:e.clientY-r.top,moved:false};
-      try{el.setPointerCapture(e.pointerId);}catch{}
-    },true);
-    document.addEventListener('pointermove',e=>{if(!drag||e.pointerId!==drag.pid)return;if(!drag.moved&&Math.hypot(e.clientX-drag.sx,e.clientY-drag.sy)<6)return;drag.moved=true;e.preventDefault();place(drag.el,{x:e.clientX-drag.dx,y:e.clientY-drag.dy});},{capture:true,passive:false});
-    const end=e=>{if(!drag||e.pointerId!==drag.pid)return;const x=drag;drag=null;try{x.el.releasePointerCapture(e.pointerId);}catch{}
-      if(x.moved){try{localStorage.setItem('scmCardPos:'+x.el.id,JSON.stringify({x:x.el.offsetLeft,y:x.el.offsetTop}));}catch{}C.noClickUntil=Date.now()+400;}};
-    document.addEventListener('pointerup',end,true);document.addEventListener('pointercancel',end,true);
-    document.addEventListener('click',e=>{
-      if(Date.now()<(C.noClickUntil||0)&&e.target.closest?.('#scm-contracts-pill,#scm-contracts-card .scm-ls-head')){e.preventDefault();e.stopPropagation();return;}
-      if(e.target.closest?.('#scm-contracts-card .scm-ls-close')){e.preventDefault();e.stopPropagation();setOpen(false);return;}
-      if(e.target.closest?.('#scm-contracts-pill')){e.preventDefault();e.stopPropagation();setOpen(true);}
-    },true);
-    window.addEventListener('resize',()=>{placeSaved(document.getElementById(CARD));placeSaved(document.getElementById(PILL));},{passive:true});
-    // Background tells us when the small key changes (no storage.onChanged: it would deliver every large realm-store write).
-    chrome.runtime?.onMessage?.addListener((msg)=>{
-      if(msg?.type!=='SCM_CARD_KEY_CHANGED')return false;
-      const realm=currentRealm();if(realm==null||msg.key!==`scmOutgoingContracts:${realm}`||!C.open)return false;
-      clearTimeout(C.changeTimer);C.changeTimer=setTimeout(()=>request(false),300);return false;
-    });
-    document.addEventListener('visibilitychange',()=>{if(!document.hidden&&C.open){request(true);tickAgo();}});
-    // the game re-announces its realm on every state update; act only on a real change
-    window.addEventListener('scm-game-realm-change',()=>{const r=currentRealm();if(r===C.realm)return;C.realm=r;C.data=null;C.seq++;paint();request(true);});
-    const start=()=>{if(C.started||!isSimCompaniesPage())return;C.started=true;C.realm=currentRealm();paint();request(true);C.agoTimer=setInterval(tickAgo,30000);C.refreshTimer=setInterval(()=>{if(!document.hidden&&C.open)request(true);},15000);};
-    return {start};
-  })();
-  if(document.readyState!=='loading')Contracts.start();else document.addEventListener('DOMContentLoaded',()=>Contracts.start(),{once:true});
   // Performance: this runs on every DOM mutation batch. The URL decides at once; otherwise the visible page text
   // is read at most once per 1.5 s per URL.
   let contractTextCheck={at:0,path:'',value:false};

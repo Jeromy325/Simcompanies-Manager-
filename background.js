@@ -358,21 +358,48 @@ const USEFUL_PATTERNS = [
 
 const rawStorageSet=chrome.storage.local.set.bind(chrome.storage.local);
 // The game's public constants (/api/v2/constants/core|buildings|resources/) → scmGameConstants, refreshed
-// every 6 h; and your own exchange listings (/api/v2/companies/<id>/market-orders/, public) → scmMarketOrders:<realm>.
-// Plain fetches, no storage lock held while fetching.
+// every 6 h; and your own exchange listings (/api/v2/companies/<id>/market-orders/, read through the game tab) → scmMarketOrders:<realm>.
+// No storage lock held while fetching.
 const GAME_CONSTANTS_ALARM='scm-game-constants';
-async function refreshGameConstants(force=false){
+// Read through the game tab (pageGet): a plain service-worker fetch of /api/v2/constants/ now gets a Cloudflare 403
+// page or "Failed to fetch". After a failed read the next one waits 15 min, doubling up to the 6 h period. The
+// backoff is kept in storage.session (scmGameConstantsRetry) so a restarted service worker keeps it; it is cleared
+// on success and when the browser restarts or the extension is reloaded/updated. No game tab: nothing is fetched,
+// nothing is logged and the backoff is not touched.
+const GAME_CONSTANTS_PERIOD_MS=6*3600000,GAME_CONSTANTS_RETRY_MIN_MS=15*60000,GAME_CONSTANTS_RETRY_KEY='scmGameConstantsRetry';
+let gameConstantsRetryMem=null,gameConstantsInFlight=null;
+async function gameConstantsRetryGet(){try{if(chrome.storage?.session){const v=(await chrome.storage.session.get(GAME_CONSTANTS_RETRY_KEY))?.[GAME_CONSTANTS_RETRY_KEY];return v&&typeof v==='object'?v:null;}}catch{}return gameConstantsRetryMem;}
+async function gameConstantsRetrySet(v){gameConstantsRetryMem=v;try{if(chrome.storage?.session){if(v)await chrome.storage.session.set({[GAME_CONSTANTS_RETRY_KEY]:v});else await chrome.storage.session.remove(GAME_CONSTANTS_RETRY_KEY);}}catch{}}
+function refreshGameConstants(force=false){
+  if(gameConstantsInFlight)return gameConstantsInFlight;
+  gameConstantsInFlight=refreshGameConstantsOnce(force).finally(()=>{gameConstantsInFlight=null;});
+  return gameConstantsInFlight;
+}
+async function refreshGameConstantsOnce(force){
   try{
     const cur=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;
-    if(!force&&cur&&Date.now()-Date.parse(cur.at||0)<6*3600000)return {ok:true,cached:true};
-    const get=async p=>{const r=await fetch(`https://www.simcompanies.com${p}`,{credentials:'omit'});if(!r.ok)throw new Error(`${p} HTTP ${r.status}`);return r.json();};
-    const [core,buildings,resources]=await Promise.all([get('/api/v2/constants/core/'),get('/api/v2/constants/buildings/'),get('/api/v2/constants/resources/')]);
+    if(!force&&cur&&Date.now()-Date.parse(cur.at||0)<GAME_CONSTANTS_PERIOD_MS)return {ok:true,cached:true};
+    const retry=await gameConstantsRetryGet();
+    if(!force&&retry&&Number(retry.nextAt)>Date.now())return {ok:false,backoff:true,error:retry.error||null,nextAt:retry.nextAt};
+    if(!(await simTab())?.id)return {ok:false,skipped:true,error:'No Sim Companies tab open.'};
+  }catch(e){return {ok:false,error:String(e?.message||e)};}
+  try{
+    const get=async p=>{const x=await pageGet(p,null,null,'game-constants',{timeoutMs:10000,attempts:1});if(!x?.ok)throw new Error(`${p} ${x?.error||`HTTP ${x?.status||0}`}`);if(!x.data||typeof x.data!=='object')throw new Error(`${p} not JSON`);return x.data;};
+    // One at a time: the first failure stops the rest.
+    const core=await get('/api/v2/constants/core/'),buildings=await get('/api/v2/constants/buildings/'),resources=await get('/api/v2/constants/resources/');
     const next={core,buildings,resources,at:new Date().toISOString()};
     if(!globalThis.SCM_TOOLS_CORE.gameConstantsOk(next))throw new Error('constants missing fields');
     await rawStorageSet({scmGameConstants:next});
+    await gameConstantsRetrySet(null);
     logActivity(await activeRealmNumber(),'game-constants','success',{});
     return {ok:true};
-  }catch(e){logActivity(await activeRealmNumber(),'game-constants','failure',{},String(e?.message||e));return {ok:false,error:String(e?.message||e)};}
+  }catch(e){
+    const error=String(e?.message||e);
+    try{const prev=await gameConstantsRetryGet();const failures=Math.min(30,(Number(prev?.failures)||0)+1);
+      const waitMs=Math.min(GAME_CONSTANTS_PERIOD_MS,GAME_CONSTANTS_RETRY_MIN_MS*2**(failures-1));
+      await gameConstantsRetrySet({failures,nextAt:Date.now()+waitMs,error,at:new Date().toISOString()});}catch{}
+    logActivity(await activeRealmNumber(),'game-constants','failure',{},error);return {ok:false,error};
+  }
 }
 // Targeted delivery for the game-page cards: instead of the content script listening to every storage.local
 // write (realm stores are ~1MB), tell Sim Companies tabs which small key changed.
@@ -382,22 +409,30 @@ async function notifyGameCardsKeyChanged(key){
   }catch{}
 }
 const ownListingsRefreshAt=new Map(); // realm → last GET_OWN_LISTINGS_DATA refresh request (ms)
+const ownListingsRefreshError=new Map(); // realm → {error,at} of the last failed refreshMarketOrders (cleared on success; memory only)
+// Read through the game tab (pageGet): a plain service-worker fetch of this URL now gets a Cloudflare 403 page.
 async function refreshMarketOrders(realm,maxAgeMs=5*60000){
+  const r=validRealmNumber(realm);if(r==null)return {ok:false};
+  const k=`scmMarketOrders:${r}`;
+  const fail=(error)=>{ownListingsRefreshError.set(r,{error,at:new Date().toISOString()});logActivity(r,'market-orders','failure',{},error);notifyGameCardsKeyChanged(k);return {ok:false,error};};
   try{
-    const r=validRealmNumber(realm);if(r==null)return {ok:false};
-    const k=`scmMarketOrders:${r}`;const cur=(await chrome.storage.local.get({[k]:null}))[k];
+    const cur=(await chrome.storage.local.get({[k]:null}))[k];
     if(cur&&Date.now()-Date.parse(cur.at||0)<maxAgeMs)return {ok:true,cached:true};
-    // The company id is already in the small orders key after the first read; the large realm store is only read when it is not.
-    let cid=Number(cur?.companyId)||0;
-    if(!(cid>0)){const st=await notifyRealmStore(r);cid=Number(st?.authData?.authCompany?.companyId??st?.authData?.authCompany?.id);}
-    if(!(cid>0))return {ok:false,error:'company id not captured'};
-    const res=await fetch(`https://www.simcompanies.com/api/v2/companies/${cid}/market-orders/`,{credentials:'omit'});
-    if(!res.ok)return {ok:false,error:`HTTP ${res.status}`};
-    const orders=await res.json();if(!Array.isArray(orders))return {ok:false,error:'not a list'};
-    await rawStorageSet({[k]:{companyId:cid,orders,at:new Date().toISOString()}});notifyGameCardsKeyChanged(k);
+    // Company id of THIS realm: the realm store's authCompany when its realm is r (or not stated), else the id kept
+    // in the small orders key from an earlier read. An authCompany that says another realm is never used.
+    const st=await notifyRealmStore(r),ac=st?.authData?.authCompany;
+    const acRealm=validRealmNumber(ac?.realmId??ac?.realm??st?.authData?.realmId??st?.authData?.realm);
+    const storeCid=acRealm==null||acRealm===r?Number(ac?.companyId??ac?.id)||0:0;
+    const cid=storeCid>0?storeCid:Number(cur?.companyId)||0;
+    if(!(cid>0))return fail('company id not captured');
+    const x=await pageGet(`/api/v2/companies/${cid}/market-orders/`,r,null,'own-listings-card',{timeoutMs:8000,attempts:1});
+    if(!x?.ok||x.data==null)return fail(x?.error||`HTTP ${x?.status||0}`);
+    if(!Array.isArray(x.data)&&!(x.data&&typeof x.data==='object'&&['data','items','results','orders','marketOrders'].some(f=>Array.isArray(x.data[f]))))return fail('not a list');
+    const orders=helperArray(x.data,['data','items','results','orders','marketOrders']);
+    await rawStorageSet({[k]:{companyId:cid,orders,at:new Date().toISOString()}});ownListingsRefreshError.delete(r);notifyGameCardsKeyChanged(k);
     logActivity(r,'market-orders','success',{rows:orders.length});
     return {ok:true};
-  }catch(e){logActivity(validRealmNumber(realm),'market-orders','failure',{},String(e?.message||e));return {ok:false,error:String(e?.message||e)};}
+  }catch(e){return fail(String(e?.message||e));}
 }
 // Your outgoing contracts read through the game tab into a small key scmOutgoingContracts:<realm>
 // ({data,at}); the game-page card is told it changed by an SCM_CARD_KEY_CHANGED message, without touching the large
@@ -532,7 +567,9 @@ async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
   return {ok:true,saved:out,warnings};
 }
 chrome.alarms.onAlarm.addListener(a=>{if(a?.name===GAME_CONSTANTS_ALARM)refreshGameConstants().catch(()=>{});});
-async function ensureGameConstantsAlarm(){try{await scmAlarmCreate(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});}catch{}refreshGameConstants().catch(()=>{});}
+// Only created when missing or its period changed: re-creating it on every service-worker start (delay 1 min)
+// re-armed it each time and, with stale constants, retried the read about every minute.
+async function ensureGameConstantsAlarm(){try{await scmEnsurePeriodicAlarm(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});}catch{}refreshGameConstants().catch(()=>{});}
 ensureGameConstantsAlarm();
 // Economy phase log per realm (scmEconomyStateLog:<realm>) from auth-data temporals.economyState.
 // Seeds from the previously stored auth-data so the phase before a change is kept. Storage only, no network.
@@ -7209,14 +7246,16 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const now=Date.now();
         if(m.refresh&&now-(ownListingsRefreshAt.get(realm)||0)>=OWN_LISTINGS_REFRESH_GAP_MS){ownListingsRefreshAt.set(realm,now);refreshMarketOrders(realm,0).catch(()=>{});}
         const k=`scmMarketOrders:${realm}`;const mo=(await chrome.storage.local.get({[k]:null}))[k];
-        if(!mo||!Array.isArray(mo.orders)){send({ok:true,realm,at:null,rows:[],missing:true});return;}
+        // refreshError: the last refresh failed (message + when), so old or empty rows are not real "0 listings".
+        const refreshError=ownListingsRefreshError.get(realm)||null;
+        if(!mo||!Array.isArray(mo.orders)){send({ok:true,realm,at:null,rows:[],missing:true,refreshError});return;}
         const [assets,store]=await Promise.all([gameOverlayAssets(),notifyRealmStore(realm)]);
         const rows=mo.orders.map(o=>{
           const kind=Number(o?.kind??o?.resourceId??o?.resource?.id),quality=Number(o?.quality)||0,quantity=Number(o?.quantity??o?.amount)||0,price=Number(o?.price)||0;
           const file=assets.images?.[String(kind)];const vwap=overlayVwap(store,kind,quality,realm);
           return {id:o?.id??null,kind,quality,quantity,price,total:quantity*price,name:String(assets.names.get(String(kind))||o?.resource?.name||`Resource #${kind}`),image:file?`${assets.imageBase}${file}`:'',vwap,vsVwapPct:vwap&&price>0?(price-vwap)/vwap*100:null};
         }).filter(r=>r.kind>0&&r.quantity>0);
-        send({ok:true,realm,at:mo.at||null,rows});
+        send({ok:true,realm,at:mo.at||null,rows,refreshError});
       }catch(e){send({ok:false,error:e?.message||String(e)});}
     })(); return true;
   }
