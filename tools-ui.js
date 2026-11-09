@@ -192,7 +192,7 @@
     const vd = $('#tlVerdict'); if (vd) vd.innerHTML = !r.ok ? '' : `Borrowing ${money(r.principal, 0)} for ${r.termDays} days costs <b>${money(r.totalInterest, 0)}</b> in interest (${money(r.hourlyDebtCost)}/h). The item earns ${money(r.fundedProfitPerHour)}/h${r.leadTimeHours > 0 ? ` after ${hrs(r.leadTimeHours)} of building` : ''}: ${money(r.earnedOverTerm, 0)} over the term, so ${r.netOverTerm >= 0 ? `you keep <b class="tl-up">${money(r.netOverTerm, 0)}</b> after interest — <b class="tl-up">worth it</b>.` : `you lose <b class="tl-down">${money(-r.netOverTerm, 0)}</b> — <b class="tl-down">not worth it</b> at this rate.`}`;
     $('#tlOut').innerHTML = !r.ok ? `<div class="tl-empty">${esc(r.error)}</div>` : `<div><span>Total interest</span>${money(r.totalInterest)}</div><div><span>Total repayment</span>${money(r.totalRepayment)}</div><div><span>Hourly cost of debt</span>${money(r.hourlyDebtCost)}/h</div><div><span>Net per hour</span><b class="${cls(r.netHourly)}">${money(r.netHourly)}/h</b></div><div><span>Net over term</span><b class="${cls(r.netOverTerm)}">${money(r.netOverTerm)}</b></div><div><span>Verdict</span><b class="${r.outEarnsDebt ? 'tl-up' : 'tl-down'}">${r.outEarnsDebt ? 'Out-earns the debt' : 'Does not cover the debt'}</b></div><p class="tl-note tl-wide">Break-even: the item must earn at least ${money(r.breakEvenProfitPerHour)}/h. ${esc(r.formula)}</p>`;
   }
-  // v2.5.331 phone layout: help collapsed, suggestion first, one compact card per option, and amounts
+  // Phone layout: help collapsed, suggestion first, one compact card per option, and amounts
   // accept shorthand (250k, 1.2m, 3,500). parseAmt is pure text parsing — no game values involved.
   function parseAmt(v) {
     const m = String(v ?? '').trim().toLowerCase().replace(/[$,\s]/g, '').match(/^(-?\d*\.?\d+)([kmb]?)$/);
@@ -251,5 +251,5 @@
     loadStaticData().then(() => { if (isActive()) paint(); });
     paint();
   }
-  globalThis.SCM_TOOLS_UI = { render, _state: S };
+  globalThis.SCM_TOOLS_UI = { render };
 })();

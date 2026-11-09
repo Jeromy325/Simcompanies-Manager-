@@ -9,30 +9,30 @@
     } catch { return false; }
   };
 
-  // v2.5.326 bridge event queue. window.postMessage is fire-and-forget: anything posted before
+  // Bridge event queue. window.postMessage is fire-and-forget: anything posted before
   // content.js has attached its listener (both scripts start at document_start, in either order, and
   // mobile Chromium can start the isolated world late) is lost. Intercepted network events are
   // therefore held here, in order, until content.js sends an 'INITIALIZED' handshake; then the queue
   // is flushed and later events are posted directly. Replies to content.js requests are never queued
   // (content.js is necessarily listening when it asks). If no handshake arrives within
-  // BRIDGE_FALLBACK_FLUSH_MS the queue is flushed anyway, so behaviour is never worse than before.
-  const BRIDGE_IMMEDIATE_TYPES = new Set(['HOOK_READY','INITIALIZED_ACK','BRIDGE_QUEUE_FLUSHED','API_RESULT','NETWORK_CAPTURE_CONTROL_ACK','JAVASCRIPT_DIAGNOSTIC','DOM_RUNTIME_DIAGNOSTIC_RESULT','REDUX_STATE_DIAGNOSTIC_RESULT','SYNC_REALM_SET','SYNC_REALM_CLEARED','RESOURCE_IMAGE_RESULT']);
+  // BRIDGE_FALLBACK_FLUSH_MS the queue is flushed anyway, so no event waits forever.
+  const BRIDGE_IMMEDIATE_TYPES = new Set(['HOOK_READY','INITIALIZED_ACK','BRIDGE_QUEUE_FLUSHED','API_RESULT','NETWORK_CAPTURE_CONTROL_ACK','JAVASCRIPT_DIAGNOSTIC','DOM_RUNTIME_DIAGNOSTIC_RESULT','REDUX_STATE_DIAGNOSTIC_RESULT','RESOURCE_IMAGE_RESULT']);
   const BRIDGE_QUEUE_MAX = 500;
   const BRIDGE_FALLBACK_FLUSH_MS = 15000;
   const bridgeQueue = [];
   let bridgeInitialized = false, bridgeDropped = 0, bridgeQueuedTotal = 0;
-  // v2.5.434: once content.js hands over a private MessageChannel port (PORT_HANDOFF), all events go
+  // Once content.js hands over a private MessageChannel port (PORT_HANDOFF), all events go
   // over it instead of window.postMessage, so other page scripts cannot read them. Before that the
   // window path is used with targetOrigin = location.origin. Only the FIRST handoff is adopted; a later
   // handoff (e.g. a page script trying to hijack the bridge) replaces it only if the current port fails
   // a liveness ping (content.js answers PORT_PING only while its extension context is valid, so after a
   // genuine extension reload the new content world can take over). Commands are still accepted on both
   // paths (MAIN world). Pristine references are captured here at document_start so later page scripts
-  // cannot intercept the bridge by patching postMessage/addEventListener/JSON.
+  // cannot intercept the bridge by patching postMessage/addEventListener, or captured responses by patching JSON.parse.
   const P_winPost = window.postMessage.bind(window);
   const P_addEL = EventTarget.prototype.addEventListener;
   const P_portPost = MessagePort.prototype.postMessage;
-  const P_JSON = { parse: JSON.parse, stringify: JSON.stringify };
+  const P_JSON = { parse: JSON.parse };
   const portSend = (p, m) => P_portPost.call(p, m);
   const BRIDGE_ORIGIN = (() => { try { return location.origin && location.origin !== 'null' ? location.origin : '*'; } catch { return '*'; } })();
   const PORT_PING_MS = 1000;
@@ -354,8 +354,9 @@
     } catch { return null; }
   };
   let catalogCaptureBusy=false;
-  // P4: the catalog (up to ~2 MB of base64 images) is posted only when what it would contain changes:
-  // the sorted resource ids that have an image plus the constants count/size. Explicit requests force it.
+  // The catalog (up to ~2 MB of base64 images) is posted only when what it would contain changes:
+  // the sorted resource ids that have an image plus the constants count/size. force=true (the game rewrote its
+  // constants) posts it regardless.
   let lastResourceCatalogSignature='';
 
   async function emitResourceCatalog(force = false) {
@@ -528,18 +529,8 @@
         try { return new URL(src, location.href).pathname.replace(/^\/static\//,'').replace(/\.[0-9a-f]{6,}\.(png|jpg|jpeg|gif|svg|webp)$/i, '.$1'); }
         catch { return String(src||'').replace(/^\/static\//,''); }
       };
-      // If constants use a different object shape, match any rendered resource
-      // image against the resource's known image path.
-      let target='';
-      const findTargetImage = (v, inheritedId=null) => {
-        if (target || !v || typeof v!=='object') return;
-        if (Array.isArray(v)) { for (const x of v) findTargetImage(x, inheritedId); return; }
-        const id=Number(inheritedId ?? v.resourceId ?? v.productId ?? v.kind ?? v.id ?? v.dbLetter);
-        const image=v.image ?? v.icon ?? v.iconUrl ?? v.imageUrl ?? v.picture ?? v.img;
-        if (Number.isFinite(id) && id===wanted && image) { target=normalize(image); return; }
-        for (const [k,x] of Object.entries(v)) findTargetImage(x,/^\d+$/.test(k)?Number(k):inheritedId);
-      };
-      findTargetImage(constants);
+      // Prefer a rendered resource image that matches the resource's known image path.
+      const target = direct ? normalize(direct) : '';
       if (target) {
         const img=[...document.querySelectorAll('img[src*="/static/images/resources/"]')].find(el=>normalize(el.currentSrc||el.src||el.getAttribute('src'))===target);
         if(img)return img.currentSrc||img.src||img.getAttribute('src');
@@ -583,17 +574,6 @@
         const root = parsed?.constantsResources || {};
         const direct = root?.[String(id)] || root?.[id];
         if (direct && typeof direct === 'object') src = direct.image || direct.icon || direct.iconUrl || direct.imageUrl || direct.picture || direct.img || null;
-        if (!src) {
-          const walk = (v, inheritedId=null) => {
-            if (src || !v || typeof v!=='object') return;
-            if (Array.isArray(v)) { for (const x of v) walk(x,inheritedId); return; }
-            const rid=Number(inheritedId ?? v.resourceId ?? v.productId ?? v.kind ?? v.id ?? v.dbLetter);
-            const image=v.image ?? v.icon ?? v.iconUrl ?? v.imageUrl ?? v.picture ?? v.img;
-            if (Number.isFinite(rid) && rid===id && image) { src=String(image); return; }
-            for (const [k,x] of Object.entries(v)) walk(x,/^\d+$/.test(k)?Number(k):inheritedId);
-          };
-          walk(root);
-        }
       }
       if (!src) { emit('RESOURCE_IMAGE_RESULT', { resource:id, error:'No resource image path found.' }); return; }
       const url = new URL(String(src), location.href);
@@ -621,7 +601,7 @@
     if (saved && Number.isFinite(Number(saved.realm)) && Number(saved.until) > Date.now()) {
       forcedCaptureRealm = Number(saved.realm);
       forcedCaptureRealmUntil = Number(saved.until);
-      // v2.5.345 the game reloads the page after a confirmed realm switch: that realm is this page's realm.
+      // The game reloads the page after a confirmed realm switch: that realm is this page's realm.
       if (saved.source === 'switch' && (forcedCaptureRealm === 0 || forcedCaptureRealm === 1)) { lastKnownRealm = forcedCaptureRealm; startupSwitchRealm = forcedCaptureRealm; }
     }
   } catch {}
@@ -630,11 +610,11 @@
     for(const v of candidates){const n=Number(v);if(Number.isFinite(n))return n;}
     return null;
   }
-  // v2.5.345 the game requests auth-data, buildings and the warehouse in parallel on load, and the realm is not
-  // in the URL. Responses to requests started before this page knew its realm were tagged with no realm and the
-  // Manager filed them under the last-synced realm (R1 buildings/warehouse in the R2 store). They are now held
-  // here until auth-data proves the session's realm, then sent with that realm. A realm switch reloads the page,
-  // so held responses can only belong to the realm auth-data reports; on a switch they are dropped (old realm unknown).
+  // The game requests auth-data, buildings and the warehouse in parallel on load, and the realm is not in the URL.
+  // Responses to requests started before this page knew its realm would carry no realm (and be filed under the
+  // last-synced realm), so they are held here until auth-data proves the session's realm, then sent with that realm.
+  // A realm switch reloads the page, so held responses can only belong to the realm auth-data reports; on a switch
+  // they are dropped (old realm unknown).
   const realmPending = [];
   const REALM_PENDING_MAX = 300;
   const learnRealm = (r, reason) => {
@@ -718,14 +698,12 @@
     } catch { return false; }
   }
 
-
-    const GAME_STORAGE_VALUE_CAP = 300000;
+  const GAME_STORAGE_VALUE_CAP = 300000;
   const GAME_STORAGE_TOTAL_CAP = 750000;
   // This runs only on the SimCompanies page. Capture the page's non-sensitive
-  // localStorage values rather than relying on a narrow prefix allow-list. The
-  // previous prefix filter could inventory harmless game keys but capture zero
-  // values when SimCompanies changed its client-side key names. The sensitive
-  // filter remains mandatory, and the byte/key caps prevent an unbounded dump.
+  // localStorage values rather than a narrow prefix allow-list (the game renames
+  // its client-side keys). The sensitive filter remains mandatory, and the
+  // byte/key caps prevent an unbounded dump.
   const GAME_STORAGE_SENSITIVE = /(?:token|auth|cookie|csrf|session|password|secret|jwt|access)/i;
   let lastGameStorageSnapshotFingerprint = '';
   function emitGameLocalStorageSnapshot(reason='scheduled') {
@@ -763,7 +741,6 @@
 
   function emitMarketCache() {
     try {
-      const realmMatch = location.pathname.match(/\/rc\/(\d+)\//);
       const realm = pageRealm();
       // Market localStorage contains keys for both realms. Only emit entries
       // belonging to the current/forced realm so the background never has to
@@ -877,10 +854,9 @@
     try {
       const u = new URL(url, location.href);
       const normalizedMethod = String(method || 'GET').toUpperCase();
-      // v2.5.328: any successful game action that can move stock refreshes the warehouse — collecting
-      // finished production from buildings, starting production, contracts, exchange buys/sells, retail.
-      // Previously only exchange buys (/order/take/) and market orders matched, so collecting resources from
-      // a building never updated the Manager. Requests that cannot change stock are excluded.
+      // Any successful game action that can move stock refreshes the warehouse: collecting finished
+      // production from buildings, starting production, contracts, exchange buys/sells, retail.
+      // Requests that cannot change stock are excluded.
       if (normalizedMethod === 'GET' || normalizedMethod === 'HEAD' || normalizedMethod === 'OPTIONS') return false;
       if (u.origin !== location.origin || !u.pathname.startsWith('/api/')) return false;
       return !/(?:chat|message|mail|notification|forum|comment|setting|preference|profile|avatar|logo|achievement|tutorial|feedback|report-|analytics|track|log-?in|log-?out|password|session|friend|follow|block|language|theme|executive|training|\/realm\/\d+\/(?:switch|sync))/i.test(u.pathname);
@@ -1105,7 +1081,7 @@
   // this can see page-owned React expando properties attached to DOM nodes.
   const collectDomRuntimeDiagnostic = (requestId) => {
     const started=performance.now(), nodes=[], roots=[], reactMarkers=[], scripts=[], embeddedJsonScripts=[];
-    let scanned=0, truncated=false, totalElementCount=null;
+    let scanned=0, totalElementCount=null;
     const fullText=el=>{try{return String(el.innerText||el.textContent||'');}catch{return ''}};
     const attrs=el=>{const out={};try{for(const a of Array.from(el.attributes||[]))out[String(a.name||'')]=String(a.value||'');}catch{}return out;};
     const all=[];
@@ -1122,10 +1098,11 @@
     let bodyText='';try{bodyText=String(document.body?.innerText||'');}catch{}
     const coverage=totalElementCount>0?Math.min(1,scanned/totalElementCount):null;
     const complete=totalElementCount!=null&&scanned===totalElementCount;
-    return {diagnostic:'simcompanies-dom-runtime-inspection',schemaVersion:4,requestId:requestId||null,capturedAt:new Date().toISOString(),page:{url:String(location.href||''),pathname:String(location.pathname||''),readyState:String(document.readyState||''),title:String(document.title||'')},dom:{totalElementCount,scannedElementCount:scanned,scanCoverageRatio:coverage,scanCoveragePercent:coverage==null?null:Math.round(coverage*1000)/10,scanCompleteness:complete?'complete':'partial',bodyTextCharacterCount:bodyText.length,bodyText,roots,reactMarkerCount:reactMarkers.length,reactMarkers,embeddedJsonScripts,scriptElements:scripts,relevantNodes:nodes,relevantBodyTextSnippets:bodyText.split(/\n+/)},runtime:{mainWorld:true,windowReactGlobal:typeof window.React!=='undefined',windowReactDomGlobal:typeof window.ReactDOM!=='undefined',globalKeyCount:Object.keys(window).length,webpackChunkGlobals:Object.keys(window).filter(k=>/^webpackChunk|^webpackJsonp/i.test(k)),scriptResources},limits:{maxScannedElements:null,maxRelevantNodes:null,maxElapsedMs:null,elapsedMs:Math.round(performance.now()-started),truncated,partial:!complete,coverageWarning:complete?null:'Element count and scan count differ; report is partial.',note:'Full read-only DOM export: all element attributes, outerHTML and text are included without keyword or sensitive-content filtering. DOM script tags and Resource Timing script resources are separate evidence sources. This can contain personal or session-related page content; inspect the JSON before sharing. It is not a raw JavaScript heap or application-state dump.'}};
+    return {diagnostic:'simcompanies-dom-runtime-inspection',schemaVersion:4,requestId:requestId||null,capturedAt:new Date().toISOString(),page:{url:String(location.href||''),pathname:String(location.pathname||''),readyState:String(document.readyState||''),title:String(document.title||'')},dom:{totalElementCount,scannedElementCount:scanned,scanCoverageRatio:coverage,scanCoveragePercent:coverage==null?null:Math.round(coverage*1000)/10,scanCompleteness:complete?'complete':'partial',bodyTextCharacterCount:bodyText.length,bodyText,roots,reactMarkerCount:reactMarkers.length,reactMarkers,embeddedJsonScripts,scriptElements:scripts,relevantNodes:nodes,relevantBodyTextSnippets:bodyText.split(/\n+/)},runtime:{mainWorld:true,windowReactGlobal:typeof window.React!=='undefined',windowReactDomGlobal:typeof window.ReactDOM!=='undefined',globalKeyCount:Object.keys(window).length,webpackChunkGlobals:Object.keys(window).filter(k=>/^webpackChunk|^webpackJsonp/i.test(k)),scriptResources},limits:{maxScannedElements:null,maxRelevantNodes:null,maxElapsedMs:null,elapsedMs:Math.round(performance.now()-started),truncated:false,partial:!complete,coverageWarning:complete?null:'Element count and scan count differ; report is partial.',note:'Full read-only DOM export: all element attributes, outerHTML and text are included without keyword or sensitive-content filtering. DOM script tags and Resource Timing script resources are separate evidence sources. This can contain personal or session-related page content; inspect the JSON before sharing. It is not a raw JavaScript heap or application-state dump.'}};
   };
 
-  // Request a GET using the game's page context and its existing cookies/session.
+  // Commands from content.js: network capture control, diagnostics, and API GETs in the game's page context
+  // (with its existing cookies/session).
   onBridge(async (event) => {
     if (event.source !== window || event.data?.source !== 'SIMCO_MANAGER') return;
     if(event.data.type==='SET_NETWORK_CAPTURE'){
@@ -1176,7 +1153,7 @@
     }
     const controller = new AbortController();
     const requestedTimeout = Number(event.data.timeoutMs);
-    const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout >= 3000 ? Math.min(requestedTimeout, 60000) : 8000; // v2.5.345 max 60 s (Sync waits 45 s)
+    const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout >= 3000 ? Math.min(requestedTimeout, 60000) : 8000; // max 60 s (Sync waits 45 s)
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       markExplicitApiGetCapture(path);
@@ -1239,17 +1216,13 @@
         forcedCaptureRealmUntil = Date.now() + Math.max(30000, Number(event.data.ttlMs) || 120000);
         try { sessionStorage.setItem('SCM_SYNC_REALM', JSON.stringify({realm:n,until:forcedCaptureRealmUntil})); } catch {}
       }
-      emit('SYNC_REALM_SET', {realm: forcedCaptureRealm});
     }
     if (event.data.type === 'CLEAR_SYNC_REALM') {
       forcedCaptureRealm = null;
       forcedCaptureRealmUntil = 0;
       try { sessionStorage.removeItem('SCM_SYNC_REALM'); } catch {}
-      emit('SYNC_REALM_CLEARED', {});
     }
-    if (event.data.type === 'RESOURCE_CATALOG_GET') emitResourceCatalog(true);
     if (event.data.type === 'RESOURCE_IMAGE_GET') emitResourceImage(event.data.resource);
-    if (event.data.type === 'MARKET_CACHE_GET') emitMarketCache();
     if (event.data.type === 'GAME_STATE_GET') { emitGameState(); emitGameLocalStorageSnapshot('game-state-request'); }
   });
   emitGameState();
@@ -1261,7 +1234,7 @@
   // check catches game updates performed through an internal storage wrapper.
   // The full JSON is parsed only when the raw snapshot actually changed.
   setInterval(() => {
-    if (document.hidden) return; // v2.5.327 mobile: no per-second localStorage reads in a hidden tab
+    if (document.hidden) return; // mobile: no per-second localStorage reads in a hidden tab
     try {
       const realm = pageRealm();
       if (realm !== 0 && realm !== 1) return;
@@ -1276,7 +1249,7 @@
   setTimeout(emitResourceCatalog, 3000);
   setTimeout(emitResourceCatalog, 8000);
   try {
-    // P4: DOM mutations re-check the catalog at most every 30 s (it walks every <img> on the page).
+    // DOM mutations re-check the catalog at most every 30 s (it walks every <img> on the page).
     const RESOURCE_CATALOG_OBSERVER_MIN_MS=30000;
     let resourceCatalogTimer=0,resourceCatalogLastRun=0;
     const scheduleResourceCatalog=()=>{
@@ -1289,7 +1262,7 @@
   } catch {}
   setTimeout(emitMarketCache, 1000);
   setTimeout(emitMarketCache, 3000);
-  // v2.5.341 the game's own executive timing config (window.reactjs.props), used by the game to decide which
+  // The game's own executive timing config (window.reactjs.props), used by the game to decide which
   // executives count toward the admin-overhead reduction. Read-only; sent once the page has set it.
   const emitGameConfig = () => {
     try {
@@ -1301,7 +1274,7 @@
   };
   setTimeout(emitGameConfig, 1500);
   setTimeout(emitGameConfig, 6000);
-  // v2.5.345 tell content.js this page's realm as soon as it is known (reload after a confirmed realm switch).
+  // Tell content.js this page's realm as soon as it is known (reload after a confirmed realm switch).
   // If the game has not revealed it 10 s after load, read auth-data once (the game itself re-reads it every 3 min).
   if (startupSwitchRealm === 0 || startupSwitchRealm === 1) emit('PAGE_REALM', { realm: startupSwitchRealm, reason: 'switch-reload' });
   setTimeout(() => {

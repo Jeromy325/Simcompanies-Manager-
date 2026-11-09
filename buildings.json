@@ -4,7 +4,7 @@
   {"id":"e","name":"Slaughterhouse","category":"Food","produces":["Steak","Sausages"]},
   {"id":"i","name":"Mill","category":"Food","produces":["Coffee Powder","Flour","Fodder"]},
   {"id":"6","name":"Beverage Factory","category":"Food","produces":["Ethanol","Orange Juice","Apple Cider","Ginger Beer"]},
-  {"id":"k","name":"Food Processing Plant","category":"Food","produces":["Cheese","Frozen Pizza","Pasta","Butter","Sugar","Chocolate","Vegetable Oil","Easter Bunny","Ramadan Sweets","Chocolate Icecream","Apple Icecream"]},
+  {"id":"k","name":"Food Processing Plant","category":"Food","produces":["Cheese","Frozen Pizza","Pasta","Butter","Sugar","Chocolate","Vegetable Oil","Easter Bunny","Ramadan Sweets","Chocolate Icecream","Apple Icecream","Cream Egg"]},
   {"id":"j","name":"Bakery","category":"Food","produces":["Bread","Apple Pie","Dough"]},
   {"id":"m","name":"Catering","category":"Food","produces":["Hamburger","Lasagna","Meat balls","Cocktails","Sauce","Salad","Samosa","Pumpkin Soup"]},
   {"id":"o","name":"Concrete Plant","category":"Construction","produces":["Reinforced Concrete","Bricks","Cement"]},

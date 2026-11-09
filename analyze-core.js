@@ -1,7 +1,8 @@
 /* Sim Companies Manager — Analyze tab maths (pure, no DOM, no network).
  * Reads only what the manager already captured: cash-flow ledger pages, warehouse lots, past finances, day statements,
  * production cost history and stored prices. Products are matched by resource id + quality, never by page text.
- * Nothing here hardcodes a game value: the exchange fee comes from the ledger (fees-<id> ÷ marketfilled-<id>). */
+ * The exchange fee comes from the ledger (fees-<id> ÷ marketfilled-<id>); the only fixed game rule is the per-channel
+ * transport share (TRANSPORT_SHARE). */
 (function (root) {
   'use strict';
   const DAY = 864e5;
@@ -49,7 +50,7 @@
   }
   // Exchange fills ('marketfilled-<resource>', category m), contract sales ('cs-<resource>-<buyer>') and retail sales
   // ('retail-<resource>', category s: no resource/amount in details; amount = money ÷ price, cost = unit_cogs, quality =
-  // the sold stock's average, keyed at the nearest whole quality, the average kept as qAvg).
+  // the sold stock's average, keyed at the nearest whole quality).
   // Each exchange fill is paired with the 'fees-<resource>' row written at the same moment (≤ 5 s apart).
   // Money in only (money > 0): a row where money goes out is a purchase, never a sale.
   function salesFromLedger(rows) {
@@ -71,7 +72,7 @@
       const gross = Number(r.money);
       if (retail) {
         const cogs = num(d.unit_cogs);
-        out.push({ id: String(r.id), t, rid, q, qAvg: qRaw, amount, price, gross, fee: null, ledgerProfit: cogs != null ? gross - cogs * amount : null, ledgerCost: cogs, channel: 'retail', buyer: String(d.building_name || '') });
+        out.push({ id: String(r.id), t, rid, q, amount, price, gross, fee: null, ledgerProfit: cogs != null ? gross - cogs * amount : null, ledgerCost: cogs, channel: 'retail', buyer: String(d.building_name || '') });
         continue;
       }
       let fee = null;
@@ -415,7 +416,7 @@
       const exTransportPU = saleTransport('exchange', x.rid, transportOf, transportCost), transportPU = saleTransport('contract', x.rid, transportOf, transportCost);
       const exNet = price != null && rate != null ? price * (1 - rate) - (exTransportPU || 0) : null, cAvg = x.cUnits ? x.cGross / x.cUnits : null;
       const cNet = cAvg != null ? cAvg - (transportPU || 0) : null;
-      return { ...x, price, exNet, exTransportPU, contractAvg: cAvg, transportPU, contractNet: cNet, last: x.contracts[0] ? x.contracts[0].price : null, diff: cNet != null && exNet != null ? cNet - exNet : null, diffPct: cNet != null && exNet ? (cNet - exNet) / exNet : null };
+      return { ...x, price, exNet, contractAvg: cAvg, transportPU, contractNet: cNet, last: x.contracts[0] ? x.contracts[0].price : null, diff: cNet != null && exNet != null ? cNet - exNet : null, diffPct: cNet != null && exNet ? (cNet - exNet) / exNet : null };
     }).sort((a, b) => (b.contracts.length > 0) - (a.contracts.length > 0) || (b.diff ?? -Infinity) - (a.diff ?? -Infinity));
   }
 
@@ -474,15 +475,15 @@
   // gaps = holes between spans inside the window (≥ 1 minute). Without spans: oldest row → now.
   function ledgerCoverage(rows, days, now, spans) {
     const list = Array.isArray(rows) ? rows : [];
-    if (!list.length) return { rows: 0, oldest: null, newest: null, coverage: 0, spanDays: 0, gaps: [], gapMs: 0, lastCapture: null };
+    if (!list.length) return { rows: 0, oldest: null, newest: null, coverage: 0, spanDays: 0, gaps: [], gapMs: 0 };
     const ts = list.map(r => ms(r.datetime)), oldest = minOf(ts), newest = maxOf(ts), start = now - days * DAY;
     const sp = mergeSpans(spans);
-    if (!sp.length) return { rows: list.length, oldest, newest, spanDays: (newest - oldest) / DAY, coverage: oldest <= start ? 1 : Math.max(0, Math.min(1, (now - oldest) / (now - start))), gaps: [], gapMs: 0, lastCapture: null };
+    if (!sp.length) return { rows: list.length, oldest, newest, spanDays: (newest - oldest) / DAY, coverage: oldest <= start ? 1 : Math.max(0, Math.min(1, (now - oldest) / (now - start))), gaps: [], gapMs: 0 };
     const end = Math.min(now, maxOf(sp.map(x => x[1]))), inW = sp.map(([a, b]) => [Math.max(a, start), Math.min(b, end)]).filter(([a, b]) => b > a);
     const covered = inW.reduce((s, [a, b]) => s + b - a, 0), gaps = [];
     for (let i = 1; i < inW.length; i++) if (inW[i][0] - inW[i - 1][1] >= 60000) gaps.push([inW[i - 1][1], inW[i][0]]);
     const reach = inW.length ? inW[0][0] : end;
-    return { rows: list.length, oldest, newest, spanDays: (end - reach) / DAY, coverage: end > start ? Math.max(0, Math.min(1, covered / (end - start))) : 0, gaps, gapMs: gaps.reduce((s, [a, b]) => s + b - a, 0), reach, lastCapture: end };
+    return { rows: list.length, oldest, newest, spanDays: (end - reach) / DAY, coverage: end > start ? Math.max(0, Math.min(1, covered / (end - start))) : 0, gaps, gapMs: gaps.reduce((s, [a, b]) => s + b - a, 0) };
   }
 
   /* ------------------------------------------------------------ chart (Accounting sparkline style) */

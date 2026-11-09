@@ -1,8 +1,6 @@
 // R2 - Entrepreneurs realm definition.
 // Realm-specific configuration lives here; shared behavior stays in realm-core.js/background.js.
 export const R2_REALM = Object.freeze({
-  id: 1,
-  apiId: 1,
   key: 'realm:1',
   display: 'R2',
   name: 'Entrepreneurs',

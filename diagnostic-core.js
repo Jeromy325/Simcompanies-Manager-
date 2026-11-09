@@ -14,56 +14,18 @@
     const count = kind => events.filter(e => e?.kind === kind).length;
     const requests=events.filter(e=>e?.kind==='request-start'||e?.kind==='request');
     const responses=events.filter(e=>e?.kind==='fetch'||e?.kind==='xhr');
-    const requestKey=e=>`${String(e?.transport||'').toLowerCase()}|${String(e?.method||'GET').toUpperCase()}|${String(e?.url||'').split('?')[0]}`;
-    const responseCounts=new Map();
-    for(const response of responses){const key=requestKey(response);responseCounts.set(key,(responseCounts.get(key)||0)+1);}
-    const unmatchedRequests=[];
-    for(const request of requests){const key=requestKey(request),remaining=responseCounts.get(key)||0;if(remaining>0)responseCounts.set(key,remaining-1);else unmatchedRequests.push({transport:String(request?.transport||''),method:String(request?.method||'GET'),url:String(request?.url||'').split('?')[0]});}
-    const stopCount=count('capture-stop');
     return {
       eventCount: events.length,
-      declaredEventCount: Number.isFinite(Number(capture?.eventCount)) ? Number(capture.eventCount) : null,
       responseCount: responses.length,
       requestCount: requests.length,
       requestErrorCount: count('request-error'),
       recorderErrorCount: count('recorder-error'),
-      startCount: count('capture-start'),
-      stopCount,
-      duplicateStopMarkers: Math.max(0,stopCount-1),
-      unmatchedRequestCount: unmatchedRequests.length,
-      unmatchedRequests: unmatchedRequests.slice(0,100),
-      resourceSnapshotCount: count('resource-timing-snapshot'),
+      stopCount: count('capture-stop'),
       status: String(capture?.status || 'missing'),
-      captureId: String(capture?.captureId || ''),
       countsMatch: capture?.eventCount != null && events.length === Number(capture.eventCount)
     };
   }
-  function verifyNetworkCaptureExport(capture) {
-    const summary = summarizeNetworkCapture(capture);
-    const reasons = [];
-    if (!summary.eventCount) reasons.push('zero-events');
-    if (!summary.countsMatch) reasons.push('event-count-mismatch');
-    if (summary.status !== 'stopped') reasons.push('capture-not-stopped');
-    if (summary.stopCount === 0) reasons.push('missing-stop-marker');
-    if (summary.duplicateStopMarkers > 0) reasons.push('duplicate-stop-markers');
-    if (summary.unmatchedRequestCount > 0) reasons.push('request-without-response-event');
-    if (capture?.truncated || Number(capture?.droppedEventCount) > 0) reasons.push('capture-truncated');
-    return { ok: reasons.length === 0, reasons, droppedEventCount: Number(capture?.droppedEventCount) || 0, truncated: Boolean(capture?.truncated || Number(capture?.droppedEventCount) > 0), ...summary };
-  }
 
-  function endpointCoverageReport(capture) {
-    const events=Array.isArray(capture?.events)?capture.events:[];
-    const key=e=>`${String(e?.method||'GET').toUpperCase()} ${String(e?.url||'').split('?')[0]}`;
-    const endpoints=new Map();
-    const rowFor=e=>{const k=key(e);if(!endpoints.has(k))endpoints.set(k,{endpoint:String(e?.url||'').split('?')[0],method:String(e?.method||'GET').toUpperCase(),requestCount:0,successfulResponseCount:0,responseCount:0,bodyCapturedCount:0,parseStatuses:{parsed:0,'parse-failed':0,'not-json':0,'body-missing':0},truncatedBodyCount:0,timingOnlyCount:0,statusCodes:{}});return endpoints.get(k);};
-    const requestEvents=events.filter(e=>e?.kind==='request-start');
-    const responseEvents=events.filter(e=>e?.kind==='fetch'||e?.kind==='xhr');
-    for(const e of requestEvents)rowFor(e).requestCount++;
-    for(const e of responseEvents){const r=rowFor(e);r.responseCount++;const status=Number(e?.status)||0;r.statusCodes[status]=(r.statusCodes[status]||0)+1;if(e?.ok===true||(status>=200&&status<300))r.successfulResponseCount++;const body=e?.body;const hasBody=body!==null&&body!==undefined;r.bodyCapturedCount+=hasBody?1:0;if(!hasBody){r.parseStatuses['body-missing']++;r.timingOnlyCount++;}else if(body&&typeof body==='object'&&body.truncated===true){r.truncatedBodyCount++;r.parseStatuses['parse-failed']++;}else if(typeof body==='string'){r.parseStatuses['not-json']++;}else r.parseStatuses.parsed++;}
-    // Resource Timing proves a request-like resource occurred, not that a response body was saved. Keep it as a separate count.
-    for(const e of events.filter(e=>e?.kind==='resource-timing-snapshot'))for(const resource of Array.isArray(e?.resources)?e.resources:[]){if(!String(resource?.url||'').startsWith('/api/'))continue;const r=rowFor({url:resource.url,method:'GET'});r.resourceTimingCount=(r.resourceTimingCount||0)+1;}
-    return [...endpoints.values()].map(r=>({...r,unmatchedRequestCount:Math.max(0,r.requestCount-r.responseCount),responseBodyMissingCount:r.responseCount-r.bodyCapturedCount,coverageStatus:r.requestCount===0?'response/timing-only':r.requestCount>r.responseCount?'missing-response-events':r.responseCount>r.bodyCapturedCount?'response-without-saved-body':'body-captured'})).sort((a,b)=>a.endpoint.localeCompare(b.endpoint)||a.method.localeCompare(b.method));
-  }
   // Reconcile each response against a saved body and terminal outcome. A response
   // without a body must never be counted as fully covered merely because the
   // recorder did not emit a body-unavailable event.
@@ -150,5 +112,5 @@
     }
     return out;
   }
-  root.SCM_DIAGNOSTIC_CORE = { redactSecrets, isSecretKey, createSerialQueue, summarizeNetworkCapture, verifyNetworkCaptureExport, endpointCoverageReport, summarizeNetworkCaptureV3, classifyStateDiscovery };
+  root.SCM_DIAGNOSTIC_CORE = { redactSecrets, createSerialQueue, summarizeNetworkCapture, summarizeNetworkCaptureV3, classifyStateDiscovery };
 })(globalThis);

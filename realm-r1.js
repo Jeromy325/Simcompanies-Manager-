@@ -1,8 +1,6 @@
 // R1 - Magnates realm definition.
 // Realm-specific configuration lives here; shared behavior stays in realm-core.js/background.js.
 export const R1_REALM = Object.freeze({
-  id: 0,
-  apiId: 0,
   key: 'realm:0',
   display: 'R1',
   name: 'Magnates',

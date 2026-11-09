@@ -1,4 +1,4 @@
-// v2.5.436 self-test: pure evaluation helpers for the in-app "Run self-test" (Settings). No chrome.* or network
+// Self-test: pure evaluation helpers for the in-app "Run self-test" (Settings). No chrome.* or network
 // here; background.js gathers raw facts and these helpers turn them into {id,name,status,detail,metrics} rows.
 // Rows carry only counts, booleans, timestamps and error messages: never names, ids, tokens or money values.
 (function (root) {

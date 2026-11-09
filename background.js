@@ -20,7 +20,6 @@ function logError(context,err){try{
   scmErrorLogLoad().then(buf=>{buf.push(entry);if(buf.length>SCM_ERROR_LOG_MAX)buf.splice(0,buf.length-SCM_ERROR_LOG_MAX);if(scmErrorLogTimer)return;scmErrorLogTimer=setTimeout(()=>{scmErrorLogTimer=null;chrome.storage.local.set({[SCM_ERROR_LOG_KEY]:scmErrorLogBuffer.slice(-SCM_ERROR_LOG_MAX)}).catch(()=>{});},2000);});
 }catch{}}
 async function getErrorLog(){if(scmErrorLogTimer){clearTimeout(scmErrorLogTimer);scmErrorLogTimer=null;}const buf=await scmErrorLogLoad();await chrome.storage.local.set({[SCM_ERROR_LOG_KEY]:buf.slice(-SCM_ERROR_LOG_MAX)}).catch(()=>{});return buf.slice();}
-async function clearErrorLog(){if(scmErrorLogTimer){clearTimeout(scmErrorLogTimer);scmErrorLogTimer=null;}scmErrorLogBuffer=[];scmErrorLogLoading=null;await chrome.storage.local.remove(SCM_ERROR_LOG_KEY);}
 self.addEventListener('error',e=>logError('uncaught',e?.error||e?.message||e));
 // Alarms: ask for persistAcrossSessions explicitly where the browser's schema accepts it. Older/other Chromium
 // builds reject unknown keys with a TypeError, so the first rejection is remembered and later calls omit it.
@@ -73,7 +72,6 @@ const syncAutoRetryRuns=new Set();
 let extensionClearGeneration=0; // bumped by Clear Stored Data; work started before it must not write afterwards
 class SyncCancelledByClear extends Error{constructor(){super('Stored data was cleared; Sync stopped.');}}
 const realmWriteQueues=new Map();
-const frozenRateEnsurePromises=new Map();
 function withRealmWriteLock(realm,task){
   const n=Number(realm);
   const previous=realmWriteQueues.get(n)||Promise.resolve();
@@ -89,8 +87,6 @@ function withRealmWriteLock(realm,task){
   next.then(()=>{if(realmWriteQueues.get(n)===next)realmWriteQueues.delete(n)},()=>{if(realmWriteQueues.get(n)===next)realmWriteQueues.delete(n)});
   return next;
 }
-
-
 
 // Network Capture 3.0: Chrome DevTools Protocol recorder. This observes browser-level
 // Network events for the selected tab (including cross-origin resources) and stores
@@ -208,9 +204,9 @@ function replayQueueEvent(event){
   if(replayBuffer.length>REPLAY_MAX_EVENTS)replayBuffer=replayBuffer.slice(-REPLAY_MAX_EVENTS);
   scheduleReplayFlush();
 }
-async function flushReplayJournal(force=false){
+async function flushReplayJournal(){
   if(!replayBuffer.length)return {ok:true,empty:true};
-  if(!force&&replayBuffer.length<REPLAY_CHUNK_SIZE)return {ok:true,buffered:true,count:replayBuffer.length};
+  if(replayBuffer.length<REPLAY_CHUNK_SIZE)return {ok:true,buffered:true,count:replayBuffer.length};
   const batch=replayBuffer.splice(0,Math.min(REPLAY_CHUNK_SIZE,replayBuffer.length));
   try{
     const existing=await chrome.storage.local.get({[REPLAY_META_KEY]:null});
@@ -231,8 +227,6 @@ async function flushReplayJournal(force=false){
 function replayEvent(type,payload={}){
   replayQueueEvent({type,...payload});
 }
-
-
 
 const SIMCOTOOLS_TIMEOUT_MS=30000;
 // Retry only transient non-rate-limit failures. A 429 activates a shared cooldown.
@@ -301,9 +295,9 @@ const REALM_SCOPED_KEYS = Object.freeze([
   'resourceCatalog','warehouseCapture','lastSync','syncStatus','syncError','fullSyncDiagnostics','fullSyncJob','warehouseCostDetails','accountingLastComputed',
   'accountingLastComputedIncome','accountingCapture','accountingSnapshots','tickerSnapshots','sellingHistory',
   'accountingWeekSales','accountingWeekSalesSummary','accountingWeekRevision','vwapData','vwapWatch','vwapStatus',
-  'realmQuarantine','productionEvents','productionRateSnapshots','productionPlans','frozenNetworkPlan',
+  'realmQuarantine','productionEvents','productionRateSnapshots','productionPlans',
   'productionRunHours','gameOverlaySnapshot','javascriptDiagnostic','javascriptDiagnosticHistory',
-  'buildingAlarms','productionEventMonitor','accountingWeekLedgerStatus','accountingDayWalkStatus','accountingDailySeries','activeRealmIdentity','realmIsolationNote','vwapLegacyDiscarded',
+  'accountingWeekLedgerStatus','accountingDayWalkStatus','accountingDailySeries',
   'gameLocalStorageSnapshot','criticalDataBaseline'
 ]);
 
@@ -332,7 +326,6 @@ const DEFAULTS = {
   productionEvents: [],
   productionRateSnapshots: {},
   productionPlans: {},
-  frozenNetworkPlan: null,
   gameOverlaySnapshot: null,
   productionPlannerState: null,
   productionRunHours: 24,
@@ -407,8 +400,8 @@ async function refreshMarketOrders(realm,maxAgeMs=5*60000){
   }catch(e){logActivity(validRealmNumber(realm),'market-orders','failure',{},String(e?.message||e));return {ok:false,error:String(e?.message||e)};}
 }
 // Your outgoing contracts read through the game tab into a small key scmOutgoingContracts:<realm>
-// ({data,at}), so the game-page card can follow it with chrome.storage.onChanged without touching the large realm
-// store. A Manager pageGet is not captured by the page hook, so this never rewrites endpointData. No lock held.
+// ({data,at}); the game-page card is told it changed by an SCM_CARD_KEY_CHANGED message, without touching the large
+// realm store. A Manager pageGet is not captured by the page hook, so this never rewrites endpointData. No lock held.
 const OWN_LISTINGS_REFRESH_GAP_MS=12000,OUTGOING_CONTRACTS_REFRESH_GAP_MS=12000,OUTGOING_CONTRACTS_FRESH_MS=60000;
 const outgoingContractsRefreshAt=new Map(); // realm → last page read (ms)
 async function refreshOutgoingContracts(realm,minGapMs=OUTGOING_CONTRACTS_REFRESH_GAP_MS){
@@ -435,9 +428,6 @@ function scheduleOwnOrdersRefresh(realm,delayMs=800){
     refreshOutgoingContracts(n,0).catch(()=>{});
   },delayMs));
 }
-// Logged-in extras through the game tab after Sync: research, government orders + your tier, and the
-// abundance of every building whose abundance the game has shown (mines etc.). Each pageGet runs without a lock;
-// saveData takes its own lock per response.
 // Buildings that make an abundance resource. The game constants (scmGameConstants, downloaded in the
 // background) are one source; if they are missing on the phone, the bundled buildings.json/recipes.json (same game
 // data: Mine, Oil Rig, Quarry) are used, plus any building producing an abundance resource now or of a kind whose
@@ -521,6 +511,9 @@ async function readFollowingMoves(path,realm,{movedReads=null,captured=null}={})
   const y=await pageGet(to,realm);
   return y?.ok&&endpointDataIsValid(path,y.data)?{ok:true,data:y.data,status:y.status,walkedPath:to}:failed;
 }
+// Logged-in extras through the game tab after Sync: research, government orders + your tier, and the
+// abundance of every building whose abundance the game has shown (mines etc.). Each pageGet runs without a lock;
+// saveData takes its own lock per response.
 async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
   const r=validRealmNumber(realm);if(r==null)return {ok:false};
   const st=await notifyRealmStore(r);const ep=st?.endpointData||{};
@@ -900,8 +893,7 @@ async function readPhysicalRealmStore(realm){
 
 function overlayRealmStoreIntoState(base,store,realm){
   const out={...base};
-  const scopedKeys=Array.isArray(REALM_SCOPED_KEYS)?REALM_SCOPED_KEYS:[];
-  for(const key of scopedKeys){
+  for(const key of REALM_SCOPED_KEYS){
     if(Object.prototype.hasOwnProperty.call(store,key)) out[key]=store[key];
     else if(!Object.prototype.hasOwnProperty.call(out,key)) out[key]=defaultRealmValue(key);
   }
@@ -1011,180 +1003,26 @@ async function gameOverlayAssets(){
   })().catch(e=>{gameOverlayAssetsPromise=null;throw e});
   return gameOverlayAssetsPromise;
 }
-function overlayBuildingLevel(b){const direct=Number(b?.level??b?.lvl??b?.buildingLevel);if(Number.isFinite(direct)&&direct>0)return Math.min(20,direct);const size=Number(b?.size);if(Number.isFinite(size)&&size>0)return Math.min(20,size);return 1;}
-function productionSnapshotKey(buildingId,started,resourceId,product){
+function productionSnapshotKey(buildingId,resourceId,product){
   return `${Number(buildingId)}|${Number(resourceId)||0}|${String(product||'').toLowerCase().replace(/\s+/g,' ').trim()}`;
 }
-function storedProductionRateSnapshot(store,building,product){
-  const b=building?.raw||building||{};
-  const busy=b?.busy||{};
-  const rid=Number(busy?.resource?.kind??busy?.resource?.resourceId);
-  const key=productionSnapshotKey(b?.id,busy?.started,rid,product);
-  const direct=store?.productionRateSnapshots?.[key];
-  const directStarted=String(direct?.started||'');
-  const directCycleMatches=!String(busy?.started||'') || directStarted===String(busy?.started||'');
-  if(direct&&directCycleMatches&&Number.isFinite(Number(direct.baseRatePerLevel))&&Number(direct.baseRatePerLevel)>0)return direct;
-  // A snapshot is only valid for the current production cycle.
-  // Do not fall back to an older building/product snapshot when `busy.started`
-  // has changed (most importantly after an upgrade). An older snapshot can
-  // have a perfectly valid rate for the previous cycle but must never be
-  // reused with the current cycle's duration/history.
-  const targetId=Number(b?.id);
-  const targetName=String(product||'').trim().toLowerCase();
-  const currentStarted=String(busy?.started||'');
-  if(Number.isFinite(targetId)&&targetId>0&&currentStarted){
-    const matches=Object.values(store?.productionRateSnapshots||{}).filter(s=>
-      Number(s?.buildingId)===targetId&&
-      String(s?.product||'').trim().toLowerCase()===targetName&&
-      String(s?.started||'')===currentStarted&&
-      Number(s?.baseRatePerLevel)>0
-    );
-    matches.sort((a,b)=>Date.parse(String(b?.capturedAt||''))-Date.parse(String(a?.capturedAt||'')));
-    if(matches[0])return matches[0];
-  }
-  return null;
-}
-async function saveProductionRateSnapshot(m){
-  const realm=validRealmNumber(m?.realm);
-  if(realm==null)return {ok:false,error:'Valid realm required.'};
-  return withRealmWriteLock(realm,async()=>{
-    const key=realmKeyFromRealm(realm);
-    const buildingId=Number(m?.buildingId),resourceId=Number(m?.resourceId),baseRatePerLevel=Number(m?.baseRatePerLevel);
-    const started=String(m?.started||'');
-    const product=String(m?.product||'').trim();
-    if(!key||!Number.isFinite(buildingId)||buildingId<=0||!Number.isFinite(resourceId)||resourceId<=0||!product||!Number.isFinite(baseRatePerLevel)||baseRatePerLevel<=0)return {ok:false,error:'Incomplete production rate snapshot.'};
-    const s=await state(realm);
-    const stores={...(s.realmStores||{})}; const store={...(stores[key]||{})};
-    const snapshots={...(store.productionRateSnapshots||{})}; const snapKey=productionSnapshotKey(buildingId,started,resourceId,product); const existing=snapshots[snapKey];
-    const incoming={buildingId,resourceId,product,started,baseRatePerLevel,observedRatePerHour:Number(m?.observedRatePerHour)||null,eventModifier:Number(m?.eventModifier)||0,companyProductionModifier:Number(m?.companyProductionModifier)||0,companyModifierNormalized:Boolean(m?.companyModifierNormalized),source:String(m?.source||'captured'),capturedAt:new Date().toISOString(),captureRealm:realm};
-    // Production protection keeps the validated base rate stable, but observed
-    // rate is cycle-specific. The snapshot key is intentionally backward-
-    // compatible and does not include `started`, so a new production cycle can
-    // reuse the same entry without accidentally carrying the previous cycle's
-    // observed rate forward under the new cycle timestamp.
-    const protectedBase=Number(existing?.productionProtection?.baseRatePerLevel??existing?.baseRatePerLevel);
-    const protectedObserved=Number(existing?.productionProtection?.observedRatePerHour??existing?.observedRatePerHour);
-    const existingStarted=String(existing?.started||'');
-    const sameCycle=!started || !existingStarted || existingStarted===started;
-    const committedBase=protectedBase>0?protectedBase:baseRatePerLevel;
-    const committedObserved=sameCycle&&Number.isFinite(protectedObserved)&&protectedObserved>0?protectedObserved:incoming.observedRatePerHour;
-    const protectedSnapshot=existing&&committedBase>0?{
-      ...existing,
-      ...incoming,
-      baseRatePerLevel:committedBase,
-      observedRatePerHour:committedObserved,
-      productionProtection:{
-        version:1,
-        baseRatePerLevel:committedBase,
-        observedRatePerHour:committedObserved,
-        capturedAt:sameCycle?String(existing?.productionProtection?.capturedAt||existing?.capturedAt||incoming.capturedAt):incoming.capturedAt,
-        source:sameCycle?String(existing?.productionProtection?.source||existing?.source||incoming.source):incoming.source
-      }
-    }:null;
-    snapshots[snapKey]=protectedSnapshot||{...incoming,productionProtection:{version:1,baseRatePerLevel:baseRatePerLevel,observedRatePerHour:incoming.observedRatePerHour,capturedAt:incoming.capturedAt,source:incoming.source}};
-    const plans={...(store.productionPlans||{})}; const plan=plans[String(buildingId)];
-    let planRateChanged=false;
-    if(plan&&normalizeOverlayName(plan.product)===normalizeOverlayName(product)&&Number(plan.resourceId??0)===resourceId){
-      const committedRate=Number(snapshots[snapKey]?.baseRatePerLevel)||null;
-      const committedObserved=Number(snapshots[snapKey]?.observedRatePerHour)||null;
-      planRateChanged=Math.abs(Number(plan.baseRatePerLevel||0)-Number(committedRate||0))>1e-9;
-      plans[String(buildingId)]={...plan,baseRatePerLevel:committedRate,rateCapturedAt:snapshots[snapKey].capturedAt,rateSource:snapshots[snapKey].source,observedRatePerHour:committedObserved};
-      store.productionPlans=plans;
-    }
-    if(planRateChanged)store.frozenNetworkPlan=null;
-    store.productionRateSnapshots=snapshots; stores[key]=store;
-    const patch={realmStores:stores}; if(s.activeRealmKey===key){patch.productionRateSnapshots=snapshots;if(store.productionPlans)patch.productionPlans=store.productionPlans;if(planRateChanged)patch.frozenNetworkPlan=null;}
-    await storageSet(patch); return {ok:true,created:!existing,key:snapKey};
-  });
-}function productionPlanKey(buildingId){return String(Number(buildingId));}
-async function saveProductionPlanSnapshot(m){
-  const realm=validRealmNumber(m?.realm); if(realm==null)return {ok:false,error:'Valid realm required.'};
-  return withRealmWriteLock(realm,async()=>{
-    const buildingId=Number(m?.buildingId),resourceId=Number(m?.resourceId),quality=Math.max(0,Number(m?.quality)||0),plannedLevel=Math.min(20,Math.max(1,Number(m?.plannedLevel)||Number(m?.level)||1));
-    const product=String(m?.product||'').trim(); if(!Number.isFinite(buildingId)||buildingId<=0||!product)return {ok:false,error:'Incomplete production plan snapshot.'};
-    const key=realmKeyFromRealm(realm); const s=await state(realm); const stores={...(s.realmStores||{})}; const store={...(stores[key]||{})}; const plans={...(store.productionPlans||{})};
-    const existing=plans[productionPlanKey(buildingId)]; const normalizedResourceId=Number.isFinite(resourceId)&&resourceId>0?resourceId:null; const source=String(m?.source||'building capture');
-    const explicitBase=Number(m?.baseRatePerLevel); const explicitObserved=Number(m?.observedRatePerHour); const explicitCapturedAt=String(m?.rateCapturedAt||''); const explicitSource=String(m?.rateSource||'');
-    const matchingSnapshot=Object.values(store.productionRateSnapshots||{}).find(x=>Number(x?.buildingId)===buildingId&&Number(x?.resourceId)===Number(normalizedResourceId)&&normalizeOverlayName(x?.product)===normalizeOverlayName(product)&&Number(x?.baseRatePerLevel)>0);
-    // Use the protected production snapshot once established. This prevents a
-    // background/event refresh from silently turning a frozen game-captured rate
-    // into a different base rate. The calculation layer itself is unchanged.
-    const protectedExistingBase=Number(existing?.productionProtection?.baseRatePerLevel??existing?.baseRatePerLevel);
-    const protectedExistingObserved=Number(existing?.productionProtection?.observedRatePerHour??existing?.observedRatePerHour);
-    const resolvedBase=protectedExistingBase>0?protectedExistingBase:(explicitBase>0?explicitBase:(matchingSnapshot?Number(matchingSnapshot?.productionProtection?.baseRatePerLevel??matchingSnapshot.baseRatePerLevel):Number(existing?.baseRatePerLevel)));
-    const resolvedObserved=Number.isFinite(protectedExistingObserved)&&protectedExistingObserved>0?protectedExistingObserved:(explicitObserved>0?explicitObserved:(matchingSnapshot?Number(matchingSnapshot?.productionProtection?.observedRatePerHour??matchingSnapshot.observedRatePerHour)||null:Number(existing?.observedRatePerHour)||null));
-    const resolvedCapturedAt=explicitCapturedAt||matchingSnapshot?.capturedAt||existing?.rateCapturedAt||null;
-    const resolvedSource=explicitSource||matchingSnapshot?.source||existing?.rateSource||null;
-    const sameBase=existing&&String(existing.product||'')===product&&Number(existing.resourceId??null)===Number(normalizedResourceId??null)&&(Number(existing.quality)||0)===quality;
-    if(sameBase){
-      const nextLevel=existing.mode==='live'?plannedLevel:Math.min(20,Math.max(1,Number(existing.plannedLevel)||plannedLevel));
-      const changedLevel=Number(existing.plannedLevel||0)!==Number(nextLevel||0);
-      const changedRate=Math.abs(Number(existing.baseRatePerLevel||0)-Number(resolvedBase||0))>1e-9;
-      const updated={...existing,plannedLevel:nextLevel,mode:existing.mode||'live',baseRatePerLevel:resolvedBase>0?resolvedBase:null,observedRatePerHour:resolvedObserved,rateCapturedAt:resolvedCapturedAt,rateSource:resolvedSource,productionProtection:existing.productionProtection||((resolvedBase>0)?{version:1,baseRatePerLevel:resolvedBase,observedRatePerHour:resolvedObserved,capturedAt:resolvedCapturedAt||new Date().toISOString(),source:resolvedSource||'captured'}:null)};
-      plans[productionPlanKey(buildingId)]=updated;store.productionPlans=plans;if((changedLevel||changedRate)&&store.frozenNetworkPlan)store.frozenNetworkPlan=null;stores[key]=store;
-      const patch={realmStores:stores};if(s.activeRealmKey===key){patch.productionPlans=plans;if(changedLevel||changedRate)patch.frozenNetworkPlan=null;}await storageSet(patch);return {ok:true,changed:changedLevel||changedRate,plan:updated};
-    }
-    const plan={buildingId,product,resourceId:normalizedResourceId,quality,plannedLevel,mode:String(m?.mode||'live'),baseRatePerLevel:resolvedBase>0?resolvedBase:null,observedRatePerHour:resolvedObserved,rateCapturedAt:resolvedCapturedAt,rateSource:resolvedSource,capturedAt:new Date().toISOString(),captureRealm:realm,source,productionProtection:resolvedBase>0?{version:1,baseRatePerLevel:resolvedBase,observedRatePerHour:resolvedObserved,capturedAt:resolvedCapturedAt||new Date().toISOString(),source:resolvedSource||source}:null};
-    plans[productionPlanKey(buildingId)]=plan;store.productionPlans=plans;if(store.frozenNetworkPlan)store.frozenNetworkPlan=null;stores[key]=store;
-    const patch={realmStores:stores};if(s.activeRealmKey===key){patch.productionPlans=plans;patch.frozenNetworkPlan=null;}await storageSet(patch);return {ok:true,changed:true,plan};
-  });
-}
-async function saveFrozenNetworkPlanSnapshot(m){
-  const realm=validRealmNumber(m?.realm); if(realm==null)return {ok:false,error:'Valid realm required.'};
-  return withRealmWriteLock(realm,async()=>{
-    const key=realmKeyFromRealm(realm); if(!key)return {ok:false,error:'Invalid realm.'};
-    const plan=m?.plan&&typeof m.plan==='object'?m.plan:null;if(!plan)return {ok:false,error:'Frozen network plan required.'};
-    const productionRows=Array.isArray(plan.productionRows)?plan.productionRows.map(x=>({id:Number(x.id),quality:Number(x.quality)||0,amount:Number(x.amount)||0})).filter(x=>x.id>0&&x.amount>0):[];
-    const demandRows=Array.isArray(plan.demandRows)?plan.demandRows.map(x=>({id:Number(x.id),minQuality:Number(x.minQuality)||0,amount:Number(x.amount)||0})).filter(x=>x.id>0&&x.amount>0):[];
-    const activeSpecs=Array.isArray(plan.activeSpecs)?plan.activeSpecs.map(x=>({buildingId:Number(x.buildingId),product:String(x.product||''),productId:Number(x.productId),quality:Number(x.quality)||0,level:Number(x.level)||1,ratePerHour:Number(x.ratePerHour)||0,outputRun:Number(x.outputRun)||0})).filter(x=>x.buildingId>0&&x.product&&x.productId>0&&x.ratePerHour>0&&x.outputRun>0):[];
-    const hours=Math.max(1,Number(plan.hours)||24); const signature=String(m?.signature||''); if(!signature)return {ok:false,error:'Frozen plan signature required.'};
-    const normalizedPlans={};for(const [rawId,v] of Object.entries(plan.buildingPlans||{})){const id=Number(rawId);if(!Number.isFinite(id)||id<=0)continue;const entry={...v,buildingId:id,product:String(v?.product||''),productId:Number(v?.productId),resourceId:Number(v?.resourceId),quality:Math.max(0,Number(v?.quality)||0),plannedLevel:Math.min(20,Math.max(1,Number(v?.plannedLevel)||1)),baseRatePerLevel:Number(v?.baseRatePerLevel)>0?Number(v.baseRatePerLevel):null,mode:String(v?.mode||'live')};if(entry.product&&entry.productId>0)normalizedPlans[String(id)]=entry;}
-    const s=await state(realm);const stores={...(s.realmStores||{})};const store={...(stores[key]||{})};
-    const liveProductionBuildings=Array.isArray(store.buildings)?store.buildings.filter(b=>b&&String(b?.category||'').toLowerCase()==='production'):[];
-    const liveConfiguredIds=new Set(liveProductionBuildings.filter(b=>String(b?.busy?.resource?.name||'').trim()).map(b=>Number(b.id)).filter(n=>Number.isFinite(n)&&n>0));
-    const expectedPlans=Object.values(store.productionPlans||{}).filter(p=>p&&String(p.product||'').trim()&&p.mode!=='disabled');
-    const expectedIds=new Set([...liveConfiguredIds,...expectedPlans.map(p=>Number(p.buildingId))].filter(n=>Number.isFinite(n)&&n>0));
-    const actualIds=new Set(activeSpecs.map(x=>Number(x.buildingId)).filter(n=>Number.isFinite(n)&&n>0));
-    const missing=[...expectedIds].filter(id=>!actualIds.has(id));
-    const missingPlanEntries=[...expectedIds].filter(id=>!normalizedPlans[String(id)]);
-    const unratedPlanEntries=[...expectedIds].filter(id=>{const p=normalizedPlans[String(id)];return !p||!(Number(p.baseRatePerLevel)>0);});
-    if(!activeSpecs.length||!productionRows.length)return {ok:false,error:'Frozen plan has no planned production output.'};
-    if(missing.length)return {ok:false,error:`Frozen plan incomplete; missing building specs: ${missing.join(',')}`};
-    if(missingPlanEntries.length)return {ok:false,error:`Frozen plan incomplete; missing building plans: ${missingPlanEntries.join(',')}`};
-    if(unratedPlanEntries.length)return {ok:false,error:`Frozen plan incomplete; unrated building plans: ${unratedPlanEntries.join(',')}`};
-    const existing=store.frozenNetworkPlan;if(existing&&String(existing.signature||'')===signature)return {ok:true,changed:false,plan:existing};
-    const frozen={realm,signature,hours,productionRows,demandRows,activeSpecs,buildingPlans:normalizedPlans,plannerState:plan.plannerState&&typeof plan.plannerState==='object'?plan.plannerState:null,modifiers:plan.modifiers&&typeof plan.modifiers==='object'?plan.modifiers:{companyProductionModifier:0,events:{}},resources:Array.isArray(plan.resources)?plan.resources:[],deficits:Array.isArray(plan.deficits)?plan.deficits:[],surpluses:Array.isArray(plan.surpluses)?plan.surpluses:[],capturedAt:new Date().toISOString(),source:'frozen realm network plan'};
-    store.frozenNetworkPlan=frozen;stores[key]=store;const patch={realmStores:stores};if(s.activeRealmKey===key)patch.frozenNetworkPlan=frozen;await storageSet(patch);return {ok:true,changed:true,plan:frozen};
-  });
-}
-function overlayActiveProductionEventModifier(store,product){
-  const target=String(product||'').toLowerCase().replace(/[’']/g,'').replace(/[^a-z0-9]+/g,'').replace(/s$/,'');
-  const now=Date.now();
-  let modifier=0;
-  for(const e of Array.isArray(store?.productionEvents)?store.productionEvents:[]){
-    const exp=Number(e?.expiresAt);
-    if(Number.isFinite(exp)&&exp<=now)continue;
-    const name=String(e?.resourceName||e?.name||'').toLowerCase().replace(/[’']/g,'').replace(/[^a-z0-9]+/g,'').replace(/s$/,'');
-    if(name===target)modifier+=Number(e?.modifier)||0;
-  }
-  return Math.max(-99,Math.min(99,modifier));
-}
-// Base rate/level from the game's constants for the phase in the stored auth-data (temporals.economyState),
-// × abundance % for the building when the game has shown it. null when anything is missing.
-function overlayGameBaseRate(store,constants,resourceId,buildingId){
-  try{
-    const C=globalThis.SCM_TOOLS_CORE;const phase=Number(store?.authData?.temporals?.economyState);
-    if(!C?.gameBaseRate||!Number.isFinite(phase))return null;
-    const base=C.gameBaseRate(constants,resourceId,phase);if(!(base>0))return null;
-    const ab=Number(store?.endpointData?.[`/api/v2/companies/buildings/${Number(buildingId)}/abundance/`]?.data?.abundance?.[String(resourceId)]);
-    return Number.isFinite(ab)&&ab>0?base*ab/100:base;
-  }catch{return null;}
-}
-// The game's speed formula: rate = base × event × 1/(1 − bonus/100). Frozen plans record it.
-const OVERLAY_SPEED_FORMULA='game-divide';
-function overlayCompanyProductionModifier(store){
-  const n=Number(store?.authData?.authCompany?.productionModifier);
-  return Number.isFinite(n)?Math.max(-99,Math.min(99,n)):0;
+function productionPlanKey(buildingId){return String(Number(buildingId));}
+// A production plan is identity only (product, quality, level, mode). Rates come from the building's run
+// (planner-core), never from a plan, so a plan keeps no rate fields (SCM_STORAGE_CORE.PRODUCTION_PLAN_RATE_FIELDS).
+// Returns the plan to store, or null when the stored plan already says the same.
+function nextProductionPlan(existing,m,realm){
+  const buildingId=Number(m?.buildingId),resourceId=Number(m?.resourceId),quality=Math.max(0,Number(m?.quality)||0),plannedLevel=Math.min(20,Math.max(1,Number(m?.plannedLevel)||1));
+  const product=String(m?.product||'').trim(); if(!Number.isFinite(buildingId)||buildingId<=0||!product)return null;
+  const normalizedResourceId=Number.isFinite(resourceId)&&resourceId>0?resourceId:null;
+  const rateFields=globalThis.SCM_STORAGE_CORE.PRODUCTION_PLAN_RATE_FIELDS;
+  const sameProduct=existing&&String(existing.product||'')===product&&Number(existing.resourceId??null)===Number(normalizedResourceId??null)&&(Number(existing.quality)||0)===quality;
+  if(!sameProduct)return {buildingId,product,resourceId:normalizedResourceId,quality,plannedLevel,mode:String(m?.mode||'live'),capturedAt:new Date().toISOString(),captureRealm:realm,source:String(m?.source||'building capture')};
+  const nextLevel=existing.mode==='live'?plannedLevel:Math.min(20,Math.max(1,Number(existing.plannedLevel)||plannedLevel));
+  const hasRateFields=rateFields.some(f=>Object.prototype.hasOwnProperty.call(existing,f));
+  if(Number(existing.plannedLevel||0)===nextLevel&&!hasRateFields)return null;
+  const plan={...existing,plannedLevel:nextLevel,mode:existing.mode||'live'};
+  for(const f of rateFields)delete plan[f];
+  return plan;
 }
 function overlayWarehouseCostValue(v,depth=0){
   if(depth>5||v==null)return null;
@@ -1353,8 +1191,8 @@ function accountingWeekLedgerCacheComplete(store,boundaryMs,recentRows=null){
     : Number.isFinite(summaryEnd)&&summaryEnd>=boundary;
   if(!boundaryMatches)return false;
   // A populated ledger plus a 'complete' status is not enough to prove that
-  // the full week was crawled. Older builds could mark a short recent feed
-  // complete even though the cursor crawl never reached the week boundary.
+  // the full week was crawled: a short recent feed can be marked complete
+  // even though the cursor crawl never reached the week boundary.
   // Only reuse the durable cache when coverage was explicitly proven by the
   // crawl, or when the recent feed itself already crosses the week boundary.
   const coverageProven=Boolean(status?.coverageComplete)||
@@ -1403,9 +1241,7 @@ async function syncCurrentWeekAccountingSales(realm, trace){
 
   // A completed current-week ledger is durable cache, not a five-minute cache.
   // New sales are merged from the authoritative cashflow/recent capture during
-  // normal Sync/API capture. Re-crawling every historical cursor page merely
-  // because the summary is older than five minutes turned a growing ledger into
-  // an 80-second tax on an otherwise healthy dashboard.
+  // normal Sync/API capture, so the cursor pages are not crawled again.
   if(Number.isFinite(boundary) && Array.isArray(recentRows) && accountingWeekLedgerCacheComplete(store,boundary,recentRows) && weekPathItem?.data){
     ledger=mergeAccountingWeekSales(store,recentRows,boundary);
     const key=realmKeyFromRealm(target);
@@ -1612,7 +1448,7 @@ function withoutLedgerCursorPages(map){
   if(!Object.keys(src).some(k=>LEDGER_CURSOR_PAGE_RX.test(k)))return src;
   return Object.fromEntries(Object.entries(src).filter(([k])=>!LEDGER_CURSOR_PAGE_RX.test(k)));
 }
-// One-time shrink of stores that grew before 2.5.389: archive every stored ledger page first, then drop the old copies.
+// One-time shrink of stores that still hold every ledger page: archive each stored page first, then drop the old copies.
 async function compactLedgerPagesOnce(){
   const FLAG='scmLedgerPagesCompactedV1';
   if(coreSyncActive()){deferUntilSyncEnds('ledger-pages-compact',()=>{compactLedgerPagesOnce().catch(()=>{});});return {ok:false,deferred:true};}
@@ -1635,7 +1471,8 @@ async function compactLedgerPagesOnce(){
 }
 // Statement history: the game numbers day statements by age (/day/0/ = last finished day), so the store only
 // ever held the latest 14. Every computed day statement is also kept by its own date in scmStatementHistory:<realm>
-// ({ 'income-statement': { '<date>': data }, 'cashflow-statement': …, 'balance-sheet': … }), ~1 KB a day, never pruned.
+// ({ 'income-statement': { '<date>': data }, 'cashflow-statement': …, 'balance-sheet': … }), ~1 KB a day; the daily
+// storage trim (scmPruneStorage) keeps 90 days.
 const STATEMENT_DAY_RX=/\/api\/v2\/companies\/me\/(income-statement|cashflow-statement|balance-sheet)\/day\/\d+\/?$/;
 function statementHistoryKey(realm){return `scmStatementHistory:${Number(realm)}`;}
 const statementHistoryQueues=new Map();
@@ -1666,7 +1503,7 @@ async function seedStatementHistoryOnce(){
 setTimeout(()=>{seedStatementHistoryOnce().catch(()=>{});},6000);
 // One-time seed from the cash-flow pages already in each realm store (stamped with that realm).
 async function seedLedgerArchiveOnce(){
-  const FLAG='scmLedgerArchiveSeededV2'; // V2 (2.5.390): re-seed so retail rows from stored pages join the archive
+  const FLAG='scmLedgerArchiveSeededV2'; // V2: re-seed so retail rows from stored pages join the archive
   const got=await chrome.storage.local.get({[FLAG]:false,'scmRealmStore:0':null,'scmRealmStore:1':null});
   if(got[FLAG])return {ok:true,skipped:true};
   for(const n of [0,1]){
@@ -1681,7 +1518,7 @@ async function seedLedgerArchiveOnce(){
   return {ok:true};
 }
 setTimeout(()=>{seedLedgerArchiveOnce().catch(()=>{}).then(()=>compactLedgerPagesOnce()).catch(()=>{});},5000);
-// One-time seed from data already captured before 2.5.331 (current buildings + stored building histories).
+// One-time seed from data already captured (current buildings + stored building histories).
 async function seedProductionCostHistoryOnce(){
   const FLAG='scmProductionCostHistorySeededV1';
   const got=await chrome.storage.local.get({[FLAG]:false,'scmRealmStore:0':null,'scmRealmStore:1':null});
@@ -1717,7 +1554,6 @@ async function gameRecipesFromBundle(list){try{const c=(await chrome.storage.loc
 globalThis.__scmOwnWriteHooks?.push(items=>{if(Object.prototype.hasOwnProperty.call(items,'scmGameConstants')){notifyRecipesMemo=null;gameOverlayAssetsPromise=null;}});
 async function notifyRecipes(){if(notifyRecipesMemo)return notifyRecipesMemo;try{const list=await gameRecipesFromBundle(await (await fetch(chrome.runtime.getURL('recipes.json'))).json());const byId=new Map(),names=new Map();for(const r of Array.isArray(list)?list:[]){byId.set(Number(r.id),r);names.set(Number(r.id),String(r.name||''));}notifyRecipesMemo={byId,names};}catch{notifyRecipesMemo={byId:new Map(),names:new Map()};}return notifyRecipesMemo;}
 async function notifyRealmStore(realm){return (await chrome.storage.local.get({[`scmRealmStore:${realm}`]:null}))[`scmRealmStore:${realm}`]||{};}
-// After each SimcoTools current-price update.
 async function notifyAfterPriceUpdate(realm){
   const n=validRealmNumber(realm);if(n==null)return;const cfg=await notifySettings();
   const wantTargets=Array.isArray(cfg.priceTargets)&&cfg.priceTargets.some(t=>Number(t?.realm??n)===n);
@@ -1737,7 +1573,6 @@ async function notifyIncomingContracts(realm,data){
   const {names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE;
   await updateNotifyState(async state=>{const key=`contracts:${n}`;const r=N.newIncomingContracts(data,state[key],names,n);state[key]=r.seen;for(const f of r.fresh)await scmNotify(`contract-${n}-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,f.title,f.message);return state;});
 }
-// Daily summary alarm at the chosen local time.
 async function scheduleDailySummary(){const cfg=await notifySettings();await chrome.alarms.clear('scm-daily-summary');if(cfg.dailySummary)await scmAlarmCreate('scm-daily-summary',{when:globalThis.SCM_NOTIFY_CORE.nextDailyTime(cfg.dailySummaryTime),periodInMinutes:1440});}
 async function fireDailySummary(){
   const cfg=await notifySettings();if(!cfg.dailySummary)return;const {names}=await notifyRecipes();const N=globalThis.SCM_NOTIFY_CORE;
@@ -1761,7 +1596,9 @@ async function fireFollowUp(name){
   if(clearGen!==extensionClearGeneration)return;
   const b=(Array.isArray(st.buildings)?st.buildings:[]).find(x=>Number(x?.id)===bid);if(!b)return;
   const seenAt=Date.parse(String(st.endpointData?.['/api/v2/companies/me/buildings/']?.receivedAt||''));
-  const r=globalThis.SCM_NOTIFY_CORE.followUp({building:b,startedMs,finishMs,seenAt,names,realm});
+  // Batch size: the run's full output from its history row (busy.resource.amount is only what is still to come).
+  const batchAmount=globalThis.SCMPlannerCore.runOutputAmount(b,st.endpointData?.[`/api/v2/companies/buildings/${bid}/history/`]?.data)??undefined;
+  const r=globalThis.SCM_NOTIFY_CORE.followUp({building:b,startedMs,finishMs,seenAt,names,realm,batchAmount});
   if(r.kind==='unknown'){if(attempt<3)await createFollowupAlarm(`scm-followup:${realm}:${bid}:${startedMs}:${finishMs}:${attempt+1}`,Date.now()+3600e3,clearGen);return;}
   if(r.title)await scmNotify(`followup-${realm}-${bid}-${finishMs}`,r.title,r.message);
 }
@@ -1843,7 +1680,7 @@ function productionFinishAlarms(realm,buildings){
   for(const b of Array.isArray(buildings)?buildings:[]){
     const st=Date.parse(String(b?.busy?.started||'')),dur=Number(b?.busy?.duration);
     if(!(Number(b?.id)>0)||!Number.isFinite(st)||!(dur>0))continue;
-    if(String(b?.busy?.category||'')==='b')continue; // v2.5.450 construction / upgrade, not a production batch
+    if(String(b?.busy?.category||'')==='b')continue; // construction / upgrade, not a production batch
     const finish=st+dur*1000;
     out.push({name:`scm-prodfin:${realm}:${Number(b.id)}:${finish}`,when:finish,buildingId:Number(b.id)});
   }
@@ -1953,30 +1790,6 @@ async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000){
   }catch(e){return {ok:false,error:e?.message||String(e),totalDurationMs:Date.now()-totalStartedAt};}
 }
 
-
-function normalizeOverlayName(v){return String(v??'').toLowerCase().replace(/[’']/g,'').replace(/[^a-z0-9]+/g,'').replace(/s$/,'');}
-async function getRealmBuildingVwapData(realm,resourceName,quality){
-  const n=validRealmNumber(realm); if(n==null)return {ok:false,error:'Invalid realm.'};
-  const s=await state(n); const key=realmKeyFromRealm(n); const store={...(s.realmStores?.[key]||{})};
-  const assets=await gameOverlayAssets();
-  const targetName=String(resourceName||'').trim();
-  const norm=normalizeOverlayName(targetName);
-  let id=null;
-  for(const [sid,name] of assets.names instanceof Map?assets.names.entries():[])if(normalizeOverlayName(name)===norm){id=Number(sid);break;}
-  if(id==null){
-    const hit=vwapRowsForRealm(store,n).find(r=>normalizeOverlayName(assets.names.get(String(r.resourceId))||'')===norm);
-    if(hit)id=Number(hit.resourceId);
-  }
-  if(id==null){
-    for(const b of Array.isArray(store.buildings)?store.buildings:[]){const rid=Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId);const name=String(b?.busy?.resource?.name||'');if(Number.isFinite(rid)&&normalizeOverlayName(name)===norm){id=rid;break;}}
-  }
-  const rows=vwapRowsForRealm(store,n).filter(r=>Number(r.resourceId)===Number(id)).map(r=>{const v=globalThis.SCM_MARKET_CORE.vwap(store,n,id,r.quality);return v?{...r,value:v.value}:null;}).filter(Boolean).sort((a,b)=>Number(a.quality)-Number(b.quality));
-  if(id==null||!rows.length)return {ok:false,realm:n,resourceId:id,resourceName:targetName,quality:Number(quality),rows:[]};
-  const q=Number(quality);
-  const file=assets.images[String(id)];
-  return {ok:true,realm:n,resourceId:id,resourceName:assets.names.get(String(id))||targetName,quality:Number.isFinite(q)?q:null,rows:rows.slice(0,12),selected:rows.find(r=>Number(r.quality)===q)||null,image:file?`${assets.imageBase}${file}`:''};
-}
-
 function overlayProductionRunHours(store){
   const n=Number(store?.productionRunHours);
   return Number.isFinite(n)?Math.min(48,Math.max(1,n)):24;
@@ -2010,421 +1823,141 @@ async function ensureRealmAuthData(realmArg){
     return {ok:false,realm,error:e?.message||String(e)};
   }
 }
-async function ensureFrozenProductionRatesForRealmUnlocked(realm){
+// A stored building history gives that running building's current run its measured rate. It is kept as the run's
+// 'production history' snapshot, so planner-core still has the rate when a later history capture lacks the row
+// (replaced or pruned). Also refreshes the building's identity plan. Reads only stored data: no game request.
+// Adds to patch only what differs from the stored plan and snapshot; returns whether it added anything.
+function addRunHistoryCapture(patch,store,b,target){
+  const core=globalThis.SCMPlannerCore,id=Number(b?.id);
+  if(!Number.isFinite(id)||id<=0||String(b?.category||'').toLowerCase()!=='production')return false;
+  let changed=false;
+  // A building keeps the plan of the product it was last seen making, also while idle or being expanded.
+  const res=b.busy?.resource,product=String(res?.name||'').trim();
+  if(product){
+    const plans=patch.productionPlans||store.productionPlans||{};
+    const plan=nextProductionPlan(plans[productionPlanKey(id)],{buildingId:id,resourceId:Number(res?.kind??res?.resourceId),product,quality:Math.max(0,Number(res?.quality)||0),plannedLevel:core.buildingLevel(b),mode:'live',source:'live building capture'},target);
+    if(plan){patch.productionPlans={...plans,[productionPlanKey(id)]:plan};changed=true;}
+  }
+  const run=core.buildingRun(b);
+  const e=store.endpointData?.[`/api/v2/companies/buildings/${id}/history/`];const st=Number(e?.status)||200;
+  const row=run&&st>=200&&st<300&&Array.isArray(e?.data)?core.matchRunHistoryRow(b,e.data):null;
+  if(row){
+    const snaps=patch.productionRateSnapshots||store.productionRateSnapshots||{};
+    const outputAmount=Number(row.outputAmount??row.amount),observedRatePerHour=outputAmount*3600/run.durationSec;
+    const sk=productionSnapshotKey(id,run.productId,run.product),prev=snaps[sk];
+    const same=prev&&String(prev.source||'')==='production history'&&String(prev.started||'')===run.started&&Number(prev.resourceId)===run.productId&&(prev.quality??null)===run.quality&&Number(prev.durationSec)===run.durationSec&&Number(prev.outputAmount)===outputAmount&&Number(prev.observedRatePerHour)===observedRatePerHour;
+    if(!same){patch.productionRateSnapshots={...snaps,[sk]:{buildingId:id,resourceId:run.productId,product:run.product,quality:run.quality,started:run.started,durationSec:run.durationSec,outputAmount,observedRatePerHour,source:'production history',capturedAt:new Date().toISOString(),captureRealm:target}};changed=true;}
+  }
+  return changed;
+}
+// Called after the history endpoint is stored, outside saveData's commit slot (the realm write lock queues behind it).
+function recordRunHistoryCapture(realm,buildingId){
+  const target=validRealmNumber(realm),id=Number(buildingId);
+  if(target==null||!Number.isFinite(id)||id<=0)return Promise.resolve({ok:false,error:'Invalid realm or building.'});
+  if(coreSyncActive()){deferUntilSyncEnds(`run-history:${target}:${id}`,()=>recordRunHistoryCapture(target,id));return Promise.resolve({ok:true,deferred:true});}
+  const clearGen=extensionClearGeneration;
+  return withRealmWriteLock(target,async()=>{
+    if(clearGen!==extensionClearGeneration)return {ok:true,changed:false};
+    const key=realmKeyFromRealm(target);const s=await state(target);const store=s.realmStores?.[key];
+    if(!store)return {ok:true,changed:false};
+    const b=realmStoredBuildings(store,s,target).find(x=>Number(x?.id)===id);
+    const patch={};
+    if(!b||!addRunHistoryCapture(patch,store,b,target))return {ok:true,changed:false};
+    const stores={...(s.realmStores||{})};stores[key]={...store,...patch};
+    await storageSet({realmStores:stores});
+    return {ok:true,changed:true,plan:Boolean(patch.productionPlans),snapshot:Boolean(patch.productionRateSnapshots)};
+  });
+}
+// After the buildings list is stored: a history stored before the list showed the new run gets its snapshot now, and
+// plans of buildings that are gone or no longer production buildings are dropped. Reads only stored data: no game
+// request. Called outside saveData's commit slot (the realm write lock queues behind it).
+function reconcileProductionBuildings(realm){
   const target=validRealmNumber(realm);
-  if(target==null)return {ok:false,error:'Invalid realm.'};
-  await ensureRealmStorageMigration();
-  await ensureRealmAuthData(target);
-  let latest=await state(target);
-  const key=realmKeyFromRealm(target);
-  if(!key)return {ok:false,error:'Invalid realm.'};
-  let store={...(latest.realmStores?.[key]||{})};
-  const buildings=realmStoredBuildings(store,latest,target);
-  if(!buildings.length)return {ok:true,captured:0,requested:0,plans:0};
-  const assets=await gameOverlayAssets();
-  const companyModifier=Number(store?.authData?.authCompany?.productionModifier);
-  // Game formula: speed bonus divides by (1 − bonus/100).
-  const companyFactor=Number.isFinite(companyModifier)?(companyModifier<100?1/(1-companyModifier/100):0):1;
-  const productionBuildings=buildings.filter(b=>b&&String(b?.category||'').toLowerCase()==='production');
-  const liveProductionIds=new Set(productionBuildings.map(b=>Number(b?.id)).filter(n=>Number.isFinite(n)&&n>0));
-  const stalePlans=Object.keys(store.productionPlans||{}).filter(id=>Number.isFinite(Number(id))&&!liveProductionIds.has(Number(id)));
-  if(stalePlans.length){
-    await withRealmWriteLock(target,async()=>{
-      const fresh=await state(target);
-      const freshStores={...(fresh.realmStores||{})};
-      const freshStore={...(freshStores[key]||{})};
-      const cleaned={...(freshStore.productionPlans||{})};
-      for(const id of stalePlans)delete cleaned[id];
-      freshStore.productionPlans=cleaned;
-      freshStore.frozenNetworkPlan=null;
-      freshStores[key]=freshStore;
-      const patch={realmStores:freshStores};
-      if(fresh.activeRealmKey===key){patch.productionPlans=cleaned;patch.frozenNetworkPlan=null;}
-      await storageSet(patch);
-    });
-    latest=await state(target);
-    store={...(latest.realmStores?.[key]||store)};
-  }
-  const missing=[];
-  let plans=0;
-
-  // Capture the current configured product/quality as a frozen plan. Once a
-  // building has a plan, the plan remains valid even when the live cycle ends
-  // or the busy payload temporarily disappears. A later product/quality change
-  // simply overwrites the plan the next time the game exposes the new cycle.
-  let gameConstantsForRates;
-  for(const b of productionBuildings){
-    const busy=b?.busy;
-    const product=String(busy?.resource?.name||'').trim();
-    if(!product)continue;
-    const rid=Number(busy?.resource?.kind??busy?.resource?.resourceId);
-    const quality=Math.max(0,Number(busy?.resource?.quality)||0);
-    try{await saveProductionPlanSnapshot({realm:target,buildingId:Number(b.id),resourceId:rid,product,quality,plannedLevel:overlayBuildingLevel(b),mode:'live',source:'live building capture'});plans++; latest=await state(target); store={...(latest.realmStores?.[key]||store)};}catch{}
-    let snap=storedProductionRateSnapshot(store,b,product);
-    let snapshotValid=Boolean(snap);
-    if(snap&&String(snap?.source||'').toLowerCase()==='production history'){
-      const endpoint=store?.endpointData?.[`/api/v2/companies/buildings/${Number(b.id)}/history/`];
-      const rows=Array.isArray(endpoint?.data)?endpoint.data:[];
-      const startedMs=Date.parse(String(b?.busy?.started||''));
-      const resourceId=Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId);
-      const currentRows=rows.filter(row=>{
-        const amount=Number(row?.outputAmount??row?.amount);
-        const rowKind=Number(row?.kind);
-        const rowMs=Date.parse(String(row?.datetime||''));
-        const idMatch=Number.isFinite(resourceId)&&resourceId>0&&Number.isFinite(rowKind)&&rowKind===resourceId;
-        const cycleMatch=Number.isFinite(startedMs)&&Number.isFinite(rowMs)&&Math.abs(rowMs-startedMs)<=5000;
-        return Number.isFinite(amount)&&amount>0&&idMatch&&cycleMatch;
-      });
-      const duration=Number(b?.busy?.duration);
-      if(currentRows.length&&Number.isFinite(duration)&&duration>0){
-        const amount=Number(currentRows[0]?.outputAmount??currentRows[0]?.amount);
-        const actualRate=amount/(duration/3600);
-        const storedRate=Number(snap?.observedRatePerHour);
-        if(Number.isFinite(actualRate)&&actualRate>0&&Number.isFinite(storedRate)&&storedRate>0){
-          const relativeError=Math.abs(storedRate-actualRate)/actualRate;
-          if(relativeError>0.005)snapshotValid=false;
-        }
-      }
+  if(target==null)return Promise.resolve({ok:false,error:'Invalid realm.'});
+  if(coreSyncActive()){deferUntilSyncEnds(`production-buildings:${target}`,()=>reconcileProductionBuildings(target));return Promise.resolve({ok:true,deferred:true});}
+  const clearGen=extensionClearGeneration;
+  return withRealmWriteLock(target,async()=>{
+    if(clearGen!==extensionClearGeneration)return {ok:true,changed:false};
+    const key=realmKeyFromRealm(target);const s=await state(target);const store=s.realmStores?.[key];
+    if(!store)return {ok:true,changed:false};
+    const buildings=realmStoredBuildings(store,s,target);
+    if(!buildings.length)return {ok:true,changed:false};
+    const production=buildings.filter(b=>String(b?.category||'').toLowerCase()==='production');
+    const live=new Set(production.map(b=>productionPlanKey(b?.id)));
+    const patch={};
+    const stale=Object.keys(store.productionPlans||{}).filter(k=>Number.isFinite(Number(k))&&!live.has(productionPlanKey(k)));
+    if(stale.length){const plans={...store.productionPlans};for(const k of stale)delete plans[k];patch.productionPlans=plans;}
+    let snapshots=0;
+    for(const b of production){
+      // Only running buildings with a stored history: the same write recordRunHistoryCapture makes for them.
+      const e=store.endpointData?.[`/api/v2/companies/buildings/${Number(b?.id)}/history/`];
+      if(!globalThis.SCMPlannerCore.buildingRun(b)||!Array.isArray(e?.data))continue;
+      const before=patch.productionRateSnapshots;
+      addRunHistoryCapture(patch,store,b,target);
+      if(patch.productionRateSnapshots!==before)snapshots++;
     }
-    if(!snapshotValid)missing.push({b,product,rid,quality});
-  }
-  if(missing.length){
-    await Promise.all(missing.map(async x=>{try{await fetchBuildingHistoryForRealm(target,Number(x.b.id));}catch{}}));
-    latest=await state(target);
-    store={...(latest.realmStores?.[key]||{})};
-  }
-  let captured=0;
-  for(const {b,product,rid,quality} of missing){
-    const existing=storedProductionRateSnapshot(store,b,product);
-    const duration=Number(b?.busy?.duration);
-    const level=overlayBuildingLevel(b);
-    const endpoint=store?.endpointData?.[`/api/v2/companies/buildings/${Number(b.id)}/history/`];
-    const rows=Array.isArray(endpoint?.data)?endpoint.data:[];
-    const targetName=String(product||'').trim().toLowerCase();
-    const startedMs=Date.parse(String(b?.busy?.started||''));
-    const resourceId=Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId);
-    const currentCycleRows=rows.filter(row=>{
-      const amount=Number(row?.outputAmount??row?.amount);
-      const rowKind=Number(row?.kind);
-      const rowName=String(row?.resourceName||row?.name||'').trim().toLowerCase();
-      const rowMs=Date.parse(String(row?.datetime||''));
-      const idMatch=Number.isFinite(resourceId)&&resourceId>0&&Number.isFinite(rowKind)&&rowKind===resourceId;
-      const nameMatch=rowName&&rowName===targetName;
-      const cycleMatch=Number.isFinite(startedMs)&&Number.isFinite(rowMs)&&Math.abs(rowMs-startedMs)<=5000;
-      return Number.isFinite(amount)&&amount>0&&(idMatch||nameMatch)&&cycleMatch;
-    });
-    // A stored snapshot for the current cycle is normally authoritative, but
-    // legacy snapshots may have been created by the old nearest-history logic.
-    // If the exact current-cycle history row is available, validate the stored
-    // observed rate against it and repair a mismatch instead of preserving a
-    // mathematically plausible rate made from an older history row.
-    if(existing&&currentCycleRows.length&&Number.isFinite(duration)&&duration>0){
-      const amount=Number(currentCycleRows[0]?.outputAmount??currentCycleRows[0]?.amount);
-      const actualRate=amount/(duration/3600);
-      if(Number.isFinite(actualRate)&&actualRate>0){
-        const storedRate=Number(existing?.observedRatePerHour);
-        const relativeError=Math.abs(storedRate-actualRate)/actualRate;
-        if(Number.isFinite(storedRate)&&relativeError<=0.005)continue;
-      }
-    }else if(existing){
-      continue;
-    }
-    if(!Number.isFinite(duration)||duration<=0||!Number.isFinite(level)||level<=0||!Number.isFinite(rid)||rid<=0)continue;
-    // History is authoritative only when the row can be proven to belong to
-    // this exact production cycle. The API's history datetime is the cycle
-    // start; using an older matching row with the current cycle duration
-    // creates a mathematically plausible but completely wrong rate (the
-    // Propulsion Factory failure: 1192 old units / 16126 current seconds).
-    const matches=rows.filter(row=>{
-      const amount=Number(row?.outputAmount??row?.amount);
-      const rowKind=Number(row?.kind);
-      const rowName=String(row?.resourceName||row?.name||'').trim().toLowerCase();
-      const rowMs=Date.parse(String(row?.datetime||''));
-      const idMatch=Number.isFinite(resourceId)&&resourceId>0&&Number.isFinite(rowKind)&&rowKind===resourceId;
-      const nameMatch=rowName&&rowName===targetName;
-      const cycleMatch=Number.isFinite(startedMs)&&Number.isFinite(rowMs)&&Math.abs(rowMs-startedMs)<=5000;
-      return Number.isFinite(amount)&&amount>0&&(idMatch||nameMatch)&&cycleMatch;
-    });
-    matches.sort((a,b)=>Date.parse(String(b?.datetime||''))-Date.parse(String(a?.datetime||'')));
-    let baseRatePerLevel=null, observedRatePerHour=null, source='reference rate';
-    const row=matches[0];
-    if(row){
-      const amount=Number(row?.outputAmount??row?.amount);
-      const rate=amount/(duration/3600);
-      if(Number.isFinite(rate)&&rate>0&&companyFactor>0){
-        const eventModifier=overlayActiveProductionEventModifier(store,product);
-        const eventFactor=1+eventModifier/100;
-        if(eventFactor>0){
-          observedRatePerHour=rate;
-          baseRatePerLevel=rate/level/eventFactor/companyFactor;
-          source='production history';
-        }
-      }
-    }
-    if(!(baseRatePerLevel>0)){
-      // The game's own base rate for the current economy phase (constants), × the building's abundance
-      // where the game shows one. The bundled normal-economy file is only the last resort (it was stale, e.g. Steak +76%).
-      if(gameConstantsForRates===undefined){try{gameConstantsForRates=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants||null;}catch{gameConstantsForRates=null;}}
-      const gameBase=overlayGameBaseRate(store,gameConstantsForRates,rid,b?.id);
-      const ref=gameBase>0?gameBase:Number(assets.ratesByName?.get(assets.normalizeName(product)));
-      if(Number.isFinite(ref)&&ref>0){
-        baseRatePerLevel=ref;
-        observedRatePerHour=ref*level*companyFactor;
-        if(gameBase>0)source='reference rate (game constants)';
-      }
-    }
-    if(!(baseRatePerLevel>0))continue;
-    try{
-      // Commit the recovered rate and its matching production plan together.
-      // This is the authoritative realm-local repair transaction. It prevents
-      // a valid history-derived rate from being lost between two separate
-      // storage writes and guarantees the plan cannot remain unrated after the
-      // snapshot is successfully recovered.
-      const rateCapturedAt=new Date().toISOString();
-      const snapshotKey=productionSnapshotKey(Number(b.id),b?.busy?.started,rid,product);
-      // `missing` means the current-cycle snapshot is absent or failed
-      // validation. Replace that cycle's snapshot rather than re-protecting a
-      // legacy bad value. Protection is for a validated snapshot, not for a
-      // value that merely happens to exist in storage.
-      const committedSnapshot={buildingId:Number(b.id),resourceId:rid,product,started:String(b?.busy?.started||''),baseRatePerLevel,observedRatePerHour,eventModifier:overlayActiveProductionEventModifier(store,product),companyProductionModifier:Number.isFinite(companyModifier)?companyModifier:0,companyModifierNormalized:true,source,capturedAt:rateCapturedAt,captureRealm:target};
-      await withRealmWriteLock(target,async()=>{
-        const latestCommit=await state(target);
-        const latestStores={...(latestCommit.realmStores||{})};
-        const latestStore={...(latestStores[key]||{})};
-        const latestSnapshots={...(latestStore.productionRateSnapshots||{})};
-        const latestPlans={...(latestStore.productionPlans||{})};
-        latestSnapshots[snapshotKey]=committedSnapshot;
-        const latestPlan=latestPlans[String(Number(b.id))]||{};
-        latestPlans[String(Number(b.id))]={...latestPlan,buildingId:Number(b.id),product,resourceId:rid,quality,plannedLevel:level,mode:latestPlan.mode||'live',baseRatePerLevel:Number(committedSnapshot.baseRatePerLevel),observedRatePerHour:Number(committedSnapshot.observedRatePerHour)||observedRatePerHour,rateCapturedAt:committedSnapshot.capturedAt||rateCapturedAt,rateSource:committedSnapshot.source||source,captureRealm:target,source:'frozen production snapshot'};
-        latestStore.productionRateSnapshots=latestSnapshots;
-        latestStore.productionPlans=latestPlans;
-        latestStore.frozenNetworkPlan=null;
-        latestStores[key]=latestStore;
-        const latestPatch={realmStores:latestStores};
-        if(latestCommit.activeRealmKey===key){latestPatch.productionRateSnapshots=latestSnapshots;latestPatch.productionPlans=latestPlans;latestPatch.frozenNetworkPlan=null;}
-        await storageSet(latestPatch);
-      });
-      const verified=await state(target);
-      const verifiedStore=verified.realmStores?.[key]||{};
-      const verifiedSnapshot=storedProductionRateSnapshot(verifiedStore,b,product);
-      const verifiedPlan=verifiedStore.productionPlans?.[String(Number(b.id))];
-      if(!(Number(verifiedSnapshot?.baseRatePerLevel)>0)||!(Number(verifiedPlan?.baseRatePerLevel)>0)){
-        throw new Error(`Failed to persist frozen production rate for building ${Number(b.id)}.`);
-      }
-      captured++;
-      plans++;
-      store={...(verifiedStore||store)};
-    }catch(e){
-      // Keep the building unresolved rather than manufacturing a fallback rate.
-      continue;
-    }
-  }
-  return {ok:true,requested:missing.length,captured,plans};
+    if(!Object.keys(patch).length)return {ok:true,changed:false};
+    const stores={...(s.realmStores||{})};stores[key]={...store,...patch};
+    await storageSet({realmStores:stores});
+    return {ok:true,changed:true,pruned:stale.length,snapshots};
+  });
 }
 
-
-async function ensureFrozenProductionRatesForRealm(realm){
-  const target=validRealmNumber(realm);
-  if(target==null)return {ok:false,error:'Invalid realm.'};
-  const existing=frozenRateEnsurePromises.get(target);
-  if(existing)return existing;
-  const promise=ensureFrozenProductionRatesForRealmUnlocked(target)
-    .catch(error=>({ok:false,error:error?.message||String(error)}))
-    .finally(()=>{if(frozenRateEnsurePromises.get(target)===promise)frozenRateEnsurePromises.delete(target);});
-  frozenRateEnsurePromises.set(target,promise);
-  return promise;
+// The overlay, the saved-contract helper and the order-book refresh all read this one calculation (planner-core),
+// so they cannot disagree with each other or with the Production page. Game figures only: a running building makes
+// its run's rate for the whole run (its history row, else the stored snapshot of that run, else the game formula as
+// of the run's start); a building being expanded or idle makes 0. Plans are identity only and never change a figure
+// here. Only the countdown (collect stamps) and the warehouse move during a run. No game request is made.
+async function overlayProductionStock(store,realm,globalState){
+  const core=globalThis.SCMPlannerCore,assets=await gameOverlayAssets(),n=Number(realm);
+  const buildings=realmStoredBuildings(store,globalState,n);
+  const logKey=`scmEconomyStateLog:${n}`,collectKey=buildingCollectsKey(n);
+  let saved={};
+  try{saved=await chrome.storage.local.get({scmGameConstants:null,[logKey]:[],[collectKey]:{}});}catch{}
+  let collectStamps={};
+  try{const raw=saved[collectKey]&&typeof saved[collectKey]==='object'?saved[collectKey]:{};collectStamps=liveCollectStamps(raw,buildings);if(Object.keys(collectStamps).length!==Object.keys(raw).length)pruneBuildingCollects(n,buildings);}catch{}
+  const ctx=core.productionContext(store,{realm:n,now:Date.now(),buildings,constants:saved.scmGameConstants||null,economyLog:Array.isArray(saved[logKey])?saved[logKey]:[],normalRates:assets.rates});
+  const network=core.buildNetwork({buildings:ctx.buildings,plans:store?.productionPlans||{},recipes:assets.recipes,hours:overlayProductionRunHours(store),ctx,resourceNames:assets.names,collectStamps,snapshotMs:buildingsSnapshotMs(store)});
+  const grouped=overlayWarehouseRows(store?.warehouseResources);
+  // Manager-saved contracts only. Captured live API contracts (store.contracts) are never an input: once sent, those
+  // resources are already gone from the warehouse, so counting them would take them off twice.
+  const savedContracts=Array.isArray(store?.savedContracts)?store.savedContracts:[];
+  const stock=core.stockAfterDemand({warehouse:grouped.map(r=>({id:r.id,quality:r.quality,qty:r.qty})),productionRows:network.productionRows,demandRows:network.demandRows,savedContracts,upgradingKeys:network.upgradingKeys});
+  return {assets,ctx,network,stock,grouped,savedContracts};
+}
+// Countdown run as the game-page strip reads it. Only fields that stay fixed while the run lasts, so an unchanged run
+// does not rewrite the stored overlay snapshot on every rebuild.
+function overlayEtaRun(run){
+  const out={amount:run?.amount??null,amountAvailableNow:Number(run?.amountAvailableNow)||0,canFetch:run?.canFetch===true,finishMs:run?.finishMs,ratePerHour:Number(run?.ratePerHour)||0};
+  if(run?.collectedAtMs!=null)out.collectedAtMs=run.collectedAtMs;
+  return out;
 }
 
 async function buildGameOverlayData(store,realm,globalState){
-  // The production page can have a valid building payload while the realm
-  // mirror has not yet materialized `buildings`. Bootstrap the realm-local
-  // frozen production plans from that authoritative captured endpoint before
-  // calculating the overlay. This never uses remaining cycle amount as output.
-  let workingStore=store||{};
-  let frozenPlan=workingStore?.frozenNetworkPlan&&Number(workingStore.frozenNetworkPlan.realm)===Number(realm)?workingStore.frozenNetworkPlan:null;
-  if(!frozenPlan){
-    // When the sync already captured complete, rated production plans, do not
-    // make the first Stock overlay wait for another round of building-history
-    // requests. buildGameOverlayData can reconstruct the network directly from
-    // those authoritative plans and save a frozen plan after the first paint.
-    const authoritativePlans=Object.values(workingStore?.productionPlans||{}).filter(p=>p&&String(p.product||'').trim()&&p.mode!=='disabled');
-    const canBootstrapFromStoredPlans=authoritativePlans.length>0 && authoritativePlans.every(p=>Number(p.baseRatePerLevel)>0);
-    if(!canBootstrapFromStoredPlans){
-      try{await ensureFrozenProductionRatesForRealm(Number(realm));}catch{}
-    }
-    const latest=await state();
-    const key=realmKeyFromRealm(Number(realm));
-    workingStore={...(latest.realmStores?.[key]||workingStore)};
-    if(Number(realm)===validRealmNumber(latest.activeRealmKey!=null?String(latest.activeRealmKey).replace('realm:',''):latest.selectedRealm)){
-      workingStore={...latest,...workingStore};
-    }
-    frozenPlan=workingStore?.frozenNetworkPlan&&Number(workingStore.frozenNetworkPlan.realm)===Number(realm)?workingStore.frozenNetworkPlan:null;
-  }
-  store=workingStore;
-  const assets=await gameOverlayAssets();const warehouse=Array.isArray(store?.warehouseResources)?store.warehouseResources:[];const grouped=overlayWarehouseRows(warehouse);
-  
-  const frozenHours=Math.max(1,Number(frozenPlan?.hours)||overlayProductionRunHours(store));const companyModifier=overlayCompanyProductionModifier(store);const core=globalThis.SCMPlannerCore;
-  const planEntries=frozenPlan?.buildingPlans&&typeof frozenPlan.buildingPlans==='object'?Object.values(frozenPlan.buildingPlans):[];const eventMap={};for(const entry of planEntries){const name=String(entry?.product||'').trim();if(name)eventMap[assets.normalizeName(name)]=overlayActiveProductionEventModifier(store,name);}
-  const currentSignature=core?.frozenPlanSignature&&planEntries.length?core.frozenPlanSignature(planEntries,frozenHours,{companyProductionModifier:companyModifier,events:eventMap,speedFormula:OVERLAY_SPEED_FORMULA}):'';
-  const authoritativePlans=Object.values(store?.productionPlans||{}).filter(p=>p&&String(p.product||'').trim()&&p.mode!=='disabled');
-  const authoritativeIds=new Set(authoritativePlans.map(p=>Number(p.buildingId)).filter(n=>Number.isFinite(n)&&n>0));
-  const frozenIds=new Set(planEntries.map(p=>Number(p?.buildingId)).filter(n=>Number.isFinite(n)&&n>0));
-  const liveConfiguredIds=new Set((Array.isArray(store?.buildings)?store.buildings:[]).filter(b=>b&&String(b?.category||'').toLowerCase()==='production'&&String(b?.busy?.resource?.name||'').trim()).map(b=>Number(b.id)).filter(n=>Number.isFinite(n)&&n>0));
-  const planIdMismatch=[...new Set([...authoritativeIds,...liveConfiguredIds])].some(id=>!frozenIds.has(id));
-  const unratedAuthoritative=authoritativePlans.some(p=>!(Number(p.baseRatePerLevel)>0));
-  const hasUsableFrozenPlan=Boolean(frozenPlan&&Array.isArray(frozenPlan.productionRows)&&frozenPlan.productionRows.length&&Array.isArray(frozenPlan.demandRows)&&Array.isArray(frozenPlan.activeSpecs)&&frozenPlan.activeSpecs.length&&!planIdMismatch&&!unratedAuthoritative&&String(frozenPlan.signature||'')===currentSignature);
-  const recipeByProduct=new Map((Array.isArray(assets.recipes)?assets.recipes:[]).map(r=>[assets.normalizeName(r.name),r]));
-  const buildings=realmStoredBuildings(store,globalState,realm);
-  let productionRows=[],demandRows=[],activeSpecs=[],networkWasBootstrapped=false;
-  if(hasUsableFrozenPlan){productionRows=frozenPlan.productionRows.map(x=>({...x}));demandRows=frozenPlan.demandRows.map(x=>({...x}));activeSpecs=frozenPlan.activeSpecs.map(x=>({...x}));}
-  else{
-    const specs=[];const sourcePlans=planEntries.length?planEntries:(store?.productionPlans?Object.values(store.productionPlans):[]);const speedFactor=companyModifier<100?1/(1-companyModifier/100):0;const oldFormulaPlan=planEntries.length&&frozenPlan?.modifiers?.speedFormula!==OVERLAY_SPEED_FORMULA;const authoritativeBase=new Map(Object.values(store?.productionPlans||{}).filter(p=>Number(p?.baseRatePerLevel)>0).map(p=>[`${Number(p.buildingId)}|${assets.normalizeName(p.product)}`,Number(p.baseRatePerLevel)]));
-    for(const rawEntry of sourcePlans){const entry=rawEntry||{};const b=buildings.find(x=>Number(x?.id)===Number(entry?.buildingId));const product=String(entry?.product||'').trim();if(!product)continue;const recipe=recipeByProduct.get(assets.normalizeName(product));if(!recipe)continue;const productId=Number(entry?.productId||recipe.id);if(!(productId>0))continue;const level=Math.min(20,Math.max(1,Number(entry?.plannedLevel)||overlayBuildingLevel(b)));const quality=Math.max(0,Number(entry?.quality)||0);const eventModifier=overlayActiveProductionEventModifier(store,product);const rateBase=(oldFormulaPlan&&authoritativeBase.get(`${Number(entry?.buildingId)}|${assets.normalizeName(product)}`))||Number(entry?.baseRatePerLevel);const perHour=rateBase>0?rateBase*level*(1+eventModifier/100)*speedFactor:null;if(!(perHour>0))continue;specs.push({buildingId:Number(entry.buildingId),product,productId,quality,level,ratePerHour:perHour,recipe,source:'realm frozen plan'});}
-    const network=core?.productionBalance?core.productionBalance(specs,recipeByProduct,frozenHours,assets.names):{hours:frozenHours,productionRows:[],demandRows:[],activeSpecs:[]};productionRows=Array.isArray(network.productionRows)?network.productionRows:[];demandRows=Array.isArray(network.demandRows)?network.demandRows:[];activeSpecs=Array.isArray(network.activeSpecs)?network.activeSpecs:[];networkWasBootstrapped=activeSpecs.length>0&&productionRows.length>0;
-    if(networkWasBootstrapped){const rebuiltEvents={};for(const x of specs)rebuiltEvents[assets.normalizeName(x.product)]=overlayActiveProductionEventModifier(store,x.product);const rebuiltPlans=Object.fromEntries(specs.map(x=>[String(x.buildingId),{buildingId:x.buildingId,product:x.product,productId:x.productId,resourceId:x.productId,quality:x.quality,plannedLevel:x.level,baseRatePerLevel:Number(x.ratePerHour)/(Math.max(1,Number(x.level)||1)*(1+overlayActiveProductionEventModifier(store,x.product)/100)*speedFactor),mode:'live'}]));const signature=core?.frozenPlanSignature?core.frozenPlanSignature(Object.values(rebuiltPlans),frozenHours,{companyProductionModifier:companyModifier,events:rebuiltEvents,speedFormula:OVERLAY_SPEED_FORMULA}):JSON.stringify({hours:frozenHours,plans:rebuiltPlans});try{await saveFrozenNetworkPlanSnapshot({realm:Number(realm),signature,plan:{hours:frozenHours,productionRows,demandRows,activeSpecs,buildingPlans:rebuiltPlans,plannerState:frozenPlan?.plannerState||null,modifiers:{companyProductionModifier:companyModifier,events:rebuiltEvents,speedFormula:OVERLAY_SPEED_FORMULA},resources:Array.isArray(network.resources)?network.resources:[],deficits:Array.isArray(network.deficits)?network.deficits:[],surpluses:Array.isArray(network.surpluses)?network.surpluses:[]}});}catch{}}
-  }
-  // The overlay is driven only by Manager-saved contracts. Never fall back to
-  // `store.contracts`: that field contains captured live API contracts and must
-  // not silently become an overlay input when savedContracts is absent.
-  const savedContracts=Array.isArray(store?.savedContracts)?store.savedContracts:[];
-  const warehouseRowsForCore=grouped.map(r=>({id:r.id,quality:r.quality,amount:r.qty}));
-  const productionSurplusByKey=core?.productionSurplusByKey?core.productionSurplusByKey(productionRows,demandRows):new Map();
-
-  // Establish the stock-after-demand baseline without any saved contracts. Left
-  // quantities must be derived from this current input balance, never from the
-  // previous snapshot's `difference` (which already includes the same contract).
-  const baseCoreRows=core?.balanceSupplyDemandContracts
-    ?core.balanceSupplyDemandContracts({warehouseRows:warehouseRowsForCore,productionRows,demandRows,includeQualityRows:true})
-    :[];
-  const baseDetailRows=Array.isArray(baseCoreRows?.qualityRows)&&baseCoreRows.qualityRows.length?baseCoreRows.qualityRows:baseCoreRows;
-  const baseBalanceByKey=new Map();
-  for(const row of baseDetailRows){
-    const id=Number(row?.id),quality=Number(row?.quality)||0;
-    if(!Number.isFinite(id)||id<=0)continue;
-    const fallback=(Number(row?.warehouse)||0)-(Number(row?.demand)||0);
-    const balance=Number.isFinite(Number(row?.warehouseOnlyLeft))?Number(row.warehouseOnlyLeft):fallback;
-    baseBalanceByKey.set(`${id}:${quality}`,balance);
-  }
-  // Warehouse-only keys can be absent from the demand allocation rows. Preserve
-  // their current quantity as the baseline rather than reading any old overlay.
-  for(const row of grouped){
-    const key=`${Number(row.id)}:${Number(row.quality)||0}`;
-    if(!baseBalanceByKey.has(key))baseBalanceByKey.set(key,Math.max(0,Number(row.qty)||0));
-  }
-  const effectiveSavedQuantities=core?.resolveSavedContractQuantities
-    ?core.resolveSavedContractQuantities({savedContracts,baseBalanceByKey,surplusByKey:productionSurplusByKey})
-    :new Map();
-  const effectiveSavedQty=(c,id,quality)=>{
-    if(effectiveSavedQuantities.has(c))return Math.max(0,Number(effectiveSavedQuantities.get(c))||0);
-    const mode=String(c?.quantityMode||'custom').trim().toLowerCase();
-    if(mode==='surplus')return Math.max(0,Number(productionSurplusByKey.get(`${id}:${quality}`))||0);
-    if(mode==='left')return Math.max(0,Number(baseBalanceByKey.get(`${id}:${quality}`))||0);
-    const q=Number(c?.quantity);return Number.isFinite(q)&&q>0?q:0;
-  };
-  const contractRows=[];
-  const incomingByKey=new Map();
-  const outgoingByKey=new Map();
-  const savedContractKeys=new Set();
-  for(const c of savedContracts){
-    const direction=String(c?.direction||'').trim().toLowerCase();
-    if(direction!=='incoming'&&direction!=='outgoing')continue;
-    const raw=String(c?.product??'').trim();
-    const parsed=raw.match(/^(\d+)(?::(\d+))?$/);
-    const id=Number(c?.productId!=null?c.productId:(parsed?parsed[1]:null));
-    const quality=Math.max(0,Number(c?.quality!=null?c.quality:(parsed?parsed[2]:0))||0);
-    if(!(Number.isFinite(id)&&id>0))continue;
-    const key=`${id}:${quality}`;
-    savedContractKeys.add(key);
-    const amount=effectiveSavedQty(c,id,quality);
-    if(!(Number.isFinite(amount)&&amount>0))continue;
-    if(direction==='outgoing'){
-      contractRows.push({id,quality,amount});
-      outgoingByKey.set(key,(outgoingByKey.get(key)||0)+amount);
-    }else{
-      incomingByKey.set(key,(incomingByKey.get(key)||0)+amount);
-    }
-  }
-  // Deliberately do not read live SimCompanies outgoing-contract endpoints here.
-  // Once sent, those resources are already absent from warehouse stock; including
-  // those contracts would double-count them and corrupt the stock-after-demand overlay.
-  const coreRows=core?.balanceSupplyDemandContracts?core.balanceSupplyDemandContracts({warehouseRows:warehouseRowsForCore,productionRows,demandRows,contractRows,includeQualityRows:true}):[];
-  let detailRows=Array.isArray(coreRows?.qualityRows)&&coreRows.qualityRows.length?coreRows.qualityRows:coreRows;
-  // Incoming contracts add stock; outgoing contracts consume stock. The core
-  // planner models contract consumption, so apply the incoming side as a
-  // signed adjustment after the common demand/outgoing allocation.
-  const detailByKey=new Map(detailRows.map(r=>[`${Number(r.id)}:${Number(r.quality)||0}`,r]));
-  for(const [key,amount] of incomingByKey){
-    if(detailByKey.has(key))continue;
-    const [idText,qText]=key.split(':');
-    const id=Number(idText),quality=Number(qText)||0;
-    // Incoming is added exactly once later when the signed Left value is built.
-    detailRows.push({id,quality,warehouse:0,produced:0,demand:0,contracted:0,leftover:0,warehouseOnlyLeft:0});
-  }
-  const networkResourceIds=new Set([...productionRows,...demandRows,...contractRows,...[...incomingByKey.keys()].map(k=>Number(k.split(':')[0]))].map(r=>Number(r?.id??r)).filter(Number.isFinite));
-  // Production ownership is a resource+quality mapping. Resource ID alone is
-  // not enough because a company may produce Q3 while consuming the same
-  // resource at Q1/Q2. The overlay must never surface those input qualities as
-  // if they were company-produced outputs.
-  const producedResourceQualities=new Set((productionRows||[]).map(r=>{const id=Number(r?.id),quality=Math.max(0,Number(r?.quality??r?.minQuality)||0);return Number.isFinite(id)&&id>0?`${id}:${quality}`:null;}).filter(Boolean));
-  // v2.5.449 any usable other-quality stock (higher, or lower but >= a recipe's minQuality) is folded into a produced row.
-  // Bought higher-quality stock of a produced resource (e.g. Q4 engines when the
-  // company makes Q2) is folded into the nearest lower produced quality row, so
-  // that row's Warehouse counts all usable stock and Demand stays the full plan.
-  detailRows=core?.foldQualityStock?core.foldQualityStock(detailRows,producedResourceQualities,savedContractKeys,demandRows):detailRows;
-  // Countdown input: only plan buildings running this product right now, from this realm's own plan and buildings.
-  // The game run data says what reaches the warehouse: amountAvailableNow is produced and not collected, amount is what
-  // the run still makes (as of the last collect). A collect seen after the buildings snapshot (collect stamp) leaves only
-  // the output from that collect to the finish; see collectAdjustedRun.
-  const etaRunsByKey=new Map(),etaBuildings=new Set(),etaBuildingList=Array.isArray(buildings)?buildings:[];
-  let collectStamps={};
-  try{const raw=(await chrome.storage.local.get({[buildingCollectsKey(realm)]:{}}))[buildingCollectsKey(realm)]||{};collectStamps=liveCollectStamps(raw,etaBuildingList);if(Object.keys(collectStamps).length!==Object.keys(raw).length)pruneBuildingCollects(realm,etaBuildingList);}catch{}
-  const etaSnapshotMs=buildingsSnapshotMs(store);
-  for(const spec of activeSpecs||[]){
-    const b=(Array.isArray(buildings)?buildings:[]).find(x=>Number(x?.id)===Number(spec?.buildingId)),res=b?.busy?.resource;
-    // A run without a usable amount is still passed on (amount null), so the strip shows nothing instead of "Not producing".
-    const started=Date.parse(String(b?.busy?.started||'')),duration=Number(b?.busy?.duration),rawAmount=res?.amount==null?NaN:Number(res.amount),amount=Number.isFinite(rawAmount)&&rawAmount>=0?rawAmount:null;
-    if(!b||etaBuildings.has(String(b.id))||Number(res?.kind??res?.resourceId)!==Number(spec?.productId)||!Number.isFinite(started)||!(duration>0))continue;
-    etaBuildings.add(String(b.id));
-    const busyQuality=res?.quality==null?NaN:Number(res.quality),runQuality=Number.isFinite(busyQuality)?Math.max(0,busyQuality):Math.max(0,Number(spec.quality)||0);
-    const runKey=`${Number(spec.productId)}:${runQuality}`,availableNow=Number(res?.amountAvailableNow);
-    if(!etaRunsByKey.has(runKey))etaRunsByKey.set(runKey,[]);
-    etaRunsByKey.get(runKey).push(collectAdjustedRun({amount,amountAvailableNow:Number.isFinite(availableNow)&&availableNow>0?availableNow:0,canFetch:b.busy.canFetch===true,finishMs:started+duration*1000,ratePerHour:Number(spec?.ratePerHour)||0},collectStamps[String(b.id)],etaSnapshotMs));
-  }
+  store=store||{};
+  const {assets,network,stock,grouped,savedContracts}=await overlayProductionStock(store,realm,globalState);
   // Market price per row comes from the shared reader at the row's exact quality. No request, no other quality.
   const marketOwn=await marketOwnOpts(store,realm);
   const overlayImageStore=await resourceImagesStore();
-  const rows=detailRows.map(r=>{
+  // stockAfterDemand already holds Warehouse, Demand, Contracts, Left, Surplus and which rows show: every produced
+  // resource+quality, every Manager-saved contract key, and every input running buildings need (producing:false with
+  // reason 'upgrading' or 'not producing' when nothing makes it, so the shortfall shows).
+  const rows=stock.rows.map(r=>{
     const file=assets.images[String(r.id)];
     // Never embed base64 images in the overlay payload when the game URL is known.
     const local=file?'':(overlayImageStore.cache?.[String(r.id)]||store?.resourceImageCache?.[String(r.id)]||store?.resourceImageData?.[String(r.id)]||'');
     const name=String(assets.names.get(String(r.id))||grouped.find(x=>Number(x.id)===Number(r.id))?.name||`Resource #${r.id}`);
     const quality=Number(r.quality)||0;
-    const key=`${Number(r.id)}:${quality}`;
-    const outgoing=Number(outgoingByKey.get(key)||0);
-    const incoming=Number(incomingByKey.get(key)||0);
-    const netContracts=outgoing-incoming;
-    // Left is actual warehouse stock after full planned demand, with Manager-saved
-    // incoming commitments added once. Live outgoing game contracts never affect it.
-    const left=(Number(r.warehouseOnlyLeft)||0)+incoming;
     const marketHit=overlayMarketPriceHit(store,r.id,quality,realm,marketOwn);
     const marketPrice=marketHit?.price??null,marketPriceQuality=marketPrice!=null?quality:null;
     const marketPriceSource=marketPrice!=null?(marketHit.source||null):null,marketPriceStale=marketPrice!=null&&marketHit.stale===true;
     const vwap=overlayVwap(store,r.id,quality,realm);
-    // Production surplus for this resource+quality (game-page Sell helper "Surplus").
-    const surplus=Math.max(0,Number(productionSurplusByKey.get(key))||0);
-    return {...r,etaRuns:etaRunsByKey.get(key)||[],contracted:netContracts,incoming,outgoing,leftover:left,difference:left,warehouseOnlyLeft:left,surplus,name,quality,vwap,marketPrice,marketPriceQuality,marketPriceExact:marketPriceQuality===quality,marketPriceSource,marketPriceStale,image:local||(file?`${assets.imageBase}${file}`:'')};
-  }).filter(r=>{
-    const key=`${Number(r.id)}:${Number(r.quality)||0}`;
-    // Show every produced resource quality plus every resource/quality explicitly
-    // referenced by a Manager-saved contract. Captured live API contracts are not
-    // read for quantity, visibility, or inventory-impact calculations.
-    const visibleByOwnership=producedResourceQualities.has(key)||savedContractKeys.has(key);
-    const hasMaterialChange=Math.abs(Number(r.produced)||0)>1e-9||Math.abs(Number(r.demand)||0)>1e-9||Math.abs(Number(r.contracted)||0)>1e-9||Math.abs(Number(r.leftover)||0)>1e-9;
-    return visibleByOwnership && hasMaterialChange;
+    const etaRuns=(network.etaRunsByKey.get(`${Number(r.id)}:${quality}`)||[]).map(overlayEtaRun);
+    return {...r,etaRuns,name,quality,vwap,marketPrice,marketPriceQuality,marketPriceExact:marketPriceQuality===quality,marketPriceSource,marketPriceStale,image:local||(file?`${assets.imageBase}${file}`:'')};
   });
   const ticker=rows.map(r=>({...r,qty:r.warehouse,cost:null}));const sellingHistory=mergeSellingHistory(store);
   const savedContractsSignature=JSON.stringify(savedContracts.map(c=>[c?.id,c?.direction,c?.product,c?.quality,c?.quantity,c?.quantityMode,c?.price,c?.savedAt]));
-  return {realm:Number(realm),ticker,rows,tickerSource:hasUsableFrozenPlan?'frozen-realm-network':'frozen-realm-network-rebuilt',contractSource:'manager-saved-contracts-only',savedContractsSignature,sellingHistory:Object.values(sellingHistory),updatedAt:new Date().toISOString(),demandHorizonHours:frozenHours,networkWasBootstrapped,plannedOutputRows:productionRows.length,plannedDemandRows:demandRows.length};
+  return {realm:Number(realm),ticker,rows,tickerSource:'game-runs',contractSource:'manager-saved-contracts-only',savedContractsSignature,sellingHistory:Object.values(sellingHistory),updatedAt:new Date().toISOString(),demandHorizonHours:network.hours,plannedOutputRows:network.productionRows.length,plannedDemandRows:network.demandRows.length};
 }
 
 // VWAP status belongs to the realm that generated it. Never store VWAP status
@@ -2461,12 +1994,10 @@ function defaultRealmValue(key){
   if(key==='gameLocalStorageSnapshot') return null;
   if(key==='criticalDataBaseline') return {...DEFAULTS.criticalDataBaseline};
   if(key==='marketQueueStatus') return {...DEFAULTS.marketQueueStatus};
-  if(key==='buildingAlarms'||key==='productionEventMonitor') return {};
   if(key==='accountingWeekLedgerStatus') return null;
   if(key==='accountingDayWalkStatus') return null;
   if(key==='accountingDailySeries') return null;
   if(key==='accountingWeekRevision') return 0;
-  if(key==='vwapLegacyDiscarded') return false;
   if(key==='productionRunHours') return 24;
   if(key==='marketQueue') return [];
   if(['marketQueueCursor'].includes(key)) return 0;
@@ -2482,7 +2013,6 @@ async function activateRealmByRealmUnlocked(realm, authData=null){
   const targetState=await state(realm);
   const target={...(targetState.realmStores?.[nextKey]||{})};
   if(authData) target.authData=authData;
-  target.activeRealmIdentity={realm:Number(realm)};
   // Realm stores are already authoritative. Switching realms must not read,
   // merge, or rewrite the other physical container. Commit only the target
   // realm plus the tiny global activation metadata.
@@ -2500,15 +2030,14 @@ async function activateRealmByRealm(realm, authData=null, options={}){
 // metadata. Verified/manual realm activation continues to use the full
 // serialized path above.
 let autoRealmActivationQueue=Promise.resolve();
-function activateRealmByRealmFast(realm, authData=null){
+function activateRealmByRealmFast(realm){
   const n=validRealmNumber(realm);
   if(n==null)return Promise.resolve(false);
   // IMPORTANT: this path may run from an auth-data response while another
-  // realm-local API writer is committing contracts/VWAP. The old
-  // implementation read the entire physical realm store and wrote that stale
-  // snapshot back with rawStorageSet, which could silently erase fields that
-  // had just been captured. Auto-activation is metadata-only; auth-data itself
-  // is persisted by saveData() through the normal realm write lane.
+  // realm-local API writer is committing contracts/VWAP. Writing a realm store
+  // read here back with rawStorageSet could silently erase fields that had just
+  // been captured, so auto-activation is metadata-only; auth-data itself is
+  // persisted by saveData() through the normal realm write lane.
   const job=autoRealmActivationQueue.catch(()=>{}).then(async()=>{
     const nextKey=realmKeyFromRealm(n);
     if(!nextKey)return false;
@@ -2594,15 +2123,6 @@ function buildingsSnapshotMs(store){
     const t=Date.parse(String(entry?.receivedAt||''));if(Number.isFinite(t)&&!(t<=at))at=t;
   }
   return at;
-}
-// A collect after the snapshot: nothing is collectable, and only what the run makes from the collect to its finish is
-// still to come (capped by the snapshot amount). A buildings capture after the collect supersedes the stamp.
-function collectAdjustedRun(run,stampMs,snapshotMs){
-  const at=Number(stampMs);
-  if(!(at>0)||(Number.isFinite(snapshotMs)&&snapshotMs>=at))return run;
-  const rate=Number(run?.ratePerHour),amount=run?.amount;
-  const left=amount!=null&&rate>0?Math.min(Number(amount),Math.max(0,rate*(Number(run.finishMs)-at)/3600000)):amount;
-  return {...run,amount:left,amountAvailableNow:0,canFetch:false,collectedAtMs:at};
 }
 const pendingBuildingCollects=new Map(); // buildingId -> {at, tagged}
 let buildingCollectFlushTimer=null;
@@ -2742,26 +2262,7 @@ async function ensureRealmStorageMigration(){
       const legacyPlannerSource={...(oldPlanner&&typeof oldPlanner==='object'?oldPlanner:{}),runHours:storeRaw?.productionRunHours??oldPlanner?.runHours};
       if(storeRaw?.productionRunHours!=null || (oldPlanner&&typeof oldPlanner==='object')){const planner=sanitizeProductionPlannerState(legacyPlannerSource,storeRealm);if(planner)migratedPlannerStates[productionPlannerStateStorageKey(storeRealm)]=planner;}
       if(storeRaw?.gameOverlaySnapshot&&typeof storeRaw.gameOverlaySnapshot==='object'&&validRealmNumber(storeRaw.gameOverlaySnapshot.realm)===storeRealm){migratedOverlaySnapshots[gameOverlaySnapshotStorageKey(storeRealm)]=storeRaw.gameOverlaySnapshot;}
-      const oldVwap=storeRaw?.vwapData;
-      const oldVwapRealm=validRealmNumber(oldVwap?.sourceRealm??oldVwap?.warehouseRealm);
-      if(oldVwap && oldVwapRealm!=null && oldVwapRealm===storeRealm){
-        // Do not carry the old snapshot forward automatically; it remains
-        // available only after a fresh realm-local VWAP sync establishes it.
-        store.vwapLegacyDiscarded=true;
-      }
-      store.realmIsolationNote='Strict realm isolation reset; Sync required for runtime data.';
       migrated[key]=store;
-    }
-    if(rootRealm!=null){
-      const key=realmKeyFromRealm(rootRealm);
-      if(key){
-        const target={...(migrated[key]||{})};
-        // Legacy root data is ambiguous unless the root identity itself proves
-        // the realm. Even then, runtime state is intentionally not copied into
-        // the clean store; this prevents any historical shared cache from being
-        // silently reintroduced.
-        migrated[key]=target;
-      }
     }
     const selected=validRealmNumber(s.selectedRealm??rootRealm);
     const active=validRealmNumber(s.activeRealmKey?.replace(/^realm:/,'')??rootRealm??selected);
@@ -3075,8 +2576,8 @@ async function saveMarketCache(resource, value, receivedAt, capturedRealm=null){
 async function saveResourceCatalog(catalog, receivedAt){
   if(!catalog||typeof catalog!=='object')return;
   // Only the realm is needed here; the full store is read once, inside the lock.
-  const s={authData:DEFAULTS.authData,...(await chrome.storage.local.get({activeRealmKey:null}))}; // same fields state() gave here
-  const realm=realmNumberFromKey(s.activeRealmKey||identityFromAuth(s.authData)); if(realm==null)return;
+  const {activeRealmKey}=await chrome.storage.local.get({activeRealmKey:null});
+  const realm=realmNumberFromKey(activeRealmKey); if(realm==null)return;
   return withRealmWriteLock(realm,async()=>{
     const latest=await state(realm); const key=realmKeyFromRealm(realm);
     const stores={...(latest.realmStores||{})}; const store={...(stores[key]||{})};
@@ -3153,7 +2654,6 @@ async function saveWarehouseCostDetail(message){
   });
 }
 
-
 async function saveProductionEvents(message){
   await ensureRealmStorageMigration();
   const preview=await state();
@@ -3180,7 +2680,6 @@ async function saveProductionEvents(message){
     const patch={realmStores:stores};
     if(key===s.activeRealmKey)patch.productionEvents=active;
     await storageSet(patch);
-    scheduleGameOverlayRefreshNotification(realm);
     return {ok:true,realm,events:active};
   });
 }
@@ -3219,10 +2718,9 @@ async function saveFullSyncDiagnosticUnlocked(diagnostic, realm, clearGen=extens
   const diagnosticKey=realmDiagnosticStorageKey(diagnosticRealm);
   if(!diagnosticKey) return d;
   if(clearGen!==extensionClearGeneration) return d; // begun before Clear Stored Data
-  await rawStorageSet({[diagnosticKey]:d,scmRealmDiagnosticSchema:1});
+  await rawStorageSet({[diagnosticKey]:d});
   return d;
 }
-
 
 async function saveFullSyncDiagnostic(diagnostic, realm){
   // Diagnostics are observability data, not part of the hot API/realm storage
@@ -3258,9 +2756,9 @@ async function saveGameStateUnlocked(message) {
   const patch = {};
   if (warehouse) {
     // A fresh game-localStorage snapshot is the fastest live stock signal.
-    // Do not wait for, or overwrite it with, an older API snapshot: doing that
-    // made newly gathered resources appear late in the Manager. The API capture
-    // remains authoritative for later reconciliation/enrichment in saveData().
+    // Do not wait for, or overwrite it with, an older API snapshot, or newly
+    // gathered resources appear late in the Manager. The API capture remains
+    // authoritative for later reconciliation/enrichment in saveData().
     patch.warehouseResources=mergeWarehouseSnapshot(warehouse,fresh.warehouseResources);
     const warehouseCapturedAt=new Date().toISOString();
     const priorCapture=fresh.warehouseCapture||{};
@@ -3270,8 +2768,7 @@ async function saveGameStateUnlocked(message) {
       // Once an authoritative resource-API snapshot exists, keep the complete
       // matching API row together: quantity + cost + quality. A GAME_STATE row
       // can be newer as a message, yet still be an older/stale stock snapshot.
-      // Mixing its quantity with API cost produces false unit costs (for example
-      // 3x-stale quantities turn a correct ~$0.20/unit cost into ~$0.60).
+      // Mixing its quantity with API cost produces false unit costs.
       const apiByKey=new Map(fresh.warehouseResources.map(row=>[warehouseKey(row),row]));
       patch.warehouseResources=patch.warehouseResources.map(row=>apiByKey.get(warehouseKey(row))||row);
       patch.warehouseResources=mergeWarehouseSnapshot(fresh.warehouseResources,patch.warehouseResources);
@@ -3307,7 +2804,9 @@ async function saveGameState(message){
   const preview=await state();
   const realm=validRealmNumber(message?.realm ?? realmNumberFromKey(preview.activeRealmKey||identityFromAuth(preview.authData)));
   if(realm==null)return saveGameStateUnlocked(message);
-  return withRealmWriteLock(realm,()=>saveGameStateUnlocked(message));
+  const result=await withRealmWriteLock(realm,()=>saveGameStateUnlocked(message));
+  if(Array.isArray(message?.buildings)&&message.buildings.length)reconcileProductionBuildings(realm).catch(()=>{});
+  return result;
 }
 
 function realmNumberFromKey(key){const m=String(key||'').match(/^realm:(\d+)$/);return m?Number(m[1]):null;}
@@ -3585,7 +3084,6 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
 
 const ACCOUNTING_CORE_PATH_RE=/(?:balance-sheet|cashflow-statement|income-statement|past-finances-overview|past-finances)(?:\/|\?|$)/i;
 
-
 async function noteRealmSwitch(realm){
   const n=validRealmNumber(realm); if(n==null)return false;
   const now=Date.now();
@@ -3625,8 +3123,8 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   const quarantineRealmConflict=(expectedRealm,reason)=>appendRealmQuarantine(expectedRealm,'apiData',{url,method:String(method||'GET').toUpperCase(),status:Number(status)||0,captureRealm:capturedRealm,expectedRealm,reason});
   // If the URL/company/building identity proves the response belongs to a
   // different realm than the capture tag, reject it before it can enter the
-  // realm store. This catches the exact failure where R1 Seeds history was
-  // stamped as captureRealm 1 and then appeared in the R2 overlay.
+  // realm store (e.g. R1 building history stamped as captureRealm 1 would
+  // otherwise appear in the R2 overlay).
   if(capturedRealm!=null && companyRealm!=null && capturedRealm!==companyRealm){
     await quarantineRealmConflict(companyRealm,'Known company identity belongs to a different realm than the capture tag.');
     return;
@@ -3668,8 +3166,8 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   // New incoming contract notification (own state key, not awaited, no network).
   if(incomingContractRealm&&Number(status)>=200&&Number(status)<300)notifyIncomingContracts(validRealmNumber(incomingContractRealm[1]),data).catch(()=>{});
   if(Number(status)>=200&&Number(status)<300&&capturedRealm!=null)logGameCapture(capturedRealm,url);
-  // Also on auth-data: on the phone the game does not load the buildings list at start (user's API
-  // capture 2026-10-24), but it loads auth-data on every page load and every 3 min. Uses the stored buildings.
+  // Also on auth-data: on the phone the game does not load the buildings list at start, but it loads
+  // auth-data on every page load and every 3 min. Uses the stored buildings.
   {const isB=/\/api\/v2\/companies\/me\/buildings\/?(?:\?.*)?$/i.test(String(url||'')),isA=/\/api\/v3\/companies\/auth-data\//i.test(String(url||''));const r=capturedRealm??(isA?responseRealm:null);
    if((isB||isA)&&Number(status)>=200&&Number(status)<300&&r!=null)setTimeout(()=>{refreshAbundanceIfStale(r,isA?'game-auth-data':'game-buildings').catch(()=>{});},3000);}
   {const ob=String(url||'').match(/\/api\/v3\/market\/(\d+)\/(\d+)\/?(?:\?.*)?$/);if(ob&&Number(status)>=200&&Number(status)<300&&Array.isArray(data)){const r=Number(ob[1]),id=Number(ob[2]);setTimeout(()=>{notifyOrderBook(r,id,data).catch(()=>{});},1500);}}
@@ -3682,8 +3180,8 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
     return;
   }
   // A game response with no realm tag and nothing in it that proves its realm is never filed under the
-  // active (last-synced) realm: that put R1 buildings/warehouse into the R2 store. page-hook now holds such
-  // responses until the game's auth-data names the realm, so this only catches stragglers.
+  // active (last-synced) realm, which could be the other realm. page-hook holds such responses until the
+  // game's auth-data names the realm, so this only catches stragglers.
   if(!captureSession&&capturedRealm==null&&responseRealm==null&&companyRealm==null&&buildingRealm==null&&explicitUrlRealm==null&&switchHint==null){
     await appendRealmQuarantine(null,'apiData',{url,method:String(method||'GET').toUpperCase(),status:Number(status)||0,captureRealm:null,expectedRealm:null,reason:'No capture realm and nothing in the response proves its realm; not filed under the active realm'});
     return;
@@ -3841,17 +3339,15 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   // those amounts are batch output amounts rather than current inventory.
   // Treating them as warehouse rows can overwrite a correct resources-API
   // quantity and make unit cost appear multiplied (for example 3x too high).
-  const mid=midForPreserve;
-  if(mid){
+  if(midForPreserve){
     const arr=Array.isArray(data)?data:null;
-    patch.marketDebug={...(working.marketDebug||{}),[String(mid.resource)]:{source:'api',status:incomingStatus,type:Array.isArray(data)?'array':typeof data,records:arr?arr.length:0,keys:data&&typeof data==='object'&&!Array.isArray(data)?Object.keys(data).slice(0,30):[],sample:arr?arr.slice(0,5):data,receivedAt:new Date().toISOString()}};
+    patch.marketDebug={...(working.marketDebug||{}),[String(midForPreserve.resource)]:{source:'api',status:incomingStatus,type:Array.isArray(data)?'array':typeof data,records:arr?arr.length:0,keys:data&&typeof data==='object'&&!Array.isArray(data)?Object.keys(data).slice(0,30):[],sample:arr?arr.slice(0,5):data,receivedAt:new Date().toISOString()}};
   }
 
   const overlayRelevant=Boolean(
     Object.prototype.hasOwnProperty.call(patch,'warehouseResources') ||
     Object.prototype.hasOwnProperty.call(patch,'contracts') ||
     Object.prototype.hasOwnProperty.call(patch,'savedContracts') ||
-    Object.prototype.hasOwnProperty.call(patch,'productionEvents') ||
     Object.prototype.hasOwnProperty.call(patch,'productionRateSnapshots') ||
     Object.prototype.hasOwnProperty.call(patch,'productionPlans') ||
     Object.prototype.hasOwnProperty.call(patch,'buildings') ||
@@ -3873,6 +3369,8 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
     if(endpointResult?.store?.apiEndpoints)realmPatch.apiEndpoints=endpointResult.store.apiEndpoints;
     await storageSetRealmPatch(targetRealm,realmPatch,onTiming);
     if(overlayRelevant) scheduleGameOverlayRefreshNotification(targetRealm);
+    if(buildingMatch&&incomingStatus>=200&&incomingStatus<300&&Array.isArray(data))recordRunHistoryCapture(targetRealm,Number(buildingMatch[1])).catch(()=>{});
+    if(Array.isArray(patch.buildings)&&patch.buildings.length)reconcileProductionBuildings(targetRealm).catch(()=>{});
     {const sm=String(url||'').replace(/[?#].*$/,'').match(STATEMENT_DAY_RX);if(sm&&incomingStatus>=200&&incomingStatus<300&&data&&typeof data==='object')queueStatementHistory(targetRealm,[{kind:sm[1],data}]).catch(()=>{});}
     if(/\/api\/v2\/companies\/me\/cashflow\/(?:recent|\d+)\/?$/i.test(String(url||''))&&incomingStatus>=200&&incomingStatus<300&&Array.isArray(data?.data)) queueLedgerArchive(targetRealm,[{url:String(url).replace(/[?#].*$/,''),rows:data.data,receivedAt:endpointData[url]?.receivedAt}]).catch(()=>{});
   }
@@ -4023,20 +3521,6 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
   throw new Error(lastError?.message||'Sim Companies page bridge is not connected.');
 }
 const BUILDING_HISTORY_REFETCH_COOLDOWN_MS=15000;
-function buildingHistoryHasCurrentCycle(store,buildingId,rows){
-  const buildings=Array.isArray(store?.buildings)?store.buildings:[];
-  const building=buildings.find(b=>Number(b?.id)===Number(buildingId));
-  const busy=building?.busy;
-  const startedMs=Date.parse(String(busy?.started||''));
-  const resourceId=Number(busy?.resource?.kind??busy?.resource?.resourceId);
-  if(!Number.isFinite(startedMs)||!Number.isFinite(resourceId)||resourceId<=0)return true;
-  return (Array.isArray(rows)?rows:[]).some(row=>{
-    const amount=Number(row?.outputAmount??row?.amount);
-    const rowKind=Number(row?.kind);
-    const rowMs=Date.parse(String(row?.datetime||''));
-    return Number.isFinite(amount)&&amount>0&&Number.isFinite(rowKind)&&rowKind===resourceId&&Number.isFinite(rowMs)&&Math.abs(rowMs-startedMs)<=5000;
-  });
-}
 async function fetchBuildingHistoryForRealm(realm, buildingId){
   const target=validRealmNumber(realm);
   const id=Number(buildingId);
@@ -4046,7 +3530,10 @@ async function fetchBuildingHistoryForRealm(realm, buildingId){
   const store=current.realmStores?.[realmKeyFromRealm(target)]||{};
   const existing=store.endpointData?.[path];
   if(existing&&Number(existing.status)>=200&&Number(existing.status)<300&&validRealmNumber(existing.captureRealm)===target&&Array.isArray(existing.data)){
-    const hasCurrentCycle=buildingHistoryHasCurrentCycle(store,id,existing.data);
+    // Fetch guard: the cache is enough when the building has no run to match (unknown, idle or expanding) or when
+    // its current run already has its history row (the matcher the overlay and the page use).
+    const core=globalThis.SCMPlannerCore,building=(Array.isArray(store.buildings)?store.buildings:[]).find(b=>Number(b?.id)===id);
+    const hasCurrentCycle=!core.buildingRun(building)||Boolean(core.matchRunHistoryRow(building,existing.data));
     const age=Date.now()-Date.parse(String(existing.receivedAt||''));
     if(hasCurrentCycle)return {ok:true,cached:true,rows:existing.data.length,hasCurrentCycle:true};
     if(Number.isFinite(age)&&age>=0&&age<BUILDING_HISTORY_REFETCH_COOLDOWN_MS)return {ok:true,cached:true,rows:existing.data.length,hasCurrentCycle:false,refreshDeferred:true};
@@ -4068,7 +3555,7 @@ async function fetchBuildingHistoryForRealm(realm, buildingId){
 }
 
 // The game's Profit Calculator "Assumed wholesale price (based on the market)" is the cheapest exchange
-// listing of ANY quality (user-verified 2026-10-23: $2,230 = cheapest Bulldozer listing, a Q0). The building card
+// listing of ANY quality, Q0 included. The building card
 // asks for a fresh order book through the game tab: same request the Exchange page makes. Network first, then saveData
 // (which takes the realm lock) — no lock is held while fetching. One fetch per product per 5 min.
 const ORDER_BOOK_REFETCH_MS=5*60*1000;const orderBookFetchAt=new Map();
@@ -4124,18 +3611,18 @@ async function scmOrderBookShouldThrottle(){
 async function ensureOrderBookRefreshAlarm(){
   try{if(!(await chrome.alarms.get(ORDER_BOOK_REFRESH_ALARM)))await scmAlarmCreate(ORDER_BOOK_REFRESH_ALARM,{delayInMinutes:1,periodInMinutes:1});}catch{}
 }
-function orderBookRefreshResourceIds(store,realm){
+// networkRows: the overlay network's production and demand rows of this realm (overlayProductionStock).
+function orderBookRefreshResourceIds(store,realm,networkRows=[]){
   const ids=new Set();
   const add=v=>{const id=Number(v);if(Number.isInteger(id)&&id>0)ids.add(id);};
   for(const row of Array.isArray(store?.warehouseResources)?store.warehouseResources:[])add(row?.kind??row?.resourceId??row?.id);
-  const plan=store?.frozenNetworkPlan;
-  if(plan&&Number(plan.realm)===Number(realm))for(const row of [...(Array.isArray(plan.productionRows)?plan.productionRows:[]),...(Array.isArray(plan.demandRows)?plan.demandRows:[])])add(row?.id);
+  for(const row of Array.isArray(networkRows)?networkRows:[])add(row?.id);
   for(const p of Object.values(store?.productionPlans||{}))add(p?.productId??p?.resourceId);
   for(const b of Array.isArray(store?.buildings)?store.buildings:[])add(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId);
   return ids;
 }
 // Pure: the used resource with the oldest or missing order book. A record stamped with another realm counts as missing.
-function chooseOrderBookRefreshTarget(store,realm,attempts,now,minAgeMs=ORDER_BOOK_REFETCH_MS){
+function chooseOrderBookRefreshTarget(store,realm,attempts,now,minAgeMs=ORDER_BOOK_REFETCH_MS,networkRows=[]){
   const n=Number(realm),seen=new Map(),rx=new RegExp(`^/api/v3/market/${n}/(\\d+)/?(?:\\?.*)?$`);
   for(const [url,entry] of Object.entries(store?.endpointData||{})){
     const m=rx.exec(String(url));if(!m||Number(entry?.captureRealm)!==n||entry?.captureRealm==null)continue;
@@ -4143,7 +3630,7 @@ function chooseOrderBookRefreshTarget(store,realm,attempts,now,minAgeMs=ORDER_BO
     if(Number.isFinite(at))seen.set(Number(m[1]),Math.max(seen.get(Number(m[1]))||0,at));
   }
   let best=null,bestAt=Infinity;
-  for(const id of orderBookRefreshResourceIds(store,n)){
+  for(const id of orderBookRefreshResourceIds(store,n,networkRows)){
     const at=Math.max(seen.get(id)||0,Number(attempts?.[`${n}:${id}`])||0);
     if(now-at<minAgeMs)continue;
     if(at<bestAt||(at===bestAt&&id<best)){best=id;bestAt=at;}
@@ -4164,7 +3651,9 @@ async function runOrderBookRefreshFiring(){
     if(realm==null||syncSessionForRealm(realm)||accountingDayWalkRunning.has(realm))return {ok:true,skipped:true};
     const store=await notifyRealmStore(realm);
     const attempts=Object.fromEntries(Object.entries(saved.attempts||{}).filter(([,at])=>now-Number(at)<ORDER_BOOK_REFRESH_ATTEMPT_KEEP_MS));
-    const resourceId=chooseOrderBookRefreshTarget(store,realm,attempts,now);
+    let networkRows=[];
+    try{const {network}=await overlayProductionStock(store,realm,null);networkRows=[...network.productionRows,...network.demandRows];}catch{}
+    const resourceId=chooseOrderBookRefreshTarget(store,realm,attempts,now,ORDER_BOOK_REFETCH_MS,networkRows);
     if(resourceId==null||coreSyncActive()||clearGen!==extensionClearGeneration)return {ok:true,skipped:true};
     attempts[`${realm}:${resourceId}`]=now;
     await rawStorageSet({[ORDER_BOOK_REFRESH_STATE_KEY]:{backoffUntil:0,attempts}});
@@ -4180,7 +3669,6 @@ async function runOrderBookRefreshFiring(){
     return {...result,realm,resourceId};
   }finally{orderBookRefreshRunning=false;}
 }
-
 
 function simcoVwapNumber(v){
   if(v==null) return null;
@@ -4299,7 +3787,7 @@ async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS){
   const normalizedUrl=String(url);
   await hydrateSimcoCooldowns();
   const knownCooldown=Number(simcoRateLimitUntilByUrl.get(normalizedUrl))||0;
-  if(Math.max(knownCooldown,simcoRateLimitUntil)>Date.now()){const retryAt=new Date(Math.max(knownCooldown,simcoRateLimitUntil)).toISOString();if(typeof scmMobileNetLogBackground==='function')await scmMobileNetLogBackground({kind:'request-skipped',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',status:429,reason:'rate-limit-cooldown-active',retryAt});return {ok:false,status:429,text:'rate limit cooldown active',retryAt,rateLimited:true,skipped:true};}
+  if(Math.max(knownCooldown,simcoRateLimitUntil)>Date.now()){const retryAt=new Date(Math.max(knownCooldown,simcoRateLimitUntil)).toISOString();await scmMobileNetLogBackground({kind:'request-skipped',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',status:429,reason:'rate-limit-cooldown-active',retryAt});return {ok:false,status:429,text:'rate limit cooldown active',retryAt,rateLimited:true,skipped:true};}
   let lastError=null;
   for(let attempt=0;attempt<SIMCOTOOLS_RETRY_DELAYS_MS.length;attempt++){
     const waitMs=SIMCOTOOLS_RETRY_DELAYS_MS[attempt];
@@ -4317,10 +3805,10 @@ async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS){
       await simcoWaitForRateLimitCooldown();
       simcoLastRequestAt=Date.now();
       const requestStartedAt=Date.now();
-      if(typeof scmMobileNetLogBackground==='function')await scmMobileNetLogBackground({kind:'request-start',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',startedAt:new Date(requestStartedAt).toISOString()});
+      await scmMobileNetLogBackground({kind:'request-start',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',startedAt:new Date(requestStartedAt).toISOString()});
       const response=await fetch(url,{method:'GET',cache:'no-store',headers:{accept:'application/json'},signal:controller.signal});
       const text=await response.text();
-      if(typeof scmMobileNetLogBackground==='function')await scmMobileNetLogBackground({kind:'fetch',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',status:Number(response.status)||0,ok:Boolean(response.ok),durationMs:Date.now()-requestStartedAt,transport:'extension-background',contentType:String(response.headers?.get('content-type')||''),body:text?{truncated:text.length>4000,originalLength:text.length,preview:text.slice(0,4000)}:null});
+      await scmMobileNetLogBackground({kind:'fetch',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',status:Number(response.status)||0,ok:Boolean(response.ok),durationMs:Date.now()-requestStartedAt,transport:'extension-background',contentType:String(response.headers?.get('content-type')||''),body:text?{truncated:text.length>4000,originalLength:text.length,preview:text.slice(0,4000)}:null});
       if(response.status===429){
         const until=simcoActivateRateLimitCooldown(response);
         simcoRateLimitUntilByUrl.set(normalizedUrl,until);
@@ -4453,26 +3941,20 @@ async function fetchSimcoVwapPairs(realm,pairs){
   if(requested==null||!realmDefinition(requested))return {ok:false,rows:[],realm:requested,requested:0,failed:0,failures:[{error:'A valid realm is required for VWAP pair fetch.'}]};
   const list=Array.isArray(pairs)?pairs:[];
   const rows=[];const failures=[];const seen=new Set();
-  const concurrency=1;
-  let index=0;
-  const worker=async()=>{
-    while(true){
-      const i=index++; if(i>=list.length) return;
-      const pair=list[i];
-      const rid=Number(pair?.resourceId),q=Number(pair?.quality);
-      const url=`https://api.simcotools.com/v1/realms/${requested}/market/vwaps/${rid}/${q}`;
-      try{
-        const resp=await simcoFetch(url,15000);
-        if(!resp.ok){const error=new Error(`HTTP ${resp.status}`);error.status=resp.status;error.retryAt=resp.retryAt||null;error.rateLimited=Boolean(resp.rateLimited);throw error;}
-        const data=parseSimcoResponse(resp.text);
-        const value=extractSimcoExactVwap(data);
-        if(value==null) throw new Error('No exact VWAP value returned');
-        const key=vwapPairKey(rid,q);
-        if(!seen.has(key)){seen.add(key);rows.push({resourceId:rid,quality:q,value});}
-      }catch(e){const failure={resourceId:rid,quality:q,error:e?.message||String(e)};if(Number(e?.status)===429||e?.rateLimited){failure.status=429;failure.rateLimited=true;failure.retryAt=e?.retryAt||null;}failures.push(failure);}
-    }
-  };
-  await Promise.all(Array.from({length:Math.min(concurrency,list.length)},()=>worker()));
+  // One request at a time (SimcoTools rate limit).
+  for(const pair of list){
+    const rid=Number(pair?.resourceId),q=Number(pair?.quality);
+    const url=`https://api.simcotools.com/v1/realms/${requested}/market/vwaps/${rid}/${q}`;
+    try{
+      const resp=await simcoFetch(url,15000);
+      if(!resp.ok){const error=new Error(`HTTP ${resp.status}`);error.status=resp.status;error.retryAt=resp.retryAt||null;error.rateLimited=Boolean(resp.rateLimited);throw error;}
+      const data=parseSimcoResponse(resp.text);
+      const value=extractSimcoExactVwap(data);
+      if(value==null) throw new Error('No exact VWAP value returned');
+      const key=vwapPairKey(rid,q);
+      if(!seen.has(key)){seen.add(key);rows.push({resourceId:rid,quality:q,value});}
+    }catch(e){const failure={resourceId:rid,quality:q,error:e?.message||String(e)};if(Number(e?.status)===429||e?.rateLimited){failure.status=429;failure.rateLimited=true;failure.retryAt=e?.retryAt||null;}failures.push(failure);}
+  }
   return {ok:rows.length>0,rows,realm:requested,requested:list.length,failed:failures.length,failures};
 }
 
@@ -4502,8 +3984,7 @@ function vwapDatasetSignature(rows){
     .join('|');
 }
 
-// SimcoTools / Sim Companies publish VWAP once a day; each download is the full ~989-row dataset plus a large store
-// write.
+// SimcoTools / Sim Companies publish VWAP once a day; each download is the full ~989-row dataset plus a large store write.
 // After a download that CHANGED the data, the next one waits 20 h; while the data is unchanged (not published yet),
 // retry no sooner than every 3 h. That converges on ~1-3 downloads a day, at most ~3 h after the daily update.
 const VWAP_AFTER_CHANGE_MS=20*3600e3;
@@ -4587,7 +4068,7 @@ async function runVwapSyncUnlocked(options={}){
   const nextWatch={...(targetStore.vwapWatch||DEFAULTS.vwapWatch),lastSourceRealm:realm};
   await vwapLockedCommit(realm,{vwapData,history:mergedHistory,vwapWatch:nextWatch},['vwapData','history','vwapWatch']);
   if(!stale)void recordPriceObservations(realm,allVwaps,now);
-  await vwapLockedStatus({message:`R${realm===0?'1':'2'} VWAP sync ${stale?'loaded the R1 last-known fallback':'complete'}: ${allVwaps.length} values; ${warehouseVwaps.length} match the current warehouse.`,vwapRecords:allVwaps.length,vwapWarehouseRecords:warehouseVwaps.length,vwapRequested:sourceMode==='live-pairs'?allVwaps.length:allVwaps.length,vwapFailed:failures.length,vwapFetchedAt:vwapData.fetchedAt,vwapUpdatedAt:now,vwapSourceRealm:realm,vwapWarehouseRealm:realm,vwapWarehouseRows:warehouseRows.length,vwapSyncing:false,vwapError:stale?'Live VWAP fetch failed; using stale R1 fallback.':null,vwapFallback:stale,vwapRealm:realm},realm);
+  await vwapLockedStatus({message:`R${realm===0?'1':'2'} VWAP sync ${stale?'loaded the R1 last-known fallback':'complete'}: ${allVwaps.length} values; ${warehouseVwaps.length} match the current warehouse.`,vwapRecords:allVwaps.length,vwapWarehouseRecords:warehouseVwaps.length,vwapRequested:allVwaps.length,vwapFailed:failures.length,vwapFetchedAt:vwapData.fetchedAt,vwapUpdatedAt:now,vwapSourceRealm:realm,vwapWarehouseRealm:realm,vwapWarehouseRows:warehouseRows.length,vwapSyncing:false,vwapError:stale?'Live VWAP fetch failed; using stale R1 fallback.':null,vwapFallback:stale,vwapRealm:realm},realm);
   return {ok:true,records:warehouseVwaps.length,requested:allVwaps.length,failed:failures.length,source:sourceMode,realm,stale};
 }
 
@@ -4917,17 +4398,6 @@ async function runVwapSync(options={}){
   return run;
 }
 
-async function refreshRealmVwapDaily(reason='scheduled',realmArg=null){
-  await ensureRealmStorageMigration();
-  const s=await state();
-  const realm=validRealmNumber(realmArg??s.activeRealmKey?.replace(/^realm:/,'')??s.authData?.authCompany?.realmId);
-  if(realm==null)return {ok:false,error:'No active realm available for VWAP refresh.'};
-  // Redirect to the shared staged scheduler; this helper
-  // must never start an independent SimcoTools request burst.
-  return scheduleMarketCycle(realm,`legacy-vwap-${reason}`);
-}
-
-
 const LIVE_MARKET_REFRESH_ALARM_NAME='scm-live-market-refresh';
 const LIVE_MARKET_REFRESH_PERIOD_MINUTES=60;
 const MARKET_STAGE_ALARM_PREFIX='scm-market-stage-r';
@@ -4949,14 +4419,11 @@ async function scheduleMarketStage(realm,stage,delayMs=MARKET_STAGE_COOLDOWN_MS,
   try{await scmCreateShortAlarm(name,Math.max(1000,Number(delayMs)||0));await recordBackgroundJobEvent(n,{job:`market-${stage}-stage-scheduled`,trigger:reason,startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),durationMs:0,outcome:'success',details:{alarm:name,delayMs:Math.max(1000,Number(delayMs)||0)}}).catch(()=>{});return {ok:true,realm:n,stage,alarm:name,delayMs:Math.max(1000,Number(delayMs)||0),reason};}
   catch(e){return {ok:false,realm:n,stage,error:e?.message||String(e),reason};}
 }
-async function schedulePostSyncMarketRefresh(realm,reason='sync-complete'){
-  return scheduleMarketCycle(realm,reason);
-}
 async function scheduleMarketCycle(realmArg,reason='scheduled-market-cycle'){
   const n=validRealmNumber(realmArg);if(n==null)return {ok:false,error:'Invalid realm for market cycle.'};
   if(await hasPendingMarketStageAlarm())return {ok:true,queued:false,skipped:true,reason:'market-cycle-already-pending'};
   const other=n===0?1:0;
-  try{await chrome.storage.local.set({marketSyncCycleQueue:[n,other],marketSyncCycleStartedAt:new Date().toISOString(),marketSyncCycleReason:reason});}catch{}
+  try{await chrome.storage.local.set({marketSyncCycleQueue:[n,other]});}catch{}
   return scheduleMarketStage(n,'vwap',POST_SYNC_MARKET_COOLDOWN_MS,reason);
 }
 async function runMarketStage(realm,stage,reason='alarm'){
@@ -4986,7 +4453,7 @@ async function runMarketStage(realm,stage,reason='alarm'){
         try{await chrome.storage.local.set({marketSyncCycleQueue:queue});}catch{}
         const nextRealm=queue[0];
         if(nextRealm!=null)await scheduleMarketStage(nextRealm,'vwap',MARKET_STAGE_REALM_COOLDOWN_MS,'previous-realm-market-finished');
-        else {try{await chrome.storage.local.set({marketSyncCycleQueue:[],marketSyncCycleFinishedAt:new Date().toISOString()});}catch{}}
+        else {try{await chrome.storage.local.set({marketSyncCycleQueue:[]});}catch{}}
       }
       return {ok:Boolean(result?.ok),realm:n,stage,result,durationMs:Date.now()-started};
     }catch(e){const error=e?.message||String(e);await hydrateSimcoCooldowns();await recordBackgroundJobEvent(n,{job:`market-${stage}-stage`,trigger:reason,startedAt,finishedAt:new Date().toISOString(),durationMs:Date.now()-started,outcome:simcoRateLimitUntil>Date.now()?'rate-limited':'failure',error}).catch(()=>{});if(simcoRateLimitUntil>Date.now())await scheduleMarketStage(n,stage,Math.max(POST_SYNC_MARKET_COOLDOWN_MS,simcoRateLimitUntil-Date.now()),`rate-limit-cooldown-${stage}`);else if(stage==='vwap')await scheduleMarketStage(n,'prices',MARKET_STAGE_COOLDOWN_MS,'vwap-stage-failed');return {ok:false,realm:n,stage,error};}
@@ -5021,15 +4488,6 @@ async function runScheduledLiveMarketRefresh(reason='scheduled'){
     return {...scheduled,queued:true};
   })().finally(()=>{liveMarketRefreshAlarmRun=null;});
   return liveMarketRefreshAlarmRun;
-}
-
-const VWAP_WATCH_ALARM_NAME='scm-vwap-watch';
-
-async function ensureVwapWatchAlarm(reason='ensure'){
-  try{
-    await chrome.alarms.clear(VWAP_WATCH_ALARM_NAME);
-    return {ok:true,created:false,disabled:true,reason:'VWAP watch network requests are folded into staged market sync.',reason};
-  }catch(e){return {ok:false,created:false,error:e?.message||String(e),reason};}
 }
 
 const RESOURCE_IMAGE_CACHE_TTL_MS = 7*24*60*60*1000;
@@ -5146,7 +4604,6 @@ async function syncAllResourceImages({forceValidate=false}={}){
   return {ok:true,resourceCount:ids.length,verified,updated,failed,durationMs:Date.now()-jobStarted};
 }
 
-
 function criticalContractRowsFromStore(store){
   const rows=[];
   const ep=store?.endpointData&&typeof store.endpointData==='object'?store.endpointData:{};
@@ -5206,10 +4663,7 @@ async function runCriticalDataGuard(reason='scheduled'){
   return {ok:true,reason,report};
 }
 
-const INSTALL_KEEP_ALARM_PREFIXES=['scm-building-','scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX,ACCOUNTING_DAY_WALK_ALARM_PREFIX,ACCOUNTING_WALK_DAILY_ALARM,SYNC_AUTO_RETRY_ALARM_PREFIX];
-// Chrome drops an extension's alarms when it is updated (and may on a browser restart), so the alarms that
-// carry your state are re-created from storage: building reminders (buildingAlarms) and batch-finished alerts
-// (from the stored buildings). Storage reads + alarm calls only, no network, no lock.
+const INSTALL_KEEP_ALARM_PREFIXES=['scm-prodfin:','scm-followup:','scm-daily-summary',GAME_CONSTANTS_ALARM,ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX,ACCOUNTING_DAY_WALK_ALARM_PREFIX,ACCOUNTING_WALK_DAILY_ALARM,SYNC_AUTO_RETRY_ALARM_PREFIX];
 const FOLLOWUP_ALARMS_KEY='scmFollowupAlarms';
 // Follow-ups exist only as alarms (their whole state is in the name), so they are also listed in storage to survive a
 // lost alarm. Serialized through the commit lane; removed as they fire.
@@ -5231,7 +4685,6 @@ function forgetFollowupAlarm(name){
 }
 // Periodic jobs both onInstalled and onStartup must leave in place. Created only when missing, so a browser start does not push them back.
 const STANDING_ALARMS=[
-  ['scm-vwap-daily',{periodInMinutes:720}],
   ['scm-production-events-daily',{periodInMinutes:720}],
   ['scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15}],
   ['scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080}],
@@ -5243,8 +4696,11 @@ async function ensureStandingAlarms(){
   for(const [name,info] of STANDING_ALARMS)if(!(await chrome.alarms.get(name)))await scmAlarmCreate(name,info);
   if(!(await chrome.alarms.get(GAME_CONSTANTS_ALARM)))await scmAlarmCreate(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});
 }
+// Chrome drops an extension's alarms when it is updated (and may on a browser restart), so the alarms that
+// carry your state are re-created from storage: follow-ups, the daily summary, batch-finished alerts (from the stored
+// buildings) and pending Accounting walks. Storage reads + alarm calls only, no network, no lock.
 async function restorePersistedAlarms(reason='restore'){
-  const out={reason,buildingReminders:0,production:[],followups:0};
+  const out={reason,production:[],followups:0};
   try{
     const fu=(await chrome.storage.local.get({[FOLLOWUP_ALARMS_KEY]:{}}))[FOLLOWUP_ALARMS_KEY]||{};
     for(const [name,when] of Object.entries(fu)){
@@ -5257,10 +4713,6 @@ async function restorePersistedAlarms(reason='restore'){
   for(const n of [0,1]){
     try{
       const st=(await chrome.storage.local.get({[`scmRealmStore:${n}`]:null}))[`scmRealmStore:${n}`]||{};
-      for(const a of Object.values(st.buildingAlarms||{})){
-        const bid=Number(a?.buildingId),when=Number(a?.readyAt);if(!(bid>0)||!(when>Date.now()))continue;
-        const name=`scm-building-${n}-${bid}`;if(!(await chrome.alarms.get(name))){await scmAlarmCreate(name,{when});out.buildingReminders++;}
-      }
       if(Array.isArray(st.buildings)&&st.buildings.length)out.production.push(await scheduleProductionFinishAlarms(n,st.buildings));
       // A scheduled / interrupted Accounting day walk survives an update or restart.
       const walk=st.accountingDayWalkStatus;
@@ -5298,6 +4750,22 @@ async function scmRealmStoreTopFields(n=6){
   const endpointGroups=Object.entries(groups).sort((a,b)=>b[1].bytes-a[1].bytes).slice(0,8).map(([path,e])=>({path,bytes:e.bytes,count:e.count}));
   return {key:best.k,top:SC.topKeys(sizes,n),endpointGroups};
 }
+// Old production rate data (rates in plans, the frozen network plan, reference-rate snapshots;
+// SCM_STORAGE_CORE.withoutProductionRateData), dropped under the realm write lock. Writes only when some is left, so
+// after the first run it is a read. The frozen plan's planner UI state is kept when no planner state is stored.
+async function migrateProductionRateData(realm){
+  const n=validRealmNumber(realm);if(n==null)return 0;
+  const SC=globalThis.SCM_STORAGE_CORE,key=realmKeyFromRealm(n),plannerKey=productionPlannerStateStorageKey(n);
+  return withRealmWriteLock(n,async()=>{
+    const s=await state(n);const stores={...(s.realmStores||{})};
+    const r=SC.withoutProductionRateData(stores[key]);
+    if(!r.removed)return 0;
+    if(r.plannerState&&plannerKey&&!s.productionPlannerState){const planner=sanitizeProductionPlannerState(r.plannerState,n);if(planner)await rawStorageSet({[plannerKey]:planner});}
+    stores[key]=r.value;
+    await storageSet({realmStores:stores});
+    return r.removed;
+  });
+}
 async function scmPruneStorage({days=STORAGE_PRUNE_DAYS,reason='manual'}={}){
   if(scmPruneRunning)return scmPruneRunning;
   scmPruneRunning=(async()=>{
@@ -5318,6 +4786,10 @@ async function scmPruneStorage({days=STORAGE_PRUNE_DAYS,reason='manual'}={}){
     else for(const n of [0,1]){
       try{
         const r=await enqueueApiStorage(async()=>{
+          // Fields older versions left in the store (SCM_STORAGE_CORE.OBSOLETE_REALM_FIELDS); nothing reads them.
+          const k=realmStorageKey(n);
+          const dropped=await withRealmStorageCommit(async()=>{const cur=(await chrome.storage.local.get({[k]:null}))[k];const o=SC.withoutObsoleteRealmFields(cur);if(o.removed)await rawStorageSet({[k]:o.value});return o.removed;});
+          if(dropped){written.push(k);add({obsoleteRealmFields:dropped});}
           const raw=(await chrome.storage.local.get({[realmStorageKey(n)]:null}))[realmStorageKey(n)];
           const plan=SC.planRealmStore(raw,now,days);
           if(!Object.keys(plan.patch).length)return plan;
@@ -5326,6 +4798,11 @@ async function scmPruneStorage({days=STORAGE_PRUNE_DAYS,reason='manual'}={}){
         if(r&&Object.keys(r.patch||{}).length){await flushRealmPatches(n);written.push(realmStorageKey(n));add(r.removed);}
       }catch(e){logError('prune:realm-store',e);}
     }
+    if(!coreSyncActive())for(const n of [0,1]){
+      try{const dropped=await migrateProductionRateData(n);if(dropped){written.push(realmStorageKey(n));add({productionRateData:dropped});}}catch(e){logError('prune:production-rate-data',e);}
+    }
+    // Keys older versions wrote and nothing reads any more (SCM_STORAGE_CORE.OBSOLETE_KEYS).
+    try{const present=Object.keys(await chrome.storage.local.get(SC.OBSOLETE_KEYS));if(present.length){await chrome.storage.local.remove(present);written.push(...present);add({obsoleteKeys:present.length});}}catch(e){logError('prune:obsolete-keys',e);}
     // Error log: flush the in-memory buffer first, then trim it in place so a later debounced write keeps the trim.
     try{const log=await getErrorLog();const r=SC.planGlobal({scmErrorLog:log},now,days);if(r.patch.scmErrorLog){scmErrorLogBuffer=r.patch.scmErrorLog;await rawStorageSet(r.patch);written.push('scmErrorLog');add(r.removed);}}catch(e){logError('prune:error-log',e);}
     const after=await scmStorageBytes();
@@ -5356,22 +4833,17 @@ chrome.runtime.onInstalled.addListener(async()=>{
   });
   await scmLifecycleStep('installed:live-bridge-token',()=>migrateLiveBridgeToken());
   await scmLifecycleStep('installed:realm-migration',()=>ensureRealmStorageMigration());
-  // Only the scheduler alarms re-created below (and retired legacy ones) are cleared; building reminders,
-  // batch-finished alerts, follow-ups, the daily summary and the constants refresh survive an update.
+  // Only the scheduler alarms re-created below (and retired legacy ones) are cleared; batch-finished alerts,
+  // follow-ups, the daily summary, the constants refresh, Accounting walks and Sync retries survive an update.
   await scmLifecycleStep('installed:clear-alarms',async()=>{for(const a of await chrome.alarms.getAll()){if(!INSTALL_KEEP_ALARM_PREFIXES.some(p=>String(a?.name||'').startsWith(p)))await chrome.alarms.clear(a.name);}});
   await scmLifecycleStep('installed:live-market-alarm',()=>ensureLiveMarketRefreshAlarm('installed'));
   await scmLifecycleStep('installed:order-book-alarm',()=>ensureOrderBookRefreshAlarm());
-  await scmLifecycleStep('installed:vwap-daily',()=>scmEnsurePeriodicAlarm('scm-vwap-daily',{periodInMinutes:720}));
-  await scmLifecycleStep('installed:production-events-daily',()=>scmEnsurePeriodicAlarm('scm-production-events-daily',{periodInMinutes:720}));
-  await scmLifecycleStep('installed:production-events-watch',()=>scmEnsurePeriodicAlarm('scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15}));
+  for(const [name,info] of STANDING_ALARMS)await scmLifecycleStep(`installed:alarm:${name}`,()=>scmEnsurePeriodicAlarm(name,info));
   await scmLifecycleStep('installed:critical-data-guard',()=>ensureCriticalDataGuard('installed'));
-  await scmLifecycleStep('installed:vwap-watch',()=>ensureVwapWatchAlarm('installed'));
-  await scmLifecycleStep('installed:resource-image-validation',()=>scmEnsurePeriodicAlarm('scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080}));
-  await scmLifecycleStep('installed:storage-prune-alarm',()=>scmEnsurePeriodicAlarm('scm-storage-prune',{delayInMinutes:30,periodInMinutes:1440}));
   await scmLifecycleStep('installed:storage-prune',()=>scmPruneStorage({reason:'installed'}));
   await scmLifecycleStep('installed:restore-alarms',()=>restorePersistedAlarms('installed'));
   await scmLifecycleStep('installed:accounting-walk',()=>ensureAccountingWalkSchedule('installed'));
-  // An update restarts the worker too; a Sync interrupted by it must not stay "running" (jobs <5 min old are skipped).
+  // An update restarts the worker too; a Sync interrupted by it must not stay "running" (jobs this worker started are skipped).
   await scmLifecycleStep('installed:recover-sync',()=>recoverInterruptedSyncJobs('installed'));
   syncAllResourceImages({forceValidate:false}).catch(()=>{});
   await scmLifecycleStep('installed:market-cycle',async()=>{
@@ -5390,18 +4862,12 @@ chrome.runtime.onStartup.addListener(async()=>{
   await scmLifecycleStep('startup:restore-alarms',()=>restorePersistedAlarms('browser-startup'));
   await scmLifecycleStep('startup:accounting-walk',()=>ensureAccountingWalkSchedule('browser-startup'));
   await scmLifecycleStep('startup:recover-sync',()=>recoverInterruptedSyncJobs('service-worker-startup'));
-  await scmLifecycleStep('startup:vwap-watch',()=>ensureVwapWatchAlarm('service-worker-startup'));
   await scmLifecycleStep('startup:critical-data-guard',()=>ensureCriticalDataGuard('startup'));
-  await scmLifecycleStep('startup:vwap-daily',async()=>{
+  await scmLifecycleStep('startup:market-cycle',async()=>{
     const s=await chrome.storage.local.get({activeRealmKey:null,selectedRealm:null,authData:null});
     const realm=validRealmNumber(s.activeRealmKey?.replace(/^realm:/,'')??s.selectedRealm??s.authData?.authCompany?.realmId);
     if(realm===0) await seedBundledVwapFallback('startup-seed').catch(()=>{});
-    if(realm!=null) await refreshRealmVwapDaily('startup',realm);
-  });
-  await scmLifecycleStep('startup:market-cycle',async()=>{
-    const watchState=await chrome.storage.local.get({activeRealmKey:null,selectedRealm:null,authData:null});
-    const watchRealm=validRealmNumber(watchState.activeRealmKey?.replace(/^realm:/,'')??watchState.selectedRealm??watchState.authData?.authCompany?.realmId);
-    if(watchRealm!=null) scheduleMarketCycle(watchRealm,'startup-check').catch(()=>{});
+    if(realm!=null) await scheduleMarketCycle(realm,'startup-check');
   });
   syncAllResourceImages({forceValidate:false}).catch(()=>{});
 });
@@ -5420,25 +4886,10 @@ async function scanOpenGameTabsForProductionEvents(reason='scheduled') {
       results.push({tabId:tab.id,ok:false,error:e?.message||String(e)});
     }
   }
-  const s=await state();
-  const realm=validRealmNumber(s.activeRealmKey?.replace(/^realm:/,'')??s.selectedRealm??s.authData?.authCompany?.realmId);
-  if(realm!=null){
-    // Own small key: the 15-minute watcher must not rewrite the whole realm store.
-    const monitorKey=`scmProductionEventMonitor:${realm}`;
-    const existing=(await chrome.storage.local.get({[monitorKey]:null}))[monitorKey]||{};
-    const monitor={...existing,lastCheckAt:new Date().toISOString(),lastCheckReason:String(reason||'scheduled'),tabsScanned:results.length,successfulScans:results.filter(x=>x.ok).length};
-    await rawStorageSet({[monitorKey]:monitor});
-  }
   return {ok:true,scanned:results.length,results};
 }
 
 chrome.alarms.onAlarm.addListener(async a=>{
-  if(String(a?.name||'').startsWith('scm-building-')){
-    try{
-      const m=String(a.name).match(/^scm-building-(\d+)-(\d+)$/);if(!m)return;const realm=Number(m[1]),buildingId=Number(m[2]);const s=await state(realm),key=realmKeyFromRealm(realm),store=s.realmStores?.[key]||{};const buildings=realmStoredBuildings(store,s,realm);await withRealmWriteLock(realm,async()=>{const latest=await state(realm),latestStore=latest.realmStores?.[key]||{},alarms={...(latestStore.buildingAlarms||{})};delete alarms[String(buildingId)];await storageSet({realmStores:{[key]:{...latestStore,buildingAlarms:alarms}}});});const b=buildings.find(x=>Number(x?.id)===buildingId);const tabs=await chrome.tabs.query({url:['https://www.simcompanies.com/*','https://simcompanies.com/*']});for(const tab of tabs||[])try{await chrome.tabs.sendMessage(tab.id,{type:'BUILDING_ALARM_FIRED',realm,buildingId,buildingName:b?.name||`Building ${buildingId}`,resourceName:b?.busy?.resource?.name||'Building job'});}catch{}return;
-    }catch(e){logError('alarm:building',e);return;}
-  }
-
   const syncRetryMatch=String(a?.name||'').match(/^scm-sync-retry-r([01])$/);
   if(syncRetryMatch){
     const realm=Number(syncRetryMatch[1]);
@@ -5478,23 +4929,14 @@ chrome.alarms.onAlarm.addListener(async a=>{
     }catch{}
     return;
   }
-
   const marketStageMatch=String(a?.name||'').match(/^scm-market-stage-r([01])-(vwap|prices)$/);
   if(marketStageMatch){await runMarketStage(Number(marketStageMatch[1]),marketStageMatch[2],'alarm').catch(e=>logError('alarm:market-stage',e));return;}
   if(a.name===LIVE_MARKET_REFRESH_ALARM_NAME){ await runScheduledLiveMarketRefresh('hourly-market-cycle').catch(()=>{}); return; }
   if(a.name===ORDER_BOOK_REFRESH_ALARM){ if(await scmOrderBookShouldThrottle())return; await runOrderBookRefreshFiring().catch(e=>logError('order-book-refresh',e)); return; }
   if(a.name==='scm-storage-prune'){ await scmPruneStorage({reason:'daily-alarm'}).catch(()=>{}); return; }
   if(a.name===CRITICAL_DATA_GUARD_ALARM){ await runCriticalDataGuard('scheduled').catch(()=>{}); return; }
-  if(a.name==='scm-vwap-daily'){
-    await runScheduledLiveMarketRefresh('legacy-vwap-alarm').catch(()=>{});
-  }
   if(a.name==='scm-production-events-daily') scanOpenGameTabsForProductionEvents('daily').catch(()=>{});
   if(a.name==='scm-production-events-watch') scanOpenGameTabsForProductionEvents('watch').catch(()=>{});
-  if(a.name===VWAP_WATCH_ALARM_NAME){
-    // Legacy watcher alarms are intentionally ignored: VWAP network reads now
-    // occur only in the staged market-sync pipeline.
-    await chrome.alarms.clear(VWAP_WATCH_ALARM_NAME).catch(()=>{});
-  }
   // The install/update handler re-creates this alarm 1 min after every update; re-validate at most once a week.
   if(a.name==='scm-resource-image-validation') (async()=>{const r=await chrome.storage.local.get({scmResourceImagesValidatedAt:0});if(Date.now()-Number(r.scmResourceImagesValidatedAt||0)<6.5*24*3600e3)return;const res=await syncAllResourceImages({forceValidate:true});if(res?.ok)await rawStorageSet({scmResourceImagesValidatedAt:Date.now()});})().catch(()=>{});
 });
@@ -5572,7 +5014,6 @@ async function waitForBridge(tabId, timeoutMs=10000){
   return false;
 }
 
-
 // A page visit counts only when the game actually went there: the click landed on a real target and the address
 // changed to it (or the tab was already on it). A click that moves nothing is a failed visit, never a silent ok.
 const GAME_CLICK_NAV_CONFIRM_MS=1500;
@@ -5595,7 +5036,7 @@ async function gameTabUrl(tabId){
   }catch{}
   try{return (await chrome.tabs.get(tabId))?.url||null;}catch{return null;}
 }
-async function confirmGameNavigation(tabId,beforeUrl,hrefHints){
+async function confirmGameNavigation(tabId,beforeUrl){
   const deadline=Date.now()+GAME_CLICK_NAV_CONFIRM_MS;
   let url=await gameTabUrl(tabId);
   while(Date.now()<deadline&&(!url||url===beforeUrl)){
@@ -5607,7 +5048,7 @@ async function confirmGameNavigation(tabId,beforeUrl,hrefHints){
 async function executeGameClick(tabId,target,depth=0){
   const clicked=await executeGameClickRaw(tabId,target);
   if(clicked?.element)for(const k of ['text','href','aria','title'])if(clicked.element[k]!=null)clicked.element[k]=safeWalkText(clicked.element[k]);
-  const after=clicked?.ok&&!clicked.alreadyThere?await confirmGameNavigation(tabId,clicked.beforeUrl,target?.hrefHints):clicked?.urlAfterClick;
+  const after=clicked?.ok&&!clicked.alreadyThere?await confirmGameNavigation(tabId,clicked.beforeUrl):clicked?.urlAfterClick;
   const outcome=gamePageVisitOutcome({...clicked,target:target?.name},clicked?.beforeUrl,after,target?.hrefHints);
   // A label such as Headquarters can open the parent page first; the real link is on it.
   if(!outcome.ok&&outcome.navigated&&depth<1){const second=await executeGameClick(tabId,target,depth+1);return {...second,beforeUrl:clicked.beforeUrl};}
@@ -5839,7 +5280,6 @@ async function withSyncTimeout(promise,timeoutMs,label){
     ]);
   }finally{ if(timer) clearTimeout(timer); }
 }
-
 
 async function persistTransientSyncUi(realm,status,error=null){
   // Sync progress is ephemeral UI state. Persisting it through the realm-store
@@ -6152,8 +5592,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     }
 
     // Hard single-flight lock. A second Sync click must never start a second
-    // realm capture while the first transaction is still writing realm-local
-    // storage. Overlapping runs were a major source of UI churn and state races.
+    // realm capture while the first transaction is still writing realm-local storage.
     const runningRealms=[...realmSyncSessions.keys()].filter(r=>validRealmNumber(r)!=null);
     if(runningRealms.length){
       const runningRealm=runningRealms[0];
@@ -6377,10 +5816,6 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const targetStartedAt=Date.now();
       walkSinceMs=targetStartedAt;
       session.walkCaptures={};
-      // Do not rewrite the full realm store just to persist a transient step.
-      // Keep the durable job at sync start/final commit and expose progress
-      // through the trace instead.
-
       if(session.cancelled)throw new SyncCancelledByClear();
       const currentTab=await simTab();
       if(!currentTab?.id) throw new Error('The logged-in Sim Companies tab is no longer available.');
@@ -6389,9 +5824,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       trace('target-start',{name:target.name,step});
       await persistTrace(true);
 
-      // API-first: a sync transaction should not depend on a 10-second DOM
-      // click. Direct authoritative reads are deterministic and available on
-      // both realms. UI navigation is now only a fallback for failed reads.
+      // API-first: direct authoritative reads are deterministic and available on
+      // both realms. UI navigation is only a fallback for failed reads.
       let companyId=0;
       try{
         const current=await state();
@@ -6661,9 +6095,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
             }
           }
         }else{
-          // One last direct attempt after the route change. This is especially
-          // important for contract capture, where historical traces showed an HTTP
-          // 200 response arriving outside the old passive 15-second window.
+          // One last direct attempt after the route change: a response (contracts
+          // especially) can arrive after the passive capture window.
           for(const path of authoritativePaths){
             try{
               trace('authoritative-retry',{name:target.name,path});
@@ -6692,9 +6125,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       // Persist only the small live UI status during the transaction. The
       // durable realm-local status is written once in the final commit.
       await persistTransientSyncUi(selected,`${realmDisplayNumber(selected)||'Realm'} Sync: ${step}/${targets.length} ${target.name} ${row.ok?'✓':target.optional?'skipped':'failed'}`,row.ok||target.optional?null:row.reason);
-      // Give the browser/storage event loop a short yield between major sync targets.
-      // This is deliberately much smaller than a blanket 1-second delay and only
-      // runs after a target has finished, so it cannot create a false readiness state.
+      // Short yield between targets, only after a target has finished, so it cannot create a false readiness state.
       if(i<targets.length-1) await yieldSyncStep();
     }
 
@@ -6732,10 +6163,6 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     // retries every required endpoint, so a slow queue must not fail Sync.
     try{await withSyncTimeout(apiStorageQueueForRealm(selected),20000,'API storage queue drain');trace('api-queue-drained',{});}
     catch(e){trace('api-queue-drain-timeout',{error:e?.message||String(e)});}
-
-    // Market-data requests are intentionally excluded from the core Sync transaction.
-    // They run from a delayed post-sync alarm after game API captures and durable
-    // storage verification have completed, so SimcoTools latency cannot fail Sync.
 
     let finalState=await state(selected);
     const key=realmKeyFromRealm(selected);
@@ -6920,9 +6347,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       try{
         const enrichState=await state(selected);
         const enrichStore=enrichState.realmStores?.[key]||{};
-        const verified=await state(selected);
-        const verifiedStore=verified.realmStores?.[key]||{};
-        trace('post-sync-building-state',{realm:selected,count:Array.isArray(verifiedStore.buildings)?verifiedStore.buildings.length:0});
+        trace('post-sync-building-state',{realm:selected,count:Array.isArray(enrichStore.buildings)?enrichStore.buildings.length:0});
         await withSyncTimeout(saveFullSyncDiagnostic({
           realm:selected,
           mode:'api-first-sync-with-ui-fallback',
@@ -6942,9 +6367,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       }catch(e){
         trace('post-sync-diagnostic-save-error',{realm:selected,error:e?.message||String(e)});
       }
-      // The diagnostic trace showed a completed R2 sync while the durable
-      // realm-local status had reverted to "Never synced". A late status/progress
-      // write can race the core final commit during the post-sync enrichment tail.
+      // A late status/progress write can race the core final commit during the
+      // post-sync enrichment tail and revert the durable realm-local status.
       // Reassert the terminal result against the latest physical realm store after
       // all tail work, and mirror it only if this realm is still active.
       try{
@@ -6999,10 +6423,10 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     if(ownsSyncSession && selected!=null && !clearedDuringRun){
       const syncFinishedAt=new Date().toISOString();
       const traceFailed=Array.isArray(syncTrace)&&syncTrace.some(x=>/failed|error|exception/i.test(String(x?.type||'')));
-      await recordBackgroundJobEvent(selected,{job:'core-sync',trigger:'manual-or-dashboard',startedAt:new Date(startedAt).toISOString(),finishedAt:syncFinishedAt,durationMs:Date.now()-startedAt,outcome:syncCoreSucceeded?(traceFailed?'partial':'success'):'failure',requested:targets.length,fetched:syncTrace.filter(x=>x?.type==='endpoint-captured').length,refreshed:syncTrace.filter(x=>x?.type==='endpoint-captured').length,checked:targets.length,cached:0,stale:0,error:syncCoreSucceeded?null:([...syncTrace].reverse().find(x=>/sync-exception|sync-failed/i.test(String(x?.type||'')))?.error||null),details:{coreSyncSucceeded:Boolean(syncCoreSucceeded),traceEvents:syncTrace.length,targets:targets.map(t=>t.name)}}).catch(()=>{});
+      await recordBackgroundJobEvent(selected,{job:'core-sync',trigger:'manual-or-dashboard',startedAt:new Date(startedAt).toISOString(),finishedAt:syncFinishedAt,durationMs:Date.now()-startedAt,outcome:syncCoreSucceeded?(traceFailed?'partial':'success'):'failure',requested:targets.length,fetched:0,refreshed:0,checked:targets.length,cached:0,stale:0,error:syncCoreSucceeded?null:([...syncTrace].reverse().find(x=>/sync-exception|sync-failed/i.test(String(x?.type||'')))?.error||null),details:{coreSyncSucceeded:Boolean(syncCoreSucceeded),traceEvents:syncTrace.length,targets:targets.map(t=>t.name)}}).catch(()=>{});
     }
     if(syncCoreSucceeded && selected!=null){
-      const scheduled=await schedulePostSyncMarketRefresh(selected,'sync-complete').catch(e=>({ok:false,error:e?.message||String(e)}));
+      const scheduled=await scheduleMarketCycle(selected,'sync-complete').catch(e=>({ok:false,error:e?.message||String(e)}));
       try{await recordBackgroundJobEvent(selected,{job:'post-sync-market-refresh-scheduled',trigger:'sync-complete',startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),durationMs:0,outcome:scheduled?.ok?'success':'failure',error:scheduled?.error||null,details:scheduled||{}});}catch{}
     }
     if(ownsSyncSession && selected!=null){
@@ -7230,14 +6654,13 @@ async function stripOverlayEmbeddedImages(v){
 function lastGoodGameOverlaySnapshot(source,realm){
   const snap=source?.rows?source:(source?.gameOverlaySnapshot||null);
   if(!snap||Number(snap.realm)!==Number(realm)||!Array.isArray(snap.rows)||!snap.rows.length)return null;
-  // Sanitize a legacy cached snapshot before the asynchronous heavy refresh.
-  // Could persist an incoming-only, non-produced row such as R1 Water.
-  // Do not let that stale row remain visible during the refresh window.
+  // A snapshot saved without contractSource is cleaned before it is served while the heavy refresh runs: it can
+  // hold an incoming-only row for a resource that is not produced, which must not stay visible meanwhile.
   const currentSavedContractSchema=String(snap.contractSource||'')==='manager-saved-contracts-only';
   if(currentSavedContractSchema){
     // Current snapshots were computed from the dedicated savedContracts list.
     // Preserve both saved incoming and outgoing impacts while a refresh runs;
-    // stripping outgoing here caused the visible values to flip every refresh.
+    // stripping outgoing here would make the visible values flip on every refresh.
     return {...snap,rows:snap.rows.map(row=>({...row})),ok:true,stale:true,source:'realm-local-last-good-snapshot'};
   }
   const rows=snap.rows.map(row=>{
@@ -7393,7 +6816,6 @@ async function refreshGameOverlayDataHeavy(realm){
   return promise;
 }
 
-
 // Realm-scoped data for the in-game helper overlays (presentation data only).
 function helperLatestEndpoint(store, rx){
   const entries=Object.entries(store?.endpointData||{}).filter(([url,v])=>rx.test(String(url||''))&&Number(v?.status)>=200&&Number(v?.status)<300&&v?.data!=null);
@@ -7406,15 +6828,13 @@ function helperArray(v, keys=['data','items','results']){
   for(const k of keys)if(Array.isArray(v[k]))return v[k];
   return [];
 }
-chrome.tabs.onActivated.addListener(({tabId})=>{
+chrome.tabs.onActivated.addListener(()=>{
   requestActiveGameRealm('tab-activated').catch(()=>{});
 });
 chrome.tabs.onUpdated.addListener((tabId,changeInfo,tab)=>{
   if(!tab?.active)return;
   if(changeInfo.status==='complete'||changeInfo.url) requestActiveGameRealm('active-game-tab-updated').catch(()=>{});
 });
-
-
 
 function diffStringSet(previous=[], current=[]){
   const a=new Set(Array.isArray(previous)?previous.map(String):[]);
@@ -7519,7 +6939,7 @@ async function requestJavascriptDiagnostic(){
   if(!tab?.id)return {ok:false,error:'Open Sim Companies in a browser tab before running the JavaScript diagnostic.'};
 
   // The deep page-hook collector can contend with the game's SPA during heavy
-  // renders and was the source of the repeated mobile timeout alert. Runtime
+  // renders and time out on mobile. Runtime
   // diagnostics are troubleshooting-only, so prefer the bounded quick collector
   // and never block the dashboard on a deep source scan.
   try{
@@ -7605,9 +7025,9 @@ async function scmRunSelfTest(opts={}){
     add('notify','Notifications & badge',!chrome.notifications&&!badge?'skip':level==='denied'?'warn':'pass',!chrome.notifications?'Notifications API not available in this browser':`Notifications ${level||'available'}; badge ${badge?'available':'unavailable'}`,{notifications:!!chrome.notifications,permissionLevel:level,badge});});
   return {ok:true,version:BUILD_VERSION,at:new Date(now).toISOString(),totals:C.totals(out),results:out};
 }
-const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['RUN_SELF_TEST','PRUNE_STORAGE','SYNC_NOW','RUN_ACCOUNTING_WALK_NOW','RUN_JAVASCRIPT_DIAGNOSTIC','LIVE_MARKET_REFRESH','CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_FROZEN_NETWORK_PLAN','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','SET_BUILDING_ALARM','CLEAR_BUILDING_ALARM','GET_COMPANY_AUTH_DATA','SYNC_RESOURCE_IMAGES','GET_ERROR_LOG','CLEAR_ERROR_LOG','GET_LIVE_BRIDGE_TOKEN']);
+const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['RUN_SELF_TEST','PRUNE_STORAGE','SYNC_NOW','RUN_ACCOUNTING_WALK_NOW','RUN_JAVASCRIPT_DIAGNOSTIC','LIVE_MARKET_REFRESH','CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','GET_COMPANY_AUTH_DATA','GET_ERROR_LOG','GET_LIVE_BRIDGE_TOKEN']);
 // GET_STATE from a non-extension-page context (content script) never carries secrets.
-// NOTE (authData): authData is the game's /api/v2/companies/me/ auth payload (company id/name, user/session
+// NOTE (authData): authData is the game's /api/v3/companies/auth-data/ payload (company id/name, user/session
 // metadata), captured from the game page itself. It stays in storage.local (top level and per realmStores) because
 // many readers depend on it; content scripts run on the same game origin that already holds the session, so it
 // grants them nothing new. It is stripped here (GET_STATE defense in depth) and by SCM_DIAGNOSTIC_CORE.redactSecrets
@@ -7626,7 +7046,6 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='PRUNE_STORAGE'){scmPruneStorage({reason:'manual'}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='RUN_SELF_TEST'){scmRunSelfTest({liveFetch:m.liveFetch!==false}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='GET_ERROR_LOG'){getErrorLog().then(log=>send({ok:true,log,version:BUILD_VERSION,at:new Date().toISOString()})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
-  if(m?.type==='CLEAR_ERROR_LOG'){clearErrorLog().then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_CLEAR_ALERT_BADGE'){if(!scmIsExtensionPageSender(sender))return false;scmClearAlertBadge().then(()=>send({ok:true})).catch(()=>send({ok:false}));return true;}
   if(m?.type==='SET_ACCOUNTING_WALK_SCHEDULE'){(async()=>{const realm=validRealmNumber(m.realm);const patch={enabled:Boolean(m.enabled),offsetMin:accountingWalkOffset(m.offsetMin),attempt:0,retryAt:null};if(realm!=null)patch.realm=realm;await writeAccountingWalkSchedule(patch);const r=await ensureAccountingWalkSchedule('user');return {...r,schedule:await readAccountingWalkSchedule()};})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   // CSV import from Analyze → Data: statements by date and ledger rows; captured data always wins.
@@ -7641,7 +7060,6 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='SCM_NET3_STOP'){scmNetStop().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_NET3_STATUS'){chrome.storage.local.get('scmNetworkCaptureV3Status').then(x=>send({ok:true,status:x.scmNetworkCaptureV3Status||{status:'idle'}})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_NET3_EXPORT'){(async()=>{const id=String(m.captureId||scmNetCapture.captureId||'');if(!id)throw new Error('No Network Capture 3.0 session is available.');const offset=Math.max(0,Number(m.offset)||0),limit=Math.max(1,Math.min(500,Number(m.limit)||300));const pg=await scmNetPageEvents(id,offset,limit);send({ok:true,captureId:id,events:pg.events,total:pg.total,offset,summary:pg.summary,startedAt:scmNetCapture.startedAt,status:(await chrome.storage.local.get('scmNetworkCaptureV3Status')).scmNetworkCaptureV3Status?.status|| (scmNetCapture.active?'recording':'stopped')});})().catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
-  if(m?.type==='REPLAY_FLUSH'){flushReplayJournal(true).then(()=>send({ok:true,count:replayBuffer.length})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='RUN_JAVASCRIPT_DIAGNOSTIC'){
     requestJavascriptDiagnostic().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));
     return true;
@@ -7682,31 +7100,6 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         send({ok:errors.length===0,throttled:false,error:errors.length?errors.join(' '):null});
       }catch(e){send({ok:false,throttled:false,error:e?.message||String(e)});}
     })();return true;
-  }
-  if(m?.type==='SET_BUILDING_ALARM'){
-    (async()=>{try{
-      const realm=validRealmNumber(m.realm)!=null?validRealmNumber(m.realm):validRealmNumber((await state()).selectedRealm);const buildingId=Number(m.buildingId),readyAt=Number(m.readyAt);if(realm==null||!Number.isFinite(buildingId)||!Number.isFinite(readyAt)||readyAt<=Date.now()){send({ok:false,error:'Invalid building alarm.'});return;}
-      await withRealmWriteLock(realm,async()=>{
-        const key=realmKeyFromRealm(realm),latest=await state(realm),stores={...(latest.realmStores||{})},store={...(stores[key]||{})},alarms={...(store.buildingAlarms||{})};const alarmKey=String(buildingId);alarms[alarmKey]={buildingId,readyAt,createdAt:new Date().toISOString()};await storageSet({realmStores:{[key]:{...store,buildingAlarms:alarms}}});
-      });
-      const alarmName=`scm-building-${realm}-${buildingId}`;await chrome.alarms.clear(alarmName);await scmAlarmCreate(alarmName,{when:readyAt});send({ok:true,realm,buildingId,readyAt});
-    }catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;
-  }
-  if(m?.type==='CLEAR_BUILDING_ALARM'){
-    (async()=>{try{const realm=validRealmNumber(m.realm),buildingId=Number(m.buildingId);if(realm==null||!Number.isFinite(buildingId)){send({ok:false});return;}await withRealmWriteLock(realm,async()=>{const key=realmKeyFromRealm(realm),s=await state(realm),stores={...(s.realmStores||{})},store={...(stores[key]||{})},alarms={...(store.buildingAlarms||{})};delete alarms[String(buildingId)];await storageSet({realmStores:{[key]:{...store,buildingAlarms:alarms}}});});await chrome.alarms.clear(`scm-building-${realm}-${buildingId}`);send({ok:true});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;
-  }
-  if(m?.type==='OPEN_MANAGER_TAB') {
-    (async()=>{
-      try{
-        const tabName=String(m.tab||'overview').replace(/[^a-z0-9_-]/gi,'')||'overview';
-        const url=chrome.runtime.getURL(`dashboard.html?tab=${encodeURIComponent(tabName)}`);
-        const tabs=await chrome.tabs.query({url:chrome.runtime.getURL('dashboard.html')+'*'});
-        const existing=(tabs||[])[0];
-        if(existing?.id){await chrome.tabs.update(existing.id,{active:true});chrome.runtime.sendMessage({type:'SCM_SELECT_DASHBOARD_TAB',tab:tabName}).catch(()=>{});try{await chrome.windows.update(existing.windowId,{focused:true});}catch{};send({ok:true,tab:tabName,tabId:existing.id});return;}
-        const created=await chrome.tabs.create({url,active:true});
-        send({ok:true,tab:tabName,tabId:created?.id??null});
-      }catch(e){send({ok:false,error:e?.message||String(e)});}
-    })(); return true;
   }
   if(m?.type==='SAVE_REALM_FIELD') {
     (async()=>{
@@ -7749,21 +7142,6 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
           for(const tab of tabs||[]){try{await chrome.tabs.sendMessage(tab.id,{type:'REFRESH_GAME_OVERLAY',realm,value});}catch{}}
         }
         send({ok:true,realm,field,value});
-      }catch(e){send({ok:false,error:e?.message||String(e)});}
-    })(); return true;
-  }
-  if(m?.type==='PRODUCTION_RUN_HOURS_CHANGED'){
-    (async()=>{
-      try{
-        const realm=validRealmNumber(m.realm);
-        if(realm==null){send({ok:false,error:'No realm.'});return;}
-        // Tell the live SimCompanies page to rebuild its overlay immediately.
-        // The overlay will then read the newly persisted realm-local Production Time.
-        const tabs=await chrome.tabs.query({url:['https://www.simcompanies.com/*','https://simcompanies.com/*']});
-        for(const tab of tabs||[]){
-          try{await chrome.tabs.sendMessage(tab.id,{type:'REFRESH_GAME_OVERLAY',realm,value:Number(m.value)});}catch{}
-        }
-        send({ok:true,realm,value:Number(m.value)});
       }catch(e){send({ok:false,error:e?.message||String(e)});}
     })(); return true;
   }
@@ -7820,14 +7198,9 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       }
     })(); return true;
   }
-  if(m?.type==='GET_BUILDING_VWAP_DATA'){
-    (async()=>{
-      try{const realm=validRealmNumber(m.realm);const r=await getRealmBuildingVwapData(realm,m.resourceName,m.quality);send(r);}catch(e){send({ok:false,error:e?.message||String(e)});}
-    })(); return true;
-  }
   // Game-page "My listings" card: your own exchange listings (scmMarketOrders:<realm>) with names, images and the
   // realm's cached VWAP. refresh:true asks refreshMarketOrders (maxAge 0, no lock) at most every 12 s per realm,
-  // without waiting; the card follows the storage key through chrome.storage.onChanged. A game action also reads
+  // without waiting; the card is told the key changed by an SCM_CARD_KEY_CHANGED message. A game action also reads
   // it at once (scheduleOwnOrdersRefresh).
   if(m?.type==='GET_OWN_LISTINGS_DATA'){
     (async()=>{
@@ -7954,29 +7327,18 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const grouped=new Map();
         for(const w of warehouse){const id=Number(w?.kind??w?.resourceId??w?.id),q=Number(w?.quality),qty=Number(w?.amount??w?.quantity??w?.qty??w?.units);if(!Number.isFinite(id)||!Number.isFinite(q)||!Number.isFinite(qty))continue;const k=`${id}:${q}`;grouped.set(k,(grouped.get(k)||0)+qty);}
         const stock=[...grouped.entries()].map(([k,qty])=>{const [id,q]=k.split(':').map(Number);return {id,quality:q,quantity:qty,name:assets.names.get(String(id))||`Resource #${id}`};});
-        let baseBalanceByKey=new Map();
-        try{
-          const balance=await buildGameOverlayData(store,realm,s);
-          for(const row of (balance.rows||[])){
-            const id=Number(row?.id),quality=Number(row?.quality)||0;
-            if(!Number.isFinite(id)||id<=0)continue;
-            const warehouse=Number(row?.warehouse),demand=Number(row?.demand);
-            baseBalanceByKey.set(`${id}:${quality}`,(Number.isFinite(warehouse)?warehouse:0)-(Number.isFinite(demand)?demand:0));
-          }
-        }catch{}
+        // Surplus, the base Left and the saved-contract quantities come from the overlay's own calculation, so the
+        // helper and the Stock After Demand card always show the same numbers.
+        const plannerCore=globalThis.SCMPlannerCore;
+        let calc=null;
+        try{calc=(await overlayProductionStock(store,realm,s)).stock;}catch{}
+        const baseBalanceByKey=calc?.baseBalanceByKey||new Map();
         for(const row of stock){
           const key=`${Number(row.id)}:${Number(row.quality)||0}`;
           if(!baseBalanceByKey.has(key))baseBalanceByKey.set(key,Math.max(0,Number(row.quantity)||0));
         }
-        const plan=store?.frozenNetworkPlan||{};
-        const plannerCore=globalThis.SCMPlannerCore;
-        const hasCurrentPlanRows=Array.isArray(plan.productionRows)&&Array.isArray(plan.demandRows);
-        const surplusByKey=plannerCore?.productionSurplusByKey&&hasCurrentPlanRows
-          ?plannerCore.productionSurplusByKey(plan.productionRows,plan.demandRows)
-          :new Map((Array.isArray(plan.surpluses)?plan.surpluses:[]).map(row=>[`${Number(row?.id)}:${Number(row?.quality)||0}`,Math.max(0,Number(row?.surplus)||0)]));
-        const savedQuantityByContract=plannerCore?.resolveSavedContractQuantities
-          ?plannerCore.resolveSavedContractQuantities({savedContracts:saved,baseBalanceByKey,surplusByKey})
-          :new Map();
+        const surplusByKey=calc?.surplusByKey||new Map();
+        const savedQuantityByContract=calc?.savedQuantities||new Map();
         const marketOwn=await marketOwnOpts(store,realm);
         const helperContracts=saved.map(c=>{
           let productId=Number(c?.productId), quality=Number(c?.quality);
@@ -8050,19 +7412,6 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       }catch(e){send({ok:false,error:e?.message||String(e)});}
     })(); return true;
   }
-  if(m?.type==='GET_REALM_MARKET_PRICE'){
-    (async()=>{
-      try{
-        const s=await state();
-        const realm=validRealmNumber(m.realm);
-        const resourceId=Number(m.resourceId),quality=Number(m.quality);
-        if(realm==null||!Number.isFinite(resourceId)||resourceId<=0||!Number.isFinite(quality)){send({ok:false,price:null,error:'Valid realm, resource and quality required.'});return;}
-        const key=realmKeyFromRealm(realm),store=s.realmStores?.[key]||{};
-        const hit=globalThis.SCM_MARKET_CORE.marketPrice(store,realm,resourceId,quality,{mode:'exact'});
-        send({ok:true,realm,resourceId,quality,price:hit?.price??null,source:hit?hit.source:'unavailable',marketPriceSource:hit?.source||null,marketPriceStale:hit?.stale===true});
-      }catch(e){send({ok:false,price:null,error:e?.message||String(e)});}
-    })();return true;
-  }
   if(m?.type==='GET_VWAP_OVERLAY_DATA'){
     (async()=>{
       try{
@@ -8089,15 +7438,14 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
           // is queued through the staged scheduler and never blocks this request.
           refreshInBackground=true;
         }else if(!fresh){refreshInBackground=true;}
-        const latestStore={...(s.realmStores?.[key]||{})};
         const eid=Number.isFinite(Number(inferredResourceId))?Number(inferredResourceId):null;
         let marketRows=[];
         if(eid!=null){
-          const direct=latestStore.endpointData?.[`/api/v3/market/${realm}/${eid}/`];
+          const direct=store.endpointData?.[`/api/v3/market/${realm}/${eid}/`];
           if(Array.isArray(direct?.data))marketRows=direct.data;
         }
         if(!marketRows.length){
-          const candidates=Object.entries(latestStore.endpointData||{})
+          const candidates=Object.entries(store.endpointData||{})
             .map(([url,v])=>{const m=String(url).match(new RegExp('^/api/v3/market/'+realm+'/(\\d+)/?$'));return m?{id:Number(m[1]),data:Array.isArray(v?.data)?v.data:[],at:Date.parse(String(v?.receivedAt||''))||0}:null;})
             .filter(x=>x&&x.data.length>0)
             .sort((a,b)=>b.at-a.at);
@@ -8127,7 +7475,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         pendingBuildingCollects.clear();if(buildingCollectFlushTimer){clearTimeout(buildingCollectFlushTimer);buildingCollectFlushTimer=null;} // collect stamps (scmBuildingCollects:N) go with the clear below
         await withRealmStorageCommit(()=>chrome.storage.local.clear());
         await scmNetClearAllEvents().catch(()=>{});
-        await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY).catch(()=>{});await chrome.storage.local.remove(LIVE_BRIDGE_TOKEN_BACKUP_KEY).catch(()=>{});await liveBridgeBackupClear(); // session token + IDB backup
+        await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY).catch(()=>{});await liveBridgeBackupClear(); // session token + IDB backup
         // In-memory copies of cleared data would otherwise be served (and written back) until the worker restarts.
         resourceImagesMemo=null;notifyRecipesMemo=null;gameOverlayAssetsPromise=null;
         gameOverlaySnapshotMemo.clear();contractHelperCache.clear();
@@ -8137,7 +7485,6 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const resetDefaults={...DEFAULTS,selectedRealm:null,activeRealmKey:null,vwapStatus:{message:'Waiting for VWAP sync.'},marketQueueStatus:{message:'Waiting for the logged-in Sim Companies tab.',updatedAt:new Date().toISOString()},resourceImageData:{}};
         await storageSet(resetDefaults);
         await ensureStandingAlarms();
-        await ensureVwapWatchAlarm('clear-extension-data');
         await ensureCriticalDataGuard('clear-extension-data');
         await ensureLiveMarketRefreshAlarm('clear-extension-data'); // ClearAll removed it too
         await ensureOrderBookRefreshAlarm();
@@ -8146,7 +7493,6 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     })();
     return true;
   }
-  if(m?.type==='WAIT_FOR_ENDPOINT_CAPTURE'){waitForEndpointCapture(m.target,m.since,m.timeoutMs).then(r=>send(r)).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='REFRESH_ACCOUNTING') {
     (async()=>{
       try{
@@ -8196,7 +7542,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       const before=await state();
       const current=validRealmNumber(before.activeRealmKey?.replace(/^realm:/,''));
       let changed=false;
-      if(current!==incoming) changed=await activateRealmByRealmFast(incoming,null).catch(()=>false);
+      if(current!==incoming) changed=await activateRealmByRealmFast(incoming).catch(()=>false);
       send({ok:true,realm:incoming,changed:Boolean(changed),reason:'switch-confirmed'});
     })().catch(e=>send({ok:false,error:e?.message||String(e)}));
     return true;
@@ -8262,26 +7608,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       if(realm==null){try{const meta=await chrome.storage.local.get({activeRealmKey:null});realm=validRealmNumber(realmNumberFromKey(meta.activeRealmKey)??meta.activeRealmKey);}catch{}}
       if(realm!=null){scheduleWarehouseRefreshAfterStockMutation(realm,150);scheduleOwnOrdersRefresh(realm);}})();
     send({ok:true});return true}
-  if(m?.type==='GET_ENDPOINT_KEYS'){state().then(s=>send({ok:true,keys:Object.keys(s.endpointData||{})})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='WAREHOUSE_COST_DETAIL'){saveWarehouseCostDetail(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
-  if(m?.type==='FULL_SYNC_DIAGNOSTIC'){saveFullSyncDiagnostic(m.diagnostic||{},m.diagnostic?.realm).then(d=>send({ok:true,diagnostic:d})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
-  if(m?.type==='SYNC_PROGRESS'){
-    (async()=>{
-      const s=await state(); const selected=validRealmNumber(s.selectedRealm); const incoming=validRealmNumber(currentCaptureSyncSession()?.realm);
-      if(incoming==null || selected!==incoming){ send({ok:false,error:'Sync progress rejected: realm selection changed.'}); return; }
-      const step=Number(m.step)||0,total=Number(m.total)||0,name=String(m.name||'').trim();
-      const displayRealm=realmDisplayNumber(incoming)||'Realm';
-      let status=`${displayRealm} Sync: ${step}/${total} ${name}`;
-      if(m.status==='starting') status=`${displayRealm} Sync: ${step}/${total} ${name}…`;
-      else if(m.status==='captured') status=`${displayRealm} Sync: ${step}/${total} ${name} ✓`;
-      else if(m.status==='timeout') status=`${displayRealm} Sync: ${step}/${total} ${name} timed out`;
-      else if(m.status==='error') status=`${displayRealm} Sync: ${step}/${total} ${name} error`;
-      else if(m.status==='complete') status=`${displayRealm} Sync: game pages complete · finishing…`;
-      await setRealmLoadStatus(incoming,status,m.error||null);
-      send({ok:true});
-    })().catch(e=>send({ok:false,error:e?.message||String(e)}));
-    return true;
-  }
   if(m?.type==='REPLAY_EVENT'){
     const r=validRealmNumber(m.realm);
     replayEvent(String(m.eventType||'page-event'),{realm:r,url:m.url||null,method:m.method||null,status:Number.isFinite(Number(m.status))?Number(m.status):null,transport:m.transport||null,detail:{key:m.key||null,storage:m.storage||null,reason:m.reason||null,captureRealm:validRealmNumber(m.captureRealm)}});
@@ -8330,11 +7657,10 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     return true;
   }
   if(m?.type==='PRODUCTION_EVENTS'){saveProductionEvents(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
-  if(m?.type==='CAPTURE_PRODUCTION_RATE_SNAPSHOT'){saveProductionRateSnapshot(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_TEST_DAILY_SUMMARY'){fireDailySummary().then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_TEST_NOTIFICATION'){scmNotify(`test-${Date.now()}`,'Sim Companies Manager','Test notification — if you can read this, alerts work on this phone.').then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_NOTIFY_SETTINGS'){(async()=>{try{if(m.set&&typeof m.set==='object'){const cur=await notifySettings();await rawStorageSet({[NOTIFY_SETTINGS_KEY]:{...cur,...m.set}});await scheduleDailySummary();for(const n of [0,1]){const st=(await chrome.storage.local.get({[`scmRealmStore:${n}`]:null}))[`scmRealmStore:${n}`];if(st)await scheduleProductionFinishAlarms(n,st.buildings);}}const prodfin=(await chrome.alarms.getAll()).filter(x=>String(x.name).startsWith('scm-prodfin:'));const nameStores={};for(const a of prodfin){const r=String(a.name).split(':')[1];if(!(r in nameStores))nameStores[r]=(await chrome.storage.local.get({[`scmRealmStore:${r}`]:null}))[`scmRealmStore:${r}`]||{};}
-// Building names for the Alerts "Next" line (the dashboard rendered it before its own state had loaded).
+// Building names for the Alerts "Next" line, so the dashboard can show it before its own state has loaded.
 const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(Array.isArray(nameStores[r]?.buildings)?nameStores[r].buildings:[]).find(y=>String(y?.id)===bid);return {name:x.name,when:x.scheduledTime,buildingName:b?.name?String(b.name):null};});const daily=await chrome.alarms.get('scm-daily-summary');send({ok:true,settings:await notifySettings(),available:!!chrome.notifications?.create,alarms,dailyAt:daily?.scheduledTime||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;}
   if(m?.type==='FETCH_EXCHANGE_ORDER_BOOK'){fetchExchangeOrderBookForRealm(m.realm,m.resourceId).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='FETCH_BUILDING_HISTORY'){fetchBuildingHistoryForRealm(m.realm,m.buildingId).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
@@ -8350,8 +7676,6 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
       }catch(e){send({ok:false,error:e?.message||String(e)});}
     })(); return true;
   }
-  if(m?.type==='SAVE_FROZEN_NETWORK_PLAN'){saveFrozenNetworkPlanSnapshot(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
-  if(m?.type==='ENSURE_FROZEN_PRODUCTION_RATES'){ensureFrozenProductionRatesForRealm(m.realm).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='API_DATA'){
     (async()=>{
       const url=String(m.url||'');
@@ -8384,7 +7708,7 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
           // captured from the newly requested realm may activate it. A late
           // response from the old request can contain a valid old realm and
           // otherwise win the transition race.
-          await activateRealmByRealmFast(confirmedRealm,m.data).catch(()=>{});
+          await activateRealmByRealmFast(confirmedRealm).catch(()=>{});
         }
       }
       send({ok:true});
@@ -8404,7 +7728,6 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
     send({ok:true});
   })().catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='GET_RESOURCE_IMAGE'){(async()=>{const r=await fetchAndCacheResourceImage(Number(m.resource),{forceValidate:false}); if(r.ok){send({ok:true,dataUrl:r.dataUrl,cached:r.cached,stale:r.stale||false});return;} const tab=await simTab(); if(!tab?.id){send({ok:false,error:r.error||'Sim Companies tab is not open.'});return;} try{await chrome.tabs.sendMessage(tab.id,{type:'PAGE_RESOURCE_IMAGE',resource:Number(m.resource)}); send({ok:true,queued:true,error:r.error||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true}
-  if(m?.type==='SYNC_RESOURCE_IMAGES'){syncAllResourceImages({forceValidate:Boolean(m.forceValidate)}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='MARKET_CACHE'){saveMarketCache(m.resource,m.data,m.receivedAt,m.realm).then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='SYNC_NOW'){syncNow(m.realm,{fullWalk:true}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='SET_VIEW_REALM'){

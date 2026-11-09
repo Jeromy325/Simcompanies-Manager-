@@ -1,4 +1,4 @@
-// v2.5.433 page bridge. content.js hands page-hook.js a private MessageChannel port (with a crypto-random
+// Page bridge. content.js hands page-hook.js a private MessageChannel port (with a crypto-random
 // per-world nonce echoed in the ack). Once the matching PORT_ACK arrives, page-hook traffic is accepted
 // only over that port, so other page scripts can no longer read it or inject window-path events. This is
 // NOT authentication of earlier traffic: before the ack, window.postMessage (targetOrigin=location.origin)
@@ -8,7 +8,7 @@
 // extension context is valid, which lets a reloaded extension's new world take over a dead port.
 if(!globalThis.__scmPageBridge)globalThis.__scmPageBridge=(()=>{
   const SRC='SIMCO_MANAGER',GRACE_MS=1500;
-  const KNOWN=Object.assign(Object.create(null),Object.fromEntries(['API_DATA','API_RESULT','API_SEEN','BRIDGE_QUEUE_FLUSHED','DOM_RUNTIME_DIAGNOSTIC_RESULT','GAME_CONFIG','GAME_LOCAL_STORAGE_SNAPSHOT','GAME_STATE','HOOK_READY','INITIALIZED_ACK','JAVASCRIPT_DIAGNOSTIC','MARKET_CACHE','NETWORK_CAPTURE_CONTROL_ACK','NETWORK_CAPTURE_EVENT','PAGE_REALM','REALM_SWITCH','REALM_SWITCH_CONFIRMED','REDUX_STATE_DIAGNOSTIC_RESULT','REPLAY_EVENT','RESOURCE_CATALOG','RESOURCE_IMAGE_RESULT','STOCK_MUTATION_COMPLETE','SYNC_REALM_SET','SYNC_REALM_CLEARED','PORT_ACK','PORT_PING'].map(t=>[t,true])));const MAX_KEYS=64;
+  const KNOWN=Object.assign(Object.create(null),Object.fromEntries(['API_DATA','API_RESULT','API_SEEN','BRIDGE_QUEUE_FLUSHED','DOM_RUNTIME_DIAGNOSTIC_RESULT','GAME_CONFIG','GAME_LOCAL_STORAGE_SNAPSHOT','GAME_STATE','HOOK_READY','INITIALIZED_ACK','JAVASCRIPT_DIAGNOSTIC','MARKET_CACHE','NETWORK_CAPTURE_CONTROL_ACK','NETWORK_CAPTURE_EVENT','PAGE_REALM','REALM_SWITCH','REALM_SWITCH_CONFIRMED','REDUX_STATE_DIAGNOSTIC_RESULT','REPLAY_EVENT','RESOURCE_CATALOG','RESOURCE_IMAGE_RESULT','STOCK_MUTATION_COMPLETE','PORT_ACK','PORT_PING'].map(t=>[t,true])));const MAX_KEYS=64;
   const nonce=(()=>{try{const a=new Uint8Array(16);crypto.getRandomValues(a);return Array.from(a,b=>b.toString(16).padStart(2,'0')).join('');}catch{return `${Date.now()}-${Math.random()}`.replace('.','');}})();
   const origin=(()=>{try{return location.origin&&location.origin!=='null'?location.origin:'*';}catch{return '*';}})();
   const STR_KEYS=['id','requestId','captureId','url','method','reason','realmResolvedBy','eventType'];
@@ -39,16 +39,17 @@ if(!globalThis.__scmPageBridge)globalThis.__scmPageBridge=(()=>{
     dispatch(d);
   });
   const send=m=>{const msg={...m,source:SRC};if(port){try{port.postMessage(msg);return;}catch{}}window.postMessage(msg,origin);};
-  // v2.5.434 bfcache (Chrome 123+ may restore pages with open MessageChannels closed): after a persisted
+  // bfcache (Chrome 123+ may restore pages with open MessageChannels closed): after a persisted
   // pageshow, drop to the window path and hand over a fresh port. page-hook only replaces its port if
   // the old one stops answering, so this never lets a page script take over. The old port keeps being
   // accepted (if it is still alive) until the new port's PORT_ACK arrives, so no traffic is dropped.
   try{window.addEventListener('pageshow',e=>{if(!e.persisted)return;if(port)oldPort=port;port=null;handoffs=0;handoff();});}catch{}
-  return {listen:h=>{handlers.push(h);},send,handoff,isPortReady:()=>!!port};
+  return {listen:h=>{handlers.push(h);},send,handoff};
 })();
-// v2.5.433 teardown when the extension context is invalidated (extension reloaded/updated): orphaned
+// Teardown when the extension context is invalidated (extension reloaded/updated): orphaned
 // content scripts otherwise keep their intervals and subtree observers running forever. This only
 // records intervals/observers created in this isolated world; nothing changes while the context is valid.
+// The global marks the patches as installed: background can inject content.js again into the same world.
 if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
   const intervals=new Set(),observers=new Set();let dead=false;
   try{const si=globalThis.setInterval,ci=globalThis.clearInterval;
@@ -61,8 +62,8 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
     const kill=()=>{if(dead||alive())return;dead=true;for(const id of intervals){try{ci(id);}catch{}}intervals.clear();for(const o of Array.from(observers)){try{o.disconnect();}catch{}}observers.clear();};
     const watch=si(()=>{kill();if(dead)ci(watch);},10000);
     document.addEventListener('visibilitychange',kill);
-    return {check:kill,isDead:()=>dead,counts:()=>({intervals:intervals.size,observers:observers.size})};
-  }catch{return {check(){},isDead:()=>false};}
+    return true;
+  }catch{return true;}
 })();
 (() => {
   if (window.__SCM_BRIDGE__) return;
@@ -79,7 +80,7 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
   // game-page fetch/XHR events and instrumented extension-background events.
   let scmCaptureOverlayTimer = null;
   let scmCaptureOverlay = null;
-    let scmCaptureOverlayPollInFlight = false;
+  let scmCaptureOverlayPollInFlight = false;
   const SCM_CAPTURE_OVERLAY_COLLAPSED_KEY = 'scmMobileCaptureOverlayCollapsedV1';
   const readCaptureOverlayCollapsed = () => { try { const saved = localStorage.getItem(SCM_CAPTURE_OVERLAY_COLLAPSED_KEY); return saved === null ? true : saved === '1'; } catch { return true; } };
   const saveCaptureOverlayCollapsed = (collapsed) => { try { localStorage.setItem(SCM_CAPTURE_OVERLAY_COLLAPSED_KEY, collapsed ? '1' : '0'); } catch {} };
@@ -163,7 +164,7 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
     detail.textContent = 'Starting…';
     detail.style.cssText = 'margin-top:1px;font-size:11px;font-weight:400;color:#c9c6c5;';
     card.append(header,count,detail);
-    // v2.5.433: self-contained floating panel -> isolated in a shadow root so game CSS cannot restyle it
+    // Self-contained floating panel -> isolated in a shadow root so game CSS cannot restyle it
     // and page scripts cannot query its contents via document selectors. Falls back to a plain append.
     const host = document.createElement('div');
     host.id = 'scm-mobile-network-capture-indicator';
@@ -233,7 +234,7 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
       updateCaptureOverlay(status);
     } catch {} finally { scmCaptureOverlayPollInFlight = false; }
   };
-  const startCaptureOverlay = (captureId='') => {
+  const startCaptureOverlay = () => {
     ensureCaptureOverlay();
     applyCaptureOverlayCollapsedState();
     pollCaptureOverlayStatus();
@@ -247,7 +248,7 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
       const result = await chrome.runtime.sendMessage({type:'SCM_NET3_STATUS'});
       const status = result?.status || {};
       if (status.mode === 'mobile-page' && status.captureId && ['recording','limit-reached'].includes(status.status)) {
-        startCaptureOverlay(String(status.captureId));
+        startCaptureOverlay();
       }
     } catch {}
   };
@@ -259,91 +260,21 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
   const pendingDomDiagnostics = new Map();
   let networkResumeRequestedCaptureId = '';
 
-  // Independent isolated-world DOM/runtime inspection. This does not depend on
-  // Redux, React globals, page-hook injection, or private application state.
-  const collectDomRuntimeDiagnostic = (requestId) => {
-    const started = performance.now();
-    const sensitive = /token|auth|cookie|password|secret|credential|email|phone|address|session/i;
-    const relevant = /profit|calculator|building|production|resource|warehouse|quality|level|price|cost|cycle|hour|recipe|efficien|output|input|labor|labour/i;
-    const nodes = [], roots = [], reactMarkers = [], embeddedData = [];
-    const scripts = [], seen = new Set();
-    let scanned = 0, truncated = false;
-    const short = (v, n=180) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0,n);
-    const safeAttrs = (el) => {
-      const out = {};
-      try {
-        for (const attr of Array.from(el.attributes || [])) {
-          const name = String(attr.name || '').toLowerCase();
-          if (/^(id|role|aria-label|aria-labelledby|data-testid|data-test|data-resource-id|data-building-id|data-product-id|data-quality|data-level|name|type)$/.test(name) && !sensitive.test(name)) out[name] = short(attr.value,100);
-        }
-      } catch {}
-      return out;
-    };
-    const nodeLabel = (el) => {
-      let text = '';
-      try { text = short(el.innerText || el.textContent || '', 220); } catch {}
-      const attrs = safeAttrs(el);
-      const searchable = `${text} ${Object.entries(attrs).map(([k,v])=>`${k} ${v}`).join(' ')}`;
-      if (!relevant.test(searchable) || sensitive.test(searchable)) return;
-      const signature = `${String(el.tagName||'').toLowerCase()}|${attrs.id||''}|${attrs['data-testid']||''}|${text}`;
-      if (seen.has(signature)) return;
-      seen.add(signature);
-      nodes.push({tagName:String(el.tagName||'').toLowerCase(),attributes:attrs,text:text||null});
-    };
-    let totalElementCount = null;
-    try { totalElementCount = document.getElementsByTagName('*').length; } catch {}
-    const selectors = ['#root','#app','#__next','#game','main','[role="main"]','[data-reactroot]','[data-testid]','[data-test]','[class*="building"]','[class*="production"]','[class*="profit"]','[class*="calculator"]','button','input','label','script[type="application/json"]','script#__NEXT_DATA__'];
-    for (const selector of selectors) {
-      if (performance.now() - started > 900) { truncated = true; break; }
-      let found=[];
-      try { found=Array.from(document.querySelectorAll(selector) || []); } catch {}
-      for (const el of found) {
-        if (scanned >= 1200 || performance.now() - started > 900) { truncated = true; break; }
-        scanned++;
-        const id=short(el.id||'',100), tag=String(el.tagName||'').toLowerCase();
-        if ((/root|app|game|landscape|main/i.test(id) || selector==='main' || selector==='#root' || selector==='#app') && roots.length<40) roots.push({id,tagName:tag,selector});
-        try {
-          const keys=Object.keys(el);
-          const marker=keys.find(k=>k.startsWith('__reactFiber$')||k.startsWith('__reactProps$')||k.startsWith('__reactContainer$')||k==='_reactRootContainer');
-          if (marker && reactMarkers.length<80) reactMarkers.push({tagName:tag,id,marker:marker.split('$')[0]});
-        } catch {}
-        if (tag==='script') {
-          const type=String(el.type||'').toLowerCase(), src=String(el.src||'');
-          if (src && scripts.length<80) scripts.push({src:src.split('?')[0].slice(0,300),type:type||null});
-          if ((type==='application/json'||el.id==='__NEXT_DATA__') && embeddedData.length<30) {
-            let keys=[]; let parseStatus='not-json';
-            try { const parsed=JSON.parse(String(el.textContent||'')); keys=parsed&&typeof parsed==='object'?Object.keys(parsed).filter(k=>!sensitive.test(k)).slice(0,60):[]; parseStatus='parsed'; } catch { parseStatus='parse-failed'; }
-            embeddedData.push({id:short(el.id||'',100),type:type||null,characterCount:String(el.textContent||'').length,parseStatus,topLevelKeys:keys});
-          }
-        }
-        nodeLabel(el);
-      }
-      if (scanned >= 1200) { truncated = true; break; }
-    }
-    let resources=[];
-    try { resources=performance.getEntriesByType('resource').filter(e=>e.initiatorType==='script'||/\.m?js(?:[?#]|$)/i.test(e.name)).slice(-80).map(e=>({url:String(e.name||'').split('?')[0].slice(0,300),initiatorType:String(e.initiatorType||''),durationMs:Math.round(Number(e.duration)||0)})); } catch {}
-    let bodyTextLength=null;
-    try { bodyTextLength=String(document.body?.innerText||'').length; } catch {}
-    return {
-      diagnostic:'simcompanies-dom-runtime-inspection', schemaVersion:1, requestId:requestId||null, capturedAt:new Date().toISOString(),
-      page:{url:String(location.href||'').split('?')[0],pathname:String(location.pathname||''),readyState:String(document.readyState||''),title:short(document.title||'',160)},
-      dom:{totalElementCount,scannedElementCount:scanned,scanCoverageRatio:totalElementCount>0?Math.min(1,scanned/totalElementCount):null,scanCoveragePercent:totalElementCount>0?Math.round(Math.min(1,scanned/totalElementCount)*1000)/10:null,scanCompleteness:truncated?'partial':'bounded-scan',bodyTextCharacterCount:bodyTextLength,roots:roots.slice(0,40),reactMarkerCount:reactMarkers.length,reactMarkers,embeddedJsonScripts:embeddedData,scriptElements:scripts.slice(0,80),relevantNodes:nodes.slice(0,100)},
-      runtime:{isolatedWorld:true,windowReactGlobal:typeof window.React!=='undefined',windowReactDomGlobal:typeof window.ReactDOM!=='undefined',scriptResources:resources},
-      limits:{maxScannedElements:1200,maxRelevantNodes:100,maxElapsedMs:900,elapsedMs:Math.round(performance.now()-started),truncated,partial:truncated||(totalElementCount>0&&scanned/totalElementCount<0.25),coverageWarning:totalElementCount>0&&scanned/totalElementCount<0.25?'DOM inspection covered less than 25% of reported elements; absence of a finding is not evidence that it is absent.':null,note:'Read-only bounded DOM/runtime inspection. Text snippets are keyword-filtered and sensitive-looking content is excluded. This is not a full DOM dump or raw application-state export.'}
-    };
-  };
   // Yandex/mobile builds do not always honor MV3 MAIN-world content scripts.
   // Inject the page hook as a real page script as a fallback, and independently
   // read the game's localStorage snapshot for warehouse/building state.
+  const appendPageHookScript = () => {
+    const script = document.createElement('script');
+    script.src = chrome.runtime.getURL('page-hook.js');
+    script.async = false;
+    script.onload = () => script.remove();
+    script.onerror = () => script.remove();
+    (document.head || document.documentElement).appendChild(script);
+  };
   try {
     const inject = () => {
       if (document.documentElement?.dataset?.scmHookInjected === '1') return;
-      const script = document.createElement('script');
-      script.src = chrome.runtime.getURL('page-hook.js');
-      script.async = false;
-      script.onload = () => script.remove();
-      script.onerror = () => script.remove();
-      (document.head || document.documentElement).appendChild(script);
+      appendPageHookScript();
       if (document.documentElement) document.documentElement.dataset.scmHookInjected = '1';
     };
     if (document.documentElement) inject();
@@ -515,14 +446,12 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
   scheduleWarehouseCostDetailCapture();
   setTimeout(captureDirectGameState, 1000);
   setTimeout(captureDirectGameState, 3000);
-  // page-hook is the primary game-state source. The isolated fallback only
-  // polls when the MAIN-world hook is unavailable, preventing duplicate
-  // 5-second GAME_STATE writes and realm-follow races.
-  // Primary capture is page-hook change-driven. Keep a 1-second fallback when
-  // the MAIN-world hook is unavailable; raw storage changes are parsed only once.
+  // page-hook is the primary, change-driven game-state source. This 1-second fallback polls only while the
+  // MAIN-world hook is unavailable (no duplicate GAME_STATE writes or realm-follow races); a raw storage value
+  // is parsed only when it changed.
   setInterval(()=>{if(!hookReady&&!document.hidden)captureDirectGameState();}, 1000);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!hookReady){try{captureDirectGameState();}catch{}}});
-  // v2.5.327 mobile: background tabs do no polling work; a fresh capture runs when the tab is shown again.
+  // Mobile: background tabs do no polling work; a fresh capture runs when the tab is shown again.
   setInterval(()=>{if(!document.hidden)captureProductionEvents();}, 15000);
   setInterval(()=>{if(!document.hidden)captureWarehouseCostDetail();}, 10000);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden){try{captureWarehouseCostDetail();}catch{}}});
@@ -531,12 +460,7 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
   const forceInjectPageHook = () => {
     try {
       if (hookReady) return;
-      const script = document.createElement('script');
-      script.src = chrome.runtime.getURL('page-hook.js');
-      script.async = false;
-      script.onload = () => script.remove();
-      script.onerror = () => script.remove();
-      (document.head || document.documentElement).appendChild(script);
+      appendPageHookScript();
     } catch {}
   };
   const waitForHookReady = (timeoutMs=3000) => new Promise(resolve => {
@@ -548,20 +472,8 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
       if(hookReady || Date.now()>=deadline){clearInterval(timer);resolve(!!hookReady);}
     },150);
   });
-  const pageApiGetLocal = async (path, timeoutMs=8000) => {
-    await waitForHookReady(2500);
-    return new Promise(resolve => {
-    const id = `${Date.now()}-${++seq}`;
-    let timer = null;
-    const finish = (value) => { if (timer) clearTimeout(timer); pending.delete(id); resolve(value||{ok:false,status:0,error:'No response from Sim Companies page.'}); };
-    pending.set(id, { resolve: finish });
-    try { globalThis.__scmPageBridge.send({ source:'SIMCO_MANAGER', type:'API_GET', id, path:String(path||'') }); }
-    catch(e){ finish({ok:false,status:0,error:e?.message||String(e)}); return; }
-    timer=setTimeout(()=>finish({ok:false,status:0,error:'Sim Companies page API request timed out.'}),Math.max(2000,Number(timeoutMs)||8000));
-  });
-  };
-let hookReady = false;
-  // v2.5.326: tell page-hook.js we are listening so it releases its queued network events.
+  let hookReady = false;
+  // Tell page-hook.js we are listening so it releases its queued network events.
   let bridgeInitializedAck = false;
   const sendBridgeInitialized = () => { try { globalThis.__scmPageBridge.handoff(); globalThis.__scmPageBridge.send({ source:'SIMCO_MANAGER', type:'INITIALIZED' }); } catch {} };
   let pingTimer = null;
@@ -586,7 +498,6 @@ let hookReady = false;
       // The page hook may have started after our first INITIALIZED was posted; repeat it (idempotent).
       if (!bridgeInitializedAck) sendBridgeInitialized();
       if (pingTimer) { clearInterval(pingTimer); pingTimer=null; }
-      safeRuntimeSend({ type: 'PAGE_READY' });
       // If a diagnostic capture was active before a full page reload, resume it
       // under the same capture ID. A page reload destroys page-hook memory, not the
       // extension's durable capture record. Never resume a stopped/starting session.
@@ -600,7 +511,7 @@ let hookReady = false;
         chrome.runtime.sendMessage({type:'SCM_NET3_STATUS'}).then(result => {
           const c=result?.status;
           if(c?.mode!=='mobile-page'||c?.status!=='recording'||!c?.captureId)return;
-          startCaptureOverlay(String(c.captureId));
+          startCaptureOverlay();
           globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:true,resume:true,captureId:String(c.captureId),requestId:`mobile-resume-${Date.now()}`});
         }).catch(()=>{});
       } catch {}
@@ -690,12 +601,12 @@ let hookReady = false;
       const p = pending.get(d.id);
       if (!p) return;
       pending.delete(d.id);
-      d.ok ? p.resolve(d) : p.resolve(d);
+      p.resolve(d);
     }
   });
 
   let lastWarehouseCostPath = location.pathname;
-  // v2.5.433 mobile CPU: coalesce the subtree callback to one path check per idle slot/frame.
+  // Mobile CPU: coalesce the subtree callback to one path check per idle slot/frame.
   let warehouseCostPathCheckPending = false;
   const checkWarehouseCostPath = () => {
     warehouseCostPathCheckPending = false;
@@ -712,191 +623,6 @@ let hookReady = false;
   }).observe(document.documentElement || document, {subtree:true, childList:true});
 
   startPing();
-
-
-  const clickSyncTarget = async (options={}) => {
-    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-    const visible = el => {
-      if (!el) return false;
-      const r = el.getBoundingClientRect?.();
-      if (r && (r.width === 0 || r.height === 0)) return false;
-      const cs = getComputedStyle(el);
-      return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.pointerEvents !== 'none';
-    };
-    const norm = text => String(text || '').replace(/\s+/g,' ').trim().toLowerCase();
-    const labels = Array.isArray(options.labels)?options.labels:[];
-    const hrefHints = Array.isArray(options.hrefHints)?options.hrefHints:[];
-    const wanted=labels.map(norm), hrefWanted=hrefHints.map(norm);
-    const findTarget = () => {
-      if(hrefWanted.length){
-        const routeAnchor=[...document.querySelectorAll('a[href]')].find(a=>{
-          const href=norm(a.getAttribute('href'));
-          return visible(a)&&hrefWanted.some(h=>h&&href.includes(h));
-        });
-        if(routeAnchor)return routeAnchor;
-      }
-      const nodes=[...document.querySelectorAll('a,button,[role="button"],li,[data-testid],[class*="tab"],[class*="menu"],[class*="nav"]')];
-      let best=null,bestScore=-1;
-      for(const el of nodes){
-        if(!visible(el))continue;
-        const text=norm(el.textContent),aria=norm(el.getAttribute('aria-label')),title=norm(el.getAttribute('title')),href=norm(el.getAttribute('href'));
-        const tag=String(el.tagName||'').toLowerCase();
-        for(const w of wanted){
-          let score=-1;
-          if(hrefWanted.some(h=>h&&href.includes(h)))score=150;
-          else if(text===w||aria===w||title===w)score=(tag==='a'||tag==='button'||el.getAttribute('role')==='button')?125:90;
-          else if(text.includes(w)||aria.includes(w)||title.includes(w))score=(tag==='a'||tag==='button'||el.getAttribute('role')==='button')?85:55;
-          else if(href&&href.includes(w))score=75;
-          if(score>bestScore){best=el;bestScore=score;}
-        }
-      }
-      return best;
-    };
-    let el=findTarget();
-    if(!el && String(options.name||'')==='Accounting'){
-      const menu=[...document.querySelectorAll('a,button,[role="button"],li,[data-testid],[class*="tab"],[class*="menu"],[class*="nav"]')]
-        .find(x=>visible(x)&&['headquarters','hq'].includes(norm(x.textContent)));
-      if(menu){try{menu.click();await sleep(500);}catch{} el=findTarget();}
-    }
-    if(!el)return {ok:false,error:`${String(options.name||'Game page')} link not found.`};
-    const anchor=(hrefWanted.length?(el.matches?.('a')?el:el.closest?.('a')):null)||el;
-    const beforeUrl=String(location.href);
-    const element={tag:anchor.tagName||null,text:String(anchor.textContent||'').replace(/\s+/g,' ').trim().slice(0,200),href:anchor.getAttribute?.('href')||null,aria:anchor.getAttribute?.('aria-label')||null,title:anchor.getAttribute?.('title')||null,role:anchor.getAttribute?.('role')||null,className:String(anchor.className||'').slice(0,300)};
-    try{anchor.click();}catch(e){return {ok:false,error:e?.message||String(e),element,beforeUrl};}
-    // Return immediately. The background worker owns the API wait and can
-    // survive a route reload; this content script does not.
-    return {ok:true,element,beforeUrl,urlAfterClick:String(location.href)};
-  };
-
-
-  const runRealmSyncPageWalk = async (options={}) => {
-    // Normal Sync is UI-driven: visit each required Sim Companies section one at a time
-    // and wait for that section's own API response before advancing. This uses the
-    // same game navigation the player uses instead of a separate direct-API sync path.
-    const targets = [
-      {name:'Warehouse', labels:['Warehouse','Headquarters','HQ'], waitFor:['warehouse']},
-      {name:'Accounting', labels:['Accounting'], hrefHints:['/headquarters/accounting/'], waitFor:['accounting']},
-      {name:'Contracts', labels:['Contracts','Contract'], waitFor:['contracts']},
-    ];
-    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-    const syncStartedAt = Number(options.syncStartedAt)||Date.now();
-    const endpointWaitMs = Math.max(5000, Number(options.endpointWaitMs)||15000);
-    const visible = el => {
-      if (!el) return false;
-      const r = el.getBoundingClientRect?.();
-      if (r && (r.width === 0 || r.height === 0)) return false;
-      const cs = getComputedStyle(el);
-      return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.pointerEvents !== 'none';
-    };
-    const norm = text => String(text || '').replace(/\s+/g,' ').trim().toLowerCase();
-    const findTarget = (labels, hrefHints=[]) => {
-      const wanted = labels.map(norm);
-      const hrefWanted = hrefHints.map(norm);
-      const nodes = [...document.querySelectorAll('a,button,[role="button"],li,[data-testid],[class*="tab"],[class*="menu"],[class*="nav"]')];
-      // Prefer a real anchor with the known route. This avoids clicking a
-      // surrounding React/container element whose text happens to say
-      // "Accounting" but which does not perform navigation.
-      if (hrefWanted.length) {
-        const routeAnchor = [...document.querySelectorAll('a[href]')].find(a => {
-          const href = norm(a.getAttribute('href'));
-          return hrefWanted.some(h => h && href.includes(h));
-        });
-        if (routeAnchor && visible(routeAnchor)) return routeAnchor;
-      }
-      let best = null, bestScore = -1;
-      for (const el of nodes) {
-        if (!visible(el)) continue;
-        const text = norm(el.textContent);
-        const aria = norm(el.getAttribute('aria-label'));
-        const title = norm(el.getAttribute('title'));
-        const href = norm(el.getAttribute('href'));
-        const tag = String(el.tagName||'').toLowerCase();
-        for (const w of wanted) {
-          let score = -1;
-          if (hrefWanted.some(h => h && href.includes(h))) score = 150;
-          else if (text === w || aria === w || title === w) score = (tag==='a'||tag==='button'||el.getAttribute('role')==='button') ? 125 : 90;
-          else if (text.includes(w) || aria.includes(w) || title.includes(w)) score = (tag==='a'||tag==='button'||el.getAttribute('role')==='button') ? 85 : 55;
-          else if (href && href.includes(w)) score = 75;
-          if (score > bestScore) { best = el; bestScore = score; }
-        }
-      }
-      return best;
-    };
-    const clicked = [];
-    const sendProgress = (payload) => {
-      try { chrome.runtime.sendMessage({type:'SYNC_PROGRESS', ...payload}).catch(()=>{}); } catch {}
-    };
-    for (let targetIndex=0; targetIndex<targets.length; targetIndex++) {
-      const target = targets[targetIndex];
-      sendProgress({step:targetIndex+1,total:targets.length,name:target.name,status:'starting'});
-      let el = findTarget(target.labels, target.hrefHints || []);
-      if (!el && target.name==='Accounting') {
-        // On mobile the Headquarters navigation can be collapsed. Open the
-        // visible Headquarters/HQ control once, allow React to render its
-        // submenu, then look for the actual Accounting link again.
-        const menu = findTarget(['Headquarters','HQ'], []);
-        if (menu) {
-          try { menu.click(); await sleep(500); } catch {}
-          el = findTarget(target.labels, target.hrefHints || []);
-        }
-      }
-      if (!el) { clicked.push({name:target.name,ok:false,reason:'not-found'}); continue; }
-      try {
-        // Do not scroll the game page just to click a target. On mobile this
-        // causes the visible page to jump and looks like a navigation glitch.
-        // The click works without forcing the user's viewport to move.
-        await sleep(150);
-        const hrefHint = (target.hrefHints || [])[0];
-        const anchor = hrefHint
-          ? (el.matches?.('a') ? el : el.closest?.('a')) || [...document.querySelectorAll('a[href]')].find(a => norm(a.getAttribute('href')).includes(norm(hrefHint)))
-          : null;
-        const beforeUrl=String(location.href);
-        let endpointKeysBefore=[];
-        if(target.name==='Accounting'){
-          try{const r=await chrome.runtime.sendMessage({type:'GET_ENDPOINT_KEYS'}); endpointKeysBefore=Array.isArray(r?.keys)?r.keys:[];}catch{}
-        }
-        const targetEl=anchor||el;
-        const clickedElement={tag:targetEl.tagName||null,text:String(targetEl.textContent||'').replace(/\s+/g,' ').trim().slice(0,200),href:targetEl.getAttribute?.('href')||null,aria:targetEl.getAttribute?.('aria-label')||null,title:targetEl.getAttribute?.('title')||null,role:targetEl.getAttribute?.('role')||null,className:String(targetEl.className||'').slice(0,300)};
-        targetEl.click();
-        clicked.push({name:target.name,ok:true,status:'waiting-for-api'});
-                if(target.name==='Accounting'){
-          await sleep(1000); const url1=String(location.href);
-          await sleep(2000); const url3=String(location.href);
-        }
-
-        let waitResult=null;
-        try {
-          waitResult=await chrome.runtime.sendMessage({
-            type:'WAIT_FOR_ENDPOINT_CAPTURE',
-            target:target.waitFor[0],
-            since:syncStartedAt,
-            timeoutMs:endpointWaitMs
-          });
-        } catch (e) {
-          waitResult={ok:false,error:e?.message||String(e)};
-        }
-        const row=clicked[clicked.length-1];
-        if (waitResult?.ok) {
-          row.status='api-captured';
-          row.endpoint=waitResult.endpoint||null;
-          sendProgress({step:targetIndex+1,total:targets.length,name:target.name,status:'captured',endpoint:waitResult.endpoint||null});
-        } else {
-          row.status='api-timeout';
-          row.reason=waitResult?.error||`No ${target.name} API response was captured within ${Math.round(endpointWaitMs/1000)} seconds.`;
-          sendProgress({step:targetIndex+1,total:targets.length,name:target.name,status:'timeout',error:row.reason});
-        }
-		          try { await chrome.runtime.sendMessage({type:'PAGE_GAME_STATE'}); } catch {}
-      } catch (e) {
-        const reason=e?.message||String(e);
-        clicked.push({name:target.name,ok:false,reason});
-        sendProgress({step:targetIndex+1,total:targets.length,name:target.name,status:'error',error:reason});
-      }
-    }
-    sendProgress({step:targets.length,total:targets.length,name:'Complete',status:'complete'});
-    return clicked;
-  };
-
-  const escToast=v=>String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if(message?.type==='RUN_DOM_RUNTIME_DIAGNOSTIC'){
@@ -934,28 +660,15 @@ let hookReady = false;
       (async()=>{
         const ready=await waitForHookReady(3500);
         if(!ready)throw new Error('Game-page recorder hook is not ready. Reload the Sim Companies tab and try again.');
-        if (message.enabled) startCaptureOverlay(String(message.captureId||''));
+        if (message.enabled) startCaptureOverlay();
         else stopCaptureOverlay();
         globalThis.__scmPageBridge.send({source:'SIMCO_MANAGER',type:'SET_NETWORK_CAPTURE',enabled:Boolean(message.enabled),captureId:String(message.captureId||''),requestId});
       })().catch(error=>{if(message.enabled)stopCaptureOverlay();finish({ok:false,error:error?.message||String(error)});});
       return true;
     }
-    if(message?.type==='BUILDING_ALARM_FIRED'){
-      try{
-        const title=String(message?.buildingName||'Building ready');
-        const body=String(message?.resourceName||'A building job is ready to resolve.');
-        const old=document.getElementById('scm-building-alarm-toast');old?.remove();
-        const toastHost=document.createElement('div');toastHost.id='scm-building-alarm-toast';toastHost.setAttribute('data-scm-owned','1');toastHost.style.cssText='all:initial;position:static;';let toastRoot=null;try{toastRoot=toastHost.attachShadow({mode:'closed'});}catch{}const toast=document.createElement('div');if(!toastRoot)toast.id='scm-building-alarm-toast';toast.style.cssText='position:fixed;z-index:2147483647;left:50%;top:18%;transform:translateX(-50%);max-width:min(330px,calc(100vw - 24px));padding:10px 12px;border:1px solid #d76d5d;border-radius:8px;background:rgba(14,13,12,.97);color:#f3f2f1;box-shadow:0 10px 28px rgba(0,0,0,.55);font:11px/1.25 system-ui;';toast.innerHTML=`<strong style="display:block;font-size:12px">⏰ ${escToast(title)}</strong><span style="display:block;color:#bfbcba;margin-top:3px">${escToast(body)}</span>`;if(toastRoot){toastRoot.appendChild(toast);document.documentElement.appendChild(toastHost);}else document.documentElement.appendChild(toast);setTimeout(()=>{toast.remove();toastHost.remove();},7000);
-      }catch{} return false;
-    }
     // REFRESH_GAME_OVERLAY is handled inside the overlay IIFE below, where load() is in scope.
     if (message?.type === 'CAPTURE_PRODUCTION_EVENTS') {
       captureProductionEvents();
-      sendResponse({ok:true});
-      return false;
-    }
-    if (message?.type === 'PAGE_MARKET_CACHE') {
-      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'MARKET_CACHE_GET' });
       sendResponse({ok:true});
       return false;
     }
@@ -976,21 +689,8 @@ let hookReady = false;
       sendResponse({ok:true, ready:!!hookReady, realm:directKnownRealm===0||directKnownRealm===1?directKnownRealm:null});
       return false;
     }
-    if (message?.type === 'CLICK_SYNC_TARGET') {
-      clickSyncTarget(message || {}).then(sendResponse).catch(e => sendResponse({ok:false,error:e?.message||String(e)}));
-      return true;
-    }
-    if (message?.type === 'RUN_REALM_SYNC') {
-      runRealmSyncPageWalk(message || {}).then(results => sendResponse({ok:true,results})).catch(e => sendResponse({ok:false,error:e?.message||String(e)}));
-      return true;
-    }
     if (message?.type === 'PAGE_GAME_STATE') {
       globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'GAME_STATE_GET' });
-      sendResponse({ok:true});
-      return false;
-    }
-    if (message?.type === 'PAGE_RESOURCE_CATALOG') {
-      globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'RESOURCE_CATALOG_GET' });
       sendResponse({ok:true});
       return false;
     }
@@ -1041,7 +741,7 @@ let hookReady = false;
   });
 })();
 
-// P6: page text for "which page is this" checks that run from mutation observers. document.body.innerText
+// Page text for "which page is this" checks that run from mutation observers. document.body.innerText
 // forces a full layout; this walks text nodes (no layout), skipping script/style, and joins them with spaces.
 function scmPageTextNoLayout(){
   try{
@@ -1054,9 +754,12 @@ function scmPageTextNoLayout(){
   }catch{return String(document.body?.textContent||'');}
 }
 
-// Exchange VWAP overlay v2.5.92: table-row injection based on the proven Simco Manager v1.1.24 approach.
-// Keep our existing badge/popover appearance; change only how Exchange rows are discovered and decorated.
+// Exchange VWAP overlay: a VWAP comparison badge in each listing row of the game's Exchange page.
 (() => {
+  // waitForBridge can inject content.js again into a tab where it already runs; one instance per tab, or
+  // duplicate listeners and timers repaint the same cards from different snapshots.
+  if (window.__SCM_EXCHANGE_OVERLAY__) return;
+  window.__SCM_EXCHANGE_OVERLAY__ = true;
   const money=v=>Number.isFinite(Number(v))?'$'+Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
   const norm=v=>String(v??'').toLowerCase().replace(/[^a-z0-9]+/g,'').replace(/s$/,'');
   const isExchange=()=>{
@@ -1101,8 +804,7 @@ function scmPageTextNoLayout(){
     const m=t.match(/\$\s*([0-9][0-9,]*(?:\.\d+)?)/);
     return m?Number(m[1].replace(/,/g,'')):null;
   };
-  // v2.5.94: use the exact Exchange row convention used by the proven extension:
-  // seller -> quality -> quantity -> price. Do not infer this from generic numeric ordering.
+  // Exchange rows are seller -> quality -> quantity -> price. Do not infer this from generic numeric ordering.
   const qualityFromCell=cell=>{
     if(!cell)return null;
     const text=nativeText(cell);
@@ -1195,8 +897,8 @@ function scmPageTextNoLayout(){
     return qualities.length===1?{...parsed,record:candidates[0]}:null;
   };
 
-  let dataCache=null,cacheAt=0,cacheRealm=null,cacheResourceId=null,scheduled=0,processing=false,raf=0,currentContext='',dataInflight=null,startupRetryTimer=0,startupRetryAttempt=0,rerun=false;
-  // v2.5.319: use the game's own market response directly (seen by the page hook) instead of
+  let dataCache=null,cacheAt=0,cacheRealm=null,cacheResourceId=null,scheduled=0,processing=false,raf=0,dataInflight=null,startupRetryTimer=0,startupRetryAttempt=0,rerun=false;
+  // Use the game's own market response directly (seen by the page hook) instead of
   // waiting for it to be written to storage and read back. VWAP rows are cached separately.
   const liveMarket=new Map();let liveLatestId=null,vwapCache=null;
   globalThis.__scmPageBridge.listen(event=>{
@@ -1218,8 +920,8 @@ function scmPageTextNoLayout(){
     if(dataInflight)return dataInflight;
     dataInflight=new Promise(resolve=>{
       try{
-        // v2.5.97: Exchange routes do not encode the realm. v2.5.345: use this tab's realm (from the game's
-        // auth-data); until it is known, show no badge rather than the last-synced realm's VWAP.
+        // Exchange routes do not encode the realm: use this tab's realm (from the game's auth-data); until it
+        // is known, show no badge rather than the last-synced realm's VWAP.
         const tabRealm=Number(window.__SCM_GAME_REALM__);
         if(tabRealm!==0&&tabRealm!==1){resolve(null);return;}
         chrome.runtime.sendMessage({type:'GET_VWAP_OVERLAY_DATA',resourceId:hintedRid,realm:tabRealm},r=>resolve(chrome.runtime.lastError?null:r||null));
@@ -1267,7 +969,6 @@ function scmPageTextNoLayout(){
   };
   // Compare a listing with the VWAP for its own quality only. VWAP is the previous day's figure.
   // No VWAP for that quality means no badge. ±2% = Fair.
-  /*SCM-XCMP-START*/
   const exchangeCompare=(listing,vwap)=>{
     const price=Number(listing?.price);
     if(!Number.isFinite(price)||price<=0)return null;
@@ -1276,9 +977,8 @@ function scmPageTextNoLayout(){
     const pct=(price-ref)/ref*100;
     return {ref,pct,diff:price-ref,verdict:pct<=-2?'Cheap':pct>=2?'Expensive':'Fair'};
   };
-  /*SCM-XCMP-END*/
   const pctText=p=>`${p>=0?'+':'−'}${Math.abs(p).toFixed(1)}%`;
-  // P5: what a badge shows. A closed badge is rebuilt only when this changes (it used to be rebuilt every pass).
+  // What a badge shows. A closed badge is rebuilt only when this changes.
   const badgeSignature=(candidate,mapped)=>{
     const q=Number(candidate?.record?.quality);if(!Number.isFinite(q))return '';
     const cmp=exchangeCompare({price:candidate.price,quantity:candidate.quantity},mapped.get(q));
@@ -1295,9 +995,9 @@ function scmPageTextNoLayout(){
     b.textContent=`ⓘ ${verdictText}`;b.title='Compare with market price';b.setAttribute('aria-label','Compare with market price');
     const pop=document.createElement('div');pop.className='scx-vwap-popover';
     const row=(k,val,cls='')=>`<div class="scx-vwap-popover-row"><span class="scx-vwap-popover-label">${k}</span><span class="scx-vwap-popover-value ${cls}">${val}</span></div>`;
-    const fee=0.04; // 2.5.396 Manager exchange fee is always 4%
+    const fee=0.04; // the Manager's exchange fee is always 4%
     pop.innerHTML=`<div class="scx-vwap-popover-title">${verdictText}</div>${row('Listing price',money(candidate.price))}${row(refLabel,money(cmp.ref))}${row('Difference',`${diff>=0?'+':''}${money(diff)} · ${pctText(pct)}`,pct<=-2?'good':pct>=2?'bad':'')}${row('Listing quantity',candidate.quantity.toLocaleString())}${row('Net after 4% fee',money(candidate.price*(1-fee)))}`;
-    host.__scmPopover=pop;host.__scmRow=candidate.row;host.__scmPrice=candidate.price;host.__scmSig=badgeSignature(candidate,mapped);
+    host.__scmPopover=pop;host.__scmRow=candidate.row;host.__scmSig=badgeSignature(candidate,mapped);
     b.addEventListener('click',e=>{
       e.preventDefault();e.stopPropagation();
       const wasOpen=pop.style.display==='block'&&host.dataset.open==='1';
@@ -1308,8 +1008,7 @@ function scmPageTextNoLayout(){
     b.addEventListener('pointerdown',e=>e.stopPropagation(),{passive:true});
     host.appendChild(b);
     document.body.appendChild(pop);
-    // v2.5.94: inject into the exact native price cell, like the proven extension.
-    // Do not rewrite the cell's display/flex styles; React owns those styles.
+    // Inject into the native price cell. Do not rewrite the cell's display/flex styles; React owns them.
     const cell=candidate.priceCell||candidate.cellForRail||candidate.row.querySelectorAll?.('td')?.item?.(candidate.row.querySelectorAll?.('td')?.length-1)||candidate.row;
     if(cell){
       host.dataset.scmExchangeInjected='1';
@@ -1333,14 +1032,13 @@ function scmPageTextNoLayout(){
       const rid=Number(data.resourceId);if(!Number.isFinite(rid)||rid<=0){if(startup)scheduleStartupRetry();return;}
       const mapped=new Map(data.rows.filter(x=>Number(x.resourceId)===rid).map(x=>[Number(x.quality),Number(x.value)]));
       if(!mapped.size&&!(data.marketRows||[]).length){if(startup)scheduleStartupRetry();return;}
-      currentContext=`${data.realm}:${rid}`;
       const rows=[...document.querySelectorAll('tbody tr, tr, div.row')].filter(row=>row.nodeType===1&&!row.querySelector?.('th'));
       const wanted=new Set();
       const existingHosts=new Map([...document.querySelectorAll('.scx-vwap-host')].map(host=>[String(host.dataset.vwapKey||''),host]));
       let matchedCount=0;
       for(const row of rows){
         const parsed=parseListingRow(row);if(!parsed)continue;
-        // v2.5.322: the cheapest (first) rows are the ones that change fastest, so the stored order-book
+        // The cheapest (first) rows are the ones that change fastest, so the stored order-book
         // snapshot is often stale for exactly those rows. The badge only needs the quality shown in the row
         // and its price, so fall back to the row's own quality instead of skipping the row.
         let candidate=matchRecord(parsed,data.marketRows||[]);
@@ -1352,7 +1050,7 @@ function scmPageTextNoLayout(){
           if(host)removeBadge(host);
           host=makeBadge(candidate,rid,mapped);
         }else{
-          host.__scmRow=row;host.__scmPrice=candidate.price;
+          host.__scmRow=row;
         }
         if(host&&host.dataset.open==='1'&&host.__scmPopover?.style.display==='block')positionPopover(host);
       }
@@ -1381,7 +1079,7 @@ function scmPageTextNoLayout(){
     });
     if(relevant)schedule();
   });
-  const cleanup=()=>{clear();document.querySelectorAll('.scx-vwap-popover').forEach(x=>x.remove());currentContext='';resetStartupRetry();if(dataInflight){dataInflight=null;}};
+  const cleanup=()=>{clear();document.querySelectorAll('.scx-vwap-popover').forEach(x=>x.remove());resetStartupRetry();if(dataInflight){dataInflight=null;}};
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>processVwapUI(true),{once:true});else processVwapUI(true);
   observer.observe(document.body||document.documentElement,{childList:true,subtree:true});
   window.addEventListener('scroll',reposition,{passive:true,capture:true});
@@ -1401,42 +1099,40 @@ function scmPageTextNoLayout(){
 })();
 
 
-// Incoming Contracts inline market-price comparison v2.5.247.
-// This is intentionally separate from the existing INCOMING CONTRACT HELPER panel.
-// It decorates the game's own incoming-contract rows only; it does not alter helper behavior.
+// Incoming Contracts inline market-price comparison: decorates the game's own incoming-contract rows only.
 (() => {
+  if (window.__SCM_INCOMING_CONTRACT_OVERLAY__) return; // one instance per tab (see the Exchange VWAP overlay)
+  window.__SCM_INCOMING_CONTRACT_OVERLAY__ = true;
   const money=v=>Number.isFinite(Number(v))?'$'+Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
   const norm=v=>String(v??'').toLowerCase().replace(/[’']/g,'').replace(/[^a-z0-9]+/g,'').replace(/s$/,'');
   const visible=el=>{if(!el)return false;const cs=getComputedStyle(el),r=el.getBoundingClientRect?.();return cs.display!=='none'&&cs.visibility!=='hidden'&&(!r||r.width>0&&r.height>0);};
   const text=el=>String(el?.innerText||el?.textContent||'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').trim();
   const parsePrice=t=>{const m=String(t||'').match(/\$\s*([0-9][0-9,]*(?:\.\d+)?)/);return m?Number(m[1].replace(/,/g,'')):null;};
-  const parseQuantity=t=>{let m=String(t||'').match(/\b([0-9][0-9,]*)\s*@\s*\$/);if(m)return Number(m[1].replace(/,/g,''));m=String(t||'').match(/\b([0-9][0-9,]*)\b\s*@/);return m?Number(m[1].replace(/,/g,'')):null;};
-  // v2.5.361 performance: the visible page text (innerText forces a layout) is read at most once per 1.5 s per URL.
+  // Performance: the visible page text is read at most once per 1.5 s per URL.
   let incomingCheck={at:0,path:'',value:false};
   const isIncomingPage=()=>{
     const path=String(location.pathname||''),now=Date.now();
-    // P6: a positive answer is kept 5 s; a negative one 1.5 s so a freshly rendered page is picked up quickly.
+    // A positive answer is kept 5 s; a negative one 1.5 s so a freshly rendered page is picked up quickly.
     if(incomingCheck.path===path&&now-incomingCheck.at<(incomingCheck.value?5000:1500))return incomingCheck.value;
     incomingCheck={at:now,path,value:isIncomingPageNow()};
     return incomingCheck.value;
   };
   const isIncomingPageNow=()=>{
-    const body=scmPageTextNoLayout(); // P6: no innerText (forced layout) from mutation observers
-    // v2.5.319: no trailing word boundary. Our own badge text can sit right after the Accept label
-    // ("Accept25.00% above market"), which made this check fail and wipe the badges (flicker).
+    const body=scmPageTextNoLayout(); // no innerText (forced layout) from mutation observers
+    // No trailing word boundary: our own badge text can sit right after the Accept label
+    // ("Accept25.00% above market"), and the check must not then fail and wipe the badges.
     return /incoming contracts/i.test(body)&&/accept/i.test(body)&&/\$\s*[0-9]/.test(body);
   };
-  // v2.5.345 this tab's realm only; unknown realm → no badges (was: the last-synced realm's prices).
+  // This tab's realm only; unknown realm → no badges.
   const getDataOnce=()=>new Promise(resolve=>{try{const tabRealm=Number(window.__SCM_GAME_REALM__);if(tabRealm!==0&&tabRealm!==1){resolve(null);return;}chrome.runtime.sendMessage({type:'GET_INCOMING_CONTRACT_VWAP_DATA',realm:tabRealm},r=>resolve(chrome.runtime.lastError?null:r||null));}catch{resolve(null);}});
   // A sleeping/restarting service worker can drop the first message; retry once before giving up.
   const getData=async()=>{const first=await getDataOnce();if(first?.ok)return first;await new Promise(r=>setTimeout(r,400));return (await getDataOnce())||first;};
   const priceText=v=>`$${Number(v).toLocaleString(undefined,{minimumFractionDigits:3,maximumFractionDigits:3})}`;
   // Resolve the displayed card from its unit-price node, then walk upward until
-  // that card contains the seller and quantity. The old implementation searched
-  // every subtree for seller+any matching price, which could choose a nested
-  // wrapper with the total price or no usable unit-price anchor at all.
-  // v2.5.319: scan the DOM once per pass (cheap textContent pre-filter, layout only for price-like nodes)
-  // instead of once per contract record.
+  // that card contains the seller and quantity (searching subtrees for seller + any
+  // matching price can pick a wrapper with the total price and no unit-price anchor).
+  // The DOM is scanned once per pass (cheap textContent pre-filter, layout only for
+  // price-like nodes), not once per contract record.
   const collectPriceNodes=()=>{
     const out=[];
     for(const el of document.querySelectorAll('body *')){
@@ -1474,7 +1170,7 @@ function scmPageTextNoLayout(){
     candidates.sort((a,b)=>a.score-b.score);
     return candidates[0]||null;
   };
-  // v2.5.362 compact badge: only the % vs market price (VWAP when no market price is captured); tap it for the details popup.
+  // Compact badge: only the % vs market price (VWAP when no market price is captured); tap it for the details popup.
   const marketLabel=record=>(record?.marketPriceSource==='realm-vwap'||record?.marketPriceSource==='vwap')?'VWAP':'market price';
   const oldTag=record=>record?.marketPriceStale?' (old)':'';
   // Origin label for a price that is not a real exchange order-book price; absent fields or 'exchange' => no label.
@@ -1498,9 +1194,8 @@ function scmPageTextNoLayout(){
     if(v&&Number(v.stockCost)>0)lines.push({k:'Your stock',v:`${priceText(v.stockCost)}/u`});
     return lines;
   };
-  // 2.5.396 rank among the visible incoming contracts of the same product + quality by unit price:
+  // Rank among the visible incoming contracts of the same product + quality by unit price:
   // cheapest = 1, equal prices share a rank (1, 1, 3). One entry per displayed contract key.
-  /*SCM-RANK-START*/
   const contractPriceRanks=records=>{
     const groups=new Map();
     for(const r of Array.isArray(records)?records:[]){
@@ -1515,7 +1210,6 @@ function scmPageTextNoLayout(){
     }
     return out;
   };
-  /*SCM-RANK-END*/
   const rankText=record=>record?._scmRank&&record._scmRank.of>1?`#${record._scmRank.rank} of ${record._scmRank.of}`:'';
   const badgeFor=record=>{
     const marketPrice=Number(record?.marketPrice),p=Number(record?.price),rt=rankText(record);
@@ -1566,10 +1260,9 @@ function scmPageTextNoLayout(){
     st.textContent=`.scm-contract-vwap-badge{position:static!important;display:inline-flex!important;vertical-align:middle!important;align-items:center!important;justify-content:center!important;box-sizing:border-box!important;width:auto!important;min-width:0!important;max-width:100%!important;height:auto!important;min-height:0!important;max-height:none!important;flex:0 0 auto!important;grid-area:auto!important;justify-self:auto!important;align-self:auto!important;margin:3px 0 3px 6px!important;padding:3px 6px!important;border-radius:5px!important;font:700 9px/1.15 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;white-space:normal!important;overflow-wrap:normal!important;text-align:center!important;box-shadow:0 1px 2px rgba(0,0,0,.22)!important;pointer-events:auto!important;cursor:pointer!important}.scm-contract-vwap-badge.cheap{color:#d4eacd!important;background:rgba(48,84,36,.94)!important;border:1px solid rgba(134,194,114,.55)!important}.scm-contract-vwap-badge.expensive{color:#f9ddd8!important;background:rgba(120,33,20,.94)!important;border:1px solid rgba(232,129,113,.55)!important}.scm-contract-vwap-badge.flat{color:#eeeded!important;background:rgba(23,22,21,.94)!important;border:1px solid rgba(149,144,141,.55)!important}@media(max-width:600px){.scm-contract-vwap-badge{font-size:8px!important;padding:3px 5px!important;margin-left:4px!important}}.scm-contract-vwap-badge{text-align:left!important;line-height:1.25!important}#scm-contract-detail-pop{position:fixed;inset:0;z-index:2147483600;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:12px;box-sizing:border-box}#scm-contract-detail-pop .scm-cdp-card{width:min(360px,100%);max-height:80vh;overflow:auto;box-sizing:border-box;background:rgba(16,15,15,.98);color:#efeeed;border:1px solid #3d3a38;border-radius:8px;padding:8px 10px;font:12px/1.35 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}#scm-contract-detail-pop .scm-cdp-head{display:flex;align-items:center;gap:6px;margin-bottom:4px}#scm-contract-detail-pop .scm-cdp-title{flex:1;min-width:0;font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#scm-contract-detail-pop .scm-cdp-close{flex:0 0 auto;width:32px;height:32px;border:1px solid #3d3a38;border-radius:6px;background:#22201f;color:#efeeed;font-size:18px;line-height:1;padding:0;cursor:pointer}#scm-contract-detail-pop .scm-cdp-row{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid #2e2b2a}#scm-contract-detail-pop .scm-cdp-k{color:#b4b0ae;flex:0 0 auto}#scm-contract-detail-pop .scm-cdp-v{text-align:right;min-width:0;overflow-wrap:anywhere}#scm-contract-detail-pop .cheap .scm-cdp-v{color:#a0d090}#scm-contract-detail-pop .expensive .scm-cdp-v{color:#efa99f}`;
     (document.head||document.documentElement).appendChild(st);
   };
-  let scheduled=0,inflight=null,lastSignature='',again=false,retryTimer=0,retryAttempt=0,pageMiss=0;
+  let scheduled=0,inflight=null,again=false,retryTimer=0,retryAttempt=0,pageMiss=0;
   const clearStale=()=>{document.querySelectorAll('.scm-contract-vwap-badge').forEach(x=>x.remove());closePopup();};
-  // v2.5.319: a failed/empty data fetch or a not-yet-rendered row used to wipe every badge and wait
-  // for the next 5s poll. Keep the last good badges and retry with short backoff instead.
+  // A failed/empty data fetch or a not-yet-rendered row keeps the last good badges and retries with short backoff.
   const scheduleRetry=()=>{if(retryTimer)return;const d=[600,1500,3000,6000][Math.min(retryAttempt,3)];retryAttempt++;retryTimer=setTimeout(()=>{retryTimer=0;schedule();},d);};
   const process=async()=>{
     if(!isIncomingPage()){
@@ -1597,10 +1290,6 @@ function scmPageTextNoLayout(){
       record._scmRank=ranks.get(key)||null;
       const target=findContractTarget(record,priceNodes);if(!target){missing++;continue;}
       const {row,anchor}=target;
-      // One badge per displayed row + company/resource/price, not per API
-      // contract record. The game can group several identical incoming contracts
-      // into one visual row, so record IDs/quantities must not multiply badges.
-      wanted.add(key);
       // A single displayed game row can represent multiple identical API contracts.
       // Search globally, not only inside the inferred row: the game DOM can place
       // the price anchor and the seller/quantity wrapper in different subtrees, so
@@ -1614,7 +1303,7 @@ function scmPageTextNoLayout(){
       // Place the badge in normal document flow immediately beside the exact
       // unit-price element. Never absolutely position it over the contract card: on
       // mobile the inferred row can be a narrow seller/price column, so an overlay
-      // covers the seller and price (the 2.5.258 regression).
+      // covers the seller and price.
       const placement=anchor?.parentElement&&row.contains(anchor.parentElement)?anchor.parentElement:row;
       const fresh=badgeFor(record);
       if(fresh){badge.className=fresh.className;badge.textContent=fresh.textContent;badge.title=fresh.title;badge._scmRecord=record;}
@@ -1624,7 +1313,6 @@ function scmPageTextNoLayout(){
     for(const badge of [...document.querySelectorAll('.scm-contract-vwap-badge')]){
       if(!badge.isConnected||!badge.closest('body')||!wanted.has(String(badge.dataset.contractKey||'')))badge.remove();
     }
-    lastSignature=`${data.realm}:${records.map(c=>`${c.id}:${c.kind}:${c.quality}:${c.quantity}:${c.price}:${c.marketPrice}:${c.exchangePrice}:${c.stockCost}:${c.marketPriceSource}:${c.marketPriceStale}`).join('|')}`;
     if(missing>0)scheduleRetry();else retryAttempt=0;
   };
   const schedule=()=>{if(scheduled)return;scheduled=setTimeout(()=>{scheduled=0;if(inflight){again=true;return;}inflight=process().catch(()=>{scheduleRetry();}).finally(()=>{inflight=null;if(again){again=false;schedule();}});},300);};
@@ -1635,14 +1323,15 @@ function scmPageTextNoLayout(){
   setInterval(()=>{if(!document.hidden&&isIncomingPage())schedule();},5000);
 })();
 
-// v2.5.298: the old floating Manager helper launcher and its page-side mappings are removed.
-
-// v2.4.99 game-page production cards: no scrolling ticker.
+// Game-page cards: Stock After Demand & Contracts, Copy Left, saved-contract and sell helpers,
+// My listings, Outgoing contracts.
 (() => {
+  if (window.__SCM_GAME_CARDS__) return; // one instance per tab (see the Exchange VWAP overlay)
+  window.__SCM_GAME_CARDS__ = true;
   const OVERLAY_COLLAPSED_KEY='scm-stock-demand-contracts-collapsed-v1';
   const readCollapsedPreference=()=>{try{const value=localStorage.getItem(OVERLAY_COLLAPSED_KEY);return value===null?true:value!=='0';}catch{return true;}};
   const writeCollapsedPreference=collapsed=>{try{localStorage.setItem(OVERLAY_COLLAPSED_KEY,collapsed?'1':'0');}catch{}};
-  const S={data:null,realm:null,styled:false,collapsed:readCollapsedPreference(),signature:'',buildingSignature:'',contractSignature:'',contractCardSignature:'',contractDismissedKey:'',contractQtyMode:'saved',contractCustomQty:'',refreshTimer:null,recoveryTimer:null,lastUrl:location.href,observer:null,loadInFlight:false,loadQueued:false,loadEpoch:0,helperTimer:null,positionRaf:0,contractFillTimer:0,leftCopyDiscount:3,leftCopySignature:'',leftCopyOpen:false};
+  const S={data:null,realm:null,styled:false,collapsed:readCollapsedPreference(),signature:'',contractSignature:'',contractCardSignature:'',contractDismissedKey:'',contractQtyMode:'saved',contractCustomQty:'',refreshTimer:null,recoveryTimer:null,lastUrl:location.href,observer:null,loadInFlight:false,loadQueued:false,loadEpoch:0,helperTimer:null,positionRaf:0,contractFillTimer:0,leftCopyDiscount:3,leftCopySignature:'',leftCopyOpen:false};
   const esc=v=>String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   // Origin suffix for a price that is not a real exchange order-book price; absent fields or 'exchange' => ''.
   const priceSrcSuffix=(src,stale)=>{const l=src==='vwap'||src==='realm-vwap'?'VWAP fallback':src==='simcotools'?(stale?'SimcoTools · stale':'SimcoTools'):'';return l?` · ${l}`:'';};
@@ -1693,7 +1382,7 @@ function scmPageTextNoLayout(){
     (document.head||document.documentElement).appendChild(st);
   };
   const ensureCard=(id,cls)=>{let el=document.getElementById(id);if(el&&document.documentElement.contains(el))return el;el=document.createElement('section');el.id=id;el.className=cls;document.documentElement.appendChild(el);return el;};
-  // v2.5.358 every game-page card can be minimised to its header (− / +); remembered per card in page localStorage.
+  // Every game-page card can be minimised to its header (− / +); remembered per card in page localStorage.
   // (Stock After Demand & Contracts already collapses to ›, the monitor to a dot, Network capture to its bar.)
   const MIN_KEY='scm-card-min-v1';
   const MIN_CARDS={'scm-left-copy-card':'.scm-left-copy-head','scm-contract-helper-card':'.scm-ch-head','scm-sell-qty-card':'.scm-sq-head','scm-listings-card':'.scm-ls-head','scm-contracts-card':'.scm-ls-head'};
@@ -1710,16 +1399,15 @@ function scmPageTextNoLayout(){
     const b=e.target.closest?.('[data-scm-min]');if(!b)return;const card=b.closest(Object.keys(MIN_CARDS).map(id=>'#'+id).join(','));if(!card)return;
     e.preventDefault();e.stopPropagation();const v=minRead();v[card.id]=!card.classList.contains('scm-card-min');try{localStorage.setItem(MIN_KEY,JSON.stringify(v));}catch{}applyMin(card);try{schedulePosition();}catch{}
   },true);
-  // v2.5.354 every overlay card can be dragged by its header (or the collapsed › button); its position is kept
+  // Every overlay card can be dragged by its header (or the collapsed › button); its position is kept
   // per card in page localStorage (scmCardPos:<id>). Double-tap the header to put it back in its default place.
   const DRAG_CARDS=['scm-game-balance-card','scm-left-copy-card','scm-contract-helper-card'];
   const DRAG_HANDLES='.scm-go-head,.scm-go-collapsed .scm-go-toggle,.scm-left-copy-head,.scm-ch-head';
   const cardPos=id=>{try{const v=JSON.parse(localStorage.getItem('scmCardPos:'+id)||'null');return v&&Number.isFinite(v.x)&&Number.isFinite(v.y)?v:null;}catch{return null;}};
-  // v2.5.355 the whole card stays on screen: an expanded card near the bottom opens upwards.
+  // The whole card stays on screen: an expanded card near the bottom opens upwards.
   const placeCard=(el,x,y)=>{const w=Math.min(el.offsetWidth||300,window.innerWidth),h=Math.min(el.offsetHeight||40,window.innerHeight);x=Math.max(0,Math.min(window.innerWidth-w,x));y=Math.max(0,Math.min(window.innerHeight-h,y));el.style.left=`${Math.round(x)}px`;el.style.top=`${Math.round(y)}px`;return {x,y};};
-  // v2.5.355 width follows the card's state: the collapsed › keeps its own CSS size; an open card gets its normal
-  // width (screen − 10 px, as when it is not moved). 2.5.354 froze the width at drag time, so a card dragged while
-  // collapsed opened 28 px wide (user's screenshot 2026-10-24).
+  // Width follows the card's state: the collapsed › keeps its own CSS size; an open card gets its normal
+  // width (screen − 10 px, as when it is not moved), so a card dragged while collapsed does not open 28 px wide.
   const pinCard=(el,pos)=>{const collapsed=el.classList.contains('scm-go-collapsed');el.style.width=collapsed?'':`${Math.max(0,Math.round(window.innerWidth-10))}px`;el.style.right='auto';el.dataset.scmMoved='1';placeCard(el,pos.x,pos.y);};
   const unpinCard=el=>{delete el.dataset.scmMoved;el.style.width='';el.style.right='';el.style.left='';};
   (()=>{
@@ -1847,14 +1535,15 @@ function scmPageTextNoLayout(){
     // the game re-announces its realm on every state update; act only on a real change
     window.addEventListener('scm-game-realm-change',()=>{const r=currentRealm();if(r===L.realm)return;L.realm=r;L.data=null;L.seq++;paint();request(true);});
     const start=()=>{if(L.started||!isSimCompaniesPage())return;L.started=true;L.realm=currentRealm();paint();request(true);L.agoTimer=setInterval(tickAgo,30000);L.refreshTimer=setInterval(()=>{if(!document.hidden&&L.open)request(true);},15000);};
-    return {start,render,request,style:lstyle};
+    return {start,style:lstyle};
   })();
   if(document.readyState!=='loading')Listings.start();else document.addEventListener('DOMContentLoaded',()=>Listings.start(),{once:true});
   // "Outgoing contracts" card: its own card, pill and saved position, beside (not inside) My listings. Shows the game's
   // outgoing contracts for this realm (background GET_OUTGOING_CONTRACTS_DATA): the game's own capture or the
   // Manager's read through the game tab (scmOutgoingContracts:<realm>), whichever is newer. It asks for a read when it
   // opens, every 15 s while visible and when the tab becomes visible; a game action reads at once (background); it
-  // follows the small key through chrome.storage.onChanged. "captured X ago" says how old the data is.
+  // follows the small key through the background's SCM_CARD_KEY_CHANGED message. "captured X ago" says how old the
+  // data is.
   const Contracts=(()=>{
     const CARD='scm-contracts-card',PILL='scm-contracts-pill',OPEN_KEY='scm-contracts-card-v1';
     const C={open:Math.min(window.innerWidth,screen.width)>=768,data:null,realm:null,sig:'',seq:0,changeTimer:0,agoTimer:0,refreshTimer:0,started:false,noClickUntil:0};
@@ -1934,14 +1623,14 @@ function scmPageTextNoLayout(){
     return {start};
   })();
   if(document.readyState!=='loading')Contracts.start();else document.addEventListener('DOMContentLoaded',()=>Contracts.start(),{once:true});
-  // v2.5.361 performance: this ran on every DOM mutation batch and read document.body.innerText (forces a full layout
-  // of the game page). Now: the URL decides at once; the visible page text is read at most once per 1.5 s per URL.
+  // Performance: this runs on every DOM mutation batch. The URL decides at once; otherwise the visible page text
+  // is read at most once per 1.5 s per URL.
   let contractTextCheck={at:0,path:'',value:false};
   const likelyContractPage=()=>{
     const path=String(location.pathname||'');
     if(/contract/i.test(path))return true;
     const now=Date.now();
-    // P6: no innerText (forced layout) here; positive answers kept 5 s, negative 1.5 s.
+    // No innerText (forced layout) here; positive answers kept 5 s, negative 1.5 s.
     if(contractTextCheck.path===path&&now-contractTextCheck.at<(contractTextCheck.value?5000:1500))return contractTextCheck.value;
     contractTextCheck={at:now,path,value:/(?:recipient|price\s+per\s+unit|please\s+enter\s+amount|select\s+company)/i.test(scmPageTextNoLayout())};
     return contractTextCheck.value;
@@ -1950,19 +1639,6 @@ function scmPageTextNoLayout(){
     if(!likelyContractPage())return;
     if(S.helperTimer)clearTimeout(S.helperTimer);
     S.helperTimer=setTimeout(()=>{S.helperTimer=null;Promise.resolve(loadContractHelper()).finally(()=>schedulePosition());},450);
-  };
-  const detectProductionContext=()=>{
-    const text=String(document.body?.innerText||'').replace(/\r/g,'');
-    const lines=text.split('\n').map(s=>s.replace(/\s+/g,' ').trim()).filter(Boolean);
-    let resourceName='';
-    for(let i=0;i<lines.length;i++){
-      if(/^production$/i.test(lines[i])&&lines[i+1]&&lines[i+1].length<80){resourceName=lines[i+1].trim();break;}
-      if(/^producing(?: right now)?$/i.test(lines[i])&&lines[i+1]&&lines[i+1].length<80){resourceName=lines[i+1].replace(/^\d+\s*/,'').trim();break;}
-    }
-    if(!resourceName){const m=text.match(/(?:^|\n)PRODUCTION\s*\n([^\n]{2,80})/i);if(m)resourceName=m[1].trim();}
-    const qm=text.match(/(?:Quality|quality)\s*(?:[:\n]?\s*)(\d{1,2})/);const quality=qm?Number(qm[1]):null;
-    if(!resourceName||/production (calculator|speed)/i.test(resourceName))return null;
-    return {resourceName,quality};
   };
   const leftRows=()=>{
     const rows=Array.isArray(S.data?.rows)?S.data.rows:[];
@@ -2042,7 +1718,7 @@ function scmPageTextNoLayout(){
     return {state:'late',missing:-spare,runEndsMs:lastFinish,ratePerHour,ready};
   };
   const etaDuration=ms=>{const s=Math.max(0,Math.floor(ms/1000)),h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?`${h}h ${String(m).padStart(2,'0')}m ${String(x).padStart(2,'0')}s`:`${m}m ${String(x).padStart(2,'0')}s`;};
-  const etaText=(at,done,pre='')=>{const ms=at-Date.now();return ms>0?pre+etaDuration(ms):done;};
+  const etaText=(at,done)=>{const ms=at-Date.now();return ms>0?etaDuration(ms):done;};
   const etaStrip=(r,left)=>{
     // Older saved snapshots have no run data, so show no timer rather than a false "Not producing".
     if(!Array.isArray(r.etaRuns))return '';
@@ -2055,7 +1731,8 @@ function scmPageTextNoLayout(){
       main=left>=0?'✓ Covered':'✓ Ready to collect';
       sub=`${e.ready>0&&left<0?`${num(e.ready)} ready now · `:''}${num(e.spare)} spare${e.active?' at run end':''}`;
     }
-    else if(e.state==='none'){main='Not producing';sub='Buy it or start production';}
+    // An input nothing makes right now (producing:false); 'upgrading' = its only producer is being expanded.
+    else if(e.state==='none'){main=r.producing===false&&r.reason==='upgrading'?'Upgrading':'Not producing';sub=r.producing===false&&r.reason==='upgrading'?'Its building is being expanded · buy it to cover the demand':'Buy it or start production';}
     else if(e.state==='late'){
       main=`Short ${num(e.missing)} after run`;
       sub=e.runEndsMs?`${num(e.ratePerHour)}/hr · run left: <span data-eta-at="${e.runEndsMs}" data-eta-done="none">${etaText(e.runEndsMs,'none')}</span>`:`${num(e.ready)} ready to collect · not producing`;
@@ -2075,7 +1752,7 @@ function scmPageTextNoLayout(){
         if(t.content.firstElementChild)el.replaceWith(t.content.firstElementChild);
       });
     }
-    document.querySelectorAll('#scm-game-balance-card [data-eta-at]').forEach(el=>{el.textContent=etaText(Number(el.getAttribute('data-eta-at')),el.getAttribute('data-eta-done'),el.getAttribute('data-eta-pre')||'');});
+    document.querySelectorAll('#scm-game-balance-card [data-eta-at]').forEach(el=>{el.textContent=etaText(Number(el.getAttribute('data-eta-at')),el.getAttribute('data-eta-done'));});
   };
   const refreshGameOverlay=()=>{
     if(S.refreshBusy||(S.realm!==0&&S.realm!==1))return;
@@ -2154,22 +1831,6 @@ function scmPageTextNoLayout(){
       }
     }
     return '';
-  };
-  const findInput=(names,type)=>{
-    const wanted=(names||[]).map(normalizeFieldName);
-    const controls=[...document.querySelectorAll('input,textarea,select')];
-    for(const el of controls){
-      if(type){
-        const actual=String(el.type||el.tagName||'').toLowerCase();
-        if(actual!==String(type).toLowerCase()&&!(type==='text'&&el.tagName==='TEXTAREA'))continue;
-      }
-      const attrs=[el.getAttribute?.('aria-label'),el.getAttribute?.('placeholder'),el.getAttribute?.('name'),el.getAttribute?.('id')].filter(Boolean);
-      const id=el.getAttribute?.('id');
-      if(id){const label=document.querySelector(`label[for="${CSS.escape(id)}"]`);if(label)attrs.push(label.textContent);}
-      const parent=el.closest?.('label');if(parent)attrs.push(parent.textContent);
-      if(attrs.some(a=>wanted.some(w=>w&&normalizeFieldName(a).includes(w))))return el;
-    }
-    return null;
   };
   const fireInput=el=>{
     try{el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));el.dispatchEvent(new Event('blur',{bubbles:true}));}catch{}
@@ -2261,7 +1922,7 @@ function scmPageTextNoLayout(){
     }
     return out;
   };
-  // 2.5.347 the game's warehouse resource page (/headquarters/warehouse/<resource>/sell/ or /contract/) names its
+  // The game's warehouse resource page (/headquarters/warehouse/<resource>/sell/ or /contract/) names its
   // resource only through the header's encyclopedia link /encyclopedia/<realm>/resource/<id>/ (game bundle). Quality:
   // "Current exchange orders for Q<q>+" (selected lot), else the header's stars. Page text is never used for the
   // product: the exchange-order list holds company names such as "PATO SILICON AND METALS".
@@ -2307,7 +1968,7 @@ function scmPageTextNoLayout(){
     if(!recipientCandidates.length)return null;
     const pageId=Number(ctx.productId);
     if(pageId>0){
-      // 2.5.347 the page names its resource: only saved contracts for that resource id can match.
+      // The page names its resource: only saved contracts for that resource id can match.
       let hit=null,hitScore=-1;
       for(const c of saved){
         const id=Number(c?.productId??(String(c?.product||'').match(/^(\d+):/)||[])[1]);
@@ -2348,7 +2009,7 @@ function scmPageTextNoLayout(){
     // The selected helper mode is the source of truth for the Amount field.
     // Saved amount = saved contract quantity; Surplus = current production surplus after demand;
     // Custom = user-entered quantity. Left = current positive Stock-After-Demand-And-Contracts leftover.
-    // 2.5.347 whole units only: the game's Amount box is step 1 (screenshot showed 768.395… injected).
+    // Whole units only: the game's Amount box is step 1.
     const surplus=Math.floor(Math.max(0,Number(c.surplus??c.available)||0));
     const left=Math.floor(Math.max(0,Number(c.left)||0));
     if(S.contractQtyMode==='surplus')return surplus;
@@ -2393,8 +2054,7 @@ function scmPageTextNoLayout(){
       if(customEl){customEl.oninput=()=>{S.contractCustomQty=customEl.value;S.contractSignature='';fillContractForm(c,desiredContractQty(c));};}
     }catch{existing?.remove();}
   };
-  window.addEventListener('scm-open-saved-contract-helper',()=>{S.contractDismissedKey='';S.contractSignature='';S.contractCardSignature='';Promise.resolve(loadContractHelper()).finally(()=>schedulePosition());});
-  // 2.5.347 "Sell on the exchange" quantity helper. The game's sell form (warehouse …/sell/) has
+  // "Sell on the exchange" quantity helper. The game's sell form (warehouse …/sell/) has
   // input[name="amount"] and input[name="price"] (game bundle). Left = the overlay row's Left (stock after
   // demand & saved contracts), Surplus = the overlay row's production surplus; both whole units, never < 0.
   const SELL_POS_KEY='scmSellQtyCardPos';
@@ -2426,7 +2086,7 @@ function scmPageTextNoLayout(){
     const res=warehousePageResource();const amountEl=res?.tab==='sell'?sellAmountInput():null;
     if(!amountEl||S.sellDismissedPath===location.pathname||!Number.isFinite(S.realm)){removeSellCard();return;}
     const q=sellQuantities(res);
-    // v2.5.359 #4 smart sell price (background GET_SELL_PRICE_INFO); re-asked every 20 s, 3 s after an order-book refresh.
+    // Smart sell price (background GET_SELL_PRICE_INFO); re-asked every 20 s, 3 s after an order-book refresh.
     const pk=res.quality!=null&&res.id>0?`${S.realm}:${res.id}:${res.quality}`:'';
     const pc=pk&&S.sellPrice&&S.sellPrice.key===pk?S.sellPrice:null;
     if(pk&&(!pc||Date.now()-pc.at>20000)&&!S.sellPriceInflight){
@@ -2468,19 +2128,10 @@ function scmPageTextNoLayout(){
     if(S.sellTimer)return;
     S.sellTimer=setTimeout(()=>{S.sellTimer=0;try{loadSellHelper();}catch{}},250);
   };
-  const cleanupStaleOverlays=()=>{
-    document.getElementById('scm-vwap-button')?.remove();
-    document.getElementById('scm-vwap-overlay')?.remove();
-    document.querySelectorAll('.scm-vwap-badge').forEach(x=>x.remove());
-    document.getElementById('scm-building-vwap-card')?.remove();
-    document.getElementById('scm-resource-demand-overlay')?.remove();
-    document.querySelectorAll('#scm-game-ticker-overlay').forEach(x=>x.remove());
-  };
   const load=async(realmOverride=null)=>{
     if(!isSimCompaniesPage())return;
-    // Never remove a working overlay just because a refresh is starting. The
-    // previous implementation deleted the live card before every 10-second
-    // refresh, so a slow/failed refresh made the overlay disappear.
+    // Never remove a working overlay just because a refresh is starting: a slow or
+    // failed refresh must not make the overlay disappear.
     if(S.loadInFlight){S.loadQueued=true;return;}
     S.loadInFlight=true;
     const requestEpoch=S.loadEpoch;
@@ -2491,11 +2142,9 @@ function scmPageTextNoLayout(){
     // the other realm.
     if(overrideRealm!=null && actualPageRealm!=null && overrideRealm!==actualPageRealm){
       // Reject a stale realm notification without stranding the single-flight
-      // loader. The old path returned before try/finally, leaving loadInFlight
-      // true forever and preventing later refreshes from rebuilding the card.
+      // loader (this path returns before try/finally, so it clears loadInFlight itself).
       S.loadInFlight=false;S.loadQueued=false;
-      // v2.5.345 the other realm's refresh is simply ignored: keep this realm's card as it is (it used to be
-      // wiped and force-collapsed every time the other realm's background work finished).
+      // The other realm's refresh is ignored: keep this realm's card as it is.
       if(S.data&&Number(S.data.realm)===actualPageRealm)return;
       S.realm=actualPageRealm;S.data=null;S.signature='';S.loadEpoch++;
       renderBalance();schedulePosition();
@@ -2504,8 +2153,8 @@ function scmPageTextNoLayout(){
       setTimeout(()=>load(actualPageRealm),0);
       return;
     }
-    // v2.5.345 until this tab's realm is known (the game's auth-data answer), show nothing realm-specific. Asking
-    // without a realm returned the last-synced realm's overlay (the R2 card in an R1 tab).
+    // Until this tab's realm is known (the game's auth-data answer), show nothing realm-specific: asking
+    // without a realm would return the last-synced realm's overlay.
     if(actualPageRealm==null){
       S.loadInFlight=false;S.loadQueued=false;
       if(S.data!=null||S.realm!=null){S.data=null;S.realm=null;S.signature='';}
@@ -2518,19 +2167,17 @@ function scmPageTextNoLayout(){
     try{
       // Repaint the last valid realm-local snapshot immediately if the SPA
       // replaced the page DOM. This is deliberately before the async refresh.
-      if(!document.getElementById('scm-game-balance-card') && S.data && (pageRealm==null || Number(S.data.realm)===pageRealm)){
+      if(!document.getElementById('scm-game-balance-card') && S.data && Number(S.data.realm)===pageRealm){
         renderBalance();
         schedulePosition();
       }
-      const realm=pageRealm;
-      const r=realm==null?await chrome.runtime.sendMessage({type:'GET_GAME_OVERLAY_DATA'}):await chrome.runtime.sendMessage({type:'GET_GAME_OVERLAY_DATA',realm});
+      const r=await chrome.runtime.sendMessage({type:'GET_GAME_OVERLAY_DATA',realm:pageRealm});
       // A realm transition invalidates older in-flight requests. Never let an
       // R1 response arrive after an R2 switch and repopulate the visible card.
       if(requestEpoch!==S.loadEpoch)return;
       // A failed/slow refresh never clears the last known-good overlay.
       if(!r?.ok){schedulePosition();return;}
-      if(requestEpoch!==S.loadEpoch)return;
-      if(pageRealm!=null && Number(r.realm)!==Number(pageRealm)){
+      if(Number(r.realm)!==Number(pageRealm)){
         // Never allow an old active-realm response to repopulate a newly
         // selected realm overlay. Explicit realm requests are authoritative.
         S.realm=Number(pageRealm);
@@ -2540,10 +2187,7 @@ function scmPageTextNoLayout(){
         return;
       }
       // Re-render when any field used by Stock After Demand & Contracts or
-      // Copy Left changes. The previous signature used only `ticker`, whose
-      // rows intentionally omit VWAP; therefore a refreshed overlay could
-      // receive correct VWAP values while the visible Copy Left text stayed
-      // frozen with blank prices.
+      // Copy Left changes (VWAP included, or Copy Left keeps blank prices).
       const signature=JSON.stringify({
         realm:r.realm,
         rows:(Array.isArray(r.rows)?r.rows:[]).map(row=>({
@@ -2564,7 +2208,7 @@ function scmPageTextNoLayout(){
     }catch{
       if(requestEpoch!==S.loadEpoch)return;
       // Keep the existing card and data intact on bridge/API failures.
-      if(!document.getElementById('scm-game-balance-card') && S.data && (pageRealm==null || Number(S.data.realm)===pageRealm)){
+      if(!document.getElementById('scm-game-balance-card') && S.data && Number(S.data.realm)===pageRealm){
         try{renderBalance();schedulePosition();}catch{}
       }else schedulePosition();
     }finally{
@@ -2576,8 +2220,7 @@ function scmPageTextNoLayout(){
     // Route changes are the one time we intentionally remove route-specific
     // helpers. The production balance itself is realm-scoped and is allowed to
     // survive until the new realm snapshot has been rendered.
-    cleanupStaleOverlays();
-    if(location.href!==S.lastUrl){S.lastUrl=location.href;S.loadEpoch++;S.signature='';S.buildingSignature='';S.contractSignature='';S.contractCardSignature='';S.contractDismissedKey='';S.leftCopySignature='';S.leftCopyOpen=false;document.getElementById('scm-left-copy-card')?.remove();S.sellDismissedPath='';removeSellCard();}
+    if(location.href!==S.lastUrl){S.lastUrl=location.href;S.loadEpoch++;S.signature='';S.contractSignature='';S.contractCardSignature='';S.contractDismissedKey='';S.leftCopySignature='';S.leftCopyOpen=false;document.getElementById('scm-left-copy-card')?.remove();S.sellDismissedPath='';removeSellCard();}
     load();scheduleSellHelper();
   };
   chrome.runtime.onMessage.addListener((message)=>{
@@ -2595,9 +2238,9 @@ function scmPageTextNoLayout(){
     if(Number(S.realm)===n && S.data?.realm===n)return;
     // Invalidate the visible R1/R2 card immediately. Do not leave stale data
     // on screen while the target realm snapshot is being loaded.
-    // v2.5.345 collapse only on a real switch between two known realms, not when this tab first learns its realm.
+    // Collapse only on a real switch between two known realms, not when this tab first learns its realm.
     const switchedFromOther=(S.realm===0||S.realm===1)&&Number(S.realm)!==n;
-    S.realm=n; S.data=null; S.loadEpoch++; S.signature=''; S.buildingSignature=''; S.contractSignature=''; S.contractCardSignature=''; S.leftCopySignature=''; S.leftCopyOpen=false;
+    S.realm=n; S.data=null; S.loadEpoch++; S.signature=''; S.contractSignature=''; S.contractCardSignature=''; S.leftCopySignature=''; S.leftCopyOpen=false;
     if(switchedFromOther){S.collapsed=true;writeCollapsedPreference(true);}
     renderBalance();schedulePosition();
     document.getElementById('scm-contract-helper-card')?.remove();
@@ -2606,7 +2249,7 @@ function scmPageTextNoLayout(){
   });
 
   const start=()=>{
-    style();cleanupStaleOverlays();document.getElementById('scm-left-copy-card')?.remove();S.leftCopyOpen=false;S.leftCopySignature='';
+    style();document.getElementById('scm-left-copy-card')?.remove();S.leftCopyOpen=false;S.leftCopySignature='';
     // Create the always-available collapsed control synchronously, before the
     // background data request can complete or fail.
     S.collapsed=true;writeCollapsedPreference(true);renderBalance();schedulePosition();load();
@@ -2627,12 +2270,12 @@ function scmPageTextNoLayout(){
         }catch{}
       }
     },3000);
-    // P6: the sell/contract helper checks run once per idle slot instead of on every mutation batch. The
+    // The sell/contract helper checks run once per idle slot instead of on every mutation batch. The
     // balance-card re-insert below stays synchronous so a React re-render cannot make the card flicker.
     let helperCheckPending=false;
     const runHelperChecks=()=>{helperCheckPending=false;try{scheduleSellHelper();if(document.getElementById('scm-game-balance-card')&&likelyContractPage())scheduleContractHelper();}catch{}};
     const queueHelperChecks=()=>{if(helperCheckPending)return;helperCheckPending=true;if(typeof requestIdleCallback==='function')requestIdleCallback(runHelperChecks,{timeout:400});else setTimeout(runHelperChecks,150);};
-    // v2.5.433: mutations only inside the extension's own UI need no work here (the card-removal
+    // Mutations only inside the extension's own UI need no work here (the card-removal
     // mutation targets the game's parent node, so it is never skipped).
     const scmOwnMutation=m=>{const t=m.target;return t&&t.nodeType===1&&!!t.closest?.('[id^="scm-"],[data-scm-owned]');};
     if(S.observer)S.observer.disconnect();S.observer=new MutationObserver(muts=>{
@@ -2650,13 +2293,13 @@ function scmPageTextNoLayout(){
       }
     });
     S.observer.observe(document.documentElement,{childList:true,subtree:true});
-    // v2.5.434: start() can run again (DOMContentLoaded + readyState race); never stack listeners/timers.
+    // start() can run again (DOMContentLoaded + readyState race); never stack listeners/timers.
     if(!S.posHooks){S.posHooks=true;window.addEventListener('resize',()=>{schedulePosition();},{passive:true});setInterval(()=>{if(!document.hidden)schedulePosition();},8000);}
   };
   if(document.readyState!=='loading')start();else document.addEventListener('DOMContentLoaded',start,{once:true});
   window.addEventListener('pageshow',()=>{setTimeout(load,600);setTimeout(load,1800);});
   document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){setTimeout(load,350);}});
-  // v2.5.433 mobile CPU: SPA route changes come from the Navigation API (+popstate); the URL poll is now
+  // Mobile CPU: SPA route changes come from the Navigation API (+popstate); the URL poll is now
   // only a slow, visible-tab safety net (3 s without the Navigation API, 10 s with it).
   let last=location.href;const onRouteChange=()=>{if(location.href!==last){last=location.href;route();setTimeout(load,500);}};
   const nav=window.navigation;let hasNavApi=false;
@@ -2666,6 +2309,6 @@ function scmPageTextNoLayout(){
   setInterval(()=>{if(!document.hidden)onRouteChange();},hasNavApi?10000:3000);
 })();
 
-// v2.5.326: every content.js listener above is now attached; release page-hook.js's queued events.
+// Every content.js listener above is now attached; release page-hook.js's queued events.
 // postMessage is delivered asynchronously, so the flush always arrives after all listeners exist.
 try { globalThis.__scmPageBridge.handoff(); globalThis.__scmPageBridge.send({ source:'SIMCO_MANAGER', type:'INITIALIZED' }); } catch {}

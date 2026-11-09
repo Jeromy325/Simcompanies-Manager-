@@ -8,8 +8,7 @@
                 "quantity": 0.1
             }
         ],
-        "transport": 0.1,
-        "icon": "re"
+        "transport": 0.1
     },
     {
         "id": 3,

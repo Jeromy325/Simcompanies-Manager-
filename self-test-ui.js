@@ -1,4 +1,4 @@
-// v2.5.436/438 Self-test UI, shared by options.html and the dashboard Settings tab: RUN_SELF_TEST (extension-page-only) -> results list; Copy report is redacted (counts/booleans only).
+// Self-test UI, shared by options.html and the dashboard Settings tab: RUN_SELF_TEST (extension-page-only) -> results list; Copy report is redacted (counts/booleans only).
 (()=>{
   const $=s=>document.querySelector(s);const run=$('#runSelfTest'),copy=$('#copySelfTest'),list=$('#selfTestResults'),st=$('#selfTestStatus');
   if(!run||!list)return;let last=null;
@@ -15,7 +15,6 @@
   copy?.addEventListener('click',async()=>{
     if(!last)return;
     const rep=globalThis.SCM_SELF_TEST_CORE.buildReport(last.results,{version:last.version,userAgent:navigator.userAgent,at:last.at},v=>globalThis.SCM_DIAGNOSTIC_CORE.redactSecrets(v));
-    globalThis.__scmSelfTestReport=rep.text;
     try{await navigator.clipboard.writeText(rep.text);st.textContent=' Report copied.';}catch{st.textContent=' Copy failed (clipboard blocked).';}
   });
 })();

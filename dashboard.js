@@ -1,5 +1,5 @@
 const BUILD_VERSION=chrome.runtime.getManifest().version;
-// v2.5.441: paint the build number as soon as this script starts (the full load can take seconds on phones).
+// Paint the build number as soon as this script starts (the full load can take seconds on phones).
 try{const b=document.getElementById('managerBuild');if(b)b.textContent=`Build ${BUILD_VERSION}`;const si=document.getElementById('syncInfo');if(si)si.textContent='Loading…';}catch{}
 function updateDeviceLayout(){const width=Math.max(window.innerWidth||0,window.visualViewport?.width||0),root=document.documentElement;root.classList.toggle('scm-mobile',width<=600);root.classList.toggle('scm-tablet',width>600&&width<=1000);root.classList.toggle('scm-desktop',width>1000);}
 updateDeviceLayout();window.addEventListener('resize',updateDeviceLayout,{passive:true});window.visualViewport?.addEventListener('resize',updateDeviceLayout,{passive:true});
@@ -14,9 +14,9 @@ let accountingRefreshPending=false;
 let accountingWeekLedgerRefreshPending=false;
 let accountingWeekLedgerRetryCount=0;
 let accountingWeekLedgerRetryTimer=null;
-// v2.5.331 lag fix: while the Manager tab is hidden (you are in the game), Chrome kept delivering every
-// realm-store write (~1.3 MB each, several a minute) to this page and queued renders that all ran when you
-// switched back. Storage listeners are now detached while hidden; on return the page reads storage once.
+// While the Manager tab is hidden (you are in the game) the storage listeners are detached: Chrome would otherwise
+// deliver every realm-store write (~1.3 MB each, several a minute) and queue renders that all run on return.
+// On return the page reads storage once.
 const __scmStorageListeners=new Set();let __scmListenersAttached=true,__scmHiddenAt=0;const __scmResumeHandlers=new Set();
 function scmOnStorageChanged(fn){__scmStorageListeners.add(fn);if(__scmListenersAttached)try{chrome.storage.onChanged.addListener(fn);}catch{}}
 function scmOnDashboardResume(fn){__scmResumeHandlers.add(fn);}
@@ -54,7 +54,7 @@ function plannerUiStateFromPersisted(persisted){
   const quality=selected!=null&&qualityByBuilding[selected]!=null?Number(qualityByBuilding[selected])||0:null;
   return {buildingId:selected,planningLevels,productOverrides,quality,qualityByBuilding,runHours:Math.min(48,Math.max(1,Number(p.runHours)||24)),discount:Math.min(10,Math.max(0,Number(p.discount)||0)),planModes,kindOverrides};
 }
-function plannerUiState(s){const key=plannerUiRealmKey(s);if(!plannerUiStateByRealm[key]){const persisted=s?.productionPlannerState&&typeof s.productionPlannerState==='object'?s.productionPlannerState:(s?.frozenNetworkPlan?.plannerState||{});plannerUiStateByRealm[key]=plannerUiStateFromPersisted(persisted);}return plannerUiStateByRealm[key];}
+function plannerUiState(s){const key=plannerUiRealmKey(s);if(!plannerUiStateByRealm[key]){const persisted=s?.productionPlannerState&&typeof s.productionPlannerState==='object'?s.productionPlannerState:{};plannerUiStateByRealm[key]=plannerUiStateFromPersisted(persisted);}return plannerUiStateByRealm[key];}
 function queuePlannerUiPersist(s){
   const realm=validRealmNumber(s?.viewRealm!=null?s.viewRealm:(s?.selectedRealm!=null?s.selectedRealm:s?.authData?.authCompany?.realmId));
   if(realm==null)return;
@@ -64,7 +64,6 @@ function queuePlannerUiPersist(s){
   // so a fast page/navigation change cannot outrun a debounce window.
   try{chrome.runtime.sendMessage({type:'SAVE_PRODUCTION_PLANNER_STATE',realm,value:payload}).catch(()=>{});}catch{}
 }
-function plannerFrozenBuildingPlan(s,id){const map=s?.frozenNetworkPlan?.buildingPlans;if(!map||typeof map!=='object')return null;const p=map[String(id)];return p&&typeof p==='object'?p:null;}
 async function requestAccountingRefresh(){
   if(accountingRefreshPending)return;
   const requestEpoch=__realmViewEpoch;
@@ -153,7 +152,7 @@ async function requestAccountingWeekLedgerRefresh(reason='dashboard-overview'){
 }
 document.addEventListener('click',e=>{const t=e.target?.closest?.('[data-goto-tab]');if(!t)return;const tab=document.querySelector(`.tab[data-tab="${CSS.escape(t.dataset.gotoTab||'')}"]`);if(tab){tab.click();window.scrollTo(0,0);}});$$('.tab').forEach(b=>b.onclick=()=>{activeTab=b.dataset.tab;document.body.classList.toggle('production-active',activeTab==='production');$$('.tab').forEach(x=>x.classList.remove('active'));$$('.tabpage').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('#'+b.dataset.tab).classList.add('active');if((b.dataset.tab==='market'||b.dataset.tab==='warehouse')&&window.__scmState){const n=marketRealmFromState(window.__scmState);if(n!=null)requestLiveMarketRefresh(n,true);}if(window.__scmState){try{render(window.__scmState);}catch(e){console.error('Dashboard tab render failed',e);}}});
 document.addEventListener('click',e=>{const b=e.target?.closest?.('[data-accounting-period]');if(!b)return;accountingPeriodView=String(b.dataset.accountingPeriod||'current');document.querySelectorAll('[data-accounting-period]').forEach(x=>x.classList.toggle('active',x===b));if(window.__scmState){try{render(window.__scmState);}catch(err){console.error('Accounting period render failed',err);}}});
-// v2.5.171: mobile-friendly row focus for every horizontally scrollable dashboard table.
+// Mobile-friendly row focus for every horizontally scrollable dashboard table.
 // Event delegation keeps it working after reactive table patches/re-renders.
 document.addEventListener('click',e=>{
   const row=e.target?.closest?.('.tabpage .table-wrap > table tbody > tr');
@@ -166,7 +165,7 @@ document.addEventListener('click',e=>{
 // 'alerts' and 'diagnostic' were merged into 'settings' (saved last tab, ?tab=, SCM_SELECT_DASHBOARD_TAB).
 const SCM_TAB_ALIASES={alerts:'settings',diagnostic:'settings',selftest:'settings'};
 function selectDashboardTab(tab){let key=String(tab||'').trim();key=SCM_TAB_ALIASES[key]||key;const b=[...$$('.tab')].find(x=>x.dataset.tab===key);if(b)b.click();}
-// v2.5.330: remember the open tab and scroll position. Mobile browsers unload background
+// Remember the open tab and scroll position. Mobile browsers unload background
 // tabs, so coming back to the Manager reloads the page — it now reopens where you left it.
 const SCM_LAST_TAB_KEY='scmDashboardLastTabV1';
 function rememberDashboardTab(){try{localStorage.setItem(SCM_LAST_TAB_KEY,JSON.stringify({tab:activeTab,y:Math.round(window.scrollY||0),at:Date.now()}));}catch{}}
@@ -183,10 +182,9 @@ try{
   if(!requested&&saved?.tab&&saved.y>0){const y=saved.y;let tries=0;const restore=()=>{if(document.documentElement.scrollHeight>=y+innerHeight*0.5||tries++>20){window.scrollTo(0,y);return;}setTimeout(restore,150);};setTimeout(restore,300);}
 }catch{}
 chrome.runtime.onMessage.addListener(m=>{if(m?.type==='SCM_SELECT_DASHBOARD_TAB'&&m.tab)selectDashboardTab(String(m.tab));});
-$$('.helper-page-grid [data-helper-tab]').forEach(b=>b.addEventListener('click',()=>selectDashboardTab(b.dataset.helperTab)));
 let dashboardImagesMemo=null;
-// NOTE: blob: URLs are not an option here (manifest CSP img-src has no blob:). Icons stay data: URIs in src, but fallback
-// the fallback candidate list no longer repeats the payload (see scmCandidatesJson).
+// blob: URLs are not an option here (manifest CSP img-src has no blob:). Icons stay data: URIs in src; the fallback
+// candidate list does not repeat the payload (see scmCandidatesJson).
 // data: entries (~26KB each) are blanked in data-candidates; the src already carries the first image.
 const scmCandidatesJson=list=>JSON.stringify((list||[]).map(u=>typeof u==='string'&&u.startsWith('data:')?'':u));
 async function dashboardResourceImages(){
@@ -204,7 +202,7 @@ async function get(attempt=0){
   const viewKey=activeRealm!=null?`realm:${activeRealm}`:null;
   let store=null;
   let productionPlannerState=null;
-  // Perf: all remaining independent keys are read in ONE storage call (was ~10 sequential calls, each deserializing large blobs).
+  // Perf: all remaining independent keys are read in ONE storage call (each call deserializes large blobs).
   const rn=activeRealm!=null?Number(activeRealm):null;
   const extraRealm=validRealmNumber(activeRealm!=null?rn:(s.selectedRealm!=null?Number(s.selectedRealm):null));
   const defaults={scmGameConstants:null,scmGameConfig:null,[`scmMarketOrders:${extraRealm}`]:null};
@@ -218,16 +216,16 @@ async function get(attempt=0){
     if(physical[`scmGameOverlaySnapshot:${realmNumber}`]&&typeof physical[`scmGameOverlaySnapshot:${realmNumber}`]==='object') store={...(store||{}),gameOverlaySnapshot:physical[`scmGameOverlaySnapshot:${realmNumber}`]};
     productionPlannerState=physical[`scmProductionPlannerState:${realmNumber}`]&&typeof physical[`scmProductionPlannerState:${realmNumber}`]==='object'?physical[`scmProductionPlannerState:${realmNumber}`]:null;
   }
-  const empty={authData:null,companyData:null,buildings:null,warehouseResources:[],gameState:null,resourceCatalog:null,endpointData:{},apiEndpoints:[],history:{},contracts:[],savedContracts:[],contractEvents:[],marketCache:{},marketDebug:{},marketTicker:null,marketQueue:[],marketQueueCursor:0,marketLastRequestAt:null,marketQueueStatus:null,liveMarketData:null,liveMarketProduct:null,liveMarketProductCache:{},liveMarketPriceData:null,resourceImageData:{},resourceImageCache:{},resourceImageMeta:{},resourceImageCacheStatus:null,warehouseCapture:null,lastSync:null,syncStatus:'No active realm data',syncError:null,fullSyncDiagnostics:null,warehouseCostDetails:{},accountingLastComputed:null,accountingLastComputedIncome:null,accountingCapture:{},accountingSnapshots:{},tickerSnapshots:{},sellingHistory:{},accountingWeekSales:{},accountingWeekSalesSummary:null,vwapData:null,vwapWatch:null,vwapStatus:null,realmQuarantine:{},productionEvents:[],productionRateSnapshots:{},productionPlans:{},frozenNetworkPlan:null,productionPlannerState:null,gameOverlaySnapshot:null,productionRunHours:24,accountingWeekLedgerStatus:null,accountingDayWalkStatus:null,accountingDailySeries:null,javascriptDiagnostic:null,javascriptDiagnosticHistory:[]};
+  const empty={authData:null,companyData:null,buildings:null,warehouseResources:[],gameState:null,resourceCatalog:null,endpointData:{},apiEndpoints:[],history:{},contracts:[],savedContracts:[],contractEvents:[],marketCache:{},marketDebug:{},marketTicker:null,marketQueue:[],marketQueueCursor:0,marketLastRequestAt:null,marketQueueStatus:null,liveMarketData:null,liveMarketProduct:null,liveMarketProductCache:{},liveMarketPriceData:null,resourceImageData:{},resourceImageCache:{},resourceImageMeta:{},resourceImageCacheStatus:null,warehouseCapture:null,lastSync:null,syncStatus:'No active realm data',syncError:null,fullSyncDiagnostics:null,warehouseCostDetails:{},accountingLastComputed:null,accountingLastComputedIncome:null,accountingCapture:{},accountingSnapshots:{},tickerSnapshots:{},sellingHistory:{},accountingWeekSales:{},accountingWeekSalesSummary:null,vwapData:null,vwapWatch:null,vwapStatus:null,realmQuarantine:{},productionEvents:[],productionRateSnapshots:{},productionPlans:{},productionPlannerState:null,gameOverlaySnapshot:null,productionRunHours:24,accountingWeekLedgerStatus:null,accountingDayWalkStatus:null,accountingDailySeries:null,javascriptDiagnostic:null,javascriptDiagnosticHistory:[]};
   const scoped={...empty};
   if(store){for(const key of Object.keys(empty)){if(Object.prototype.hasOwnProperty.call(store,key))scoped[key]=store[key];}}
   const result={...scoped,productionPlannerState,realmStores:viewKey?{[viewKey]:scoped}:{},activeRealmKey:s.activeRealmKey??null,selectedRealm:s.selectedRealm!=null?Number(s.selectedRealm):null,viewRealm:activeRealm!=null?Number(activeRealm):null,captureRealm:activeRealm!=null?Number(activeRealm):null,apiBase:s.apiBase,syncMinutes:s.syncMinutes};
   if(readEpoch!==__realmViewEpoch&&attempt<3)return get(attempt+1);
   const currentMeta=await chrome.storage.local.get({activeRealmKey:null});
   if(String(currentMeta.activeRealmKey??'')!==String(result.activeRealmKey??'')&&attempt<3)return get(attempt+1);
-  // v2.5.327: images live in their own storage key (loaded once, refreshed only when images change).
+  // Images live in their own storage key (loaded once, refreshed only when images change).
   try{const imgs=await dashboardResourceImages();result.resourceImageCache={...(result.resourceImageCache||{}),...imgs};}catch{}
-  // v2.5.327/331/338/342/341/387: per-realm side keys (read together above).
+  // Per-realm side keys (read together above).
   try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);if(r!=null&&r===extraRealm){
     const h=physical[`scmBackgroundJobs:${r}`];if(Array.isArray(h)){result.backgroundJobHistory=h;if(viewKey&&result.realmStores?.[viewKey])result.realmStores[viewKey]={...result.realmStores[viewKey],backgroundJobHistory:h};}
     const ph=physical[`scmProductionCostHistory:${r}`];result.productionCostHistory=Array.isArray(ph)?ph:[];
@@ -251,8 +249,8 @@ async function copyDiagnosticText(text,button){let out=String(text??'');try{cons
 function pick(o,keys){for(const k of keys)if(o?.[k]!==undefined&&o?.[k]!==null)return o[k];return null}
 function flattenObjects(x,out=[]){if(!x)return out;if(Array.isArray(x)){for(const v of x)flattenObjects(v,out);return out}if(typeof x==='object'){out.push(x);for(const v of Object.values(x)){if(v&&typeof v==='object')flattenObjects(v,out)}}return out}
 const FALLBACK_RESOURCE_NAMES = {'-1':'Power',1:'Power',2:'Water',3:'Apples',4:'Oranges',5:'Grapes',6:'Grain',7:'Steak',8:'Sausages',9:'Eggs',10:'Crude oil',11:'Petrol',12:'Diesel',13:'Transport',14:'Minerals',15:'Bauxite',16:'Silicon',17:'Chemicals',18:'Aluminium',19:'Plastic',20:'Processors',21:'Electronic components',22:'Batteries',23:'Displays',24:'Smart phones',25:'Tablets',26:'Laptops',27:'Monitors',28:'Televisions',29:'Plant research',30:'Energy research',31:'Mining research',32:'Electronics research',33:'Breeding research',34:'Chemistry research',35:'Software',40:'Cotton',41:'Fabric',42:'Iron ore',43:'Steel',44:'Sand',45:'Glass',46:'Leather',47:'On-board computer',48:'Electric motor',49:'Luxury car interior',50:'Basic interior',51:'Car body',52:'Combustion engine',53:'Economy e-car',54:'Luxury e-car',55:'Economy car',56:'Luxury car',57:'Truck',58:'Automotive research',59:'Fashion research',60:'Underwear',61:'Gloves',62:'Dress',63:'Stiletto Heel',64:'Handbags',65:'Sneakers',66:'Seeds',67:'Xmas crackers',68:'Gold ore',69:'Golden bars',70:'Luxury watch',71:'Necklace',72:'Sugarcane',73:'Ethanol',74:'Methane',75:'Carbon fibers',76:'Carbon composite',77:'Fuselage',78:'Wing',79:'High grade e-comps',80:'Flight computer',81:'Cockpit',82:'Attitude control',83:'Rocket fuel',84:'Propellant tank',85:'Solid fuel booster',86:'Rocket engine',87:'Heat shield',88:'Ion drive',89:'Jet engine',90:'Sub-orbital 2nd stage',91:'Sub-orbital rocket',92:'Orbital booster',93:'Starship',94:'BFR',95:'Jumbo jet',96:'Luxury jet',97:'Single engine plane',98:'Quadcopter',99:'Satellite',100:'Aerospace research',101:'Reinforced concrete',102:'Bricks',103:'Cement',104:'Clay',105:'Limestone',106:'Wood',107:'Steel beams',108:'Planks',109:'Windows',110:'Tools',111:'Construction units',112:'Bulldozer',113:'Materials research',114:'Robots',115:'Cows',116:'Pigs',117:'Milk',118:'Coffee beans',119:'Coffee powder',120:'Vegetables',121:'Bread',122:'Cheese',123:'Apple pie',124:'Orange juice',125:'Apple cider',126:'Ginger beer',127:'Frozen pizza',128:'Pasta',129:'Hamburger',130:'Lasagna',131:'Meat balls',132:'Cocktails',133:'Flour',134:'Butter',135:'Sugar',136:'Cocoa',137:'Dough',138:'Sauce',139:'Fodder',140:'Chocolate',141:'Vegetable oil',142:'Salad',143:'Samosa',144:'Xmas ornament',145:'Recipes',146:'Pumpkin',147:'Jack o\'lantern',148:'Witch costume',149:'Pumpkin soup',150:'Tree',151:'Easter Bunny',152:'Ramadan sweets',153:'Chocolate icecream',154:'Apple icecream',155:'Cream egg'};
-// v2.5.361 performance: resourceInfo() ran this for every warehouse row / planner resource and, when an image was not in
-// the catalog, flattened the whole captured endpoint data (MBs) per resource. Both are now memoized per captured object.
+// resourceInfo() runs this for every warehouse row / planner resource and, when an image is not in the catalog, would
+// flatten the whole captured endpoint data (MBs) per resource. Both are memoized per captured object.
 const __scmCatalogMemo=new WeakMap(),__scmImageIndexMemo=new WeakMap(),__scmFlatMemo=new WeakMap();
 function catalogEntries(s){
   const cat=s?.resourceCatalog;if(cat&&typeof cat==='object'){const m=__scmCatalogMemo.get(cat);if(m)return m;const built=catalogEntriesBuild(s);__scmCatalogMemo.set(cat,built);return built;}
@@ -306,7 +304,7 @@ const RESOURCE_IMAGE_404_FILENAMES=new Set(["smartphones.png", "basic-interior.p
 function resourceImageSlug(name){
   return String(name||'').toLowerCase().replace(/&/g,'and').replace(/['’]/g,'').replace(/\bsub orbital\b/g,'sub-orbital').replace(/\s*2nd\s*stage\b/g,'2nd-stage').replace(/\s+/g,'-').replace(/[^a-z0-9-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
 }
-// Perf: per-captured-object memos (first path per resource id, as the old Object.keys().find returned; flattened objects per data blob).
+// Perf: per-captured-object memos (first path per resource id; flattened objects per data blob).
 const __scmResPathMemo=new WeakMap();
 function scmResourcePathIndex(ed){
   const keys=Object.keys(ed);const m=__scmResPathMemo.get(ed);if(m&&m.n===keys.length&&m.first===keys[0]&&m.last===keys[keys.length-1])return m.index;
@@ -507,26 +505,6 @@ function warehouseRows(s){
   return [...groups.values()].map(x=>({...x,_unitCost:x._qty>0&&x._totalCost!=null?x._totalCost/x._qty:null}));
 }
 
-function warehouseAlertUnitCost(s,r){
-  const fallback=Number(r?._unitCost);
-  const realm=Number(s.viewRealm??s.captureRealm??s.authData?.authCompany?.realmId??s.authData?.authCompany?.realm);
-  const key=Number.isFinite(realm)?`realm:${realm}`:null;
-  const detailMap=key?(s.warehouseCostDetails?.[key]||s.warehouseCostDetails||{}):{};
-  const details=Array.isArray(detailMap?.[String(r?._id)])?detailMap[String(r._id)].filter(x=>x?.unitCost!==null&&x?.unitCost!==undefined&&Number.isFinite(Number(x.unitCost))&&Number(x.unitCost)>=0):[];
-  if(details.length){
-    const warehouseQualities=warehouseRows(s).filter(x=>Number(x._id)===Number(r._id)).map(x=>Number(x._quality)).filter(Number.isFinite);
-    const exact=details.filter(d=>warehouseQualities.includes(Number(d.quality)) && Number(d.quality)===Number(r._quality));
-    if(exact.length)return Number(exact.sort((a,b)=>Date.parse(b.capturedAt||'')-Date.parse(a.capturedAt||''))[0].unitCost);
-    // The warehouse-page parser can report the star count differently from the
-    // API quality on some game screens. If this product exists at only one
-    // warehouse quality, the latest game sourcing-cost capture is authoritative.
-    const distinct=new Set(warehouseQualities);
-    if(distinct.size===1){
-      return Number(details.sort((a,b)=>Date.parse(b.capturedAt||'')-Date.parse(a.capturedAt||''))[0].unitCost);
-    }
-  }
-  return r?._unitCost!==null&&r?._unitCost!==undefined&&Number.isFinite(fallback)&&fallback>=0?fallback:null;
-}
 
 function simcoVwapRows(s,id,q){
   const v=cachedMarketVwap(s,id,q);
@@ -594,56 +572,7 @@ function buildBalanceSections(bs){
   const extra=financialEntries(bs,used);
   return `<div class="statement-grid">${statementTable('Assets',assets)}${statementTable('Liabilities',liabilities)}${statementTable('Equity',equity)}${extra.length?statementTable('Other balance-sheet fields',extra):''}</div>`;
 }
-function buildCashflowSections(cf,recent){
-  let tx=[];
-  const extract=v=>{
-    if(Array.isArray(v))return v;
-    if(!v||typeof v!=='object')return [];
-    for(const k of ['transactions','transaction','items','entries','movements','operations','data','results','cashflow','cashFlow','history','records']){if(Array.isArray(v[k]))return v[k];}
-    const found=[]; const walk=x=>{if(Array.isArray(x)){x.forEach(y=>{if(y&&typeof y==='object')found.push(y)});return;}if(x&&typeof x==='object')Object.values(x).forEach(walk)}; walk(v);
-    return found.filter(x=>pick(x,['amount','cashChange','change','value','money','description','profit','netProfit','price','quantity','qty'] )!=null);
-  };
-  tx=extract(recent).length?extract(recent):extract(cf);
-  if(!tx.length){
-    const source=(cf&&typeof cf==='object')?cf:recent;
-    const rows=financialEntries(source||{}).slice(0,80);
-    return rows.length?`<div class="statement-card full-width"><h3>Cash-flow statement</h3><div class="table-wrap"><table class="statement-table"><thead><tr><th>Item</th><th>Amount</th></tr></thead><tbody>${renderStatementRows(rows)}</tbody></table></div></div>`:'<p class="muted">The cash-flow endpoint was captured, but it did not contain a readable transaction list yet.</p>';
-  }
-  const transactionMetric=(t,keys)=>pickNumericDeep(t,keys);
-  const txRows=tx.slice(0,100).map(t=>{
-    const desc=pick(t,['description','name','title','text'])||pick(t.details||{},['description','name','title','text'])||'Transaction';
-    const amount=transactionMetric(t,['amount','cashChange','change','value','money']);
-    const price=transactionMetric(t,['price','unitPrice','pricePerUnit','unit_price']);
-    const profit=transactionMetric(t,['profit','netProfit','earnings']);
-    const quantity=transactionQuantity(t,price,amount);
-    return `<tr><td>${escapeHtml(desc)}</td><td>${amount==null?'—':money(amount)}</td><td>${price==null?'—':money(price)}</td><td>${profit==null?'—':money(profit)}</td><td>${quantity==null?'—':num(quantity)}</td></tr>`;
-  }).join('');
-  return `<div class="statement-card full-width"><h3>Recent cash-flow transactions</h3><div class="table-wrap"><table class="statement-table"><thead><tr><th>Description</th><th>Amount</th><th>Price</th><th>Profit</th><th>Qty</th></tr></thead><tbody>${txRows}</tbody></table></div></div>`;
-}
-function pickQuantityDeep(obj){
-  const preferred=['quantity','qty','units','amountItems','itemQuantity','itemCount','quantityItems','itemsQuantity','countItems','resourceQuantity','productQuantity','quantitySold','quantityBought','itemQty','resourceAmount','unitsAmount','unitCount','volume','count'];
-  const wanted=new Set(preferred.map(k=>k.toLowerCase())); const seen=new Set();
-  const walk=v=>{
-    if(!v||typeof v!=='object'||seen.has(v))return null; seen.add(v);
-    if(!Array.isArray(v)){
-      for(const [k,x] of Object.entries(v)){
-        if(wanted.has(String(k).toLowerCase())){const n=numericValue(x);if(n!==null&&Math.abs(n)<1e9)return n;}
-      }
-      for(const x of Object.values(v)){const r=walk(x);if(r!==null)return r;}
-    } else for(const x of v){const r=walk(x);if(r!==null)return r;}
-    return null;
-  };
-  return walk(obj);
-}
-function transactionQuantity(t,price,amount){
-  const direct=pickQuantityDeep(t); if(direct!=null)return direct;
-  if(Number.isFinite(price)&&price>0&&Number.isFinite(amount)&&Math.abs(amount)>0){
-    const d=JSON.stringify(t).toLowerCase();
-    if(/sell|sale|sold|buy|purchase|exchange|market|contract/.test(d)){ const q=Math.abs(amount)/price; if(Number.isFinite(q)&&q<1e9)return q; }
-  }
-  return null;
-}
-// v2.5.330: the game's own daily history (past-finances-overview + v3 past-finances)
+// The game's own daily history (past-finances-overview + v3 past-finances)
 // gives every completed day's profit, assets, liabilities, inventory and cash. Use it
 // for the "vs previous day" comparison instead of whatever the dashboard last rendered.
 function accountingDailyHistory(overview,detail,ledger=[],check={sales:true,expenses:true}){
@@ -693,13 +622,13 @@ function accountingDayStatements(endpointData,realmMatches=()=>true){
   return out;
 }
 function accountingStatementDay(e){
-  // v2.5.382 one completed game day of the income statement, as the Accounting overview cards read it.
+  // One completed game day of the income statement, as the Accounting overview cards read it.
   // Executives cost = salaries + training + poaching (game Operating expenses lines).
   const v=k=>Number(e?.[k])||0;
   return {sales:v('sales'),cogs:v('cogs'),freightOut:v('freightOut'),marketFees:v('marketFees'),executives:v('salariesCosts')+v('trainingCosts')+v('poachingCosts'),operatingExpenses:gameOperatingExpenses(e),netIncome:v('netIncome'),dateFrom:e?.dateFrom,date:e?.date};
 }
 function accountingDayCashflows(endpointData,realmMatches=()=>true){
-  // v2.5.382 /cashflow-statement/day/<n>/ (read by the Accounting walk): Total change in cash per completed day.
+  // /cashflow-statement/day/<n>/ (read by the Accounting walk): Total change in cash per completed day.
   const out=new Map();
   for(const [k,item] of Object.entries(endpointData||{})){
     if(!/\/api\/v2\/companies\/(?:me|\d+)\/cashflow-statement\/day\/\d+\/?$/i.test(k))continue;
@@ -734,7 +663,7 @@ function accounting(s, realmStore=null){
   };
   const supplemental=realmStore?.accountingCapture||{};
   const latestSupplemental=(path)=>{const item=supplemental[path];return item&&realmMatches(item)?item.data??null:null;};
-  // v2.5.382: the latest finished game day = the computed statement with the newest end date, from this realm only.
+  // The latest finished game day = the computed statement with the newest end date, from this realm only.
   // The current statement and the Accounting walk's day/0 are the same day; whichever was read last is newer.
   // (Sorting by receipt time let an older day, or the other realm's statement, set the period.)
   const statementEnd=x=>{const t=Date.parse(String(x?.data?.date||'').replace(' ','T'));return Number.isFinite(t)?t:0;};
@@ -821,8 +750,7 @@ function accounting(s, realmStore=null){
   // "profit" field from a recent transaction (e.g. a single contract profit).
   // Some current Sim Companies responses expose only the recent transaction
   // ledger ({data:[{money,...}]}) rather than the aggregate cashAllIncome /
-  // cashAllExpenses fields. In that shape the old code fell through to zeros
-  // because all category-total fields were absent. Derive the current captured
+  // cashAllExpenses fields. All category-total fields are then absent, so derive the current captured
   // cash-flow totals from the transaction money values instead.
   const transactionRows=[];
   const transactionSeen=new Set();
@@ -837,13 +765,6 @@ function accounting(s, realmStore=null){
       if(moneyValue!=null) transactionRows.push({...row,money:moneyValue});
     }
   }
-  const transactionIncome=transactionRows
-    .filter(x=>x.money>0)
-    .reduce((sum,x)=>sum+x.money,0);
-  const transactionExpenses=transactionRows
-    .filter(x=>x.money<0)
-    .reduce((sum,x)=>sum+Math.abs(x.money),0);
-
   let revenue=cashAllIncome;
   if(revenue==null){
     const categoryTotal=fromCustomers+fromExchange+fromRetail+fromRoyalties+fromInterest+fromGame;
@@ -880,7 +801,7 @@ function accounting(s, realmStore=null){
     });
     return rows[0]||null;
   })();
-  // v2.5.369: Total assets / liabilities as the game's balance sheet computes them (GamePages).
+  // Total assets / liabilities as the game's balance sheet computes them (GamePages).
   const gameBs=obj(bs)&&('cash' in bs||'buildings' in bs)&&typeof SCM_TOOLS_CORE!=='undefined'?SCM_TOOLS_CORE.gameFinancialStatements({},bs,{}):null;
   const gameTotal=(g,label)=>{const r=g?.balance?.find(x=>x.label===label);return r?r.value:null;};
   const assets=gameTotal(gameBs,'Total assets') ?? get(bs,['assets','totalAssets']) ?? pickNumericDeep(bs,['assets','totalAssets']) ?? get(latestPastFinanceRow,['assets','totalAssets','total']);
@@ -959,7 +880,7 @@ function accounting(s, realmStore=null){
   const bondsPayable=get(bs,['bondsPayable','bonds','bondLiabilities']);
   const currentAssetsParts=[cash,accountsReceivable,inventory].filter(v=>v!=null);
   const currentAssets=currentAssetsParts.length?currentAssetsParts.reduce((a,v)=>a+v,0):null;
-  // v2.5.330: the balance-sheet API has no accounts-payable field. Total liabilities
+  // The balance-sheet API has no accounts-payable field. Total liabilities
   // (game history) minus bonds payable (balance sheet) is the current-liability part.
   const derivedPayable=accountsPayable==null&&liabilities!=null&&bondsPayable!=null?Math.max(0,Math.abs(liabilities)-Math.abs(bondsPayable)):null;
   const payable=accountsPayable??derivedPayable;
@@ -985,17 +906,17 @@ function accounting(s, realmStore=null){
   const history=accountingDailyHistory(
     latest(/\/api\/v2\/companies\/(?:me|\d+)\/past-finances-overview\/?$/i)??latestSupplemental('/api/v2/companies/me/past-finances-overview/'),
     latest(/\/api\/v3\/companies\/(?:me|\d+)\/past-finances\/?$/i)??latestSupplemental('/api/v3/companies/me/past-finances/'),[...ledger.values()],ledgerCheck);
-  // v2.5.369: the game's own per-day income statements (/income-statement/day/<n>/, captured when
+  // The game's own per-day income statements (/income-statement/day/<n>/, captured when
   // the game's Accounting page shows a Day period) give each completed day's exact Sales,
   // Operating expenses and Net income. Matched to history rows by the statement's end date.
   const dayIncome=accountingDayStatements(endpointData,realmMatches);
   const dayCash=accountingDayCashflows(endpointData,realmMatches);
-  // v2.5.382 the current (latest finished day) statements are that day's figures even before the walk reads day/0.
+  // The current (latest finished day) statements are that day's figures even before the walk reads day/0.
   const dayMinute=e=>{const t=Date.parse(String(e?.date||'').replace(' ','T'));return Number.isFinite(t)?Math.round(t/60000):null;};
   if(obj(income)?.isComputed===true&&dayMinute(income)!=null&&!dayIncome.has(dayMinute(income)))dayIncome.set(dayMinute(income),accountingStatementDay(income));
   if(cfObj.isComputed===true&&dayMinute(cfObj)!=null&&!dayCash.has(dayMinute(cfObj)))dayCash.set(dayMinute(cfObj),accountingCashChange(cfObj));
   for(const r of history){const m=Math.round(r.t/60000);const st=dayIncome.get(m);if(st){r.sales=st.sales;r.cogs=st.cogs;r.freightOut=st.freightOut;r.marketFees=st.marketFees;r.executives=st.executives;r.operatingExpenses=st.operatingExpenses;r.netIncome=st.netIncome;r.statement=true;}const cc=dayCash.get(m);if(cc!=null)r.cashChange=cc;}
-  // v2.5.377: Current Liabilities per completed day = the Day balance sheet's accounts payable, or (as for the
+  // Current Liabilities per completed day = the Day balance sheet's accounts payable, or (as for the
   // card) that day's total liabilities minus its bonds payable. Matched to history rows by the sheet's date.
   const daySheets=accountingDayBalanceSheets(endpointData,realmMatches);
   for(const r of history){const bsd=daySheets.get(Math.round(r.t/60000));if(!bsd)continue;const cl=bsd.accountsPayable!=null?Math.abs(bsd.accountsPayable):(r.liabilities!=null&&bsd.bondsPayable!=null?Math.max(0,Math.abs(r.liabilities)-Math.abs(bsd.bondsPayable)):null);if(cl!=null)r.currentLiabilities=cl;}
@@ -1134,7 +1055,7 @@ function scmAccountingSignature(store){
   const summarizeComputed=x=>x&&typeof x==='object'?{captureRealm:x.captureRealm??null,receivedAt:x.receivedAt??null,isComputed:x.data?.isComputed??null,date:x.data?.date??null,dateFrom:x.data?.dateFrom??null}:{value:x??null};
   const weekSummary=store?.accountingWeekSalesSummary&&typeof store.accountingWeekSalesSummary==='object'?{rangeStart:store.accountingWeekSalesSummary.rangeStart??null,rangeEnd:store.accountingWeekSalesSummary.rangeEnd??null,transactionCount:store.accountingWeekSalesSummary.transactionCount??0,updatedAt:store.accountingWeekSalesSummary.updatedAt??null}:{};
   const weekStatus=store?.accountingWeekLedgerStatus&&typeof store.accountingWeekLedgerStatus==='object'?{status:store.accountingWeekLedgerStatus.status??null,updatedAt:store.accountingWeekLedgerStatus.updatedAt??null,completedAt:store.accountingWeekLedgerStatus.completedAt??null,rows:store.accountingWeekLedgerStatus.rows??null,pages:store.accountingWeekLedgerStatus.pages??null}:{};
-  // 2.5.373: the day-walk status drives the Last 7 days note; without it a walk finishing after the tab rendered never showed.
+  // The day-walk status drives the Last 7 days note; without it a walk finishing after the tab rendered never showed.
   const dw=store?.accountingDayWalkStatus&&typeof store.accountingDayWalkStatus==='object'?store.accountingDayWalkStatus:null;
   const dayWalk=dw?{status:dw.status??null,updatedAt:dw.updatedAt??null,finishedAt:dw.finishedAt??null,captured:dw.captured??null}:{};
   return JSON.stringify({entries,supplemental:supplementalSig,lastComputed:summarizeComputed(store?.accountingLastComputed),lastComputedIncome:summarizeComputed(store?.accountingLastComputedIncome),accountingWeekRevision:Number(store?.accountingWeekRevision)||0,weekSummary,weekStatus,dayWalk});
@@ -1159,13 +1080,10 @@ function updateAccountingSnapshot(s,a){
   const old=realm.store.accountingSnapshots||null;
   const sig=snapshotSignature(current);
   const sameRealm=old?.baselineVersion===1 && Number(old?.realm)===Number(s.viewRealm);
-  // v2.4.43/v2.4.44 snapshots did not carry a baseline schema marker.
-  // Those snapshots could contain a stale pre-realm comparison (notably R1's
-  // $2.28M cash baseline). Treat that legacy comparison as invalid exactly
-  // once, while preserving the captured current values for diagnostics/history.
+  // Snapshots without baselineSchemaVersion 2 can hold a stale pre-realm comparison (notably R1's
+  // $2.28M cash baseline) and are treated as invalid; the captured current values are kept for diagnostics/history.
   const baselineSchemaVersion=Number(old?.baselineSchemaVersion)||0;
   const validBaseline=sameRealm && baselineSchemaVersion===2;
-  const legacyBaseline=sameRealm && baselineSchemaVersion<2;
   const aggregateUncomputed=a?.source?.cf?.isComputed===false || a?.source?.income?.isComputed===false;
   const rolloverPlaceholder=aggregateUncomputed && Number(a?.revenue)===0 && Number(a?.profit)===0;
   // At the daily rollover Sim Companies briefly exposes an uncomputed zero
@@ -1192,7 +1110,7 @@ function updateAccountingSnapshot(s,a){
   } else s.accountingSnapshots=old;
   return snap||{previous:null,current};
 }
-// v2.5.450 the game marks construction and upgrades with busy.category "b" (EXPANDING; "r" is producing).
+// The game marks construction and upgrades with busy.category "b" (EXPANDING; "r" is producing).
 function buildingIsExpanding(b){return String(b?.busy?.category||'')==='b'||Boolean(b?.busy?.expanding);}
 function buildingExpandFinish(b){const st=Date.parse(String(b?.busy?.started||'')),d=Number(b?.busy?.duration);return Number.isFinite(st)&&d>0?st+d*1000:null;}
 function buildingArrayFromState(s){
@@ -1244,7 +1162,7 @@ function activeProductionCostCells(s,r){
     const diffLabel=diff==null?'—':diff>1e-9?`+${money(Math.abs(diff))}`:diff< -1e-9?`−${money(Math.abs(diff))}`:money(0);
     return {cost:`<span class="active-cost-line"><strong>${money(x.unitCost)}</strong><small>${label}</small></span>`,diff:`<span class="active-cost-line ${cls}"><strong>${diffLabel}</strong><small>${label}</small></span>`};
   };
-  // v2.5.330: buildings running at the same cost are shown once ("$30.46 · 7 Mills")
+  // Buildings running at the same cost are shown once ("$30.46 · 7 Mills")
   // so a card never grows sideways with one column per building.
   const groups=new Map();
   for(const x of entries){const k=money(x.unitCost);const g=groups.get(k)||{...x,names:[]};g.names.push(String(x.building||''));groups.set(k,g);}
@@ -1272,50 +1190,10 @@ function findNestedObject(root, keys, maxDepth=5){
   };
   return walk(root,0);
 }
-function deepValue(root, keys, maxDepth=6){
-  const wanted=new Set(keys.map(k=>String(k).toLowerCase())); const seen=new Set();
-  const walk=v=>{
-    if(v==null||typeof v!=='object'||seen.has(v))return null; seen.add(v);
-    if(!Array.isArray(v)){
-      for(const [k,x] of Object.entries(v)){if(wanted.has(String(k).toLowerCase())&&x!=null)return x;}
-      for(const x of Object.values(v)){const r=walk(x);if(r!=null)return r;}
-    } else for(const x of v){const r=walk(x);if(r!=null)return r;}
-    return null;
-  };
-  return walk(root);
-}
 function busyObject(b){
   if(b?.busy&&typeof b.busy==='object') return b.busy;
   const x=findNestedObject(b,['busy','production','productionState','currentProduction','runningProduction']);
   return x||null;
-}
-function productionQuantity(b){
-  const busy=busyObject(b);
-  const roots=[busy,b].filter(x=>x&&typeof x==='object');
-  const keys=['quantityRemaining','amountRemaining','unitsRemaining','remainingQuantity','remainingAmount','remainingUnits','productionLeft','quantityLeft','amountLeft','unitsLeft','outputAmount','outputQuantity','outputUnits','productionQuantity','productionAmount','productionUnits','amountProduced','quantityProduced','batchSize','batchQuantity','totalQuantity','quantity','amount','qty','units'];
-  for(const root of roots){
-    for(const k of keys){
-      const v=root?.[k];
-      if(v&&typeof v==='object'){
-        const n=Number(pick(v,['quantity','amount','qty','units','remaining','value']));
-        if(Number.isFinite(n)&&n>=0)return n;
-      } else {
-        const n=Number(v);
-        if(Number.isFinite(n)&&n>=0)return n;
-      }
-    }
-    const v=deepValue(root,keys);
-    const n=Number(v);
-    if(Number.isFinite(n)&&n>=0)return n;
-  }
-  return null;
-}
-function productionEnd(b){
-  const busy=busyObject(b);
-  const roots=[busy,b].filter(x=>x&&typeof x==='object');
-  const keys=['endsAt','endAt','until','finishAt','finishedAt','completionAt','completeAt','productionEnd','productionEndTime','timeEnd','timeRemaining','remainingTime','secondsLeft','timeLeft','finish','finishTime','completionTime','endTime','runEnd','productionFinish','productionFinishTime'];
-  for(const root of roots){const v=deepValue(root,keys);if(v!=null)return v;}
-  return null;
 }
 const REALM_DEFINITIONS={0:{display:'R1',name:'Magnates'},1:{display:'R2',name:'Entrepreneurs'}};
 function realmName(realm){return REALM_DEFINITIONS[Number(realm)]?`${REALM_DEFINITIONS[Number(realm)].display} - ${REALM_DEFINITIONS[Number(realm)].name}`:`Realm ${realm}`;}
@@ -1468,11 +1346,10 @@ function cachedMarketVwap(s,resourceId,quality){
   if(!m.vwaps.has(key))m.vwaps.set(key,core.vwap(s,m.realm,resourceId,quality,m.t));
   return m.vwaps.get(key)?.value??null;
 }
-function cachedMarketPrice(s,resourceId,quality){return scmMarketPrice(s,resourceId,quality,'exact')?.price??null;}
-// Short origin text for a shared-source price: where it came from, how old, and "old" when it is stale.
 // Origin label for a price that is not a real exchange order-book price (shared rule: exchange => no label).
 function scmSrcLabel(p){return p?(p.source==='vwap'?'VWAP fallback':p.source==='simcotools'?(p.stale?'SimcoTools · stale':'SimcoTools'):''):'';}
 function scmSrcTag(p,cls){const l=scmSrcLabel(p);return l?`<small class="${cls||'market-inline-vwap'}">${escapeHtml(l)}</small>`:'';}
+// Short origin text for a shared-source price: where it came from, how old, and "old" when it is stale.
 function scmMarketSourceText(p){
   if(!p)return 'Market price not captured';
   const age=p.ageMs!=null?plannerAge(p.ageMs):'';
@@ -1661,32 +1538,14 @@ function accountingPeriodViewData(a,mode){
   const profit=hasExplicitProfit?explicitProfit:(revenue||expenses?revenue-expenses:null);
   return {...a,revenue:revenue||null,expenses:expenses||null,profit,netMargin:revenue&&profit!=null?profit/revenue*100:null,cashChange,period:{...(a.period||{}),dateFrom:new Date(start).toISOString(),date:new Date(end).toISOString()},periodMode:key,periodSource:'recent-cashflow',periodTransactionCount:selected.length};
 }
-function normalizedKey(v){return String(v??'').toLowerCase().replace(/[^a-z0-9]/g,'');}
-function findNormalizedNumeric(root,aliases){
-  const wanted=new Set(aliases.map(normalizedKey)); const seen=new Set();
-  const walk=v=>{
-    if(v==null||typeof v!=='object'||seen.has(v))return null;seen.add(v);
-    if(Array.isArray(v)){for(const item of v){const r=walk(item);if(r!=null)return r;}return null;}
-    for(const [k,x] of Object.entries(v)){
-      if(wanted.has(normalizedKey(k))){const n=numericValue(x);if(n!==null)return n;const nested=pickNumericDeep(x,['value','amount','total','result','percent','percentage']);if(nested!==null)return nested;}
-    }
-    const label=pick(v,['name','label','title','metric','description','type','code']);
-    if(typeof label==='string'&&wanted.has(normalizedKey(label))){const n=pickNumericDeep(v,['value','amount','total','result','percent','percentage','ratio']);if(n!==null)return n;}
-    for(const x of Object.values(v)){const r=walk(x);if(r!=null)return r;}
-    return null;
-  };
-  return walk(root);
-}
-
 function accountingComparisonBase(a){
-  // Only the game's own completed-day history and cash-flow ledger are used. The old
-  // "last value this dashboard saw" baseline could equal the current figures (or be
-  // empty) and produced fake +100% / $0 changes, so it is no longer used here.
+  // Only the game's own completed-day history and cash-flow ledger are used: a "last value this dashboard saw"
+  // baseline could equal the current figures (or be empty) and produce fake +100% / $0 changes.
   const p=a?.previousPeriod||null;
   if(p&&a?.sourceType!=='income-statement'&&p.cashIn!=null)return {...p,revenue:p.cashIn,sales:p.cashIn};
   return p;
 }
-// v2.5.371 Daily scheduled Accounting walk: on/off, minutes after the game finishes your statements, Run now.
+// Daily scheduled Accounting walk: on/off, minutes after the game finishes your statements, Run now.
 function accountingWalkTimes(sch){
   const t=v=>{const d=new Date(v);return v&&Number.isFinite(d.getTime())?d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}):null;};
   const dt=v=>{const d=new Date(v);return v&&Number.isFinite(d.getTime())?`${d.toLocaleDateString(undefined,{weekday:'short'})} ${t(v)}`:'—';};
@@ -1745,7 +1604,7 @@ function accountingHistoryTable(history,walk=null){
   const d=t=>new Date(t).toLocaleDateString(undefined,{month:'short',day:'numeric'});
   const tone=v=>v==null?'':(v>=0?'positive':'negative');
   const field=(label,v,cls=false)=>`<div class="acct-day-field"><span>${label}</span><strong class="${cls?tone(v):''}">${v==null?'—':money(v)}</strong></div>`;
-  // v2.5.350 one collapsible card per day; collapsed shows the day and its profit (right).
+  // One collapsible card per day; collapsed shows the day and its profit (right).
   const key=r=>{const t=new Date(r.t);return Number.isFinite(t.getTime())?t.toISOString().slice(0,10):String(r.t);};
   return `<div class="acct-day-list">${rows.map(r=>`<div class="acct-day" data-collapse="acctday:${escapeHtml(key(r))}" data-collapse-default="closed"><div class="acct-day-head" data-collapse-head><span>${escapeHtml(d(r.t))}</span><strong class="${tone(r.profit)}">${r.profit==null?'—':money(r.profit)}</strong></div><div class="acct-day-body">${field('Sales',r.sales)}${r.statement?field('Operating expenses',r.operatingExpenses,true):field('Cash paid out',r.expenses)}${field(r.statement?'Net income':'Profit (EVA)',r.statement?r.netIncome:r.profit,true)}${field('Cash',r.cash)}${field('Inventory',r.inventory)}${field('Total assets',r.assets)}<div class="acct-day-field"><span>Rank</span><strong>${r.rank==null?'—':'#'+Number(r.rank).toLocaleString()}</strong></div></div></div>`).join('')}</div><p class="muted">One row per completed game day. Sales, Operating expenses and Net income are the game's Day statements, read by Sync from the game's Accounting page. A day without one shows the game's Profit (EVA).</p>${accountingDayWalkNote(walk)}`;
 }
@@ -1758,7 +1617,7 @@ function accountingDayWalkNote(w){
   return `<p class="muted acct-walk-note ${w.status==='complete'?'':'warn'}">${txt}</p>`;
 }
 function accountingOverview(a,previous){
-  // v2.5.382 Accounting overview: one row per figure, grouped Cash / Income / Expenses. Every row is the latest
+  // Accounting overview: one row per figure, grouped Cash / Income / Expenses. Every row is the latest
   // finished game day (the current statements) against the day before it. Expenses show as positive costs, so a
   // cost going up is red and a cost going down is green. The statement date is shown in the page header only.
   const groups=[['Cash',[['Cash','cash',a.cash],['Total change in cash','cashChange',a.cashChange]]],['Income',[['Sales','sales',a.revenue],['Net income','netIncome',a.profit]]],
@@ -1791,11 +1650,11 @@ function accountingStatementPeriodText(period){
   return a&&b?`${a} to ${b}`:(b||'');
 }
 
-// v2.5.377 Accounting card charts: up to 90 days per card, straight trend line + 7-day average, one 7D/30D/90D
+// Accounting card charts: up to 90 days per card, straight trend line + 7-day average, one 7D/30D/90D
 // range for every card, tap readout (date, value, change from the day before). Gaps are joined.
 // Background refreshes never rebuild the cards: values are patched in place, and while a chart is being touched
 // or its full view is open, new chart data waits behind an "Update charts" button.
-// v2.5.382 the full view is a popout over the page (✕, tap outside or Esc closes it).
+// The full view is a popout over the page (✕, tap outside or Esc closes it).
 const ACCT_CHART_RANGES=[7,30,90];
 const ACCT_CHART_DAY=86400000;
 const ACCT_SERIES_KEEP_DAYS=90;
@@ -1811,7 +1670,7 @@ let acctChartRange=90, acctChartOpenKey=null, acctChartTouching=false, acctChart
 function acctDayKey(t){const d=new Date(t);return Number.isFinite(d.getTime())?d.toISOString().slice(0,10):null;}
 function accountingDailySeriesMerge(oldSeries,history,statementHistory,now=Date.now()){
   // Saves each completed day's statement / balance-sheet figures by the day's end date, last 90 days.
-  // v2.5.443 days imported on Analyze (CSV) or read earlier (scmStatementHistory) fill days and fields captures lack.
+  // Days imported on Analyze (CSV) or read earlier (scmStatementHistory) fill days and fields captures lack.
   const days={...(oldSeries&&typeof oldSeries.days==='object'?oldSeries.days:{})};
   for(const r of Array.isArray(history)?history:[]){
     const k=acctDayKey(r?.t);if(!k)continue;const cur={...(days[k]||{})};
@@ -1939,7 +1798,7 @@ function renderAccountingOverview(root,a,previous,history,series){
 function accountingChartSignature(data){return JSON.stringify(Object.keys(ACCT_CHART_FIELDS).map(k=>accountingChartPoints(data.history,data.series,k,acctChartRange)));}
 function accountingChartPendingBar(root){
   const bar=root?.querySelector('[data-acct-pending]');if(!bar)return;
-  // v2.5.382 no bar while the popout is open: closing it applies the update, and the bar would shift the rows behind it.
+  // No bar while the popout is open: closing it applies the update, and the bar would shift the rows behind it.
   const n=acctChartPending&&!acctChartOpenKey?acctChartPendingCount:0;bar.hidden=!n;
   if(n)bar.querySelector('span').textContent=`${n} update${n===1?'':'s'} waiting while you look`;
 }
@@ -2005,9 +1864,7 @@ document.addEventListener('click',e=>{
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&acctChartOpenKey){e.preventDefault();accountingChartClose();}});
 
 function renderFullSyncDiagnostics(s){
-  // Diagnostic rendering must never be able to break the main dashboard render.
-  // Keep all helpers local to this diagnostic pass and derive them from the same
-  // realm-scoped endpoint store used by the data cards.
+  // Diagnostic rendering is derived from the realm-scoped endpoint store and must never break the main render.
   const realm=Number(s.viewRealm??s.authData?.authCompany?.realmId??s.authData?.authCompany?.realm);
   const ep=s.endpointData&&typeof s.endpointData==='object'?s.endpointData:{};
   const endpointEntries=Object.entries(ep).filter(([,v])=>v&&typeof v==='object');
@@ -2022,94 +1879,15 @@ function renderFullSyncDiagnostics(s){
     el.innerHTML=`<div class="page-diag-summary"><span class="diag-status ${ok?'diag-ok':'diag-waiting'}">${escapeHtml(status||'WAITING')}</span><strong>${escapeHtml(detail||'')}</strong></div>${list.length?`<details><summary>${list.length} matching API endpoint${list.length===1?'':'s'}</summary><pre>${escapeHtml(JSON.stringify(list.slice(0,30),null,2))}</pre></details>`:''}${copyType?`<div class="diag-meta">Realm ${Number.isFinite(realm)?escapeHtml(realmName(realm)):'—'} · Raw response data is available through the Copy JSON button below.</div>`:''}`;
   };
 
-  // Existing warehouse cost diagnostic (kept intact, but safely scoped).
-  const d=s.fullSyncDiagnostics&&typeof s.fullSyncDiagnostics==='object'?s.fullSyncDiagnostics:{};
-  const costEl=document.querySelector('#warehouseCostDiagnostics');
-  if(costEl){
-    const rows=Array.isArray(d.warehouseCosts)?d.warehouseCosts:[];
-    if(!rows.length){
-      costEl.innerHTML='<p class="muted">No diagnostic captured yet. Run Sync.</p>';
-    }else{
-      const html=rows.map(e=>{const f=e.fields||{};const v=k=>(f[k]===null||f[k]===undefined)?'—':JSON.stringify(f[k]);const name=resourceInfo({kind:e.resourceId},s).name||('Resource #'+e.resourceId);return `<tr><td>${escapeHtml(name)}</td><td>${e.resourceId}</td><td>${e.quality}</td><td>${escapeHtml(e.source||'')}</td><td>${v('quantity')}</td><td>${v('cost')}</td><td>${v('sourcingCost')}</td><td>${v('totalCost')}</td><td>${v('unitCost')}</td><td>${v('averageCost')}</td></tr>`}).join('');
-      const detailMap=Number.isFinite(realm)?(s.warehouseCostDetails||{}):{};
-      const detailRows=Object.values(detailMap).flatMap(v=>Array.isArray(v)?v:[]);
-      const detailHtml=detailRows.length?`<h4>Captured from game sourcing-cost screen</h4><div class="table-wrap"><table class="statement-table"><thead><tr><th>Resource</th><th>Quality</th><th>Qty</th><th>Unit cost</th><th>Captured</th></tr></thead><tbody>${detailRows.map(e=>`<tr><td>${escapeHtml(resourceInfo({kind:e.resourceId},s).name||('#'+e.resourceId))}</td><td>${e.quality==null?'—':e.quality}</td><td>${e.quantity==null?'—':num(e.quantity)}</td><td>${money(e.unitCost)}</td><td>${escapeHtml(e.capturedAt||'')}</td></tr>`).join('')}</tbody></table></div>`:'';
-      const rawWarehouse=JSON.stringify(rows,null,2);
-      costEl.innerHTML=detailHtml+`<div class="table-wrap"><table class="statement-table"><thead><tr><th>Resource</th><th>ID</th><th>Quality</th><th>Source</th><th>Qty</th><th>cost</th><th>sourcingCost</th><th>totalCost</th><th>unitCost</th><th>averageCost</th></tr></thead><tbody>${html}</tbody></table></div><details><summary>Raw diagnostic JSON</summary><pre>${escapeHtml(rawWarehouse.slice(0,50000))}</pre></details>`;
-    }
-  }
-
-  const wr=warehouseRows(s);
-  const costRealm=Number.isFinite(realm)?(s.warehouseCostDetails||{}):{};
-  const costDetails=Object.values(costRealm).flatMap(v=>Array.isArray(v)?v:[]);
-  const wKeys=matches(/\/api\/v(?:2|3)\/(?:resources|warehouse|warehouse-resources)(?:\/|$)/i);
-  const wMissing=wr.filter(r=>r._unitCost==null).length;
-  card('warehousePageDiagnostics',wKeys.length||costDetails.length?'CAPTURED':'WAITING',`${wr.length} rows · ${costDetails.length} sourcing-cost captures · ${wMissing} rows without cost`,wKeys,'warehouse-page');
-  const warehouseDiagEl=document.querySelector('#warehousePageDiagnostics');
-  if(warehouseDiagEl){
-    const vw=s.vwapData||{};
-    // Only show a timestamp when a complete SimcoTools dataset is actually
-    // stored. Do not fall back to the status object, because that can retain
-    // an old timestamp after the dataset itself was lost or a refresh failed.
-    const vwapUpdated=(Array.isArray(vw.rows)&&vw.rows.length)?(vw.updatedAt||vw.fetchedAt):null;
-    const vwapCount=Array.isArray(vw.rows)?vw.rows.length:Number(vw.count)||0;
-    const vwapStamp=vwapUpdated?new Date(vwapUpdated):null;
-    const vwapStampText=vwapStamp&&Number.isFinite(vwapStamp.getTime())
-      ? vwapStamp.toLocaleString(undefined,{year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})
-      : 'Not updated yet';
-    warehouseDiagEl.insertAdjacentHTML('beforeend',`<div class="diag-vwap-update"><strong>SimcoTools VWAP data updated:</strong> ${escapeHtml(vwapStampText)}${vwapCount?` · ${vwapCount.toLocaleString()} total values`:''}</div>`);
-  }
-
-  const a=accounting(s);
-  const snap=s.accountingSnapshots||{};
-  const rollover=(a?.source?.cf?.isComputed===false || a?.source?.income?.isComputed===false) && Number(a?.revenue)===0 && Number(a?.profit)===0;
-  const display=rollover&&snap?.current?{...a,revenue:snap.current.revenue??a.revenue,expenses:snap.current.expenses??a.expenses,profit:snap.current.profit??a.profit,period:snap.period||a.period}:a;
-  const aKeys=matches(/accounting|balance-sheet|cash-flow|cashflow|profit|income-statement|financial/i);
-  const aFields=['cash','revenue','expenses','profit','assets','liabilities','inventory'].filter(k=>display[k]!=null).length;
-  const accountingCapture=s.accountingCapture&&typeof s.accountingCapture==='object'?s.accountingCapture:{};
-  const accountingSourcePaths=[
-    '/api/v2/companies/me/cashflow-statement/',
-    '/api/v2/companies/me/income-statement/',
-    '/api/v2/companies/me/balance-sheet/',
-    '/api/v2/companies/me/past-finances-overview/',
-    '/api/v2/companies/me/cashflow/recent/',
-    '/api/v2/companies/me/administration-overhead/',
-    '/api/v3/companies/me/past-finances/'
-  ];
-  const accountingSourceCount=accountingSourcePaths.filter(path=>accountingCapture[path]?.data!=null).length;
-  const accountingComplete=accountingSourceCount===accountingSourcePaths.length;
-  const accountingStatus=accountingComplete?'CAPTURED':(accountingSourceCount?'PARTIAL':'NO ACCOUNTING RESPONSE');
-  card('accountingPageDiagnostics',accountingStatus,`${accountingSourceCount}/${accountingSourcePaths.length} Accounting sources · ${aFields}/7 core financial fields · revenue ${display.revenue==null?'—':money(display.revenue)} · profit ${display.profit==null?'—':money(display.profit)}`,aKeys,'accounting-page');
-
-  const cRows=currentContracts(s);
-  const cKeys=matches(/contracts-(?:incoming|outgoing)|warehouse-contracts-summary|contracts-history-(?:incoming|outgoing)/i);
-  const ci=cRows.filter(c=>c.direction==='Incoming').length, co=cRows.filter(c=>c.direction==='Outgoing').length;
-  card('contractsPageDiagnostics',cKeys.length?'CAPTURED':'WAITING',`${cRows.length} current contracts · ${ci} incoming · ${co} outgoing`,cKeys,'contracts-page');
-
   const vRows=Array.isArray(s.vwapData?.rows)?s.vwapData.rows.length:0;
   const vKeys=matches(/market|orders|orderbook|vwap/i);
   const hCount=Object.keys(s.history||{}).length;
   card('marketPageDiagnostics',vRows||vKeys.length?'CAPTURED':'WAITING',`${vRows||Object.keys(s.vwapData||{}).length} VWAP values · ${hCount} history series`,vKeys,'market-page');
-
-  // Overview diagnostic: this is the authoritative high-level view of the
-  // current realm's sync transaction. It is deliberately derived from the same
-  // endpointData/fullSyncDiagnostics objects that feed the individual cards.
-  const walk=Array.isArray(d.walkResults)?d.walkResults:[];
-  const captured=walk.filter(x=>x?.ok).length;
-  const endpointCount=endpointEntries.filter(([,v])=>Number(v?.status)>=200&&Number(v?.status)<300&&v?.data!=null).length;
-  const syncStatus=String(s.syncStatus||d.status||'WAITING');
-  const overview=document.querySelector('#overviewSyncDiagnostics');
-  if(overview){
-    const target=Number.isFinite(realm)?`${realmDisplayNumber(realm)} - ${realmName(realm).replace(/^R\d+ - /,'')}`:'No realm selected';
-    const error=s.syncError||d.error||'';
-    overview.innerHTML=`<div class="overview-diag-grid"><div class="diag-stat"><span>Realm</span><strong>${escapeHtml(target)}</strong></div><div class="diag-stat"><span>Sync status</span><strong>${escapeHtml(syncStatus)}</strong></div><div class="diag-stat"><span>Game pages</span><strong>${walk.length?`${captured}/${walk.length}`:'Not started'}</strong></div><div class="diag-stat"><span>Successful API responses</span><strong>${endpointCount}</strong></div></div><div class="overview-diag-foot">${error?`<span class="diag-error">${escapeHtml(error)}</span>`:`Raw API responses are being stored inside ${escapeHtml(Number.isFinite(realm)?`realm:${realm}`:'the selected realm')} and are used by the page cards.`}</div>`;
-  }
 }
 
 
-let scmRecipesCache=null;
 async function loadBuildingPlannerData(){
-  // v2.5.345 recipe inputs/transport and building outputs follow the game's constants (scmGameConstants) when
+  // Recipe inputs/transport and building outputs follow the game's constants (scmGameConstants) when
   // captured; the bundled files are the fallback. Rebuilt when the constants change.
   const gc=window.__scmState?.gameConstants||null,gcAt=String(gc?.at||'');
   if(window.__scmBuildingPlannerData&&window.__scmBuildingPlannerDataAt===gcAt)return window.__scmBuildingPlannerData;
@@ -2123,21 +1901,6 @@ async function loadBuildingPlannerData(){
 }
 function plannerNormalizeName(v){return globalThis.SCMPlannerCore?.normalizeName?globalThis.SCMPlannerCore.normalizeName(v):String(v??'').toLowerCase().replace(/[’']/g,'').replace(/[^a-z0-9]+/g,'').replace(/s$/,'');}
 function plannerRecipeMap(recipes){const m=new Map();for(const r of recipes||[]){m.set(Number(r.id),r);m.set(plannerNormalizeName(r.name),r);}return m;}
-function plannerStoredProductionPlan(s,building){
-  const id=Number(building?.id??building?.raw?.id);
-  const plan=s?.productionPlans?.[String(id)];
-  return plan&&String(plan.product||'').trim()?plan:null;
-}
-function plannerProductionSnapshotKey(building,product,s){
-  const b=building?.raw||building||{};
-  const busy=b?.busy||{};
-  const plan=plannerStoredProductionPlan(s,building);
-  // The frozen realm plan owns the product/resource identity. Live busy data
-  // may advance, disappear, or change between renders and must not select a
-  // different rate snapshot for the same frozen plan.
-  const rid=Number(plan?.resourceId??busy?.resource?.kind??busy?.resource?.resourceId);
-  return `${Number(b?.id)}|${Number(rid)||0}|${String(product||'').toLowerCase().replace(/\s+/g,' ').trim()}`;
-}
 function plannerCompanyAuthData(s){
   const direct=s?.authData?.authCompany;
   if(direct&&typeof direct==='object') return direct;
@@ -2147,26 +1910,18 @@ function plannerCompanyAuthData(s){
   const data=entries[0]?.[1]?.data;
   return data?.authCompany||data?.company||data||null;
 }
-function plannerCompanyProductionModifier(s){
-  const modifier=Number(plannerCompanyAuthData(s)?.productionModifier);
-  return Number.isFinite(modifier)?Math.max(-99,Math.min(99,modifier)):0;
-}
 function plannerCompanySalesModifier(s){
   const modifier=Number(plannerCompanyAuthData(s)?.salesModifier);
   return Number.isFinite(modifier)?Math.max(-99,Math.min(99,modifier)):null;
 }
-// v2.5.341 game formula (bundle tSe): rate = base × event / (1 − bonus/100), e.g. 8% → ÷0.92 = ×1.08696.
-function plannerCompanyProductionFactor(s){
-  const m=plannerCompanyProductionModifier(s);return m<100?1/(1-m/100):0;
-}
 
-// v2.5.343 abundance % of a natural resource at a building (mines, oil rigs, quarries), from the game's
+// Abundance % of a natural resource at a building (mines, oil rigs, quarries), from the game's
 // /api/v2/companies/buildings/<id>/abundance/ — only resources the game lists there have one.
 function plannerAbundancePct(s,buildingId,resourceId){const d=s?.endpointData?.[`/api/v2/companies/buildings/${Number(buildingId)}/abundance/`]?.data?.abundance;const v=Number(d?.[String(resourceId)]);return d&&Number.isFinite(v)?v:null;}
 function plannerEconomyNow(s){const log=Array.isArray(s?.economyStateLog)?s.economyStateLog:[];const a=Number(s?.authData?.temporals?.economyState);return log.length?Number(log[log.length-1].s):(Number.isFinite(a)?a:null);}
 function plannerRate(name,recipes,rates,s){
   const target=plannerNormalizeName(name);
-  // v2.5.342 game constants: exact base rate for the current economy phase.
+  // Game constants: exact base rate for the current economy phase.
   try{const C=globalThis.SCM_TOOLS_CORE,ph=plannerEconomyNow(s),rec=(Array.isArray(recipes)?recipes:[]).find(r=>plannerNormalizeName(r?.name)===target);
     const b=ph!=null&&rec&&C?.gameBaseRate?C.gameBaseRate(s?.gameConstants,rec.id,ph):null;if(b>0)return {rate:b,source:'game constants'};}catch{}
   // Production-rate mapping is canonicalized by normalized resource name so
@@ -2177,36 +1932,24 @@ function plannerRate(name,recipes,rates,s){
     const direct=Number(value);
     if(Number.isFinite(direct)&&direct>0)return {rate:direct,source:'normal-economy reference'};
   }
-  // v2.5.361 flattened once per captured catalog/endpoint objects (was per call).
-  const fk=s?.endpointData&&typeof s.endpointData==='object'?s.endpointData:null;let fm=fk?__scmFlatMemo.get(fk):null;
-  if(!fm||fm.c!==s?.resourceCatalog){fm={c:s?.resourceCatalog,objects:flattenObjects(s?.resourceCatalog||{}).concat(flattenObjects(s?.endpointData||{}))};if(fk)__scmFlatMemo.set(fk,fm);}
-  const objects=fm.objects;
-  for(const o of objects){
-    if(!o||typeof o!=='object')continue;
-    const n=pick(o,['name','resourceName','displayName','title','label']);
-    if(plannerNormalizeName(n)!==target)continue;
-    for(const key of ['producedAnHour','producedPerHour','productionPerHour','productionRate','amountPerHour','unitsPerHour','ratePerHour']){
-      const v=Number(o[key]);if(Number.isFinite(v)&&v>0)return {rate:v,source:'captured game data'};
-    }
-  }
   return {rate:null,source:'not available'};
 }
-function plannerProductionModifierRows(s){
-  const endpoints=Object.entries(s?.endpointData||{}).filter(([url,value])=>
-    /\/api\/v2\/production-modifiers\/\d+\//i.test(url)&&
-    Number(value?.status)===200&&Array.isArray(value?.data?.resourceProductionModifiers)
-  );
-  const viewRealm=Number(s?.viewRealm??s?.captureRealm);
-  const matching=endpoints.filter(([,value])=>!Number.isFinite(viewRealm)||!Number.isFinite(Number(value?.captureRealm))||Number(value.captureRealm)===viewRealm);
-  matching.sort((a,b)=>Date.parse(String(b[1]?.receivedAt||''))-Date.parse(String(a[1]?.receivedAt||'')));
-  return matching.length?matching[0][1].data.resourceProductionModifiers:[];
+// One production context per store snapshot: the same calculation the game-page overlay uses (planner-core.js).
+function plannerProductionContext(s,rawBuildings,rates){
+  return globalThis.SCMPlannerCore.productionContext(s,{realm:s?.viewRealm,buildings:rawBuildings,constants:s?.gameConstants,economyLog:s?.economyStateLog,normalRates:rates});
 }
-function plannerActiveProductionEvent(s,product,recipes,resourceId){
-  const recipe=(Array.isArray(recipes)?recipes:[]).find(r=>plannerNormalizeName(r?.name)===plannerNormalizeName(product));
-  const id=Number(resourceId??recipe?.id);
-  return globalThis.SCMPlannerCore?.activeResourceProductionModifier
-    ?globalThis.SCMPlannerCore.activeResourceProductionModifier(plannerProductionModifierRows(s),id,Date.now()):0;
+const __plannerBaseCtx={s:null,t:0,ctx:null};
+function plannerBaseContext(s){
+  const t=Math.floor(Date.now()/30000);
+  if(__plannerBaseCtx.s===s&&__plannerBaseCtx.t===t&&__plannerBaseCtx.ctx)return __plannerBaseCtx.ctx;
+  const ctx=plannerProductionContext(s,buildingArrayFromState(s),window.__scmBuildingPlannerData?.rates||null);
+  Object.assign(__plannerBaseCtx,{s,t,ctx});
+  return ctx;
 }
+// Active production event (%) of a resource, from the game's production-modifiers rows only.
+function plannerEventPct(s,resourceId,atMs){return globalThis.SCMPlannerCore.activeResourceProductionModifier(plannerBaseContext(s).modifierRows,Number(resourceId),atMs??Date.now())||0;}
+// Company production modifier plus the recreation bonus: the bonus the game divides every rate by.
+function plannerBonusPct(s){const c=plannerBaseContext(s);return (Number(c.companyModifier)||0)+(Number(c.recreationBonus)||0);}
 const plannerHistoryAudit = new Map();
 function plannerHistoryAuditKey(realm, buildingId, product){return `${Number(realm)||0}:${Number(buildingId)||0}:${plannerNormalizeName(product)}`;}
 function plannerHistoryAuditExport(){return [...plannerHistoryAudit.values()].sort((a,b)=>a.buildingId-b.buildingId||a.product.localeCompare(b.product)).map(x=>({...x}));}
@@ -2221,96 +1964,34 @@ function plannerRecordHistoryAudit(building,name,s,details={}){
   const raw=building?.raw||building||{}; const id=Number(raw?.id??building?.id); const realm=Number(s?.viewRealm??s?.captureRealm);
   if(!Number.isFinite(id)||id<=0)return;
   const busy=busyObject(raw)||raw?.busy||{}; const path=`/api/v2/companies/buildings/${id}/history/`; const endpoint=s?.endpointData?.[path];
-  const currentCycle=globalThis.SCMPlannerCore?.observedProductionRatePerHour?globalThis.SCMPlannerCore.observedProductionRatePerHour(raw,plannerHistoryRowsForCurrentCycle(raw,name,endpoint?.data),building?.level):null;
+  const row=globalThis.SCMPlannerCore.matchRunHistoryRow(raw,endpoint?.data);
   const key=plannerHistoryAuditKey(realm,id,name); const prior=plannerHistoryAudit.get(key)||{};
-  plannerHistoryAudit.set(key,{realm:Number.isFinite(realm)?realm:null,buildingId:id,buildingName:String(building?.name||raw?.name||''),product:String(name||''),resourceId:Number(busy?.resource?.kind??busy?.resource?.resourceId)||null,cycleStarted:String(busy?.started||''),historyEndpointPresent:!!endpoint,historyHttpStatus:Number(endpoint?.status)||null,historyCaptureRealm:validRealmNumber(endpoint?.captureRealm),matchedCurrentCycle:!!(currentCycle?.rate>0),matchedAmount:currentCycle?.amount??null,matchedDurationSeconds:currentCycle?.duration??null,selectedRateSource:details.source??prior.selectedRateSource??null,fallbackReason:details.fallbackReason??prior.fallbackReason??null,historyRequestStatus:prior.historyRequestStatus??'not-requested',historyRequestAt:prior.historyRequestAt??null,lastEvaluatedAt:new Date().toISOString()});
+  plannerHistoryAudit.set(key,{realm:Number.isFinite(realm)?realm:null,buildingId:id,buildingName:String(building?.name||raw?.name||''),product:String(name||''),resourceId:Number(busy?.resource?.kind??busy?.resource?.resourceId)||null,cycleStarted:String(busy?.started||''),historyEndpointPresent:!!endpoint,historyHttpStatus:Number(endpoint?.status)||null,historyCaptureRealm:validRealmNumber(endpoint?.captureRealm),matchedCurrentCycle:!!row,matchedAmount:row?Number(row.outputAmount??row.amount):null,matchedDurationSeconds:row?Number(busy?.duration)||null:null,selectedRateSource:details.source??prior.selectedRateSource??null,fallbackReason:details.fallbackReason??prior.fallbackReason??null,historyRequestStatus:prior.historyRequestStatus??'not-requested',historyRequestAt:prior.historyRequestAt??null,lastEvaluatedAt:new Date().toISOString()});
 }
 function plannerSetHistoryRequestAudit(realm,buildingId,product,status,error=null){
   const key=plannerHistoryAuditKey(realm,buildingId,product); const prior=plannerHistoryAudit.get(key)||{realm,buildingId:Number(buildingId),product:String(product||'')};
   plannerHistoryAudit.set(key,{...prior,historyRequestStatus:status,historyRequestError:error?String(error).slice(0,240):null,historyRequestAt:new Date().toISOString()});
 }
-// Prefer an output amount from the exact live cycle. That rate already includes
-// the game's current company and resource modifiers, so it must not be modified
-// a second time. Only normalized base rates and static reference rates need
-// current modifiers applied when no exact cycle measurement is available.
-function plannerHistoryRowsForCurrentCycle(building,product,historyRows){
-  const raw=building?.raw||building||{},busy=busyObject(raw)||raw?.busy||{};
-  const started=Date.parse(String(busy?.started||''));
-  const currentName=plannerNormalizeName(busy?.resource?.name||product||'');
-  const resourceId=Number(busy?.resource?.kind??busy?.resource?.resourceId);
-  if(!Number.isFinite(started)||!Number.isFinite(Number(busy?.duration))||Number(busy.duration)<=0)return [];
-  return (Array.isArray(historyRows)?historyRows:[]).filter(row=>{
-    const when=Date.parse(String(row?.datetime||'')),amount=Number(row?.outputAmount??row?.amount);
-    if(!Number.isFinite(when)||Math.abs(when-started)>5000||!Number.isFinite(amount)||amount<=0)return false;
-    const rowName=plannerNormalizeName(row?.resourceName||row?.name||'');
-    if(currentName&&rowName&&rowName!==currentName)return false;
-    const rowId=Number(row?.kind);
-    const rowQuality=Number(row?.quality),currentQuality=Number(busy?.resource?.quality);
-    if(Number.isFinite(rowQuality)&&Number.isFinite(currentQuality)&&rowQuality!==currentQuality)return false;
-    return Number.isFinite(resourceId)&&resourceId>0?rowId===resourceId:Boolean(currentName&&rowName===currentName);
-  });
-}
-function plannerRateForProduct(name,building,level,recipes,rates,s){
-  const raw=building?.raw||building||{};
-  const busy=busyObject(raw)||raw?.busy||{};
-  const currentProduct=String(busy?.resource?.name||'').trim();
-  const finish=(result,fallbackReason=null)=>{plannerRecordHistoryAudit(building,name,s,{source:result?.source||'unknown',fallbackReason});return result;};
-  const isCurrentProduct=Boolean(currentProduct)&&plannerNormalizeName(currentProduct)===plannerNormalizeName(name);
-  const history=s?.endpointData?.[`/api/v2/companies/buildings/${Number(raw?.id??building?.id)}/history/`];
-  const cycle=isCurrentProduct&&globalThis.SCMPlannerCore?.observedProductionRatePerHour
-    ?globalThis.SCMPlannerCore.observedProductionRatePerHour(raw,plannerHistoryRowsForCurrentCycle(raw,name,history?.data),level):null;
-  if(cycle?.rate>0)return finish({rate:cycle.rate,source:'exact current-cycle production history'},null);
-
-  // The snapshot's observed rate is the measured rate for its recorded cycle,
-  // including modifiers. Reuse it only when that cycle still matches; never
-  // multiply it by modifiers again or reuse a prior cycle's observed rate.
-  const snapshot=s?.productionRateSnapshots?.[plannerProductionSnapshotKey(building,name,s)];
-  const currentStarted=String(busy?.started||'');
-  const currentLevel=Number(building?.level||raw?.size||1);
-  if(isCurrentProduct&&snapshot&&currentStarted&&String(snapshot?.started||'')===currentStarted&&
-     plannerNormalizeName(snapshot?.product)===plannerNormalizeName(name)&&
-     Number(snapshot?.observedRatePerHour)>0&&currentLevel>0){
-    return finish({rate:Number(snapshot.observedRatePerHour)*Math.max(1,Number(level)||1)/currentLevel,source:'matching current-cycle rate snapshot'},'current history row unavailable; matching-cycle snapshot used');
-  }
-
-  // Last-resort measured rate from the active cycle itself. The amount and
-  // duration belong to the current busy resource, so only accept them when the
-  // product matches and both values are finite and positive. This measurement
-  // already reflects game modifiers; do not apply modifiers a second time.
-  if(isCurrentProduct){
-    const cycleAmount=Number(busy?.resource?.amount);
-    const cycleDuration=Number(busy?.duration);
-    if(Number.isFinite(cycleAmount)&&cycleAmount>0&&Number.isFinite(cycleDuration)&&cycleDuration>0){
-      const scale=Math.max(1,Number(level)||1)/Math.max(1,Number(building?.level||raw?.size)||1);
-      const measuredRate=cycleAmount*3600/cycleDuration*scale;
-      if(Number.isFinite(measuredRate)&&measuredRate>0)
-        return finish({rate:measuredRate,source:'active cycle amount ÷ duration (measured game rate)'},'history and matching-cycle snapshot unavailable; active cycle amount/duration used');
-    }
-  }
-
-  if(isCurrentProduct)for(const root of [busy,raw]){
-    if(!root||typeof root!=='object')continue;
-    for(const key of ['producedPerHour','producedAnHour','productionPerHour','productionRatePerHour','productionRate','ratePerHour','outputPerHour','unitsPerHour','amountPerHour']){
-      const n=Number(root[key]);
-      if(Number.isFinite(n)&&n>0){
-        const scale=Math.max(1,Number(level)||1)/Math.max(1,Number(building?.level||raw?.size)||1);
-        return finish({rate:n*scale,source:'captured game production rate'},'no matching history row or matching-cycle snapshot; captured game rate used');
-      }
-    }
-  }
-
+// The building's game rate for a product, from the shared core (planner-core.js resolveBuildingRate). The running
+// product gives the run's own rate; any other product gives the next-run formula rate at the given level.
+// result = the core's full answer (ratePerHour, locked, eventPct, bonusPct, nextRun ...); nextRun = the next-run rate
+// of the asked product (the core's own for the running product, the formula for another).
+function plannerRateForProduct(name,building,level,recipes,rates,s,ctx){
+  const core=globalThis.SCMPlannerCore,raw=building?.raw||building||{};
   const recipe=(Array.isArray(recipes)?recipes:[]).find(r=>plannerNormalizeName(r?.name)===plannerNormalizeName(name));
-  const resourceId=Number(busy?.resource?.kind??busy?.resource?.resourceId??recipe?.id);
-  const eventModifier=plannerActiveProductionEvent(s,name,recipes,resourceId);
-  const eventFactor=1+eventModifier/100;
-  const companyModifier=plannerCompanyProductionModifier(s);
-  const companyFactor=plannerCompanyProductionFactor(s);
-  if(eventFactor<=0||companyFactor<=0)return finish({rate:null,source:'invalid production modifier'},'modifier factor was non-positive');
-  const base=plannerRate(name,recipes,rates,s);
-  if(Number.isFinite(Number(base?.rate))&&Number(base.rate)>0)
-    {const ab=plannerAbundancePct(s,raw?.id??building?.id,recipe?.id??resourceId);if(ab!=null)return finish({rate:Number(base.rate)*level*eventFactor*companyFactor*ab/100,source:`${base.source} fallback × game modifiers × abundance ${ab.toFixed(1)}%`},'reference rate with the building abundance');}
-    return finish({rate:Number(base.rate)*level*eventFactor*companyFactor,source:`${base.source} fallback × game modifiers`},'no matching current-cycle history or usable live rate; reference rate used');
-  return finish(base,base?.rate>0?'no matching current-cycle history or usable live rate; reference rate used':'no usable current-cycle history, snapshot, live rate or reference rate');
+  const c=ctx||plannerProductionContext(s,buildingArrayFromState(s),rates);
+  const productId=Number(recipe?.id);
+  const result=core.resolveBuildingRate(raw,c,{identity:{productId,product:String(name||''),quality:Number(building?.currentQuality)||0}});
+  const same=Boolean(result.running)&&productId>0&&Number(result.productId)===productId;
+  const lvl=Math.max(1,Number(level)||1);
+  let nextRun=same?result.nextRun:null;
+  if(!same&&productId>0){
+    const f=core.formulaRatePerLevel(c,{productId,product:String(name||''),buildingId:Number(raw?.id??building?.id),eventAtMs:c.now});
+    nextRun=f?{ratePerHour:f.perLevel*lvl,perLevel:f.perLevel,level:lvl,eventPct:f.eventPct,bonusPct:f.bonusPct,abundancePct:f.abundancePct,phase:f.phase,source:f.source}:null;
+  }
+  const out=same?{rate:result.ratePerHour,source:result.sourceLabel}:(nextRun?{rate:nextRun.ratePerHour,source:`next run (${nextRun.source})`}:{rate:null,source:'not available'});
+  plannerRecordHistoryAudit(building,name,s,{source:out.source,fallbackReason:same&&result.source==='game-formula'?'no history row of the current run; game formula estimate':null});
+  return {...out,same,result,nextRun};
 }
 function plannerAssetUrl(image){
   const candidates=imageCandidates(image).filter(candidate=>!RESOURCE_IMAGE_404_FILENAMES.has(String(candidate).split("/").pop().split("?")[0]));
@@ -2330,7 +2011,7 @@ function plannerResourceNameById(recipes,id,s){
   return resourceName({_id:Number(id),kind:Number(id)},s);
 }
 function plannerMoney(v){return v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v))?money(Number(v)):'—';}
-// v2.5.363 kindOverrides {buildingId: buildings.json kind}: a planner-only "what if this building were X" test.
+// KindOverrides {buildingId: buildings.json kind}: a planner-only "what if this building were X" test.
 // The test building keeps its id and level but drops the game's busy/plan/image/cost data of the real
 // building, so nothing measured for the real building is reused for the test kind. Reset removes the override.
 function ownedPlannerBuildings(s, definitions, kindOverrides={}){
@@ -2355,8 +2036,7 @@ function ownedPlannerBuildings(s, definitions, kindOverrides={}){
     const idKey=String(pick(raw,['id','buildingId'])??index);
     // A plan saved for another kind (a test kind, or the game kind while testing) is not this building's plan.
     const kindOk=p=>p&&(p.kind==null||String(p.kind)===kind)?p:null;
-    const frozenPlan=kindOk(s?.frozenNetworkPlan?.buildingPlans?.[idKey]||null);
-    const plan=frozenPlan||(isTest?null:kindOk(s?.productionPlans?.[idKey]||null));
+    const plan=isTest?null:kindOk(s?.productionPlans?.[idKey]||null);
     const currentResource=busy?.name||plan?.product||null;
     const currentResourceId=Number.isFinite(Number(busy?.kind))?Number(busy.kind):Number.isFinite(Number(plan?.resourceId))?Number(plan.resourceId):null;
     const pinnedResource=Number.isFinite(Number(pinned))?Number(pinned):null;
@@ -2366,7 +2046,7 @@ function ownedPlannerBuildings(s, definitions, kindOverrides={}){
   });
 }
 function plannerCurrentProduct(building, recipes){
-  const frozen=building?.productionPlan||null;const produces=Array.isArray(building?.produces)?building.produces:[];const findByName=name=>{if(!name)return null;return produces.find(p=>plannerNormalizeName(p)===plannerNormalizeName(name))||null;};const frozenProduct=findByName(frozen?.product);if(frozenProduct)return frozenProduct;const liveByName=findByName(building?.currentResource);if(liveByName)return liveByName;const recipeById=new Map((recipes||[]).map(r=>[Number(r.id),r]));const byId=id=>{const n=Number(id);if(!Number.isFinite(n))return null;return findByName(recipeById.get(n)?.name);};for(const id of [building?.currentResourceId,building?.pinnedResource,building?.robotsSpecialization]){const p=byId(id);if(p)return p;}return produces[0]||'';}
+  const stored=building?.productionPlan||null;const produces=Array.isArray(building?.produces)?building.produces:[];const findByName=name=>{if(!name)return null;return produces.find(p=>plannerNormalizeName(p)===plannerNormalizeName(name))||null;};const storedProduct=findByName(stored?.product);if(storedProduct)return storedProduct;const liveByName=findByName(building?.currentResource);if(liveByName)return liveByName;const recipeById=new Map((recipes||[]).map(r=>[Number(r.id),r]));const byId=id=>{const n=Number(id);if(!Number.isFinite(n))return null;return findByName(recipeById.get(n)?.name);};for(const id of [building?.currentResourceId,building?.pinnedResource,building?.robotsSpecialization]){const p=byId(id);if(p)return p;}return produces[0]||'';}
 function plannerBuildingIcon(category){
   const c=String(category||'').toLowerCase();
   if(c.includes('energy')) return '⚡';
@@ -2380,14 +2060,32 @@ function plannerBuildingIcon(category){
   if(c.includes('fashion')) return '👗';
   return '🏭';
 }
-function plannerProductionNetwork(s, owned, recipes, rates, runHours, overrides={}){
-  const selectedId=overrides?.buildingId!=null?String(overrides.buildingId):null;const planningLevels=(overrides?.planningLevels&&typeof overrides.planningLevels==='object')?overrides.planningLevels:{};const frozenPlans=(overrides?.planState&&typeof overrides.planState==='object')?overrides.planState:(s?.frozenNetworkPlan?.buildingPlans||{});const networkHours=Math.max(1,Number(runHours)||24);const activeBuildings=[];const specs=[];const recipeBy=plannerRecipeMap(recipes);
-  for(const b of Array.isArray(owned)?owned:[]){const isSelected=selectedId!=null&&String(b.id)===selectedId;const stored=frozenPlans?.[String(b.id)]||(b.testKind?null:plannerStoredProductionPlan(s,b))||null;const frozenProduct=String(stored?.product||b.currentResource||'').trim();const product=isSelected?String(overrides.product||frozenProduct||'').trim():frozenProduct;if(!product)continue;const frozenQuality=Number.isFinite(Number(stored?.quality))?Math.max(0,Number(stored.quality)):Math.max(0,Number(b.currentQuality)||0);const quality=isSelected?Math.max(0,Number(overrides.quality)||0):frozenQuality;const plannedLevel=Math.min(20,Math.max(1,Number(planningLevels[String(b.id)])||Number(stored?.plannedLevel)||Number(b.level)||1));const level=isSelected?Math.min(20,Math.max(1,Number(overrides.level)||plannedLevel)):plannedLevel;const rateInfo=plannerRateForProduct(product,b,level,recipes,rates,s);const rate=Number(rateInfo?.rate);const recipe=recipeBy.get(plannerNormalizeName(product));const outputId=Number(recipe?.id);if(!Number.isFinite(rate)||rate<=0||!Number.isFinite(outputId)||!recipe){activeBuildings.push({building:b,product,quality,level,rate:null,outputRun:null,source:rateInfo?.source||'not available',inputs:[]});continue;}const outputRun=rate*networkHours;const inputs=(recipe.materials||[]).map(m=>{const id=Number(m.id),perOutput=Number(m.quantity)||0,required=outputRun*perOutput,minQuality=Math.max(0,quality-1);return {id,name:plannerResourceNameById(recipes,id,s),required,minQuality};});activeBuildings.push({building:b,product,quality,level,rate,outputRun,source:rateInfo?.source||'unknown',inputs});specs.push({buildingId:Number(b.id),product,productId:outputId,quality,level,ratePerHour:rate,recipe});}
-  const resourceNames=new Map((recipes||[]).map(r=>[String(r.id),r.name]));const core=globalThis.SCMPlannerCore?.productionBalance?globalThis.SCMPlannerCore.productionBalance(specs,recipeBy,networkHours,resourceNames):{resources:[],deficits:[],surpluses:[],productionRows:[],demandRows:[]};return {activeBuildings,resources:core.resources,deficits:core.deficits,surpluses:core.surpluses,productionRows:core.productionRows,demandRows:core.demandRows,activeSpecs:Array.isArray(core.activeSpecs)&&core.activeSpecs.length?core.activeSpecs.map(({recipe,...x})=>x):specs,hours:networkHours};
+// Identity plans for the shared network: which product, quality and level each building is meant to make. They never
+// carry a rate; the core takes every rate from the building's real run.
+function plannerBuildPlans(owned,ui,planningLevels,productOverrides){
+  const plans={};
+  for(const b of Array.isArray(owned)?owned:[]){
+    const id=String(b.id),ovr=(b.produces||[]).includes(productOverrides?.[id])?productOverrides[id]:'';
+    const planner=b.testKind||(ui?.planModes||{})[id]==='planner';
+    const product=String(ovr||(b.testKind?(b.produces?.[0]||''):(b.currentResource||''))).trim();
+    if(!product)continue;
+    const qRaw=planner?ui?.qualityByBuilding?.[id]:null;
+    const quality=Math.max(0,qRaw!=null&&Number.isFinite(Number(qRaw))?Number(qRaw):(Number(b.currentQuality)||0));
+    plans[id]={buildingId:Number(b.id),product,quality,plannedLevel:Math.min(20,Math.max(1,Number(planningLevels?.[id])||Number(b.level)||1)),mode:(ui?.planModes||{})[id]||'live'};
+  }
+  return plans;
 }
-// v2.5.345 the game's own upgrade cost (GamePages bundle: amount = perCostUnit × building costUnits × current level,
+// The production network of all owned buildings, from the shared core. Game figures only; what-ifs appear as `planned`.
+function plannerProductionNetwork(s,owned,recipes,rates,runHours,overrides={}){
+  const core=globalThis.SCMPlannerCore,raws=(Array.isArray(owned)?owned:[]).map(b=>b.raw);
+  const ctx=overrides.ctx||plannerProductionContext(s,raws,rates);
+  const resourceNames=new Map((recipes||[]).map(r=>[String(r.id),r.name]));
+  const net=core.buildNetwork({buildings:raws,plans:overrides.plans||s?.productionPlans||{},recipes,hours:runHours,ctx,resourceNames});
+  return {...net,ctx};
+}
+// The game's own upgrade cost (GamePages bundle: amount = perCostUnit × building costUnits × current level,
 // per level step). costUnits comes from /api/v2/constants/buildings/; perCostUnit is the game client's table
-// (not served by any API). baseQty × cost ÷ 10350 is the old estimate, kept only when the constants are missing.
+// (not served by any API). baseQty × cost ÷ 10350 is the fallback estimate, used only when the constants are missing.
 const CONSTRUCTION_MATERIALS=[
   {id:101,name:'Reinforced concrete',perCostUnit:4,baseQty:12,referencePrice:166.66},
   {id:102,name:'Bricks',perCostUnit:55,baseQty:165,referencePrice:2.16},
@@ -2453,26 +2151,27 @@ async function ensurePlannerCompanyModifiers(s){
   finally{plannerModifierFetchPending=false;}
   return s;
 }
-const plannerHistoryFetchPending=new Set();
+// One history request per building and run in this page session, and only when no row of the run is stored yet.
+const plannerHistoryAsked=new Set();
 function requestPlannerBuildingHistory(building,s){
+  const core=globalThis.SCMPlannerCore;
   const realm=Number(s?.viewRealm);
   const id=Number(building?.id);
+  const raw=building?.raw;
   const product=String(building?.currentResource||'').trim();
-  if(!Number.isFinite(realm)||!Number.isFinite(id)||id<=0||!product||!building?.raw?.busy)return;
+  if(!Number.isFinite(realm)||!Number.isFinite(id)||id<=0||!raw?.busy||!core?.buildingRun(raw))return;
   const path=`/api/v2/companies/buildings/${id}/history/`;
   const endpoint=s?.endpointData?.[path];
   const endpointRealm=validRealmNumber(endpoint?.captureRealm);
   const sameRealm=endpointRealm==null||endpointRealm===realm;
-  const currentCycle=endpoint&&sameRealm&&globalThis.SCMPlannerCore?.observedProductionRatePerHour
-    ?globalThis.SCMPlannerCore.observedProductionRatePerHour(building.raw,plannerHistoryRowsForCurrentCycle(building.raw,product,endpoint.data),building.level):null;
-  if(endpoint&&Number(endpoint.status)>=200&&Number(endpoint.status)<300&&currentCycle?.rate>0){plannerSetHistoryRequestAudit(realm,id,product,'not-needed-current-cycle-matched');return;}
-  const key=`${realm}:${id}`;
-  if(plannerHistoryFetchPending.has(key)){plannerSetHistoryRequestAudit(realm,id,product,'deduplicated-in-flight');return;}
-  plannerHistoryFetchPending.add(key); plannerSetHistoryRequestAudit(realm,id,product,'requested');
+  const ok=endpoint&&sameRealm&&Number(endpoint.status)>=200&&Number(endpoint.status)<300;
+  if(ok&&core.matchRunHistoryRow(raw,endpoint.data)){plannerSetHistoryRequestAudit(realm,id,product,'not-needed-current-cycle-matched');return;}
+  const key=`${realm}:${id}:${String(raw.busy.started||'')}`;
+  if(plannerHistoryAsked.has(key)){plannerSetHistoryRequestAudit(realm,id,product,'already-requested-for-this-run');return;}
+  plannerHistoryAsked.add(key); plannerSetHistoryRequestAudit(realm,id,product,'requested');
   Promise.resolve().then(()=>chrome.runtime.sendMessage({type:'FETCH_BUILDING_HISTORY',realm,buildingId:id}))
     .then(result=>plannerSetHistoryRequestAudit(realm,id,product,result?.ok?'success':(result?.skipped?'skipped':'failed'),result?.error||null))
-    .catch(error=>plannerSetHistoryRequestAudit(realm,id,product,'failed',error?.message||String(error)))
-    .finally(()=>plannerHistoryFetchPending.delete(key));
+    .catch(error=>plannerSetHistoryRequestAudit(realm,id,product,'failed',error?.message||String(error)));
 }
 function showBuildingUpgradeProjection(host,ctx){
   const existing=document.getElementById('scm-upgrade-projection');
@@ -2484,7 +2183,7 @@ function showBuildingUpgradeProjection(host,ctx){
   const scale=Number(building?.raw?.cost)/10350;
   const costUnits=Number(plan.costUnits)>0?Number(plan.costUnits):null;
   const materials=CONSTRUCTION_MATERIALS.map(mat=>{
-    // v2.5.345 same game formula as constructionMaterialPlan (costUnits from the game's constants).
+    // Same game formula as constructionMaterialPlan (costUnits from the game's constants).
     const required=roundResourceDown(costUnits!=null?mat.perCostUnit*costUnits*Number(plan.stepFactor||0):Number(mat.baseQty)*scale*Number(plan.stepFactor||0),3);
     const warehouse=constructionWarehouseStock(ctx.state,mat.id);
     const buy=Math.max(0,roundResourceDown(required-warehouse,3));
@@ -2511,14 +2210,14 @@ function showBuildingUpgradeProjection(host,ctx){
 }
 
 
-// v2.5.323 Profit / h / level inside the building card. Uses the card's own data: the measured
+// Profit / h / level inside the building card. Uses the card's own data: the measured
 // production/hour for the planning level, the recipe's per-unit inputs at the input quality the card
 // shows (production quality − 1), and current market prices (VWAP when no market price is captured).
 const PLANNER_PROFIT_KEY='scmPlannerProfitSettingsV1';
 const __plannerProfitLast={};
 function plannerProfitSettings(){let v={};try{v=JSON.parse(localStorage.getItem(PLANNER_PROFIT_KEY)||'{}')||{};}catch{}return {inputSource:'warehouse',sellMode:'exchange',exchangeFeePct:'',contractDiscountPct:0,adminOverheadPct:'',wages:{},...v,wages:{...(v.wages||{})}};}
 function savePlannerProfitSettings(v){try{localStorage.setItem(PLANNER_PROFIT_KEY,JSON.stringify(v));}catch{}}
-// v2.5.324 price resolvers that match the game's own Profit Calculator.
+// Price resolvers that match the game's own Profit Calculator.
 // Market: the captured exchange order book first (cheapest listing at the exact quality when selling,
 // at that quality or better when buying inputs), then captured current market prices, then VWAP.
 // Warehouse: your actual sourcing cost per unit for the lowest stocked quality that satisfies the input.
@@ -2536,19 +2235,13 @@ function plannerMarketPrice(s,id,q,mode){
   return {price:p.price,quality:p.quality,source:`${where}${age?` · ${age}`:''}${old}${hint}`,stale:p.stale,origin:p.source,srcLabel:scmSrcLabel(p)};
 }
 function plannerProfitWageKey(building){return String(building?.raw?.kind||building?.kind||building?.category||building?.name||'building');}
-// v2.5.324 Labour and admin come from the game's own cost records, never hard-coded:
+// Labour and admin come from the game's own cost records, never hard-coded:
 // every produced warehouse lot carries cost.workers and cost.admin for the whole lot, so
 //   workers per unit = cost.workers ÷ amount   and   admin overhead = cost.admin ÷ cost.workers.
 // The latest lot of the product is used; the last value seen is cached so it survives selling out.
 const PLANNER_LABOUR_CACHE_KEY='scmPlannerLabourCacheV1';
 function plannerRealmOf(s){return validRealmNumber(s?.viewRealm??s?.captureRealm??s?.authData?.authCompany?.realmId);}
 function plannerWarehouseLots(s){return Array.isArray(s?.warehouseResources)?s.warehouseResources:[];}
-function plannerWarehouseCost(s,id,minQ){
-  let rows=[];try{rows=warehouseRows(s);}catch{}
-  const lots=rows.filter(r=>Number(r?._id)===Number(id)&&Number(r?._quality)>=Number(minQ)&&Number(r?._qty)>0).sort((a,b)=>Number(a._quality)-Number(b._quality));
-  for(const r of lots){let c=null;try{c=warehouseAlertUnitCost(s,r);}catch{c=r._unitCost;}if(Number.isFinite(Number(c))&&Number(c)>=0)return {price:Math.round(Number(c)*100)/100,quality:Number(r._quality),source:`warehouse · ${num(r._qty)} in stock`};}
-  return null;
-}
 function plannerAdminOverheadFromLots(s){
   const lots=plannerWarehouseLots(s).filter(x=>Number(x?.cost?.workers)>0&&Number.isFinite(Number(x?.cost?.admin)));
   if(!lots.length)return null;
@@ -2582,7 +2275,7 @@ function plannerExchangeFeeFromSales(s){
   const recent=pairs.slice(0,10).sort((a,b)=>b.value-a.value)[0];
   return {pct:Math.round(recent.pct*100)/100,at:recent.at};
 }
-// v2.5.332 ask the background for a fresh exchange order book (through the game tab) when the stored one is older
+// Ask the background for a fresh exchange order book (through the game tab) when the stored one is older
 // than 15 min; re-render this card when it arrives. Background throttles to once per product per 5 min.
 const __plannerOrderBookAsked=new Map();
 function plannerRequestOrderBook(ctx,host,productId){
@@ -2598,7 +2291,7 @@ function plannerRequestOrderBook(ctx,host,productId){
   }catch{}
 }
 function plannerDate(v){const t=Date.parse(String(v||''));return Number.isFinite(t)?new Date(t).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'—';}
-// v2.5.338 economy phase for the profit card. The running batch keeps the phase it started in; the game's
+// Economy phase for the profit card. The running batch keeps the phase it started in; the game's
 // Profit Calculator uses the current phase. Wage per hour per level does not change with the phase, so labour
 // per unit = wage ÷ units per hour (game: 67.82 × 6.613 = 73.94 × 6.066 = 448.5 $/h/level).
 const PLANNER_PHASE_RATE_KEY='scmPlannerPhaseRateV1',PLANNER_WAGE_KEY='scmPlannerWageV1';
@@ -2609,14 +2302,14 @@ function plannerEconomy(ctx){
   const authSt=Number(ctx.s?.authData?.temporals?.economyState);
   const current=log.length?Number(log[log.length-1].s):(Number.isFinite(authSt)?authSt:null);
   let batch=ctx.rateFromBatch&&ctx.batchStarted&&C?.economyStateAt?C.economyStateAt(log,ctx.batchStarted):null;
-  // 2.5.340 batch started before the log's first entry: phase unknown. If the economy is normal now and the
+  // Batch started before the log's first entry: phase unknown. If the economy is normal now and the
   // batch's measured rate is far from the normal rate, it was produced in another phase.
   if(!batch&&ctx.rateFromBatch&&current===1&&C?.batchPhaseFromRate){const v=C.batchPhaseFromRate(Number(ctx.outputPerHour),ctx.referenceRate);if(v&&v.differs)batch={state:'other',inferred:true,diffPct:v.diffPct};}
   const realm=plannerRealmOf(ctx.s),level=Math.max(1,Number(ctx.level)||1),measured=Number(ctx.outputPerHour);
   const rates=plannerLocalGet(PLANNER_PHASE_RATE_KEY);
   if(batch&&!batch.inferred&&realm!=null&&measured>0){rates[`${realm}:${ctx.productId}:${batch.state}`]={perLevel:measured/level,at:ctx.batchStarted};plannerLocalPut(PLANNER_PHASE_RATE_KEY,rates);}
   const known=current!=null?rates[`${realm}:${ctx.productId}:${current}`]:null;
-  // v2.5.342 game constants: rate = the game's own formula for the current phase (what its Profit Calculator uses);
+  // Game constants: rate = the game's own formula for the current phase (what its Profit Calculator uses);
   // the running batch's phase is the log's, else the phase whose game rate matches its measured rate.
   const gc=ctx.s?.gameConstants,opts={eventPct:ctx.eventPct||0,bonusPct:ctx.bonusPct||0,abundancePct:ctx.abundancePct??null};
   const gameNow=current!=null&&C?.gameRatePerLevel?C.gameRatePerLevel(gc,ctx.productId,current,opts):null;
@@ -2639,7 +2332,7 @@ function plannerWage(ctx,lab){
   if(cache[key]&&Number(cache[key].wage)>0)return {wage:Number(cache[key].wage),fresh:false,at:cache[key].at};
   return measured>0?{wage:lab.workersPerUnit*measured/level,fresh:false,at:lab.at}:null;
 }
-// v2.5.421 the player's OWN executives roster. endpointData also holds rosters of other companies viewed in the game
+// The player's OWN executives roster. endpointData also holds rosters of other companies viewed in the game
 // (no skills/salary/trainings), so never pick "any" roster; with no own id or no own roster return null.
 function ownExecutivesKey(s){
   const ac=s?.authData?.authCompany,id=Number(ac?.companyId??ac?.id);
@@ -2647,7 +2340,7 @@ function ownExecutivesKey(s){
   const k=`/api/v3/companies/${id}/executives/`;
   return s?.endpointData&&s.endpointData[k]?k:null;
 }
-// v2.5.341 current admin overhead exactly as the game computes it: captured base (/administration-overhead/) and
+// Current admin overhead exactly as the game computes it: captured base (/administration-overhead/) and
 // executives, plus the game page's executive timing config (scmGameConfig). Null when anything is missing.
 function plannerGameAdmin(s){
   try{
@@ -2659,11 +2352,11 @@ function plannerGameAdmin(s){
     return r?{...r,at:ep[exKey]?.receivedAt||null}:null;
   }catch{return null;}
 }
-// v2.5.374 Executives tab: roster cards, Team Impact (game admin formula), COO ROI, training planner, apprentice vs main.
+// Executives tab: roster cards, Team Impact (game admin formula), COO ROI, training planner, apprentice vs main.
 // Salaries are $/day (confirmed by the user against the game's Salaries line); training cost and skill gain per session are user inputs (not from the game's API).
 const EXEC_PLAN_KEY='scmExecPlanner',EXEC_MAX_TRAININGS=20;
 function execPlanSettings(){try{const v=JSON.parse(localStorage.getItem(EXEC_PLAN_KEY)||'{}');return {cost:v.cost??10000,gain:v.gain??1.5};}catch{return {cost:10000,gain:1.5};}}
-// v2.5.376 Executives charts: inline SVG, no library. Colour follows the role (validated dark categorical slots 1–5
+// Executives charts: inline SVG, no library. Colour follows the role (validated dark categorical slots 1–5
 // on the panel surface #1d1b1a), one y-axis per chart, 2px lines, hover crosshair + tooltip, legend + direct labels.
 const EXEC_COLOR={o:'#3987e5',v:'#d95926',f:'#199e70',m:'#c98500',t:'#d55181'};
 const __execCharts=new Map();
@@ -2785,24 +2478,24 @@ function renderPlannerProfit(host){
     const c=plannerProfitSettings();
     const setNum=v=>v!==''&&v!=null&&Number.isFinite(Number(v));
     const overhead=setNum(c.adminOverheadPct)?Number(c.adminOverheadPct):(autoAdmin??0);
-    const feePct=setNum(c.exchangeFeePct)?Number(c.exchangeFeePct):(C.EXCHANGE_FEE_PCT??4); // 2.5.396 always 4% unless typed
+    const feePct=setNum(c.exchangeFeePct)?Number(c.exchangeFeePct):(C.EXCHANGE_FEE_PCT??4); // always 4% unless typed
     const productId=Number(ctx.productId);
     const sale=Number.isFinite(productId)?plannerMarketPrice(ctx.s,productId,ctx.quality,'any'):null;
     plannerRequestOrderBook(ctx,host,productId);
     const transport=plannerMarketPrice(ctx.s,13,0,'min');
     const isMarket=c.inputSource==='market'||c.inputSource==='market-any';
-    // v2.5.348 warehouse inputs as the game: cheapest lot of that resource, any quality, Σ cost ÷ amount, not rounded
+    // Warehouse inputs as the game: cheapest lot of that resource, any quality, Σ cost ÷ amount, not rounded
     // (Water Q0 $0.347, not the Q1 lot $0.37); not in the warehouse → cheapest listing of any quality, as the game.
     const lotsAll=plannerWarehouseLots(ctx.s);
     const inputs=(ctx.plannedInputs||[]).map(x=>{let p=null;if(!isMarket&&C.warehouseUnitCostAsGame){const w=C.warehouseUnitCostAsGame(lotsAll,x.id);if(w)p={price:w.unitCost,quality:w.quality,lot:true,source:`warehouse, cheapest lot (as game) · ${num(w.amount)} in stock`};}if(!p){p=plannerMarketPrice(ctx.s,x.id,x.minQuality,c.inputSource==='market'?'min':'any');if(p&&!isMarket)p={...p,source:`${p.source} (not in warehouse)`};}return {id:x.id,name:x.name,quality:x.minQuality,qtyPerUnit:Number(x.perOutput)||0,unitPrice:p?.price??null,priceQuality:p?.quality??null,lot:Boolean(p?.lot),source:p?.source||null};});
     const wageOverride=setNum(c.wages?.[wageKey])?Number(c.wages[wageKey]):null;
     let lab=wageOverride==null&&Number.isFinite(productId)?plannerLabourFromLots(ctx.s,productId,ctx.quality):null;
-    const eco=plannerEconomy(ctx),lvl=Math.max(1,Number(ctx.level)||1),ownUnitsPerHour=eco.rate||ctx.outputPerHour;
-    // v2.5.348 the game's Profit Calculator rates mine/oil/quarry resources at a fixed 90 % abundance (Minerals
+    const eco=plannerEconomy(ctx),lvl=Math.max(1,Number(ctx.level)||1),ownUnitsPerHour=ctx.nextPerLevel>0?ctx.nextPerLevel*lvl:(eco.rate||ctx.outputPerHour);
+    // The game's Profit Calculator rates mine/oil/quarry resources at a fixed 90 % abundance (Minerals
     // 116.641/h/level, not your mine's 129.6); the card uses the same rate. Your own abundance is shown in a note.
     const calcRate=C.isAbundanceResource?.(productId)&&eco.current!=null&&C.gameProfitCalcRatePerLevel?C.gameProfitCalcRatePerLevel(ctx.s?.gameConstants,productId,eco.current,{eventPct:ctx.eventPct||0,bonusPct:ctx.bonusPct||0}):null;
     const unitsPerHour=calcRate>0?calcRate*lvl:ownUnitsPerHour;
-    // v2.5.342 game wage from constants (AVERAGE_SALARY × salaryModifier × 0.97 with robots) when available.
+    // Game wage from constants (AVERAGE_SALARY × salaryModifier × 0.97 with robots) when available.
     const gWage=wageOverride==null&&C.gameWagePerLevel?C.gameWagePerLevel(ctx.s?.gameConstants,ctx.buildingKind,ctx.robots):null;
     let wage=null;
     if(gWage>0&&unitsPerHour>0){lab={quality:ctx.quality,at:null,cached:false,boughtUnits:0,...(lab||{}),workersPerUnit:gWage/(unitsPerHour/Math.max(1,Number(ctx.level)||1)),game:true};wage={wage:gWage,fresh:false,game:true};}
@@ -2811,7 +2504,7 @@ function renderPlannerProfit(host){
     if(lab&&wage&&unitsPerHour>0&&(eco.changed||!wage.fresh))lab.workersPerUnit=wage.wage/(unitsPerHour/Math.max(1,Number(ctx.level)||1));}
     // Worker and admin cost shown in cents (as the game shows them)...
     const r2=v=>Math.round(v*100)/100;const wPU=lab?r2(lab.workersPerUnit):null,aPU=lab?r2(wPU*overhead/100):null;
-    // ...but v2.5.348 the game's profit uses them unrounded (Power: $0.19787, not $0.20 → $151.04 / h / level).
+    // ...but the game's profit uses them unrounded (Power: $0.19787, not $0.20 → $151.04 / h / level).
     const labourPerUnit=lab?lab.workersPerUnit*(1+overhead/100):null;
     const profitArgs={level:ctx.level,salePrice:sale?.price??null,inputs,transportUnits:ctx.transportUnits,transportUnitCost:transport?.price??0,sellMode:c.sellMode,exchangeFeePct:feePct,contractDiscountPct:Number(c.contractDiscountPct),wagePerHourPerLevel:wageOverride??0,adminOverheadPct:overhead};
     const r=C.buildingProfit({...profitArgs,unitsPerHour,labourPerUnit});
@@ -2822,7 +2515,8 @@ function renderPlannerProfit(host){
       else own={abundancePct:null};}
     try{__plannerProfitLast[String(ctx.building?.id??ctx.building?.raw?.id??ctx.product)]={at:new Date().toISOString(),building:String(ctx.building?.name||''),product:ctx.product,productId,quality:ctx.quality,level:ctx.level,unitsPerHour,measuredUnitsPerHour:ctx.outputPerHour,economy:{current:eco.current,batch:eco.batch,source:eco.source,changed:eco.changed},wage,sale,inputs,labour:lab?{workersPerUnit:lab.workersPerUnit,lotAt:lab.at,lotQuality:lab.quality,cached:lab.cached}:null,adminOverheadPct:overhead,adminSource:setNum(c.adminOverheadPct)?'override':gameAdmin?'game formula (executives)':lotAdmin?'latest batch':'none',gameAdmin,exchangeFeePct:feePct,labourPerUnit,gameCalc:{abundanceResource:calcRate>0,assumedAbundancePct:calcRate>0?C.GAME_PROFIT_CALC_ABUNDANCE_PCT:null,ratePerLevel:unitsPerHour/lvl,ownRatePerLevel:ownUnitsPerHour/lvl,ownAbundancePct:ctx.abundancePct??null,own},result:r.ok?{inputCostPerUnit:r.inputCostPerUnit,labourPerUnit:r.labourPerUnit,sourcingCostPerUnit:r.inputCostPerUnit+r.labourPerUnit,profitPerUnitGameBasis:r.profitPerUnit+r.feePerUnit+r.contractDiscountPerUnit+r.transportPerUnit,profitPerHourPerLevelGameBasis:(r.profitPerUnit+r.feePerUnit+r.contractDiscountPerUnit+r.transportPerUnit)*r.unitsPerHour/lvl,profitPerHourPerLevelAfterFee:r.profitPerHourPerLevel}:{error:r.error},runningBatchUnitCost:Number(ctx.building?.raw?.busy?.resource?.unitCost)||null};}catch{}
     const out=host.querySelector('#plannerProfitResults');if(!out)return;
-    if(!r.ok){out.innerHTML=`<div class="planner-profit-empty">${escapeHtml(sale?r.error:`No market or VWAP price captured for ${ctx.product||'this product'} Q${ctx.quality} yet.`)}</div>`;try{renderPlannerInsights(host);}catch(e){console.error('Smart insights render failed',e);}return;}
+    const nrn=ctx.nextRun,nextRunNote=nrn&&ctx.nextPerLevel>0?`<div class="pp-basis">Next run: ${num(+(ctx.nextPerLevel*lvl).toFixed(3))}/h at Level ${num(lvl)} (${num(+ctx.nextPerLevel.toFixed(3))}/h/level · event ${Number(nrn.eventPct||0)>=0?'+':''}${num(+Number(nrn.eventPct||0).toFixed(2))}% · speed bonus ${num(+Number(nrn.bonusPct||0).toFixed(2))}%${nrn.abundancePct!=null?` · abundance ${num(+Number(nrn.abundancePct).toFixed(2))}%`:''})${ctx.runPerLevel!=null?` · running batch ${num(+(ctx.runPerLevel*Math.max(1,Number(ctx.building?.level)||lvl)).toFixed(3))}/h at Level ${num(Math.max(1,Number(ctx.building?.level)||lvl))} (game)`:''}</div>`:'';
+    if(!r.ok){out.innerHTML=`<div class="planner-profit-empty">${escapeHtml(sale?r.error:`No market or VWAP price captured for ${ctx.product||'this product'} Q${ctx.quality} yet.`)}</div>${nextRunNote}`;try{renderPlannerInsights(host);}catch(e){console.error('Smart insights render failed',e);}return;}
     const tone=v=>v>0.0001?'is-profit':v<-0.0001?'is-loss':'';
     const perLevel=v=>v*r.unitsPerHour/ctx.level;
     // Game basis = the game's Profit Calculator: sale price − sourcing cost (inputs + labour), no fee or transport.
@@ -2835,15 +2529,15 @@ function renderPlannerProfit(host){
       :`no produced ${escapeHtml(ctx.product||'')} batch in the warehouse yet — appears after the first batch, or enter a wage override`;
     const ecoSrc={'game-constants':`the game's ${eco.name(eco.current)}-economy rate, from its constants`,'phase-measured':`your ${eco.name(eco.current)}-economy rate measured earlier`,reference:`normal-economy rate ÷ (1 − your speed bonus), the game's formula`,'measured-stale':`no ${eco.name(eco.current)} rate captured yet — still the running batch's rate`}[eco.source];
     const ecoNote=eco.changed?`<div class="pp-basis pp-economy">Economy is ${escapeHtml(eco.name(eco.current))} now; ${eco.batch?.inferred&&!eco.batch?.matched?`the running batch (${num(+eco.measured.toFixed(3))}/h) started in another phase — its rate is ${num(+eco.batch.diffPct.toFixed(1))}% off the normal rate`:`the running batch started in ${escapeHtml(eco.name(eco.batch?.state))} at ${num(+eco.measured.toFixed(3))}/h`}. Profit uses ${num(+Number(unitsPerHour).toFixed(3))}/h (${escapeHtml(ecoSrc||'')}).</div>`:(eco.source==='game-constants'&&eco.diffPct!=null&&Math.abs(eco.diffPct)>1?`<div class="pp-basis pp-economy">Your running batch measures ${num(+eco.measured.toFixed(3))}/h; the game's formula gives ${num(+Number(eco.rate).toFixed(3))}/h (${num(+eco.diffPct.toFixed(1))}%). Profit uses the game's figure, as its calculator does.</div>`:'');
-    const abundanceNote=calcRate>0?`<div class="pp-basis pp-economy">The game's calculator assumes ${num(C.GAME_PROFIT_CALC_ABUNDANCE_PCT)}% abundance (${num(+calcRate.toFixed(3))}/h/level), and so does this card. ${own&&own.abundancePct!=null?`Your building at ${num(+own.abundancePct.toFixed(2))}% (${num(+own.ratePerLevel.toFixed(3))}/h/level): ${plannerMoney(own.perLevel)} / h / level, ${plannerMoney(own.netPerLevel)} after ${c.sellMode==='exchange'?'fee':'discount'} &amp; transport.`:`Your building's own abundance isn't captured yet — open the building in the game once.`}</div>`:'';
-    // v2.5.343 research progress for this product (/api/v3/players/research/).
+    const abundanceNote=calcRate>0?`<div class="pp-basis pp-economy">The game's calculator assumes ${num(C.GAME_PROFIT_CALC_ABUNDANCE_PCT)}% abundance (${num(+calcRate.toFixed(3))}/h/level), and so does this card. ${own&&own.abundancePct!=null?`Next run at your building's ${num(+own.abundancePct.toFixed(2))}% abundance (${num(+own.ratePerLevel.toFixed(3))}/h/level): ${plannerMoney(own.perLevel)} / h / level, ${plannerMoney(own.netPerLevel)} after ${c.sellMode==='exchange'?'fee':'discount'} &amp; transport.`:`Your building's own abundance isn't captured yet — open the building in the game once.`}</div>`:'';
+    // Research progress for this product (/api/v3/players/research/).
     const rs=(Array.isArray(ctx.s?.endpointData?.['/api/v3/players/research/']?.data)?ctx.s.endpointData['/api/v3/players/research/'].data:[]).find(x=>Number(x?.kind)===productId);
     const researchNote=rs?`<div class="pp-basis">Research level Q${num(rs.quality)} · ${num(rs.patents)} / ${num(rs.patentsNeeded)} patents for the next level</div>`:'';
     const sellLabel=c.sellMode==='exchange'?`Exchange fee ${num(+feePct.toFixed(2))}%`:`Contract discount ${num(c.contractDiscountPct)}%`;
     const busy=ctx.building?.raw?.busy?.resource;
     const batchCost=busy&&Number(busy.kind)===productId&&Number(busy.unitCost)>0?Number(busy.unitCost):null;
     out.innerHTML=`<div class="pp-stats"><div class="pp-stat ${tone(gameUnit)}"><strong>${plannerMoney(perLevel(gameUnit))}</strong><span>Profit / h / level</span></div><div class="pp-stat ${tone(gameUnit)}"><strong>${plannerMoney(gameUnit*r.unitsPerHour)}</strong><span>Profit / h · Level ${ctx.level}</span></div><div class="pp-stat ${tone(gameUnit)}"><strong>${plannerMoney(gameUnit)}</strong><span>Profit / unit</span></div></div>
-<div class="pp-basis">Same basis as the game’s Profit Calculator (before market fee &amp; transport).</div>${ecoNote}${abundanceNote}${researchNote}${batchCost!=null?`<div class="pp-batch"><div><strong>$${batchCost.toLocaleString(undefined,{minimumFractionDigits:3,maximumFractionDigits:3})}</strong><span>Cost per unit · running batch (game)</span></div><small>What the game charged for the batch in progress: the inputs it actually consumed when the batch started + labour. “Sourcing cost / unit” below is what a new batch would cost at today’s warehouse costs (the game’s Profit Calculator figure). Difference ${plannerMoney(batchCost-(r.inputCostPerUnit+r.labourPerUnit))}.</small></div>`:''}
+<div class="pp-basis">Same basis as the game’s Profit Calculator (before market fee &amp; transport).</div>${ecoNote}${nextRunNote}${abundanceNote}${researchNote}${batchCost!=null?`<div class="pp-batch"><div><strong>$${batchCost.toLocaleString(undefined,{minimumFractionDigits:3,maximumFractionDigits:3})}</strong><span>Cost per unit · running batch (game)</span></div><small>What the game charged for the batch in progress: the inputs it actually consumed when the batch started + labour. “Sourcing cost / unit” below is what a new batch would cost at today’s warehouse costs (the game’s Profit Calculator figure). Difference ${plannerMoney(batchCost-(r.inputCostPerUnit+r.labourPerUnit))}.</small></div>`:''}
 <div class="pp-stats pp-stats-net"><div class="pp-stat ${tone(r.profitPerHourPerLevel)}"><strong>${plannerMoney(r.profitPerHourPerLevel)}</strong><span>/ h / level after ${c.sellMode==='exchange'?'fee':'discount'} &amp; transport</span></div><div class="pp-stat ${tone(r.profitPerUnit)}"><strong>${plannerMoney(r.profitPerUnit)}</strong><span>/ unit after ${c.sellMode==='exchange'?'fee':'discount'} &amp; transport</span></div></div>
 <div class="pp-list">
 ${row('Sale price (market, any quality)',plannerMoney(sale.price),`${escapeHtml(sale.source)} · Q${sale.quality} listing`)}
@@ -2869,7 +2563,7 @@ ${row('Production / h',num(r.unitsPerHour),`Level ${ctx.level} · ${num(+(r.unit
   el.querySelector('#ppInputSource').onchange=e=>save(c=>{c.inputSource=e.target.value;});
   results();
 }
-// v2.5.357 Smart insights under the profit card: (1) best product for this building, (2) input run-out for all
+// Smart insights under the profit card: (1) best product for this building, (2) input run-out for all
 // buildings with a suggested buy, (3) make or buy each input. Same basis as the game's Profit Calculator (tools-core
 // gameCalcProduct reproduces the card's $151.04 / $422.05 / $474.45). No new network requests.
 function plannerInsightsData(ctx){
@@ -2885,22 +2579,22 @@ function plannerInsightsData(ctx){
   const inputCostOf=id=>{if(!isMarket){const w=C.warehouseUnitCostAsGame(lots,id);if(w)return w.unitCost;}const p=plannerMarketPrice(s,id,0,cfg.inputSource==='market'?'min':'any');return p?p.price:null;};
   const recipes=Array.isArray(ctx.recipes)?ctx.recipes:[];
   const nameOf=id=>{try{return plannerResourceNameById(recipes,id,s)||`#${id}`;}catch{return `#${id}`;}};
-  const eventPctOf=id=>{try{return plannerActiveProductionEvent(s,nameOf(id),recipes,id)||0;}catch{return 0;}};
+  const eventPctOf=id=>{try{return plannerEventPct(s,id);}catch{return 0;}};
   return {ok:true,C,s,gc,economyState,adminPct,bonusPct:Number(ctx.bonusPct)||0,inputCostOf,nameOf,eventPctOf};
 }
-// v2.5.383 Analyze tab context: the same price, warehouse and game-calculator helpers the Production cards use, so
+// Analyze tab context: the same price, warehouse and game-calculator helpers the Production cards use, so
 // Analyze numbers match them. Reads stored state only (no network); products by resource id + quality.
 function analyzeContext(s){
   const lots=plannerWarehouseLots(s),realm=validRealmNumber(s?.viewRealm??s?.selectedRealm??s?.authData?.authCompany?.realmId);
-  let d=null;try{d=plannerInsightsData({s,recipes:[],bonusPct:plannerCompanyProductionModifier(s)});}catch{}
+  let d=null;try{d=plannerInsightsData({s,recipes:[],bonusPct:plannerBonusPct(s)});}catch{}
   const owned=Array.isArray(s?.buildings)?s.buildings:[];
   const maker=id=>owned.find(b=>Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId)===Number(id))||null;
   return {realm,lots,buildingIds:owned.map(b=>Number(b?.id)).filter(id=>id>0),companyName:s?.authData?.authCompany?.company||'',
     nameOf:id=>resourceName({_id:Number(id),kind:Number(id)},s),
-    // 2.5.393 CSV import: the background stores it (realm-keyed queues; captured data wins).
+    // CSV import: the background stores it (realm-keyed queues; captured data wins).
     importCsv:msg=>chrome.runtime.sendMessage(msg),
     priceOf:(id,q)=>{const p=plannerMarketPrice(s,id,q,'exact');return p&&Number(p.price)>0?{price:Number(p.price),source:p.source||''}:null;},
-    // 2.5.394 transport units per unit sold: game constants (.transportation), else the bundled recipes.
+    // Transport units per unit sold: game constants (.transportation), else the bundled recipes.
     transportOf:id=>{const gv=s?.gameConstants?.resources?.[String(id)]?.transportation,g=gv==null||gv===''?NaN:Number(gv);if(Number.isFinite(g)&&g>=0)return g;const r=(window.__scmBuildingPlannerRaw?.recipes||[]).find(x=>Number(x?.id)===Number(id));const t=Number(r?.transport);return Number.isFinite(t)&&t>=0?t:null;},
     calcOf:(id,q,salePrice)=>{
       if(!d?.ok)return {ok:false,reason:d?.reason||'Calculator not available.'};
@@ -2925,7 +2619,7 @@ function renderPlannerInsights(host){
   else if(best&&best.resourceId===curId)verdict=`${escapeHtml(nameOf(curId))} is already the best product for this building.`;
   const priced=ranked.filter(x=>x.profitPerHourPerLevel!=null),unpriced=ranked.filter(x=>x.profitPerHourPerLevel==null);const top=priced.slice(0,5);if(cur&&!top.includes(cur))top.push(cur);
   const srcShort=v=>String(v||'').split(' — ')[0].replace('cheapest exchange listing, any quality (as game)','exchange').replace('SimcoTools, cheapest captured quality','SimcoTools');
-  // v2.5.359 #5 profit / h / level in each economy phase (same prices; the game's rate and labour per unit change).
+  // Profit / h / level in each economy phase (same prices; the game's rate and labour per unit change).
   const phaseOf=x=>x.complete&&x.salePrice!=null?C.phaseProfits({c:gc,resourceId:x.resourceId,bonusPct,adminPct,robots:Boolean(ctx.robots),eventPct:eventPctOf(x.resourceId),salePrice:x.salePrice,inputCostOf}):null;
   const phases=new Map(priced.map(x=>[x.resourceId,phaseOf(x)]));
   const phaseKeys=Object.keys(gc.core.SALARY_MID);
@@ -2939,7 +2633,7 @@ function renderPlannerInsights(host){
   el.innerHTML=`${sec1}<div class="pp-basis">Game Profit Calculator basis (before fee &amp; transport) · admin ${num(+adminPct.toFixed(2))}% · sale = cheapest listing any quality, else VWAP.</div>`;
   try{renderPlannerPayback(host,d);}catch(e){console.error('Upgrade payback render failed',e);}
 }
-// v2.5.359 #7 upgrade payback: construction materials for the next level (constructionMaterialPlan: game costUnits × level,
+// Upgrade payback: construction materials for the next level (constructionMaterialPlan: game costUnits × level,
 // valued at the cheapest market price) ÷ the extra level's profit / h (game Profit Calculator basis, own abundance).
 function renderPlannerPayback(host,d){
   const el=host?.querySelector?.('#plannerPayback'),ctx=host?.__plannerProfitCtx;
@@ -2949,7 +2643,7 @@ function renderPlannerPayback(host,d){
   const owned=Array.isArray(ctx.owned)?ctx.owned:[];
   const dur=h=>h==null?'—':h<48?`${num(+h.toFixed(1))} h`:`${num(+(h/24).toFixed(1))} d`;
   const rows=[];
-  // v2.5.360 extra admin per hour from one more level: wages of every producing level × (1/170) × (1 − COO%).
+  // Extra admin per hour from one more level: wages of every producing level × (1/170) × (1 − COO%).
   let ga=null;try{ga=plannerGameAdmin(s);}catch{}
   const coo=Number(ga?.coo)||0,dAdmin=C.adminIncreasePerLevel(coo);
   const wageAll=owned.filter(b=>Number(b.currentResourceId)>0).reduce((a,b)=>a+(Number(C.gameWagePerLevel(gc,String(b.kind||''),Boolean(b.robotsSpecialization)))||0)*Math.max(1,Number(b.level)||1),0);
@@ -2979,7 +2673,7 @@ function renderPlannerPayback(host,d){
   }).join('');
   el.innerHTML=rows.length?`<div class="pp-list">${html}</div><div class="pp-basis">Payback from the start of the upgrade = upgrade time (level × build time; the building doesn't produce) + (materials at the cheapest market price + profit lost while upgrading) ÷ (extra profit / h − extra admin / h). Extra admin: one more level adds 1/170 to the base overhead${coo?`, ${num(coo)}% less with your COO`:''}, on the wages of every producing building (game formula). Upgrade-speed boosts are not counted. Green &lt; 3 days, orange &lt; 2 weeks.</div>`:'<div class="planner-profit-empty">No building is producing anything right now.</div>';
 }
-// v2.5.358 inputs run-out & make or buy lives on the Warehouse tab (all buildings). ctx: {s, recipes,
+// Inputs run-out & make or buy lives on the Warehouse tab (all buildings). ctx: {s, recipes,
 // owned, runHours, bonusPct}. Returns HTML.
 function plannerRunOutHtml(ctx){
   const d=plannerInsightsData(ctx);
@@ -3014,7 +2708,7 @@ function renderWarehouseRunOut(s){
     let ui=null;try{ui=plannerUiState(s);}catch{}
     const runHours=Math.min(48,Math.max(1,Number(ui?.runHours)||Number(s?.productionRunHours)||24));
     const owned=ownedPlannerBuildings(s,data.buildings);
-    el.innerHTML=plannerRunOutHtml({s,recipes:data.recipes,owned,runHours,bonusPct:plannerCompanyProductionModifier(s)});
+    el.innerHTML=plannerRunOutHtml({s,recipes:data.recipes,owned,runHours,bonusPct:plannerBonusPct(s)});
   }).catch(e=>{if(token===__scmWhRunOutToken)el.innerHTML=`<div class="planner-profit-empty">Could not calculate: ${escapeHtml(String(e?.message||e))}</div>`;});
 }
 // Planner repaint guard. Background/storage-driven repaints (options.background) are queued while the user is editing
@@ -3046,26 +2740,7 @@ function renderBuildingPlanner(s,options={}){
     const definitions=data.buildings, recipes=data.recipes, rates=data.rates;
     const modifierState=await ensurePlannerCompanyModifiers(s);
     if(modifierState!==s){ renderBuildingPlanner(modifierState,options); return; }
-    const realm=Number(s?.viewRealm??s?.captureRealm??s?.authData?.authCompany?.realmId);
-    let ensurePromise=null;
-    if(Number.isFinite(realm)&&!options.skipEnsure){
-      ensurePromise=chrome.runtime.sendMessage({type:'ENSURE_FROZEN_PRODUCTION_RATES',realm}).catch(()=>({ok:false}));
-      // Do not hold the Production UI hostage to history/rate reconciliation.
-      // Render immediately from the realm-local state we already have, then
-      // refresh once the authoritative frozen-rate transaction completes.
-      if(ensurePromise){
-        ensurePromise.then(async result=>{
-          if(result?.ok&&host.dataset.renderToken===renderToken&&host.dataset.rateRefreshToken!==renderToken){
-            host.dataset.rateRefreshToken=renderToken;
-            try{renderBuildingPlanner(await get(),{skipEnsure:true,background:true});}catch{}
-          }
-        }).catch(()=>{});
-      }
-    }
-    // Use the already-captured realm state passed into this render. Re-reading the
-    // full physical realm store here made every planner interaction pay for another
-    // large storage deserialization. The async rate reconciliation above remains
-    // responsible for triggering a single fresh render when authoritative rates change.
+    s=await get();
     const ui=plannerUiState(s);
     const owned=ownedPlannerBuildings(s,definitions,ui.kindOverrides||{}).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),undefined,{numeric:true,sensitivity:'base'}));
     if(!owned.length){
@@ -3094,36 +2769,37 @@ function renderBuildingPlanner(s,options={}){
     const product=building.produces.includes(manualProduct)?manualProduct:currentProduct;
     const productPickerValue=building.produces.includes(manualProduct)?manualProduct:'__current__';
     const productRecipe=recipeBy.get(plannerNormalizeName(product));
-    const productRate=product?plannerRateForProduct(product,building,level,recipes,rates,s):{rate:null,source:null};
-    if(building.currentResource&&plannerNormalizeName(product)===plannerNormalizeName(building.currentResource))requestPlannerBuildingHistory(building,s);
-    const outputPerHour=productRate.rate!=null?productRate.rate:null;
+    // Game figures come from the shared core; a what-if (other product, level or quality) is a separate `planned` value.
+    const plans=plannerBuildPlans(owned,ui,planningLevels,productOverrides);
+    if(product)plans[String(building.id)]={buildingId:Number(building.id),product,quality,plannedLevel:level,mode:(ui.planModes||{})[String(building.id)]||'live'};
+    const network=plannerProductionNetwork(s,owned,recipes,rates,runHours,{plans});
+    const entry=network.buildings.find(e=>String(e.buildingId)===String(building.id))||null;
+    // Only the user's own changes (type, output, level, quality) are what-ifs; a second network holds just those.
+    const whatIfIds=new Set(owned.filter(b=>{const id=String(b.id);return Boolean(ui.kindOverrides?.[id])||Boolean(productOverrides[id])||(planningLevels[id]!=null&&Number(planningLevels[id])!==Number(b.level))||(ui.planModes||{})[id]==='planner';}).map(b=>String(b.id)));
+    const whatIfPlans=Object.fromEntries(Object.entries(plans).filter(([id])=>whatIfIds.has(id)));
+    const planNetwork=whatIfIds.size?plannerProductionNetwork(s,owned,recipes,rates,runHours,{plans:whatIfPlans,ctx:network.ctx}):null;
+    const planned=planNetwork?.buildings.find(e=>String(e.buildingId)===String(building.id))?.planned||null;
+    const productRate=product?plannerRateForProduct(product,building,level,recipes,rates,s,network.ctx):{rate:null,source:null};
+    requestPlannerBuildingHistory(building,s);
+    const gameRunning=Boolean(entry?.running);
+    const gameRate=gameRunning?Number(entry.ratePerHour)||0:0;
+    const upgrading=Boolean(building.expanding||entry?.expanding);
+    const statusLabel=upgrading?'Upgrading':building.testKind?'Test building':!gameRunning?'Idle':(gameRate>0?'':'Rate unknown');
+    const outputPerHour=gameRate>0||upgrading?gameRate:null;
     const outputPerPlan=outputPerHour!=null?outputPerHour*runHours:null;
-    // v2.5.350 planning level ≠ current level: the same rate function at the building's own level, for the difference.
-    let originalPerHour=null;
-    if(product&&level!==Number(building.level)&&outputPerHour!=null){try{const r0=plannerRateForProduct(product,building,Number(building.level)||1,recipes,rates,s);if(r0?.rate!=null&&Number.isFinite(Number(r0.rate)))originalPerHour=Number(r0.rate);}catch{}}
-    const diffPerHour=originalPerHour!=null?outputPerHour-originalPerHour:null;
+    const plannedPerHour=planned&&planned.ratePerHour>0?planned.ratePerHour:null;
+    const diffPerHour=planned&&plannedPerHour!=null&&gameRunning&&gameRate>0&&Number(planned.productId)===Number(entry.productId)&&Number(planned.level)!==Number(entry.level)?plannedPerHour-gameRate:null;
     const diffStat=(v,label)=>`<div class="planner-output-stat planner-output-diff ${v>0?'is-profit':v<0?'is-loss':''}"><strong>${v>0?'+':v<0?'−':''}${num(Math.abs(v))}</strong><span>${label}</span></div>`;
     const minInputQuality=Math.max(0,quality-1);
     const inputs=Array.isArray(productRecipe?.materials)?productRecipe.materials:[];
+    const inputRate=planned?plannedPerHour:(gameRate>0&&entry&&Number(entry.productId)===Number(productRecipe?.id)?gameRate:null);
     const plannedInputs=inputs.map(m=>{
       const id=Number(m.id), perOutput=Number(m.quantity)||0;
-      const required=outputPerHour!=null?perOutput*outputPerHour:null;
+      const required=inputRate!=null?perOutput*inputRate:null;
       const requiredPlan=required!=null?required*runHours:null;
       return {id,name:plannerResourceNameById(recipes,id,s),perOutput,required,requiredPlan,minQuality:minInputQuality};
     });
-
-    // Aggregate the realm's frozen building plan for the selected 1–48 hour plan.
-    // The selected building's planner overrides are applied to its contribution;
-    // every other building uses its realm-local frozen product/quality/level/rate.
-    const existingPlanMap=(s?.frozenNetworkPlan?.buildingPlans&&typeof s.frozenNetworkPlan.buildingPlans==='object')?s.frozenNetworkPlan.buildingPlans:{};const existingProdPlans=s?.productionPlans||{};const planForKind=(p,b)=>p&&(p.kind==null||String(p.kind)===String(b.kind))&&!(b.testKind&&p.kind==null)?p:null;const planModes={...(s?.frozenNetworkPlan?.plannerState?.planModes||{}),...(ui.planModes||{})};const planState={};
-    for(const b of owned){const id=String(b.id);const selected=String(b.id)===String(building.id);
-      // v2.5.367 a test building's output/level/quality live in the planner state, not in any saved game plan.
-      const testPlan=b.testKind&&!selected?{product:(b.produces||[]).includes(productOverrides[id])?productOverrides[id]:(b.produces?.[0]||''),quality:Number(ui.qualityByBuilding?.[id]??plannerFrozenBuildingPlan(s,id)?.quality??0)||0,plannedLevel:planningLevels[id]??b.level}:null;
-      const persisted=testPlan||planForKind(existingPlanMap[id],b)||planForKind(existingProdPlans[id],b)||{};const p=selected?product:String(persisted.product||b.currentResource||'').trim();if(!p)continue;const rcp=recipeBy.get(plannerNormalizeName(p));const q=selected?quality:Math.max(0,Number(persisted.quality??b.currentQuality??0)||0);const lvl=selected?level:Math.min(20,Math.max(1,Number(persisted.plannedLevel)||Number(b.level)||1));const base=Number(persisted.baseRatePerLevel||0);planState[id]={buildingId:Number(b.id),product:p,productId:Number(rcp?.id||persisted.productId||0),resourceId:Number(persisted.resourceId||rcp?.id||0)||null,quality:q,plannedLevel:lvl,baseRatePerLevel:base>0?base:null,mode:planModes[id]||persisted.mode||'live',kind:String(b.kind||'')};}
-    const network=plannerProductionNetwork(s,owned,recipes,rates,runHours,{buildingId:building.id,product,level,quality,planningLevels,planState});
-    for(const spec of (network.activeSpecs||[])){const id=String(spec.buildingId);const current=planState[id]||{};const eventModifier=plannerActiveProductionEvent(s,spec.product,recipes,spec.productId);const divisor=(1+eventModifier/100)*plannerCompanyProductionFactor(s);if(divisor>0&&Number(spec.ratePerHour)>0)current.baseRatePerLevel=Number(spec.ratePerHour)/(Math.max(1,Number(spec.level)||1)*divisor);current.product=spec.product;current.productId=Number(spec.productId);current.quality=Math.max(0,Number(spec.quality)||0);current.plannedLevel=Math.min(20,Math.max(1,Number(spec.level)||1));current.buildingId=Number(spec.buildingId);planState[id]=current;}
-    try{const eventMap={};for(const entry of Object.values(planState))eventMap[plannerNormalizeName(entry.product)]=plannerActiveProductionEvent(s,entry.product,recipes,entry.productId);const signature=globalThis.SCMPlannerCore?.frozenPlanSignature?globalThis.SCMPlannerCore.frozenPlanSignature(planState,runHours,{companyProductionModifier:plannerCompanyProductionModifier(s),events:eventMap,speedFormula:'game-divide'}):JSON.stringify({hours:runHours,planState});const plannerState={selectedBuildingId:String(building.id),planningLevels,productOverrides,qualityByBuilding:{...(s?.frozenNetworkPlan?.plannerState?.qualityByBuilding||{}),[String(building.id)]:quality},runHours,discount:ui.discount||0,planModes};const frozenSignature=String(s?.frozenNetworkPlan?.signature||'');const shouldPersistFrozen=host.__lastFrozenPlanSignature!==signature&&(!frozenSignature||frozenSignature!==signature);if(shouldPersistFrozen){host.__lastFrozenPlanSignature=signature;chrome.runtime.sendMessage({type:'SAVE_FROZEN_NETWORK_PLAN',realm:Number(realm),signature,plan:{hours:runHours,productionRows:network.productionRows,demandRows:network.demandRows,activeSpecs:network.activeSpecs,buildingPlans:planState,plannerState,modifiers:{companyProductionModifier:plannerCompanyProductionModifier(s),events:eventMap,speedFormula:'game-divide'},resources:network.resources,deficits:network.deficits,surpluses:network.surpluses}}).catch(()=>{});}}catch{}
-    s=await get();
+    const summaryNet=planNetwork?.planned||network;
 
     const productImage=productRecipe?.id!=null?plannerResourceImage(Number(productRecipe.id),s):'';
     const buildingImage=plannerAssetUrl(building.raw?.image);
@@ -3131,7 +2807,7 @@ function renderBuildingPlanner(s,options={}){
     const hasPlannerChange=b=>{const id=String(b.id);return Boolean(kindOverrides[id])||Boolean(productOverrides[id])||(planningLevels[id]!=null&&Number(planningLevels[id])!==Number(b.level))||(ui.planModes||{})[id]==='planner';};
     const changedCount=owned.filter(hasPlannerChange).length;
     const kindList=[...definitions].filter(d=>String(d.id)!==String(building.gameKind)&&String(d?.name||'').trim()&&(d.produces||[]).length).sort((x,y)=>String(x.name).localeCompare(String(y.name)));
-    // v2.5.366 flat list: optgroups made Yandex's Android picker indent rows unevenly.
+    // Flat list: optgroups made Yandex's Android picker indent rows unevenly.
     const kindOpts=`<option value="__game__" ${building.testKind?'':'selected'}>Game: ${escapeHtml(building.gameName||building.name)}</option>`+kindList.map(d=>`<option value="${escapeHtml(String(d.id))}" ${building.testKind&&String(d.id)===String(building.kind)?'selected':''}>${escapeHtml(d.name)}</option>`).join('');
     const productOptions=[`<option value="__current__" ${productPickerValue==='__current__'?'selected':''}>Current output${currentProduct?` — ${escapeHtml(currentProduct)}`:''}</option>`].concat((building.produces||[]).map(p=>`<option value="${escapeHtml(p)}" ${p===productPickerValue?'selected':''}>${escapeHtml(p)}</option>`)).join('');
     const busyText=building.testKind?`Test building — game: ${building.gameName}`:building.expanding?`Under construction${building.expandFinish?` · done ${new Date(building.expandFinish).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}`:''}`:building.currentResource?`Currently producing: ${building.currentResource}${building.currentQuality!=null?` Q${building.currentQuality}`:''}`:'Currently producing: Idle';
@@ -3145,9 +2821,9 @@ function renderBuildingPlanner(s,options={}){
     const buildingCards=owned.map(b=>{
       const img=plannerAssetUrl(b.raw?.image);
       const testBadge=b.testKind?`<span class="owned-building-test">TEST · was ${escapeHtml(b.gameName)}</span>`:'';
-      const frozenCard=plannerFrozenBuildingPlan(s,b.id);const cardKindOk=frozenCard&&(frozenCard.kind==null?!b.testKind:String(frozenCard.kind)===String(b.kind));
-      const testPick=b.testKind?{product:(b.produces||[]).includes(productOverrides[String(b.id)])?productOverrides[String(b.id)]:(b.produces?.[0]||''),quality:Number(ui.qualityByBuilding?.[String(b.id)]??frozenCard?.quality??0)||0}:null;
-      const cardPlan=(cardKindOk?frozenCard:null)||b.productionPlan||testPick||null;
+      const cardOvr=(b.produces||[]).includes(productOverrides[String(b.id)])?productOverrides[String(b.id)]:null;
+      const cardQ=Number(ui.qualityByBuilding?.[String(b.id)]);
+      const cardPlan=cardOvr?{product:cardOvr,quality:Number.isFinite(cardQ)?cardQ:(b.currentQuality??0)}:b.testKind?{product:b.produces?.[0]||'',quality:Number.isFinite(cardQ)?cardQ:0}:b.productionPlan||null;
       const cardProduct=String(cardPlan?.product||b.currentResource||b.produces?.[0]||'').trim();
       const cardQuality=Number.isFinite(Number(cardPlan?.quality))?Number(cardPlan.quality):b.currentQuality;
       const cardRecipe=cardProduct?recipeBy.get(plannerNormalizeName(cardProduct)):null;
@@ -3155,7 +2831,7 @@ function renderBuildingPlanner(s,options={}){
       const outputLabel=cardProduct?`${cardProduct}${cardQuality!=null?` Q${cardQuality}`:''}`:'Idle';
       const inputLabel=cardInputs.length?cardInputs.join(' · '):'None';
       const constructionLine=b.expanding?'<span class="owned-building-io owned-building-construction"><b>Under construction</b></span>':'';
-      // v2.5.350 abundance (game's /api/v2/companies/buildings/<id>/abundance/) for mines, oil rigs and quarries.
+      // Abundance (game's /api/v2/companies/buildings/<id>/abundance/) for mines, oil rigs and quarries.
       const TC=globalThis.SCM_TOOLS_CORE,cardResId=Number(cardRecipe?.id);
       const cardAb=cardResId>0&&TC?.isAbundanceResource?.(cardResId)?plannerAbundancePct(s,b.raw?.id??b.id,cardResId):undefined;
       const abundanceLine=cardAb===undefined?'':cardAb==null?'<span class="owned-building-io owned-building-abundance ab-none"><b>Abundance:</b> not captured</span>':`<span class="owned-building-io owned-building-abundance ab-${TC.abundanceTone(cardAb)}"><b>Abundance:</b> <em>${num(+cardAb.toFixed(2))}%</em></span>`;
@@ -3174,15 +2850,15 @@ function renderBuildingPlanner(s,options={}){
     // Freeze the captured resource-id + quality market-price mapping for this render.
     // Discount changes operate only on these frozen quotes; the mapping itself
     // is never recomputed by the selector.
-    const deficitBase=network.deficits.map(x=>plannerDiscountQuote(s,x,'deficit',0));
-    const surplusBase=network.surpluses.map(x=>plannerDiscountQuote(s,x,'surplus',0));
+    const deficitBase=summaryNet.deficits.map(x=>plannerDiscountQuote(s,x,'deficit',0));
+    const surplusBase=summaryNet.surpluses.map(x=>plannerDiscountQuote(s,x,'surplus',0));
     const applyDiscount=(quote,pct)=>({...quote,discount:pct,unitPrice:quote.marketPrice!=null?roundCurrencyUp(quote.marketPrice*(1-pct/100)):null,total:quote.marketPrice!=null&&quote.amount>0?roundCurrencyUp(roundCurrencyUp(quote.marketPrice*(1-pct/100))*quote.amount):null});
     const deficitQuotes=deficitBase.map(q=>applyDiscount(q,discount));
     const surplusQuotes=surplusBase.map(q=>applyDiscount(q,discount));
     const summaryRows=(quotes,type)=>quotes.length?quotes.map(q=>{
       return `<div class="planner-summary-row"><div class="planner-summary-resource">${plannerImage(plannerResourceImage(q.id,s),q.name,'planner-summary-icon')}<span>${escapeHtml(q.name)}<small>Q${q.quality}${q.marketPriceQuality!=null&&Number(q.marketPriceQuality)!==Number(q.quality)?` · market Q${q.marketPriceQuality}`:''}</small></span></div><strong>${type==='deficit'?'-':'+'}${num(q.amount)}</strong><span class="planner-summary-money" data-market-price="${q.marketPrice??''}" data-amount="${q.amount}" data-summary-type="${type}"><small>Market</small> ${plannerMoney(q.marketPrice)}${q.marketPriceSrc?` <small>${escapeHtml(q.marketPriceSrc)}</small>`:''}<br><small>Est. ${type==='deficit'?'Buy Cost':'Sale Value'} · ${q.discount}% discount</small> ${plannerMoney(q.total)} <small>(${plannerMoney(q.unitPrice)} / unit)</small></span></div>`;
     }).join(''):`<div class="planner-summary-empty">No ${type}s for this production plan.</div>`;
-    // v2.5.86 text-box format: keep the resource reference separated by spaces
+    // Text-box format: keep the resource reference separated by spaces
     // so the Sim Companies chat parser renders :re-###: as an image. Keep each
     // material on one unbroken line and use the same compact layout the user
     // verified manually in-game.
@@ -3263,8 +2939,8 @@ function renderBuildingPlanner(s,options={}){
     if(plannerRepaintBlocked(host,options))return; // user began editing while this async render was computing
     const previousBuildingsStrip=host.querySelector('.owned-buildings-strip');
     const buildingsStripScrollLeft=previousBuildingsStrip?previousBuildingsStrip.scrollLeft:0;
-    const plannerHtml=`<div class="owned-buildings-heading"><h3>Your Buildings</h3><span class="owned-building-count">Total Buildings: ${owned.length}</span></div><div class="owned-buildings-strip">${buildingCards}</div><div class="planner-speed-modifiers" aria-label="Current production and sales speed modifiers"><div class="planner-speed-modifier"><span>Production Speed</span><strong>${modifierText(productionModifier)}</strong></div><div class="planner-speed-modifier"><span>Sales Speed</span><strong>${modifierText(salesModifier)}</strong></div></div><article class="planner-main-card"><div class="planner-selected-head"><div class="planner-building-hero">${plannerImage(buildingImage,building.name,'planner-building-hero-image')}<div><h3>${escapeHtml(building.name)}</h3><div class="planner-selected-category">${escapeHtml(building.category||'Resources')}</div><div class="planner-selected-line">Current Level: ${building.level} · Planning Level: ${level}</div><div class="planner-selected-line ${building.currentResource?'is-producing':''}">${busyText.replace(/·/g,'')}</div></div></div><div class="building-detail-controls"><div class="planner-kind-row"><label>Building Type<select id="buildingKind">${kindOpts}</select></label><label>Output<select id="buildingOutput" aria-label="Production output">${productOptions}</select></label></div><label>Planning Level<select id="buildingLevel">${levelOpts}</select></label><label>Production Quality<select id="buildingQuality">${qOpts}</select></label><label>Production Time<input id="buildingRunHours" type="number" min="1" max="48" step="1" value="${runHours}"><small>1–48 hours</small></label><div class="planner-reset-row">${hasPlannerChange(building)?'<button type="button" id="plannerResetBuilding">Reset to game data</button>':''}${changedCount>1||(changedCount===1&&!hasPlannerChange(building))?`<button type="button" id="plannerResetAll">Reset all (${changedCount})</button>`:''}</div></div></div><div class="planner-divider"></div><div class="planner-section-label">Production Output</div><div class="planner-output-grid${diffPerHour!=null?' has-diff':''}"><div class="planner-output-product planner-output-product-picker" title="Click to change production output">${plannerImage(productImage,product,'planner-output-image')}<div><strong>${escapeHtml(product||'No product')}</strong><span>Primary Product</span></div><select id="buildingProduct" class="planner-output-product-picker-select" aria-label="Change production output">${productOptions}</select></div><div class="planner-output-stat"><strong>${outputPerHour==null?'—':num(outputPerHour)}</strong><span>Production / hr</span></div>${diffPerHour!=null?diffStat(diffPerHour,`vs Level ${num(building.level)} / hr`):''}<div class="planner-output-stat"><strong>${outputPerPlan==null?'—':num(outputPerPlan)}</strong><span>Production / ${runHours} hr</span></div>${diffPerHour!=null?diffStat(diffPerHour*runHours,`vs Level ${num(building.level)} / ${runHours} hr`):''}</div><div class="planner-section-label">Required Inputs <span>(for ${escapeHtml(product||'selected product')} Q${quality})</span></div><div class="table-wrap planner-table-wrap"><table class="building-input-table planner-input-table mobile-cards"><thead><tr><th>Resource</th><th>Required / hr</th><th>Required / ${runHours} hr</th></tr></thead><tbody>${rows||'<tr><td colspan="3">No recipe inputs are defined for this product.</td></tr>'}</tbody></table></div><div class="planner-section-label">Profit / h / level <span>(${escapeHtml(product || 'selected product')} Q${quality} · Level ${level})</span></div><div id="plannerProfit" class="planner-profit"></div><div class="planner-section-label">Best product <span>(for this building · profit / h / level)</span></div><div id="plannerInsights" class="planner-profit planner-insights"></div><div class="planner-section-label">Upgrade payback <span>(all buildings · next level)</span></div><div id="plannerPayback" class="planner-profit planner-insights"></div><div class="planner-section-label planner-summary-label">Deficit &amp; Surplus</div><div class="planner-discount-control"><label>Buying - selected discount from VWAP<select id="plannerDiscount">${discountOpts}</select></label></div><div class="planner-summary-grid"><div class="planner-summary-card deficit-card"><div class="planner-summary-head"><span>Deficit - Total</span><strong id="plannerDeficitTotal">${deficitTotal}</strong></div><div class="planner-summary-table-scroll"><div class="planner-summary-table-head"><span>Resource</span><span>Amount</span><span>VWAP / Est. Market Cost</span></div>${summaryRows(deficitQuotes,'deficit')}</div></div><div class="planner-summary-card surplus-card"><div class="planner-summary-head"><span>Surplus - Total</span><strong id="plannerSurplusTotal">${surplusTotal}</strong></div><div class="planner-summary-table-scroll"><div class="planner-summary-table-head"><span>Resource</span><span>Amount</span><span>VWAP / Est. Market Value</span></div>${summaryRows(surplusQuotes,'surplus')}</div></div></div><div class="planner-text-grid"><div class="planner-text-card deficit-card"><div class="planner-summary-head"><span>Deficit Text</span><button type="button" class="planner-copy-btn" data-copy-target="deficitText">Copy</button></div><div id="deficitText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 BUYING -${discount}% MARKET 🔽🔽🔽</div>${deficitTextRows.html}<div class="planner-copy-heading">==============================</div></div></div><div class="planner-text-card surplus-card"><div class="planner-summary-head"><span>Selling Text</span><button type="button" class="planner-copy-btn" data-copy-target="surplusText">Copy</button></div><div id="surplusText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 SELLING -${discount}% MARKET 🔽🔽🔽</div>${surplusTextRows.html}<div class="planner-copy-heading">==============================</div></div></div></div><div class="planner-construction-card planner-text-card"><div class="planner-summary-head"><span>Construction Materials</span><strong id="plannerConstructionTotal">${plannerMoney(constructionTotalCost)}</strong><button type="button" class="planner-copy-btn" data-upgrade-projection>Upgrade View</button><button type="button" class="planner-copy-btn" data-copy-target="constructionMaterialsText">Copy</button></div><div class="planner-missing-prices" id="plannerConstructionMissing" role="status">${escapeHtml(constructionMissingText(constructionMissing))}</div><div id="constructionMaterialsText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 BUYING -${discount}% MARKET 🔽🔽🔽</div>${constructionTotalItems.length?constructionTotalItems.map(x=>`<div class="planner-copy-line"><span>${escapeHtml(`➡️ ${num(x.amount)} - ${x.name} :re-${Number(x.id)}: - ${x.price!=null?money(x.price):'—'}${x.price!=null&&x.marketPriceSrc?` (${x.marketPriceSrc})`:''}`)}</span></div>`).join(''):'<div class="planner-copy-empty">No additional construction materials required for the planned building levels.</div>'}<div class="planner-copy-heading">==============================</div></div></div><div class="planner-quality-footer"><div class="planner-info-dot">i</div><div><strong>Quality Note</strong><p>Inputs must be at least one quality level below the selected production quality. Higher quality inputs can also be used. Production quantity is not affected by quality level.</p><p class="planner-network-reference">Deficit and surplus are calculated from all owned buildings for the selected production time. Warehouse inventory is applied to construction-material needs by total quantity, regardless of stored quality.</p></div></div></article>`;
-    // v2.5.450 a background repaint that would draw the same planner is skipped (it re-laid out the page and jumped)
+    const plannerHtml=`<div class="owned-buildings-heading"><h3>Your Buildings</h3><span class="owned-building-count">Total Buildings: ${owned.length}</span></div><div class="owned-buildings-strip">${buildingCards}</div><div class="planner-speed-modifiers" aria-label="Current production and sales speed modifiers"><div class="planner-speed-modifier"><span>Production Speed</span><strong>${modifierText(productionModifier)}</strong></div><div class="planner-speed-modifier"><span>Sales Speed</span><strong>${modifierText(salesModifier)}</strong></div></div><article class="planner-main-card"><div class="planner-selected-head"><div class="planner-building-hero">${plannerImage(buildingImage,building.name,'planner-building-hero-image')}<div><h3>${escapeHtml(building.name)}</h3><div class="planner-selected-category">${escapeHtml(building.category||'Resources')}</div><div class="planner-selected-line">Current Level: ${building.level} · Planning Level: ${level}</div><div class="planner-selected-line ${building.currentResource?'is-producing':''}">${busyText.replace(/·/g,'')}</div></div></div><div class="building-detail-controls"><div class="planner-kind-row"><label>Building Type<select id="buildingKind">${kindOpts}</select></label><label>Output<select id="buildingOutput" aria-label="Production output">${productOptions}</select></label></div><label>Planning Level<select id="buildingLevel">${levelOpts}</select></label><label>Production Quality<select id="buildingQuality">${qOpts}</select></label><label>Production Time<input id="buildingRunHours" type="number" min="1" max="48" step="1" value="${runHours}"><small>1–48 hours</small></label><div class="planner-reset-row">${hasPlannerChange(building)?'<button type="button" id="plannerResetBuilding">Reset to game data</button>':''}${changedCount>1||(changedCount===1&&!hasPlannerChange(building))?`<button type="button" id="plannerResetAll">Reset all (${changedCount})</button>`:''}</div></div></div><div class="planner-divider"></div><div class="planner-section-label">Production Output</div><div class="planner-output-grid${diffPerHour!=null?' has-diff':''}${planned?' has-planned':''}"><div class="planner-output-product planner-output-product-picker" title="Click to change production output">${plannerImage(productImage,product,'planner-output-image')}<div><strong>${escapeHtml(product||'No product')}</strong><span>Primary Product</span></div><select id="buildingProduct" class="planner-output-product-picker-select" aria-label="Change production output">${productOptions}</select></div><div class="planner-output-stat"><strong>${outputPerHour==null?'—':num(outputPerHour)}</strong><span>Production / hr${statusLabel?` · ${statusLabel}`:''}</span></div><div class="planner-output-stat"><strong>${outputPerPlan==null?'—':num(outputPerPlan)}</strong><span>Production / ${runHours} hr${statusLabel?` · ${statusLabel}`:''}</span></div>${planned?`<div class="planner-output-stat planner-output-planned"><strong>${plannedPerHour==null?'—':num(plannedPerHour)}</strong><span>Planned / hr · ${escapeHtml(planned.product)} Q${planned.quality} · Level ${planned.level}</span></div><div class="planner-output-stat planner-output-planned"><strong>${plannedPerHour==null?'—':num(plannedPerHour*runHours)}</strong><span>Planned / ${runHours} hr</span></div>`:''}${diffPerHour!=null?diffStat(diffPerHour,`vs game Level ${num(building.level)} / hr`)+diffStat(diffPerHour*runHours,`vs game Level ${num(building.level)} / ${runHours} hr`):''}</div><div class="planner-section-label">Required Inputs <span>(for ${escapeHtml(product||'selected product')} Q${quality}${planned?' · Planned':''})</span></div><div class="table-wrap planner-table-wrap"><table class="building-input-table planner-input-table mobile-cards"><thead><tr><th>Resource</th><th>Required / hr</th><th>Required / ${runHours} hr</th></tr></thead><tbody>${rows||'<tr><td colspan="3">No recipe inputs are defined for this product.</td></tr>'}</tbody></table></div><div class="planner-section-label">Profit / h / level <span>(${escapeHtml(product || 'selected product')} Q${quality} · Level ${level})</span></div><div id="plannerProfit" class="planner-profit"></div><div class="planner-section-label">Best product <span>(for this building · profit / h / level)</span></div><div id="plannerInsights" class="planner-profit planner-insights"></div><div class="planner-section-label">Upgrade payback <span>(all buildings · next level)</span></div><div id="plannerPayback" class="planner-profit planner-insights"></div><div class="planner-section-label planner-summary-label">Deficit &amp; Surplus${planNetwork?.planned?' <span>(Planned · includes your what-if changes)</span>':''}</div><div class="planner-discount-control"><label>Buying - selected discount from VWAP<select id="plannerDiscount">${discountOpts}</select></label></div><div class="planner-summary-grid"><div class="planner-summary-card deficit-card"><div class="planner-summary-head"><span>Deficit - Total</span><strong id="plannerDeficitTotal">${deficitTotal}</strong></div><div class="planner-summary-table-scroll"><div class="planner-summary-table-head"><span>Resource</span><span>Amount</span><span>VWAP / Est. Market Cost</span></div>${summaryRows(deficitQuotes,'deficit')}</div></div><div class="planner-summary-card surplus-card"><div class="planner-summary-head"><span>Surplus - Total</span><strong id="plannerSurplusTotal">${surplusTotal}</strong></div><div class="planner-summary-table-scroll"><div class="planner-summary-table-head"><span>Resource</span><span>Amount</span><span>VWAP / Est. Market Value</span></div>${summaryRows(surplusQuotes,'surplus')}</div></div></div><div class="planner-text-grid"><div class="planner-text-card deficit-card"><div class="planner-summary-head"><span>Deficit Text</span><button type="button" class="planner-copy-btn" data-copy-target="deficitText">Copy</button></div><div id="deficitText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 BUYING -${discount}% MARKET 🔽🔽🔽</div>${deficitTextRows.html}<div class="planner-copy-heading">==============================</div></div></div><div class="planner-text-card surplus-card"><div class="planner-summary-head"><span>Selling Text</span><button type="button" class="planner-copy-btn" data-copy-target="surplusText">Copy</button></div><div id="surplusText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 SELLING -${discount}% MARKET 🔽🔽🔽</div>${surplusTextRows.html}<div class="planner-copy-heading">==============================</div></div></div></div><div class="planner-construction-card planner-text-card"><div class="planner-summary-head"><span>Construction Materials</span><strong id="plannerConstructionTotal">${plannerMoney(constructionTotalCost)}</strong><button type="button" class="planner-copy-btn" data-upgrade-projection>Upgrade View</button><button type="button" class="planner-copy-btn" data-copy-target="constructionMaterialsText">Copy</button></div><div class="planner-missing-prices" id="plannerConstructionMissing" role="status">${escapeHtml(constructionMissingText(constructionMissing))}</div><div id="constructionMaterialsText" class="planner-copy-area"><div class="planner-copy-heading">==============================<br>🔽🔽🔽 BUYING -${discount}% MARKET 🔽🔽🔽</div>${constructionTotalItems.length?constructionTotalItems.map(x=>`<div class="planner-copy-line"><span>${escapeHtml(`➡️ ${num(x.amount)} - ${x.name} :re-${Number(x.id)}: - ${x.price!=null?money(x.price):'—'}${x.price!=null&&x.marketPriceSrc?` (${x.marketPriceSrc})`:''}`)}</span></div>`).join(''):'<div class="planner-copy-empty">No additional construction materials required for the planned building levels.</div>'}<div class="planner-copy-heading">==============================</div></div></div><div class="planner-quality-footer"><div class="planner-info-dot">i</div><div><strong>Quality Note</strong><p>Inputs must be at least one quality level below the selected production quality. Higher quality inputs can also be used. Production quantity is not affected by quality level.</p><p class="planner-network-reference">Deficit and surplus are calculated from all owned buildings for the selected production time. Warehouse inventory is applied to construction-material needs by total quantity, regardless of stored quality.</p></div></div></article>`;
+    // A background repaint that would draw the same planner is skipped (it re-laid out the page and jumped)
     const plannerSkip=Boolean(options?.background&&host.__plannerHtml===plannerHtml&&host.querySelector('.owned-buildings-strip'));
     if(!plannerSkip){host.__plannerHtml=plannerHtml;host.innerHTML=plannerHtml;}
 
@@ -3272,12 +2948,14 @@ function renderBuildingPlanner(s,options={}){
     const surplusTextEl=$('#surplusText'); if(surplusTextEl) surplusTextEl.dataset.copyText=surplusCopyText;
     const constructionTextEl=$('#constructionMaterialsText'); if(constructionTextEl) constructionTextEl.dataset.copyText=constructionCopyText;
     host.__upgradeProjectionContext={state:s,building,plan:constructionMaterialPlan(s,building,building.level,level,discount),discount};
-  // v2.5.338 economy phase: the measured rate belongs to the running batch's phase; also pass the
-  // normal-economy reference rate (× the same game modifiers) for when the phase has changed since.
-  let referenceRate=null;try{const rb=plannerRate(product,recipes,rates,s);const ev=1+plannerActiveProductionEvent(s,product,recipes,Number(productRecipe?.id))/100;const cf=plannerCompanyProductionFactor(s);if(Number(rb?.rate)>0&&ev>0&&cf>0)referenceRate=Number(rb.rate)*level*ev*cf;}catch{}
-  let ctxEventPct=0;try{ctxEventPct=plannerActiveProductionEvent(s,product,recipes,Number(productRecipe?.id))||0;}catch{}
-  const busyRaw=building?.raw?.busy;const rateFromBatch=Boolean(busyRaw?.started)&&Number(busyRaw?.resource?.kind)===Number(productRecipe?.id)&&!/reference/i.test(String(productRate?.source||''));
-  host.__plannerProfitCtx={s,building,product,productId:Number(productRecipe?.id),quality,level,outputPerHour,eventPct:ctxEventPct,abundancePct:plannerAbundancePct(s,building?.raw?.id??building?.id,Number(productRecipe?.id)),bonusPct:plannerCompanyProductionModifier(s),buildingKind:String(building?.raw?.kind??building?.kind??''),robots:Boolean(building?.raw?.robotsSpecialization),rateSource:productRate?.source||null,rateFromBatch,batchStarted:rateFromBatch?String(busyRaw.started):null,referenceRate,plannedInputs,transportUnits:Number(productRecipe?.transport)||0,owned,recipes,runHours};
+  // Economy phase: the running batch's rate is the game's (locked) rate; "Next run" is the same formula at today's economy
+  // with the building's real abundance (core nextRun). The reference rate is the normal-economy rate with the same modifiers.
+  const pr=productRate?.result||null,nr=productRate?.nextRun||null,sameRun=Boolean(productRate?.same);
+  const bonusPct=pr?Number(pr.bonusPct)||0:plannerBonusPct(s);
+  let referenceRate=null;try{const rb=plannerRate(product,recipes,rates,s);if(Number(rb?.rate)>0)referenceRate=Number(rb.rate)*level*(1+(nr?.eventPct||0)/100)/(1-bonusPct/100);}catch{}
+  const runPerLevel=sameRun&&Number(pr.perLevel)>0?Number(pr.perLevel):null,nextPerLevel=Number(nr?.perLevel)>0?Number(nr.perLevel):null;
+  const rateFromBatch=sameRun&&Boolean(pr.locked)&&runPerLevel!=null;
+  host.__plannerProfitCtx={s,building,product,productId:Number(productRecipe?.id),quality,level,outputPerHour:runPerLevel!=null?runPerLevel*level:(nextPerLevel!=null?nextPerLevel*level:null),eventPct:nr?.eventPct??0,abundancePct:nr?.abundancePct??plannerAbundancePct(s,building?.raw?.id??building?.id,Number(productRecipe?.id)),bonusPct,buildingKind:String(building?.raw?.kind??building?.kind??''),robots:Boolean(building?.raw?.robotsSpecialization),rateSource:productRate?.source||null,rateFromBatch,batchStarted:rateFromBatch?String(building.raw.busy.started):null,referenceRate,runPerLevel,nextPerLevel,nextRun:nr,plannedInputs,transportUnits:Number(productRecipe?.transport)||0,owned,recipes,runHours};
   try{renderPlannerProfit(host);}catch(e){console.error('Planner profit render failed',e);}
   if(plannerSkip)return; // same DOM and handlers as the last paint; no scroll restore
     host.querySelector('[data-upgrade-projection]')?.addEventListener('click',()=>showBuildingUpgradeProjection(host,host.__upgradeProjectionContext));
@@ -3301,7 +2979,7 @@ function renderBuildingPlanner(s,options={}){
       requestAnimationFrame(restorePlannerScroll);
       setTimeout(restorePlannerScroll,50);
     });
-    host.querySelectorAll('[data-building-id]').forEach(b=>b.onclick=()=>{ui.buildingId=b.dataset.buildingId;const ownedB=owned.find(x=>String(x.id)===String(b.dataset.buildingId));const saved=plannerFrozenBuildingPlan(s,b.dataset.buildingId);ui.quality=Number(saved?.quality??ui.qualityByBuilding?.[String(b.dataset.buildingId)]??ownedB?.currentQuality??0);ui.qualityByBuilding={...(ui.qualityByBuilding||{}),[String(b.dataset.buildingId)]:ui.quality};host.dataset.buildingId=b.dataset.buildingId;host.dataset.quality=String(ui.quality);queuePlannerUiPersist(s);renderBuildingPlanner(s);});
+    host.querySelectorAll('[data-building-id]').forEach(b=>b.onclick=()=>{ui.buildingId=b.dataset.buildingId;const ownedB=owned.find(x=>String(x.id)===String(b.dataset.buildingId));const savedQ=(ui.planModes||{})[String(b.dataset.buildingId)]==='planner'?ui.qualityByBuilding?.[String(b.dataset.buildingId)]:undefined;ui.quality=Number(savedQ??ownedB?.currentQuality??0);ui.qualityByBuilding={...(ui.qualityByBuilding||{}),[String(b.dataset.buildingId)]:ui.quality};host.dataset.buildingId=b.dataset.buildingId;host.dataset.quality=String(ui.quality);queuePlannerUiPersist(s);renderBuildingPlanner(s);});
     const onProductPick=value=>{
       let overrides={};
       try{overrides=JSON.parse(host.dataset.productOverrides||'{}')||{};}catch{}
@@ -3343,7 +3021,6 @@ function renderBuildingPlanner(s,options={}){
     host.querySelectorAll('.planner-copy-btn').forEach(btn=>btn.onclick=async()=>{const el=document.getElementById(btn.dataset.copyTarget);if(!el)return;const text=el.dataset.copyText??el.value??el.textContent??'';try{await navigator.clipboard.writeText(text);}catch{const ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();}btn.textContent='Copied';setTimeout(()=>btn.textContent='Copy',1200);});
   });
 }
-function renderMarketAlerts(s){const host=$('#marketAlerts');if(!host)return;const alerts=[];for(const r of warehouseRows(s)){const mp=scmMarketPrice(s,r._id,r._quality,'exact'),marketPrice=mp?.price??null;const alertCost=warehouseAlertUnitCost(s,r);if(marketPrice==null||!Number.isFinite(alertCost)||alertCost<=0)continue;const pct=(marketPrice-alertCost)/alertCost*100;if(Math.abs(pct)>=5)alerts.push({name:resourceName(r,s),quality:r._quality,cost:alertCost,marketPrice,pct,mp});}alerts.sort((a,b)=>Math.abs(b.pct)-Math.abs(a.pct));host.innerHTML=alerts.length?`<div class="market-alert-list">${alerts.slice(0,10).map(a=>`<div class="market-alert-row"><div><strong>${escapeHtml(a.name)}</strong><small>Q${escapeHtml(String(a.quality))}</small></div><div>${money(a.cost)} → ${money(a.marketPrice)}${scmSrcTag(a.mp,'market-source')}</div><strong class="${a.pct>=0?'positive':'negative'}">${a.pct>=0?'+':''}${a.pct.toFixed(1)}%</strong></div>`).join('')}</div><p class="muted">Warehouse sourcing cost compared with the shared market price (exchange or SimcoTools; VWAP only when no current price is captured; "old" = stale). Alerts trigger at 5% or more.</p>`:'<p class="muted">No warehouse Market alerts at the current 5% threshold.</p>';}
 
 document.querySelector('#saveJson')?.addEventListener('click',async()=>{try{const s=await get();const manifestVersion=chrome.runtime.getManifest()?.version||BUILD_VERSION;const payload={exportedAt:new Date().toISOString(),page:'simcompanies-manager',version:manifestVersion,manifestVersion,buildVersion:BUILD_VERSION,activeRealmKey:s.activeRealmKey??null,selectedRealm:s.selectedRealm??null,captureRealm:s.captureRealm??null,realmStores:s.realmStores??{},activeState:{authData:s.authData??null,companyData:s.companyData??null,warehouseResources:s.warehouseResources??[],gameState:s.gameState??null,endpointData:s.endpointData??{},apiEndpoints:s.apiEndpoints??[],contracts:s.contracts??[],savedContracts:s.savedContracts??[],contractEvents:s.contractEvents??[],gameLocalStorageSnapshot:s.gameLocalStorageSnapshot??null,vwapData:s.vwapData??null,history:s.history??{},marketCache:s.marketCache??{},marketDebug:s.marketDebug??{},vwapStatus:s.vwapStatus??null,vwapWatch:s.vwapWatch??null,productionEvents:s.productionEvents??[],syncStatus:s.syncStatus??null,syncError:s.syncError??null,fullSyncDiagnostics:s.fullSyncDiagnostics??null,warehouseCostDetails:s.warehouseCostDetails??{},javascriptDiagnostic:s.javascriptDiagnostic??null,javascriptDiagnosticHistory:s.javascriptDiagnosticHistory??[]}};const blob=new Blob([JSON.stringify(SCM_DIAGNOSTIC_CORE.redactSecrets(payload),null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`simcompanies-manager-diagnostic-${realmDisplayNumber(payload.captureRealm)}-${new Date().toISOString().replace(/[:.]/g,'-')}.json`;document.body.appendChild(a);a.click();a.remove();scmDownloadToast(a.download,blob.size);setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){alert('Unable to save diagnostic JSON: '+(e?.message||String(e)));}});
 document.querySelector('#downloadStorage')?.addEventListener('click',async()=>{try{const storage=await chrome.storage.local.get(null);const manifestVersion=chrome.runtime.getManifest()?.version||BUILD_VERSION;const payload={exportedAt:new Date().toISOString(),page:'simcompanies-manager-storage',version:manifestVersion,manifestVersion,buildVersion:BUILD_VERSION,storage:SCM_DIAGNOSTIC_CORE.redactSecrets(storage)};const blob=new Blob([JSON.stringify(SCM_DIAGNOSTIC_CORE.redactSecrets(payload),null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`simcompanies-manager-storage-${manifestVersion}-${new Date().toISOString().replace(/[:.]/g,'-')}.json`;document.body.appendChild(a);a.click();a.remove();scmDownloadToast(a.download,blob.size);setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){alert('Unable to download stored data: '+(e?.message||String(e)));}});
@@ -3354,7 +3031,7 @@ const networkCaptureStatusEl=document.querySelector('#networkCaptureStatus');
 const networkCaptureButton=document.querySelector('#startNetworkCapture');
 // Android uses MAIN-world page capture (fetch/XHR); desktop uses browser-level CDP capture.
 const networkCaptureUnsupportedOnAndroid=/Android/i.test(navigator.userAgent||'');
-// v2.5.330: Android unloads the game tab while you are in the Manager (tab status
+// Android unloads the game tab while you are in the Manager (tab status
 // "unloaded"); scripting a sleeping tab fails with "Cannot access contents of the page".
 // Pick an awake game tab, or reload the sleeping one and wait for it before running.
 async function pickAwakeGameTab(stage,button){
@@ -3395,9 +3072,7 @@ async function sendGameTabMessage(tabId,message,{timeoutMs=5000,bootstrapTimeout
 async function readNetworkCapture(){const raw=await chrome.storage.local.get('scmNetworkTrafficCapture');return raw?.scmNetworkTrafficCapture||null;}
 function renderNetworkCaptureStatus(capture){const stats=SCM_DIAGNOSTIC_CORE.summarizeNetworkCapture(capture);const status=stats.status;const errors=stats.requestErrorCount+stats.recorderErrorCount;if(networkCaptureStatusEl){networkCaptureStatusEl.textContent=`Network capture ${status}${status==='stopped'&&stats.stopCount?' and saved':''} · ${stats.eventCount} events · ${stats.requestCount} requests · ${stats.responseCount} responses · ${errors} errors`;networkCaptureStatusEl.dataset.status=status;networkCaptureStatusEl.dataset.eventCount=String(stats.eventCount);networkCaptureStatusEl.dataset.countsMatch=String(stats.countsMatch);if(status==='stopped'&&stats.eventCount===0)networkCaptureStatusEl.textContent+=' · FAILURE: no events captured';else if(status==='stopped'&&!stats.stopCount)networkCaptureStatusEl.textContent+=' · WARNING: stop marker missing';if(capture?.truncated||Number(capture?.droppedEventCount)>0)networkCaptureStatusEl.textContent+=` · INCOMPLETE: ${Number(capture?.droppedEventCount)||0} events dropped`;}}
 async function refreshNetworkCaptureStatus(){try{const v3=await chrome.runtime.sendMessage({type:'SCM_NET3_STATUS'});if(v3?.status?.status==='recording'||v3?.status?.captureId){const x=v3.status,active=x.status==='recording';networkCaptureActive=active;networkCaptureId=String(x.captureId||networkCaptureId||'');if(networkCaptureStatusEl)networkCaptureStatusEl.textContent=`${x.mode==='mobile-page'?'Mobile page capture':'Network Capture 3.0'} ${x.status} · ${x.events||0} events · ${x.requests||0} requests · ${x.responses||0} responses · ${x.errors||0} errors${x.mode==='mobile-page'?' · fetch/XHR only':''}`;if(networkCaptureButton){networkCaptureButton.textContent=active?'Stop Network Capture':'Start Network Capture';networkCaptureButton.setAttribute('aria-pressed',String(active));}return;}const capture=await readNetworkCapture();renderNetworkCaptureStatus(capture);const active=['starting','recording','stopping'].includes(String(capture?.status||''));networkCaptureActive=active;networkCaptureId=String(capture?.captureId||networkCaptureId||'');if(networkCaptureButton){networkCaptureButton.textContent=active?'Stop Network Capture':'Start Network Capture';networkCaptureButton.setAttribute('aria-pressed',String(active));}if(networkCaptureUnsupportedOnAndroid&&networkCaptureStatusEl&&!capture)networkCaptureStatusEl.textContent='Mobile capture records game-page fetch/XHR requests while the game tab is running. Keep the game tab open overnight; Android may suspend background tabs.';}catch{}}
-async function waitForNetworkCaptureStarted(captureId,timeoutMs=4000){const started=Date.now();while(Date.now()-started<timeoutMs){const capture=await readNetworkCapture();if(capture?.captureId===captureId&&capture?.status==='recording'&&Array.isArray(capture.events)&&capture.events.some(event=>event?.kind==='capture-start'))return capture;await new Promise(resolve=>setTimeout(resolve,100));}const capture=await readNetworkCapture();throw new Error(`Recorder did not confirm start in storage (status=${capture?.status||'missing'}, events=${Array.isArray(capture?.events)?capture.events.length:0}).`);}
 async function resolveNetworkCaptureTab(){if(networkCaptureTabId!=null){try{const tab=await chrome.tabs.get(networkCaptureTabId);if(tab?.id&&/^https:\/\/(?:www\.)?simcompanies\.com\//i.test(String(tab.url||'')))return tab;}catch{}}const tabs=await chrome.tabs.query({url:['https://www.simcompanies.com/*','https://simcompanies.com/*']});const tab=(tabs||[]).find(t=>t.active)||tabs?.[0];if(tab?.id)networkCaptureTabId=tab.id;return tab||null;}
-async function waitForNetworkCaptureQuiet(quietMs=900,timeoutMs=8000){const started=Date.now();let lastCount=-1,lastChange=Date.now();while(Date.now()-started<timeoutMs){const c=await readNetworkCapture();const count=Array.isArray(c?.events)?c.events.length:0;if(count!==lastCount){lastCount=count;lastChange=Date.now();}if(Date.now()-lastChange>=quietMs&&c?.status==='stopped')return c;await new Promise(r=>setTimeout(r,150));}return await readNetworkCapture();}
 scmOnStorageChanged((changes,area)=>{if(area==='local'&&changes.scmNetworkTrafficCapture){renderNetworkCaptureStatus(changes.scmNetworkTrafficCapture.newValue);const c=changes.scmNetworkTrafficCapture.newValue;networkCaptureActive=['starting','recording','stopping'].includes(String(c?.status||''));if(c?.captureId)networkCaptureId=String(c.captureId);if(networkCaptureButton){networkCaptureButton.textContent=networkCaptureActive?'Stop Network Capture':'Start Network Capture';networkCaptureButton.setAttribute('aria-pressed',String(networkCaptureActive));}}});
 refreshNetworkCaptureStatus();
 async function toggleMobileNetworkCapture(button){const stat=await chrome.runtime.sendMessage({type:'SCM_NET3_STATUS'});const status=stat?.status||{};if(status.status==='recording'&&status.mode==='mobile-page'){const stopped=await chrome.runtime.sendMessage({type:'SCM_MOBILE_NET_STOP'});if(!stopped?.ok)throw new Error(stopped?.error||'Could not stop mobile capture.');networkCaptureActive=false;networkCaptureId=stopped.captureId;if(networkCaptureStatusEl)networkCaptureStatusEl.textContent=`Mobile page capture stopped · ${stopped.events||0} events · ${stopped.requests||0} requests · ${stopped.responses||0} responses · ${stopped.errors||0} errors`;button.textContent='Start Network Capture';button.setAttribute('aria-pressed','false');alert(`Mobile network capture stopped.\n\nEvents: ${stopped.events||0}\nRequests: ${stopped.requests||0}\nResponses: ${stopped.responses||0}\nErrors: ${stopped.errors||0}\n\nUse Download Network Capture to export the JSON.`);return;}const tab=await resolveNetworkCaptureTab();if(!tab?.id)throw new Error('Open Sim Companies in a browser tab first.');networkCaptureTabId=tab.id;const result=await chrome.runtime.sendMessage({type:'SCM_MOBILE_NET_START',tabId:tab.id});if(!result?.ok)throw new Error(result?.error||'Could not start mobile page capture.');networkCaptureId=result.captureId;networkCaptureActive=true;button.textContent='Stop Network Capture';button.setAttribute('aria-pressed','true');if(networkCaptureStatusEl)networkCaptureStatusEl.textContent=`Mobile page capture recording · ${result.events||0} events · fetch/XHR only · up to 100,000 events. Keep game tab open; Android may suspend background tabs.`;alert('Mobile network capture started. Keep the Sim Companies tab open overnight. Android may suspend a background tab, so this records activity only while the page is running.');}
@@ -3426,14 +3101,8 @@ document.querySelector('#runJavascriptDiagnostic')?.addEventListener('click',e=>
 document.querySelector('#runJavascriptDiagnosticInline')?.addEventListener('click',e=>runJavascriptDiagnosticFromDashboard(e.currentTarget));
 
 document.querySelector('#clearStoredData')?.addEventListener('click',async()=>{if(!confirm('Clear all data stored by Sim Companies Manager?\n\nThis cannot be undone. Your Sim Companies account and game data will not be affected.\n\nIf you want a backup first, use Full Stored Data (Settings tab › Diagnostic › Advanced diagnostics).')) return; const button=document.querySelector('#clearStoredData'); button.disabled=true; try{const result=await chrome.runtime.sendMessage({type:'CLEAR_EXTENSION_DATA'}); if(!result?.ok) throw new Error(result?.error||'Reset failed.'); alert('Stored data cleared. The Manager is starting fresh.'); window.location.reload();}catch(e){button.disabled=false; alert('Unable to clear stored data: '+(e?.message||String(e)));}});
-document.addEventListener('click',async e=>{const b=e.target.closest('.diag-copy');if(!b)return;let s=await get();let text='';const type=b.dataset.copyJson;const realm=Number(s.viewRealm??s.authData?.authCompany?.realmId??s.authData?.authCompany?.realm);const realmKey=Number.isFinite(realm)?`realm:${realm}`:null;const ep=s.endpointData||{};const endpointEntries=Object.entries(ep).sort((a,c)=>new Date(c[1]?.receivedAt||0)-new Date(a[1]?.receivedAt||0));const matching=(rx)=>endpointEntries.filter(([k])=>rx.test(k)).map(([k,v])=>({endpoint:k,status:v?.status,receivedAt:v?.receivedAt,data:v?.data??null}));
-if(type==='sync')text=JSON.stringify({page:'sync',realm:Number.isFinite(realm)?realm:null,syncStatus:s.syncStatus||null,syncError:s.syncError||null,fullSyncDiagnostics:s.fullSyncDiagnostics||null,endpointData:s.endpointData||{},apiEndpoints:s.apiEndpoints||[]},null,2);
-else if(type==='warehouse')text=JSON.stringify(s.fullSyncDiagnostics?.warehouseCosts||[],null,2);
-else if(type==='walk')text=JSON.stringify(s.fullSyncDiagnostics?.walkResults||[],null,2);
-else if(type==='warehouse-page'){const costDetails=realmKey?s.warehouseCostDetails?.[realmKey]||{}:{};const vw=s.vwapData||{};text=JSON.stringify({page:'warehouse',realm:Number.isFinite(realm)?realm:null,warehouseRows:warehouseRows(s),sourcingCostCaptures:Object.values(costDetails).flatMap(v=>Array.isArray(v)?v:[]),warehouseDiagnostics:s.fullSyncDiagnostics?.warehouseCosts||[],vwapDataUpdatedAt:vw.fetchedAt||vw.updatedAt||s.vwapStatus?.vwapUpdatedAt||s.vwapStatus?.vwapFetchedAt||null,vwapDatasetCount:Array.isArray(vw.rows)?vw.rows.length:(Number(vw.count)||0),vwapSource:vw.source||'SimcoTools',endpoints:matching(/\/api\/v(?:2|3)\/(?:resources|warehouse|warehouse-resources)(?:\/|$)/i)},null,2);}
-else if(type==='market-page'){text=JSON.stringify({page:'market',realm:Number.isFinite(realm)?realm:null,vwapData:s.vwapData||{},history:s.history||{},marketDebug:s.marketDebug||{},marketCache:s.marketCache||{},endpoints:matching(/market|orders|orderbook|vwap/i)},null,2);}
-else if(type==='accounting-page'){text=JSON.stringify({page:'accounting',realm:Number.isFinite(realm)?realm:null,accounting:accounting(s),accountingSnapshots:s.accountingSnapshots||{},endpoints:matching(/accounting|balance-sheet|cash-flow|cashflow|profit|income-statement|financial/i)},null,2);}
-else if(type==='contracts-page'){text=JSON.stringify({page:'contracts',realm:Number.isFinite(realm)?realm:null,currentContracts:currentContracts(s),contractEvents:s.contractEvents||[],endpoints:matching(/contracts-(?:incoming|outgoing)|warehouse-contracts-summary|contracts-history-(?:incoming|outgoing)/i)},null,2);}
+document.addEventListener('click',async e=>{const b=e.target.closest('.diag-copy');if(!b)return;let s=await get();let text='';const type=b.dataset.copyJson;const realm=Number(s.viewRealm??s.authData?.authCompany?.realmId??s.authData?.authCompany?.realm);const ep=s.endpointData||{};const endpointEntries=Object.entries(ep).sort((a,c)=>new Date(c[1]?.receivedAt||0)-new Date(a[1]?.receivedAt||0));const matching=(rx)=>endpointEntries.filter(([k])=>rx.test(k)).map(([k,v])=>({endpoint:k,status:v?.status,receivedAt:v?.receivedAt,data:v?.data??null}));
+if(type==='market-page'){text=JSON.stringify({page:'market',realm:Number.isFinite(realm)?realm:null,vwapData:s.vwapData||{},history:s.history||{},marketDebug:s.marketDebug||{},marketCache:s.marketCache||{},endpoints:matching(/market|orders|orderbook|vwap/i)},null,2);}
 if(text)await copyDiagnosticText(text,b);});
 
 function diagnosticStore(s){
@@ -3458,7 +3127,7 @@ function diagnosticProducedKeys(s){
   }
   return keys;
 }
-// v2.5.330: every download shows a visible confirmation (alerts are easy to miss on Android).
+// Every download shows a visible confirmation (alerts are easy to miss on Android).
 function scmDownloadToast(name,bytes){try{let t=document.getElementById('scmToast');if(!t){t=document.createElement('div');t.id='scmToast';t.className='scm-toast';t.setAttribute('role','status');document.body.appendChild(t);}const kb=Number(bytes)>0?` (${Math.max(1,Math.round(bytes/1024)).toLocaleString()} KB)`:'';t.textContent=`⬇ Downloaded ${name}${kb} — check your Downloads folder`;t.classList.add('show');clearTimeout(scmDownloadToast.timer);scmDownloadToast.timer=setTimeout(()=>t.classList.remove('show'),5000);}catch{}}
 function downloadDiagnosticFile(name,payload){
   const blob=new Blob([JSON.stringify(SCM_DIAGNOSTIC_CORE.redactSecrets(payload),null,2)],{type:'application/json'});
@@ -3474,7 +3143,7 @@ async function buildDiagnosticBundleRaw(s){
   const replayRaw=await chrome.storage.local.get(null);
   const replayChunkKeys=Object.keys(replayRaw||{}).filter(k=>String(k).startsWith('scmReplayChunk:')).sort();
   const replayEvents=replayChunkKeys.flatMap(k=>Array.isArray(replayRaw[k])?replayRaw[k]:[]);
-  // v2.5.331 additions: environment + storage sizes (lag), endpoint index, production cost history, and the exact
+  // Environment + storage sizes (lag), endpoint index, production cost history, and the exact
   // numbers each building card used for Profit / h / level (to reconcile against the game's Profit Calculator).
   const bytesByKey=Object.fromEntries(Object.entries(replayRaw||{}).map(([k,v])=>{let n=0;try{n=JSON.stringify(v)?.length||0;}catch{}return [k,n];}).sort((a,b)=>b[1]-a[1]));
   const endpointIndex=endpointEntries.map(x=>{let n=0;try{n=JSON.stringify(x.data)?.length||0;}catch{}return {url:x.url,status:x.status,receivedAt:x.receivedAt,captureRealm:x.captureRealm,bytes:n};}).sort((a,b)=>String(b.receivedAt||'').localeCompare(String(a.receivedAt||'')));
@@ -3645,7 +3314,7 @@ function accountingIncomeStatement(src){
   const rows=financialEntries(src,exclude);
   return rows.length?`<div class="statement-grid">${statementTable('Income Statement Fields',rows.slice(0,60))}</div>`:'<p class="muted">No readable income-statement summary fields were captured.</p>';
 }
-// v2.5.448 Overview quick-view cards: Accounting, Warehouse, Production. Read-only summaries of data the Manager
+// Overview quick-view cards: Accounting, Warehouse, Production. Read-only summaries of data the Manager
 // already holds at render time. No fetches, no new formulas and no side effects: acctCardNow, image requests and
 // the planner are left alone. Each card links to the tab that has the full detail.
 function accountingLatestTime(s){
@@ -3731,17 +3400,16 @@ function render(s){
 <div class="overview-section overview-operations-card"><div class="overview-section-head"><div><h3>Operations</h3><span>Company activity at a glance</span></div></div><div class="overview-stat-grid"><div class="overview-stat-card"><span>Buildings</span><strong>${buildingCount||'—'}</strong></div><div class="overview-stat-card"><span>Warehouse Lines</span><strong>${rows.length||'—'}</strong></div><div class="overview-stat-card"><span>Warehouse Qty</span><strong>${warehouseQty?num(warehouseQty):'—'}</strong></div><div class="overview-stat-card"><span>VWAP Values</span><strong>${vwapCount?num(vwapCount):'—'}</strong></div></div></div>
 <div class="overview-section"><div class="overview-section-head"><div><h3>Contracts</h3><span>Current active and saved value</span></div></div><div class="overview-stat-grid overview-stat-grid-compact"><div class="overview-stat-card"><span>Incoming</span><strong>${money(incomingGross)}</strong><small>${contractRows.filter(c=>c.direction==='Incoming').length} active</small></div><div class="overview-stat-card"><span>Outgoing</span><strong>${money(outgoingGross)}</strong><small>${contractRows.filter(c=>c.direction==='Outgoing').length} active</small></div><div class="overview-stat-card"><span>Saved</span><strong>${money(savedGross)}</strong><small>${savedRows.length} saved</small></div></div></div>
 <div class="overview-resource-ranking-stack"><div class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Net Profit Resources</h3><span>Captured selling profit · ${escapeHtml(overviewRange)}</span></div><span class="overview-section-badge">Net Profit</span></div><div class="overview-selling-list">${topSelling.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topSelling.items.length?topSelling.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Net Profit</small><strong>${money(x.profit)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No selling profit data captured yet.</div>'}</div></div>
-<div id="overviewTopGross" class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Gross Resources</h3><span>Captured sales value · ${escapeHtml(overviewDate(topGross.rangeStart)&&overviewDate(topGross.rangeEnd)?`${overviewDate(topGross.rangeStart)} – ${overviewDate(topGross.rangeEnd)}`:'Captured range unavailable')}</span></div><span class="overview-section-badge">Gross</span></div><div class="overview-selling-list">${topGross.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topGross.items.length?topGross.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Gross</small><strong>${money(x.gross)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No gross sales data captured yet.</div>'}</div></div></div>${overviewAccountingCard(s,accountingDisplayBase,accountingComparisonBase(a))}${overviewWarehouseCard(s,rows)}${overviewProductionCard(s)}</div>`; if($('#overviewRealmBadge')){const syncTime=viewStore?.lastSync||s.lastSync;const hasCapturedData=!!(viewStore&&(viewStore.lastSync||viewStore.fullSyncDiagnostics||viewStore.gameOverlaySnapshot||(Array.isArray(viewStore.buildings)&&viewStore.buildings.length)||(Array.isArray(viewStore.warehouseResources)&&viewStore.warehouseResources.length)||(viewStore.endpointData&&Object.keys(viewStore.endpointData).length)||(viewStore.productionRateSnapshots&&Object.keys(viewStore.productionRateSnapshots).length)));const badgeStatus=__realmHydrationPending?'Switching…':syncTime?new Date(syncTime).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):(hasCapturedData?'Captured · sync not completed':'Not synced');$('#overviewRealmBadge').textContent=`${realm!=null?realmName(realm):'Realm —'} · ${badgeStatus}`; } } if(activeTab==='accounting'){ if($('#accountingSource')){const period=accountingDisplay.period?.dateFrom&&accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.dateFrom).toLocaleDateString()}–${new Date(accountingDisplay.period.date).toLocaleDateString()}`:(accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.date).toLocaleDateString()}`:''); $('#accountingSource').textContent=`Source: ${a.sourceType==='income-statement'?'income statement':a.sourceType==='cash-flow-derived'?'cash-flow statement':'unavailable'}${period}`;} if($('#accountingPeriodBadge')){const badge=$('#accountingPeriodBadge'),dateEl=$('#accountingPeriodDate'),metaEl=$('#accountingPeriodMeta');document.querySelectorAll('[data-accounting-period]').forEach(x=>x.classList.toggle('active',String(x.dataset.accountingPeriod||'current')===accountingPeriodView));const labels={current:'Current statements date',day:'Day',week:'Week',month:'Month'};const stmtText=accountingPeriodView==='current'?accountingStatementPeriodText(accountingDisplay.period):'';if(dateEl)dateEl.textContent=labels[accountingPeriodView]||labels.current;if(metaEl)metaEl.textContent=accountingDisplay.periodSource==='recent-cashflow'?`Derived from captured cash-flow rows · ${Number(accountingDisplay.periodTransactionCount)||0} transactions`:(stmtText||'Game accounting view');} if($('#accountingLiveStatus')){
+<div id="overviewTopGross" class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Gross Resources</h3><span>Captured sales value · ${escapeHtml(overviewDate(topGross.rangeStart)&&overviewDate(topGross.rangeEnd)?`${overviewDate(topGross.rangeStart)} – ${overviewDate(topGross.rangeEnd)}`:'Captured range unavailable')}</span></div><span class="overview-section-badge">Gross</span></div><div class="overview-selling-list">${topGross.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topGross.items.length?topGross.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Gross</small><strong>${money(x.gross)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No gross sales data captured yet.</div>'}</div></div></div>${overviewAccountingCard(s,accountingDisplayBase,accountingComparisonBase(a))}${overviewWarehouseCard(s,rows)}${overviewProductionCard(s)}</div>`; if($('#overviewRealmBadge')){const syncTime=viewStore?.lastSync||s.lastSync;const hasCapturedData=!!(viewStore&&(viewStore.lastSync||viewStore.fullSyncDiagnostics||viewStore.gameOverlaySnapshot||(Array.isArray(viewStore.buildings)&&viewStore.buildings.length)||(Array.isArray(viewStore.warehouseResources)&&viewStore.warehouseResources.length)||(viewStore.endpointData&&Object.keys(viewStore.endpointData).length)||(viewStore.productionRateSnapshots&&Object.keys(viewStore.productionRateSnapshots).length)));const badgeStatus=__realmHydrationPending?'Switching…':syncTime?new Date(syncTime).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):(hasCapturedData?'Captured · sync not completed':'Not synced');$('#overviewRealmBadge').textContent=`${realm!=null?realmName(realm):'Realm —'} · ${badgeStatus}`; } } if(activeTab==='accounting'){ if($('#accountingSource')){const period=accountingDisplay.period?.dateFrom&&accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.dateFrom).toLocaleDateString()}–${new Date(accountingDisplay.period.date).toLocaleDateString()}`:(accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.date).toLocaleDateString()}`:''); $('#accountingSource').textContent=`Source: ${a.sourceType==='income-statement'?'income statement':a.sourceType==='cash-flow-derived'?'cash-flow statement':'unavailable'}${period}`;} if($('#accountingPeriodBadge')){const dateEl=$('#accountingPeriodDate'),metaEl=$('#accountingPeriodMeta');document.querySelectorAll('[data-accounting-period]').forEach(x=>x.classList.toggle('active',String(x.dataset.accountingPeriod||'current')===accountingPeriodView));const labels={current:'Current statements date',day:'Day',week:'Week',month:'Month'};const stmtText=accountingPeriodView==='current'?accountingStatementPeriodText(accountingDisplay.period):'';if(dateEl)dateEl.textContent=labels[accountingPeriodView]||labels.current;if(metaEl)metaEl.textContent=accountingDisplay.periodSource==='recent-cashflow'?`Derived from captured cash-flow rows · ${Number(accountingDisplay.periodTransactionCount)||0} transactions`:(stmtText||'Game accounting view');} if($('#accountingLiveStatus')){
    const latestTime=accountingLatestTime(s);
    $('#accountingLiveStatus').textContent=latestTime
      ?`Last updated: ${new Date(latestTime).toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'})}`
      :'Waiting for latest financial response';
 } if($('#accountingOverview'))renderAccountingOverview($('#accountingOverview'),accountingDisplay,accountingPeriodView==='current'?accountingComparisonBase(a):null,a.history,acctDailySeries); if($('#accountingHistory')){if(scmSetHTML($('#accountingHistory'),accountingHistoryTable(a.history,(viewStore||s)?.accountingDayWalkStatus||null)))scmApplyCollapse($('#accountingHistory'));renderAccountingWalkSchedule(s);} if($('#accountingBalanceSummary'))scmSetHTML($('#accountingBalanceSummary'),`<div class="overview-stat-grid accounting-balance-summary"><div class="overview-stat-card"><span>Cash</span><strong>${money(a.cash)}</strong></div><div class="overview-stat-card"><span>Accounts Receivable</span><strong>${money(a.accountsReceivable)}</strong></div><div class="overview-stat-card"><span>Inventory</span><strong>${money(a.inventory)}</strong></div><div class="overview-stat-card"><span>Current Assets</span><strong>${money(a.currentAssets)}</strong></div><div class="overview-stat-card"><span>Accounts Payable</span><strong>${money(a.accountsPayable)}</strong></div><div class="overview-stat-card"><span>Bonds Payable</span><strong>${money(a.bondsPayable)}</strong></div><div class="overview-stat-card"><span>Current Liabilities</span><strong>${money(a.currentLiabilities)}</strong></div><div class="overview-stat-card"><span>Total Assets</span><strong>${money(a.assets)}</strong></div><div class="overview-stat-card"><span>Total Liabilities</span><strong>${money(a.liabilities)}</strong></div></div>`); if($('#accountingCashflowSummary'))scmSetHTML($('#accountingCashflowSummary'),accountingCashflowSummary(a.source?.cf)); if($('#accountingIncomeStatement'))scmSetHTML($('#accountingIncomeStatement'),accountingIncomeStatement(a.source?.income)); if($('#balanceDetails'))scmSetHTML($('#balanceDetails'),buildBalanceSections(a.source?.bs)); if($('#accountingRatios'))scmSetHTML($('#accountingRatios'),accountingFinancialRatios(a.source?.income,a.source?.bs)); }
  if(activeTab==='warehouse'){ renderWarehouseMarketTimestamp(s); try{renderWarehouseRunOut(s);}catch(e){console.error('Run-out render failed',e);} const inventoryRowsEl=$('#inventoryRows'); if(inventoryRowsEl) inventoryRowsEl.innerHTML=rows.length?rows.map(r=>{const priceRef=scmMarketPrice(s,r._id,r._quality,'exact'),marketPrice=priceRef?.price??null;const margin=marketPrice!=null&&r._unitCost>0?(marketPrice-r._unitCost)/r._unitCost*100:null;const ri=resourceInfo(r,s);const imgs=ri.imageCandidates||[];const localImage=s.resourceImageCache?.[String(r._id)]||s.resourceImageData?.[String(r._id)]||null;if(!localImage) requestResourceImage(r._id);const srcs=localImage?[localImage,...imgs]:imgs;const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';const activeCost=activeProductionCostCells(s,r);return `<tr data-warehouse-key="${Number(r._id)}:${Number(r._quality)}"><td><div class="product-cell">${img}<span><strong>${resourceName(r,s)}</strong><small>#${r._id}</small></span></div>${warehouseHeadCost(r)}</td><td>${num(r._qty)}</td><td>${r._quality??'—'}</td><td>${r._unitCost==null?'—':money(r._unitCost)}</td><td>${activeCost.costHtml}</td><td>${activeCost.diffHtml}</td><td data-cell="prod-cost-history">${productionCostHistoryCell(s,r)}</td><td><span class="cell-stack">${marketPrice==null?'—':money(marketPrice)}<small class="market-source">${escapeHtml(scmMarketSourceText(priceRef))}</small></span></td><td class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td></tr>`}).join(''):'<tr><td colspan="9">No warehouse data captured.</td></tr>'; }
- if(activeTab==='overview'&&$('#cashflowDetails'))$('#cashflowDetails').innerHTML=buildCashflowSections(a.source?.cf,a.source?.recent); if(activeTab==='market'){ renderLiveMarketProduct(s); renderMarketHistory(s); renderMarketAlerts(s); } if(activeTab==='production') renderBuildingPlanner(s,{background:true}); // v2.5.450 same-HTML repaints skipped
+ if(activeTab==='market'){ renderLiveMarketProduct(s); renderMarketHistory(s); } if(activeTab==='production') renderBuildingPlanner(s,{background:true}); // same-HTML repaints are skipped
  renderVwapDiagnostics(s);
- const rawEl=activeTab==='settings'?$('#raw'):null; if(rawEl) rawEl.textContent=JSON.stringify({auth:s.authData,warehouseCount:rows.length,accounting:a,marketEndpointCount:Object.keys(s.endpointData||{}).filter(k=>/\/market\//.test(k)).length,marketCacheResources:Object.keys(s.marketCache||{}).length,marketDebug:s.marketDebug||{}},null,2).slice(0,30000);
- if(activeTab==='executives'){try{renderBoardRoom(s);}catch(e){console.error('Executives tab render failed',e);}} if(activeTab==='tools'){try{globalThis.SCM_TOOLS_UI?.render(s,catalogEntries(s));}catch(e){console.error('Tools tab render failed',e);}} if(activeTab==='analyze'){try{globalThis.SCM_ANALYZE_UI?.render(s,analyzeContext(s));}catch(e){console.error('Analyze tab render failed',e);}} if(activeTab==='contracts') { populateContractProducts(s); renderContracts(s); } if(activeTab==='settings'){ renderApiList(s); renderDiagnostics(s); }
+ if(activeTab==='executives'){try{renderBoardRoom(s);}catch(e){console.error('Executives tab render failed',e);}} if(activeTab==='tools'){try{globalThis.SCM_TOOLS_UI?.render(s,catalogEntries(s));}catch(e){console.error('Tools tab render failed',e);}} if(activeTab==='analyze'){try{globalThis.SCM_ANALYZE_UI?.render(s,analyzeContext(s));}catch(e){console.error('Analyze tab render failed',e);}} if(activeTab==='contracts') { populateContractProducts(s); renderContracts(s); } if(activeTab==='settings'){ renderDiagnostics(s); }
   requestAnimationFrame(()=>{ if(Math.abs(window.scrollX-__scrollX)>0 || Math.abs(window.scrollY-__scrollY)>0) window.scrollTo(__scrollX,__scrollY); });
 }
 function deepCompanyName(v, seen=new Set()){
@@ -3934,26 +3602,27 @@ function savedContractProductKey(c){
   const quality=Number(c?.quality!=null?c.quality:(parsed?parsed[2]:0));
   return Number.isFinite(id)?{id,quality:Number.isFinite(quality)?quality:0}:null;
 }
-function savedContractPlanForState(s){
-  const realm=Number(s?.viewRealm??s?.selectedRealm??s?.captureRealm??s?.authData?.authCompany?.realmId);
-  const store=Number.isFinite(realm)?s?.realmStores?.[`realm:${realm}`]:null;
-  return s?.frozenNetworkPlan||store?.frozenNetworkPlan||null;
-}
-function savedContractSurplusMap(s){
-  const plan=savedContractPlanForState(s);
-  const core=globalThis.SCMPlannerCore;
-  // If the current plan rows exist, their computed result is authoritative even
-  // when a resource has zero surplus. Do not revive a stale cached positive row.
-  if(core?.productionSurplusByKey&&Array.isArray(plan?.productionRows)&&Array.isArray(plan?.demandRows)){
-    return core.productionSurplusByKey(plan.productionRows,plan.demandRows);
+// Saved contracts, the Contracts page and the overlay share planner-core.js: the production network of the owned buildings
+// (game figures only) and stockAfterDemand. Recomputed when the state, the planner data or the minute changes.
+let __savedContractModel=null;
+function savedContractStockModel(s,data){
+  const core=globalThis.SCMPlannerCore,d=data||window.__scmBuildingPlannerData||null;
+  const contracts=savedContracts(s),minute=Math.floor(Date.now()/60000);
+  const keyOf=[s,s?.warehouseResources,s?.buildings,s?.endpointData,s?.productionPlans,s?.productionRunHours,s?.gameConstants,contracts,d,minute];
+  const m=__savedContractModel;
+  if(m&&m.key.length===keyOf.length&&m.key.every((v,i)=>v===keyOf[i]))return m;
+  const runHours=Math.min(48,Math.max(1,Number(s?.productionRunHours)||24));
+  const raws=buildingArrayFromState(s);
+  let net=null;
+  if(core&&d&&Array.isArray(d.recipes)&&d.recipes.length&&raws.length){
+    net=plannerProductionNetwork(s,raws.map(raw=>({raw})),d.recipes,d.rates||{},runHours,{});
   }
-  const fallback=new Map();
-  for(const row of (Array.isArray(plan?.surpluses)?plan.surpluses:[])){
-    const id=Number(row?.id),quality=Number(row?.quality)||0,value=Number(row?.surplus);
-    if(Number.isFinite(id)&&id>0&&Number.isFinite(value))fallback.set(`${id}:${quality}`,Math.max(0,value));
-  }
-  return fallback;
+  const warehouse=warehouseRows(s).map(r=>({id:r._id,quality:r._quality,qty:warehouseQuantity(r)}));
+  const sd=core.stockAfterDemand({warehouse,productionRows:net?.productionRows||[],demandRows:net?.demandRows||[],savedContracts:contracts,upgradingKeys:net?.upgradingKeys});
+  __savedContractModel={key:keyOf,net,sd,runHours};
+  return __savedContractModel;
 }
+function savedContractSurplusMap(s){return savedContractStockModel(s).sd.surplusByKey;}
 function savedContractProductionSurplusQuantity(c,s){
   const key=savedContractProductKey(c);if(!key)return 0;
   const value=Number(savedContractSurplusMap(s).get(`${key.id}:${key.quality}`));
@@ -3965,41 +3634,8 @@ function savedContracts(s){
   const store=Number.isFinite(realm)?s?.realmStores?.[`realm:${realm}`]:null;
   return Array.isArray(store?.savedContracts)?store.savedContracts:[];
 }
-function savedContractBaseBalanceMap(s){
-  const realm=Number(s?.viewRealm??s?.selectedRealm??s?.captureRealm??s?.authData?.authCompany?.realmId);
-  const realmStore=Number.isFinite(realm)?s?.realmStores?.[`realm:${realm}`]:null;
-  let snapshot=s?.gameOverlaySnapshot;
-  if(Number.isFinite(realm)&&snapshot&&Number(snapshot.realm)!=realm)snapshot=null;
-  if(!Array.isArray(snapshot?.rows))snapshot=realmStore?.gameOverlaySnapshot||null;
-  const balances=new Map();
-  for(const row of (Array.isArray(snapshot?.rows)?snapshot.rows:[])){
-    const id=Number(row?.id),quality=Math.max(0,Number(row?.quality)||0);
-    if(!Number.isFinite(id)||id<=0)continue;
-    const warehouse=Number(row?.warehouse),demand=Number(row?.demand);
-    const base=(Number.isFinite(warehouse)?warehouse:0)-(Number.isFinite(demand)?demand:0);
-    balances.set(`${id}:${quality}`,base);
-  }
-  // Include held stock for keys that have not yet appeared in an overlay row.
-  // This fallback is current warehouse data, not a prior calculated Difference.
-  const sourceState=realmStore?{...s,...realmStore}:s;
-  for(const row of warehouseRows(sourceState)){
-    const id=Number(row?._id),quality=Math.max(0,Number(row?._quality)||0);
-    if(!Number.isFinite(id)||id<=0)continue;
-    const key=`${id}:${quality}`;
-    if(!balances.has(key))balances.set(key,Math.max(0,Number(row?._qty)||0));
-  }
-  return balances;
-}
-function savedContractResolvedQuantityMap(s){
-  // Recompute from the current stock/demand/production inputs on each render.
-  // Do not cache by state-object identity: nested warehouse/surplus snapshots can
-  // be refreshed while a page remains open.
-  const core=globalThis.SCMPlannerCore;
-  const contracts=savedContracts(s);
-  return core?.resolveSavedContractQuantities
-    ?core.resolveSavedContractQuantities({savedContracts:contracts,baseBalanceByKey:savedContractBaseBalanceMap(s),surplusByKey:savedContractSurplusMap(s)})
-    :new Map();
-}
+function savedContractBaseBalanceMap(s){return savedContractStockModel(s).sd.baseBalanceByKey;}
+function savedContractResolvedQuantityMap(s){return savedContractStockModel(s).sd.savedQuantities;}
 function savedContractEffectiveQuantity(c,s){
   const quantities=savedContractResolvedQuantityMap(s);
   if(quantities.has(c))return Math.max(0,Number(quantities.get(c))||0);
@@ -4052,103 +3688,15 @@ function contractDiscountHtml(c,s,saved){
   return `<span class="${cls}">${sign}${value.toFixed(2)}%</span>`;
 }
 function contractRow(c,s, saved=false, includeDirection=true){const effectiveQty=saved?savedContractEffectiveQuantity(c,s):Number(c.quantity)||0;const qtyText=saved?savedContractQuantityLabel(c,s):num(c.quantity);const qtyLabel=c.count>1?`${qtyText} (${c.count} contracts)`:qtyText;const displayPrice=saved?savedContractPrice(c,s):c.price;const rowTotal=saved?roundCurrencyUp((Number(displayPrice)||0)*effectiveQty):(Number(c.total)||0);const productParts=String(c.product||'').match(/^(\d+)(?::(\d+))?$/);const pid=Number.isFinite(Number(c.productId))?Number(c.productId):(productParts?Number(productParts[1]):null);const pq=Number.isFinite(Number(c.quality))?Number(c.quality):(productParts?Number(productParts[2]):null);const info=pid!=null?resourceInfo({kind:pid,quality:pq},s||{}):{imageCandidates:[]};const src=(info.imageCandidates||[])[0]||'';const image=src?`<img class="contract-product-icon" src="${escapeHtml(src)}" alt="" loading="lazy">`:'';const productLabel=saved&&pid!=null?resourceName({kind:pid,quality:pq},s||{}):(c.productName||c.product||'—');return `<tr>${includeDirection?`<td>${escapeHtml(c.direction||'—')}</td>`:''}<td>${escapeHtml(c.company||'—')}</td><td class="contract-product-cell">${image}<span>${escapeHtml(productLabel)}</span></td><td>${qtyLabel}</td><td>${c.quality??'—'}</td><td>${(()=>{const mi=contractMarketInfo(c,s);if(mi==null)return '—';const nt=contractPriceNote(mi);return `${money(mi.price)}${nt?` <small class="market-inline-vwap">${nt}</small>`:''}`;})()}</td><td>${contractDiscountHtml(c,s,saved)}</td><td>${contractPriceMoney(displayPrice)}</td><td>${money(rowTotal)}</td>${saved?`<td><button class="saved-edit" data-id="${escapeHtml(c.id||'')}">Edit</button> <button class="danger saved-delete" data-id="${escapeHtml(c.id||'')}">Delete</button></td>`:''}</tr>`}
-function renderApiList(s){
-  const el=$('#apiList');
-  if(!el)return;
-  const catalog=Array.isArray(s?.apiEndpoints)?s.apiEndpoints:[];
-  if(!catalog.length){
-    el.innerHTML='<div class="status">No live API endpoints captured yet.</div>';
-    return;
-  }
-  const rows=catalog.slice().sort((a,b)=>new Date(b.seenAt||0)-new Date(a.seenAt||0));
-  el.innerHTML=rows.map(item=>{
-    const url=String(item?.url||'');
-    const method=String(item?.method||'GET').toUpperCase();
-    const d=(s.endpointData||{})[url]||{};
-    const status=Number(d.status)||0;
-    const suffix=status?`<span>${status}</span>`:'';
-    return `<div class="api-row"><code>${escapeHtml(method)} ${escapeHtml(url)}</code>${suffix}</div>`;
-  }).join('');
-}
-function contractSurplusAfterOutgoing(s, owned, recipes, rates){
+function contractSurplusAfterOutgoing(s,data){
   // Contracts are displayed as signed net inventory impact: outgoing (+) uses stock; incoming (-) adds stock.
-  const runHours=Math.min(48,Math.max(1,Number(s?.productionRunHours)||24));
-  const network=plannerProductionNetwork(s,owned,recipes,rates,runHours,{});
-  const warehouseRowsForCore=warehouseRows(s).map(r=>({id:r._id,quality:r._quality,amount:warehouseQuantity(r)}));
-  const productionRows=[];
-  const demandRows=[];
-  for(const b of (network.activeBuildings||[])){
-    if(Number.isFinite(Number(b.outputRun))&&Number(b.outputRun)>0){
-      const rec=recipes.find(r=>plannerNormalizeName(r.name)===plannerNormalizeName(b.product));
-      if(rec) productionRows.push({id:rec.id,quality:b.quality,amount:b.outputRun});
-    }
-    for(const input of (b.inputs||[])){
-      if(Number.isFinite(Number(input.id))&&Number(input.required)>0) demandRows.push({id:Number(input.id),minQuality:Number(input.minQuality)||0,amount:Number(input.required)||0});
-    }
-  }
-  const outgoingSaved=savedContracts(s).filter(c=>String(c.direction||'').trim().toLowerCase()==='outgoing');
-  const incomingSaved=savedContracts(s).filter(c=>String(c.direction||'').trim().toLowerCase()==='incoming');
-  const incomingById=new Map();
-  const incomingRows=[];
-  for(const c of incomingSaved){
-    const raw=String(c.product??'').trim();
-    const parsed=raw.match(/^(\d+)(?::(\d+))?$/);
-    const id=Number(c.productId!=null?c.productId:(parsed?parsed[1]:null));
-    const quality=Math.max(0,Number(c.quality!=null?c.quality:(parsed?parsed[2]:0))||0);
-    const qty=savedContractEffectiveQuantity(c,s);
-    if(Number.isFinite(id)&&id>0&&qty>0){
-      incomingById.set(id,(incomingById.get(id)||0)+qty);
-      incomingRows.push({id,quality,amount:qty});
-    }
-  }
-  const contractRows=[];
-  const leftCandidates=[];
-  for(const c of outgoingSaved){
-    const raw=String(c.product??'').trim();
-    const parsed=raw.match(/^(\d+)(?::(\d+))?$/);
-    const id=Number(c.productId!=null?c.productId:(parsed?parsed[1]:null));
-    const quality=Math.max(0,Number(c.quality!=null?c.quality:(parsed?parsed[2]:0))||0);
-    const mode=savedContractQuantityMode(c);
-    const qty=mode==='surplus'?savedContractProductionSurplusQuantity(c,s):mode==='left'?0:Number(c.quantity)||0;
-    if(Number.isFinite(id)&&id>0&&qty>0)contractRows.push({id,quality,amount:qty});
-    if(Number.isFinite(id)&&id>0&&mode==='left')leftCandidates.push({c,id,quality});
-  }
-  const calcCore=(rows)=>globalThis.SCMPlannerCore?.balanceSupplyDemandContracts
-    ?globalThis.SCMPlannerCore.balanceSupplyDemandContracts({warehouseRows:warehouseRowsForCore,productionRows,demandRows,contractRows:rows,incomingContractRows:incomingRows})
-    :[];
-  let coreRows=calcCore(contractRows);
-  if(leftCandidates.length){
-    const additions=[];const assigned=new Set();
-    for(const item of leftCandidates){
-      const key=`${item.id}:${item.quality}`;if(assigned.has(key))continue;
-      const base=coreRows.find(r=>Number(r.id)===item.id);
-      // Left-mode contracts use stock after demand (plus incoming), not upcoming production.
-      const amount=Math.max(0,(Number(base?.warehouse)||0)+(Number(base?.incoming)||0)-(Number(base?.demand)||0)-(Number(base?.contracted)||0));
-      if(amount>0){additions.push({id:item.id,quality:item.quality,amount});assigned.add(key);}
-    }
-    if(additions.length)coreRows=calcCore([...contractRows,...additions]);
-  }
-  const rowsById=new Map(coreRows.map(r=>[Number(r.id),r]));
-  for(const [id,incomingQty] of incomingById.entries()){
-    if(!rowsById.has(id)){
-      const warehouse=warehouseRowsForCore.filter(r=>Number(r.id)===id).reduce((n,r)=>n+Math.max(0,Number(r.amount)||0),0);
-      rowsById.set(id,{id,warehouse,produced:0,demand:0,contracted:0,leftover:incomingQty+warehouse,warehouseOnlyLeft:warehouse});
-    }
-  }
-  const rows=[...rowsById.values()].map(r=>{
-    const incoming=Number(incomingById.get(Number(r.id))||0);
-    const outgoing=Number(r.contracted)||0;
-    // The Contracts column is a signed net inventory impact:
-    // outgoing consumes stock (+), incoming supplies stock (-).
-    const netContracts=outgoing-incoming;
-    const warehouse=Number(r.warehouse)||0;
-    const demand=Number(r.demand)||0;
-    const displayedLeft=warehouse-demand-netContracts;
+  const model=savedContractStockModel(s,data);
+  const recipes=Array.isArray(data?.recipes)?data.recipes:[];
+  const rows=model.sd.idRows.map(r=>{
     const info=resourceInfo({kind:r.id},s||{});
-    return {...r,incoming,contracted:netContracts,leftover:displayedLeft,warehouseOnlyLeft:warehouse-demand,
-      name:info.name||plannerResourceNameById(recipes,r.id,s),quality:null};
+    return {...r,name:info.name||plannerResourceNameById(recipes,r.id,s)};
   });
-  return {runHours,rows:rows.filter(r=>Math.abs(r.leftover)>1e-9||Math.abs(r.incoming)>1e-9||r.warehouse>1e-9||r.produced>1e-9||r.demand>1e-9||Math.abs(r.contracted)>1e-9)};
+  return {runHours:model.runHours,rows:rows.filter(r=>Math.abs(r.leftover)>1e-9||Math.abs(r.incoming)>1e-9||r.warehouse>1e-9||r.produced>1e-9||r.demand>1e-9||Math.abs(r.contracted)>1e-9)};
 }
 
 let contractSurplusRenderKey='';
@@ -4175,13 +3723,12 @@ async function renderContractSurplusAfterOutgoing(s,force=false){
   try{
     const data=await loadBuildingPlannerData();
     if(renderToken!==contractSurplusRenderToken)return;
-    const owned=ownedPlannerBuildings(s,data.buildings||[]);
-    if(!owned.length||!Array.isArray(data.recipes)||!data.recipes.length){
+    if(!buildingArrayFromState(s).length||!Array.isArray(data.recipes)||!data.recipes.length){
       body.innerHTML='<tr><td colspan="5">Production data is not available yet.</td></tr>';
       body.dataset.ready='1';
       return;
     }
-    const result=contractSurplusAfterOutgoing(s,owned,data.recipes,data.rates||{});
+    const result=contractSurplusAfterOutgoing(s,data);
     if(hoursEl)hoursEl.textContent=`${result.runHours} hr`;
     if(!result.rows.length){
       body.innerHTML='<tr><td colspan="5">No surplus or demand to account for.</td></tr>';
@@ -4194,7 +3741,7 @@ async function renderContractSurplusAfterOutgoing(s,force=false){
     if(renderToken===contractSurplusRenderToken){body.innerHTML=`<tr><td colspan="5">Unable to calculate surplus: ${escapeHtml(e?.message||String(e))}</td></tr>`;body.dataset.ready='1';}
   }
 }
-// v2.5.343 current government orders (/api/v3/government-orders/<realm>/) with the amount at your tier
+// Current government orders (/api/v3/government-orders/<realm>/) with the amount at your tier
 // (/government-orders/tier/: game = ceil(amountBase × resourceMultiplicator)) and your stock at that quality or better.
 function renderGovernmentOrders(s){
   const sec=document.getElementById('contracts');if(!sec)return;
@@ -4218,6 +3765,7 @@ function renderGovernmentOrders(s){
 }
 function renderContracts(s){
   try{
+  if(!window.__scmBuildingPlannerData&&!window.__scmContractsDataKick){window.__scmContractsDataKick=true;loadBuildingPlannerData().then(()=>{window.__scmContractsDataKick=false;if(window.__scmState)renderContracts(scmReactiveViewState(window.__scmState));}).catch(()=>{window.__scmContractsDataKick=false;});}
   const rows=currentContracts(s);
   const incoming=rows.filter(c=>String(c.direction)==='Incoming');
   const outgoing=rows.filter(c=>String(c.direction)==='Outgoing');
@@ -4368,7 +3916,7 @@ const flushPendingDashboardRender=()=>{
   scheduleDashboardRender();
 };
 // Throttled: at most one full render per SCM_RENDER_MIN_GAP_MS with a trailing render, so storage bursts neither
-// starve the UI (old debounce kept resetting) nor re-render on every event. Deferred while editing or scrolling.
+// starve the UI nor re-render on every event. Deferred while editing or scrolling.
 const SCM_RENDER_MIN_GAP_MS=2500;
 let __lastDashboardRenderAt=0;
 const scheduleDashboardRender=()=>{
@@ -4409,12 +3957,12 @@ function dashboardChangeAffectsTab(changes,tab){
   if(tab==='overview')return ['authData','companyData','warehouseResources','contracts','savedContracts','contractEvents','vwapData','history','sellingHistory','buildings','accountingLastComputed','accountingLastComputedIncome','accountingCapture','accountingSnapshots','accountingWeekLedgerStatus','accountingWeekSalesSummary','accountingWeekRevision','syncStatus','syncError','lastSync','fullSyncJob','fullSyncProgress'].some(has);
   if(tab==='warehouse')return ['warehouseResources','vwapData','vwapStatus','liveMarketData','liveMarketPriceData','history','contracts','savedContracts','contractEvents','warehouseCostDetails'].some(has);
   if(tab==='market')return ['vwapData','vwapStatus','liveMarketData','liveMarketPriceData','history','warehouseResources','warehouseCostDetails'].some(has);
-  if(tab==='production')return ['buildings','warehouseResources','productionEvents','productionRateSnapshots','productionPlans','frozenNetworkPlan','productionRunHours','vwapData','vwapStatus','liveMarketData','liveMarketPriceData'].some(has);
+  if(tab==='production')return ['buildings','warehouseResources','productionEvents','productionRateSnapshots','productionPlans','productionRunHours','vwapData','vwapStatus','liveMarketData','liveMarketPriceData'].some(has);
   if(tab==='contracts')return ['contracts','savedContracts','contractEvents','endpointData','warehouseResources','liveMarketPriceData','liveMarketProductCache'].some(has);
   if(tab==='tools')return ['warehouseResources','vwapData','liveMarketPriceData','history'].some(has);
   if(tab==='executives')return ['endpointData','buildings','scmGameConfig','scmGameConstants'].some(has);
   
-  if(tab==='settings')return ['syncStatus','syncError','lastSync','fullSyncJob','fullSyncProgress','endpointData','apiEndpoints','realmQuarantine','productionEvents','productionRateSnapshots','productionPlans','frozenNetworkPlan','gameOverlaySnapshot','warehouseResources','vwapData'].some(has);
+  if(tab==='settings')return ['syncStatus','syncError','lastSync','fullSyncJob','fullSyncProgress','endpointData','apiEndpoints','realmQuarantine','productionEvents','productionRateSnapshots','productionPlans','gameOverlaySnapshot','warehouseResources','vwapData'].some(has);
   return false;
 }
 function scmWarehouseSignature(store){
@@ -4468,7 +4016,6 @@ function renderVwapDiagnostics(s){
   if(!host)return;
   const v=s?.vwapData||{};
   const rowsCount=Array.isArray(v.rows)?v.rows.length:Number(v.count)||0;
-  const stamp=v.fetchedAt?new Date(v.fetchedAt).toLocaleTimeString():(v.receivedAt?new Date(v.receivedAt).toLocaleTimeString():'—');
   const qs=s?.vwapStatus||{};
   const qmsg=qs.message||'Waiting for VWAP sync.';
   const qerr=qs.vwapError||'';
@@ -4489,17 +4036,22 @@ function renderVwapDiagnostics(s){
 }
 function scmBuildingsSignature(store){
   const buildings=Array.isArray(store?.buildings)?store.buildings:[];
-  return buildings.map(b=>{
+  const sig=buildings.map(b=>{
     const busy=b?.busy||{}; const resource=busy?.resource||{};
     return [
       Number(b?.id??b?.buildingId)||0, String(b?.category||''), String(b?.kind||''), String(b?.name||''),
       Number(b?.size??b?.level??b?.buildingLevel)||0, Number(b?.pinnedResource??resource?.kind)||0,
       String(busy?.started||''), Number(busy?.duration)||0, Number(resource?.kind??resource?.resourceId)||0,
       String(resource?.name||''), Number(resource?.quality)||0, String(busy?.category||''), Boolean(busy?.expanding),
-      // v2.5.351 a new abundance capture repaints the building cards
-      JSON.stringify(store?.endpointData?.[`/api/v2/companies/buildings/${Number(b?.id??b?.buildingId)||0}/abundance/`]?.data?.abundance||null)
+      // A new abundance capture repaints the building cards
+      JSON.stringify(store?.endpointData?.[`/api/v2/companies/buildings/${Number(b?.id??b?.buildingId)||0}/abundance/`]?.data?.abundance||null),
+      // Rate inputs: the current cycle's history capture
+      String(store?.endpointData?.[`/api/v2/companies/buildings/${Number(b?.id??b?.buildingId)||0}/history/`]?.receivedAt||'')
     ].join(',');
-  }).sort().join('|')+`#${buildings.length}`;
+  }).sort().join('|');
+  // Rate inputs shared by every building: production-modifier captures and the company's production modifier
+  const modifierStamps=Object.entries(store?.endpointData||{}).filter(([url])=>/\/api\/v2\/production-modifiers\/\d+\//i.test(url)).map(([url,v])=>url+'@'+String(v?.receivedAt||'')).sort().join(';');
+  return sig+`#${buildings.length}#${modifierStamps}#${Number(plannerCompanyAuthData(store)?.productionModifier)||0}`;
 }
 function scmHistorySignature(store){
   const history=store?.history&&typeof store.history==='object'?store.history:{};
@@ -4507,15 +4059,20 @@ function scmHistorySignature(store){
 }
 function scmProductionSignature(store,opts){
   const parts=[];
-  const events=Array.isArray(store?.productionEvents)?store.productionEvents:[];
-  parts.push('events',events.map(e=>`${e?.resourceId??''}:${e?.resourceName??''}:${e?.modifier??''}:${e?.expiresAt??''}:${e?.capturedAt??''}`).sort().join(';'));
+  // Everything the shared production calculation reads: production-modifier rows, the company modifier, run histories,
+  // the stored run snapshots and plans, and each building's current run.
+  const ep=store?.endpointData&&typeof store.endpointData==='object'?store.endpointData:{};
+  const epParts=[];
+  for(const [url,e] of Object.entries(ep)){
+    if(/^\/api\/v2\/production-modifiers\/\d+\/?$/.test(url)||/^\/api\/v2\/companies\/buildings\/\d+\/(?:history|abundance)\/?$/.test(url))epParts.push(`${url}:${e?.status??''}:${e?.receivedAt??''}:${Array.isArray(e?.data)?e.data.length:''}`);
+  }
+  parts.push('endpoints',epParts.sort().join(';'));
+  parts.push('company',String(store?.authData?.authCompany?.productionModifier??''),String(store?.authData?.temporals?.economyState??''));
+  parts.push('runs',(Array.isArray(store?.buildings)?store.buildings:[]).map(b=>`${b?.id??''}:${b?.busy?.started??''}:${b?.busy?.category??''}`).sort().join(';'));
   const snaps=store?.productionRateSnapshots&&typeof store.productionRateSnapshots==='object'?store.productionRateSnapshots:{};
-  parts.push('rates',Object.values(snaps).map(x=>`${x?.buildingId??''}:${x?.resourceId??''}:${x?.product??''}:${x?.started??''}:${x?.baseRatePerLevel??''}:${x?.observedRatePerHour??''}:${x?.capturedAt??''}`).sort().join(';'));
+  parts.push('rates',Object.values(snaps).map(x=>`${x?.buildingId??''}:${x?.resourceId??''}:${x?.product??''}:${x?.started??''}:${x?.observedRatePerHour??''}:${x?.source??''}`).sort().join(';'));
   const plans=store?.productionPlans&&typeof store.productionPlans==='object'?store.productionPlans:{};
-  parts.push('plans',Object.values(plans).map(x=>`${x?.buildingId??''}:${x?.resourceId??''}:${x?.product??''}:${x?.quality??''}:${x?.plannedLevel??''}:${x?.baseRatePerLevel??''}:${x?.rateCapturedAt??''}`).sort().join(';'));
-  const frozen=store?.frozenNetworkPlan;
-  const frozenPlans=frozen?.buildingPlans&&typeof frozen.buildingPlans==='object'?frozen.buildingPlans:{};
-  parts.push('frozen',String(frozen?.createdAt||frozen?.capturedAt||''),Object.values(frozenPlans).map(x=>`${x?.buildingId??''}:${x?.resourceId??''}:${x?.product??''}:${x?.quality??''}:${x?.plannedLevel??''}:${x?.baseRatePerLevel??''}`).sort().join(';'));
+  parts.push('plans',Object.values(plans).map(x=>`${x?.buildingId??''}:${x?.resourceId??''}:${x?.product??''}:${x?.quality??''}:${x?.plannedLevel??''}`).sort().join(';'));
   if(!opts?.ignoreHours)parts.push('hours',Number(store?.productionRunHours)||24);
   return parts.join('|');
 }
@@ -4597,10 +4154,10 @@ function scmReactiveViewState(state){
   if(!store||typeof store!=='object')return base;
   return {...base,...store,viewRealm:realm,captureRealm:realm};
 }
-// v2.5.331 phone card header: warehouse stock cost per unit at the top right (same value as the
+// Phone card header: warehouse stock cost per unit at the top right (same value as the
 // "Warehouse Stock Cost" cell; hidden on wide screens where that column is visible).
 function warehouseHeadCost(r){return r?._unitCost==null?'':`<span class="wh-head-cost" title="Warehouse stock cost per unit"><strong>${money(r._unitCost)}</strong><small>cost / unit</small></span>`;}
-// v2.5.331 production cost history cell: newest run vs the run before it, for this product/quality.
+// Production cost history cell: newest run vs the run before it, for this product/quality.
 // The change is a button that opens every stored run with a line chart.
 function productionCostHistoryOf(s){const r=validRealmNumber(s?.viewRealm??s?.selectedRealm);const h=s?.productionCostHistory??(r!=null?s?.[`scmProductionCostHistory:${r}`]:null);return Array.isArray(h)?h:[];}
 function pchMoney(v){const n=Number(v);return Math.abs(n)<1&&Number.isFinite(n)?'$'+n.toFixed(3):money(n);}
@@ -4634,9 +4191,9 @@ function openProductionCostHistory(s,key){
 }
 document.addEventListener('click',e=>{const b=e.target?.closest?.('[data-pch]');if(!b)return;e.preventDefault();try{openProductionCostHistory(__scmState||{},b.dataset.pch);}catch(err){console.debug('production cost history',err);}});
 try{scmOnStorageChanged((changes,area)=>{if(area!=='local'||!__scmState)return;const r=validRealmNumber(__scmState.viewRealm??__scmState.selectedRealm);const c=r!=null?changes[`scmProductionCostHistory:${r}`]:null;if(!c)return;__scmState.productionCostHistory=Array.isArray(c.newValue)?c.newValue:[];if(activeTab==='warehouse'){try{patchWarehouseCells(__scmState);}catch{}}});}catch{}
-// v2.5.393 statement history (CSV import, new day statements) recomputes Analyze too.
+// Statement history (CSV import, new day statements) recomputes Analyze too.
 try{scmOnStorageChanged((changes,area)=>{if(area!=='local'||!__scmState)return;const r=validRealmNumber(__scmState.viewRealm??__scmState.selectedRealm);const c=r!=null?changes[`scmStatementHistory:${r}`]:null;if(!c)return;__scmState.statementHistory=c.newValue&&typeof c.newValue==='object'?c.newValue:null;if(activeTab==='analyze'){globalThis.SCM_ANALYZE_UI?.refresh?.();scheduleDashboardRender();}});}catch{}
-// v2.5.387 a new ledger page in the archive recomputes Analyze while it is open (the archive is realm-keyed).
+// A new ledger page in the archive recomputes Analyze while it is open (the archive is realm-keyed).
 try{scmOnStorageChanged((changes,area)=>{if(area!=='local'||!__scmState)return;const r=validRealmNumber(__scmState.viewRealm??__scmState.selectedRealm);const c=r!=null?changes[`scmLedgerArchive:${r}`]:null;if(!c)return;__scmState.ledgerArchive=c.newValue&&typeof c.newValue==='object'?c.newValue:null;if(activeTab==='analyze'){globalThis.SCM_ANALYZE_UI?.refresh?.();scheduleDashboardRender();}});}catch{}
 function patchWarehouseCells(state){
   renderWarehouseMarketTimestamp(state);
@@ -4914,9 +4471,8 @@ scmOnStorageChanged((changes, area)=>{
   const relevant=dashboardChangeAffectsTab(changes,activeTab);
   // Physical realm-store writes are already reconciled by queuePhysicalRealmStateRefresh.
   // That path patches the active feature in place (and specifically updates the
-  // Production planner only when its actual inputs changed). Scheduling render()
-  // again here used to replace every dashboard section after the targeted patch,
-  // causing visible flicker, scroll/layout churn, and unnecessary recipe reloads.
+  // Production planner only when its actual inputs changed). Scheduling render() again here would
+  // replace every dashboard section after the targeted patch, causing flicker, scroll/layout churn and recipe reloads.
   const physicalTabHandled=activeTab==='production' && physicalRealmKeys.length>0 &&
     !changes.activeRealmKey && !changes.selectedRealm;
   if(relevant&&!physicalTabHandled)scheduleDashboardRender();
@@ -4928,7 +4484,7 @@ scmOnDashboardResume(async()=>{
     const fresh=await get();if(commitDashboardState(fresh))scheduleDashboardRender();
   }catch(e){console.debug('resume refresh failed',e);}
 });
-// v2.5.438: initial load must survive an extension update. While the worker restarts (Android Chromium
+// Initial load must survive an extension update. While the worker restarts (Android Chromium
 // especially) chrome.storage reads can reject or never settle, which left the page showing only the static
 // HTML ("Build —", "No sync yet") until manual refreshes. Header renders at once; the data load is bounded
 // by a timeout and retried with backoff; once loaded, storage changes keep it live.
@@ -4957,7 +4513,7 @@ scmInitialDashboardLoad();
 // If the first load never succeeded, any storage write (the updated worker finishing its migration) retries it.
 scmOnStorageChanged((changes,area)=>{if(area==='local'&&!window.__scmDashboardLoaded&&(changes.activeRealmKey||Object.keys(changes||{}).some(k=>/^scmRealmStore:\d+$/.test(k))))scmWithTimeout(get(),3000).then(s=>{if(!window.__scmDashboardLoaded){render(s);window.__scmDashboardLoaded=true;}}).catch(()=>{});});
 
-// v2.5.327 mobile: on phone widths, tables marked .mobile-cards render as stacked cards (CSS). Each cell
+// Mobile: on phone widths, tables marked .mobile-cards render as stacked cards (CSS). Each cell
 // gets its column name as data-label; rows are re-labelled whenever a table body is re-rendered.
 (function(){
   const label=()=>{
@@ -4983,19 +4539,18 @@ scmOnStorageChanged((changes,area)=>{if(area==='local'&&!window.__scmDashboardLo
 })();
 
 
-// v2.5.328: extension pages forbid inline event handlers (CSP script-src 'self'), so the old
-// onerror="window.scmImageFallback(this)" attributes never ran and a failed product image stayed broken.
-// One capture-phase listener does the same job for every image marked data-scm-fallback.
+// Extension pages forbid inline event handlers (CSP script-src 'self'), so onerror="..." attributes would never run.
+// One capture-phase listener does the fallback job for every image marked data-scm-fallback.
 document.addEventListener('error',e=>{const t=e.target;if(!t||t.tagName!=='IMG'||!t.dataset)return;if(t.dataset.scmFallback==='1'&&typeof window.scmImageFallback==='function'){try{window.scmImageFallback(t);}catch{}}else if(t.dataset.scmHideOnError==='1'){t.style.visibility='hidden';}},true);
 
-// v2.5.335 Alerts tab: one switch per alert, thresholds and price targets.
+// Alerts tab: one switch per alert, thresholds and price targets.
 (function(){
   const st=$('#notifyStatus');if(!st)return;
   let cfg=null;
   const when=ms=>new Date(ms).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'});
   const realmNow=()=>validRealmNumber(__scmState?.viewRealm??__scmState?.selectedRealm);
   const prodName=(id)=>{try{return resourceName({_id:id,kind:id},__scmState||{});}catch{return '#'+id;}};
-  // v2.5.336: filled when tapped (state may not be loaded yet when the Alerts tab opens first); lists warehouse
+  // Filled when tapped (state may not be loaded yet when the Alerts tab opens first); lists warehouse
   // items and products your buildings are making now.
   const fillProducts=()=>{const sel=$('#nfTProduct');if(!sel)return;const s=__scmState||{};let opts=[];try{opts=marketWarehouseOptions(s).map(o=>({key:`${o.id}:${o.quality}`,label:`${o.name} Q${o.quality} · ${num(o.qty)} in warehouse`}));}catch{}
     const have=new Set(opts.map(o=>o.key));for(const b of Array.isArray(s.buildings)?s.buildings:[]){const r=b?.busy?.resource;const id=Number(r?.kind),q=Number(r?.quality);if(id>0&&Number.isFinite(q)&&!have.has(`${id}:${q}`)){have.add(`${id}:${q}`);opts.push({key:`${id}:${q}`,label:`${r.name||prodName(id)} Q${q} · producing`});}}
@@ -5030,7 +4585,7 @@ document.addEventListener('error',e=>{const t=e.target;if(!t||t.tagName!=='IMG'|
 })();
 
 
-// v2.5.350 expandable / collapsible cards. A container marked data-collapse="<key>" collapses to its
+// Expandable / collapsible cards. A container marked data-collapse="<key>" collapses to its
 // [data-collapse-head] child; taps on the head toggle it. Choices are kept per key in localStorage
 // (scmCollapseV2). data-collapse-default="open" starts expanded; everything else starts collapsed. No inline handlers (CSP).
 const SCM_COLLAPSE_KEY='scmCollapseV2';
@@ -5042,7 +4597,7 @@ function scmApplyCollapse(root){
   const list=[...(root.matches?.('[data-collapse]')?[root]:[]),...root.querySelectorAll('[data-collapse]')];
   for(const el of list){const k=el.dataset.collapse;const h=el.querySelector(':scope>[data-collapse-head]');if(!h)continue;h.classList.add('collapse-head');h.setAttribute('role','button');h.tabIndex=0;scmSetCollapsed(el,k in saved?!!saved[k]:el.dataset.collapseDefault!=='open');}
 }
-// v2.5.358 every card in the Manager is expandable / collapsible. Cards rendered without data-collapse get it here,
+// Every card in the Manager is expandable / collapsible. Cards rendered without data-collapse get it here,
 // on every render (MutationObserver, runs before the next paint):
 //  - label + content sections (Production page labels, Your Buildings, Alerts groups) are wrapped into one card;
 //  - card containers below whose direct child is a heading: that heading becomes the tap target.
@@ -5108,5 +4663,5 @@ function scmAutoCollapse(root){
 
 try{chrome.runtime.sendMessage({type:'SCM_CLEAR_ALERT_BADGE'}).catch(()=>{});}catch{}
 
-// v2.5.439 Settings → Diagnostic → Storage: "Trim now" runs the 90-day retention pass and shows bytes before/after.
+// Settings → Diagnostic → Storage: "Trim now" runs the 90-day retention pass and shows bytes before/after.
 document.querySelector('#trimStorageNow')?.addEventListener('click',async e=>{const btn=e.currentTarget,out=document.querySelector('#trimStorageStatus');const mb=b=>b==null?'?':`${(b/1048576).toFixed(2)} MB`;btn.disabled=true;if(out)out.textContent='Trimming…';try{const r=await chrome.runtime.sendMessage({type:'PRUNE_STORAGE'});if(out)out.textContent=r?.ok?`${mb(r.before)} → ${mb(r.after)}${r.written?.length?'':' (nothing older than 90 days)'}`:`Trim failed: ${r?.error||'no answer'}`;}catch(err){if(out)out.textContent=`Trim failed: ${err?.message||err}`;}finally{btn.disabled=false;}});

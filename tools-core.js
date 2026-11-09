@@ -88,7 +88,7 @@
       r.opportunityCostPerHour = i === 0 ? (next ? Math.max(0, next.profitPerHour) : 0) : Math.max(0, best.profitPerHour) - r.profitPerHour;
     });
     const byReturn = rows.slice().sort((a, b) => b.returnPerDay - a.returnPerDay).map(r => r.name);
-    // v2.5.330: with a budget, pick options best-return-first while they still fit.
+    // With a budget, pick options best-return-first while they still fit.
     let plan = null;
     if (cap != null) {
       let left = cap; const picked = [];
@@ -122,7 +122,7 @@
       if (!Number.isFinite(price)) { missing.push(i?.name || String(i?.id ?? '?')); continue; }
       inputCostPerUnit += q * price;
     }
-    const transportPerUnit = num(p.transportUnits) * num(p.transportUnitCost) * (exchange ? 1 : num(p.contractTransportShare, 1)); // 2.5.395 contracts use the same units
+    const transportPerUnit = num(p.transportUnits) * num(p.transportUnitCost) * (exchange ? 1 : num(p.contractTransportShare, 1)); // contracts use the same transport units
     // Contracts carry no exchange fee but are normally sold below market: contractDiscountPct models that.
     const contractDiscount = exchange ? 0 : Math.min(100, Math.max(0, num(p.contractDiscountPct))) / 100;
     const netRevenuePerUnit = sale * (1 - fee) * (1 - contractDiscount);
@@ -151,34 +151,6 @@
       exchangeFee: num(b.exchangeFeePct, 4) / 100,
       inputs: (b.inputs || []).map(i => ({ name: i.name, id: i.id, qty: i.qtyPerUnit, unitPrice: i.unitPrice }))
     });
-  }
-
-  // Rank every producible product by profit per hour per level, from VWAP prices.
-  //   recipes: [{id,name,materials:[{id,quantity}],transport}]   rates: {name: baseRatePerLevel}
-  //   priceOf(resourceId, quality) -> number|null
-  function rankProducts({ recipes = [], rates = {}, priceOf, names = new Map(), quality = 0, inputQuality = 0, settings = {} } = {}) {
-    const rateByName = new Map(Object.entries(rates || {}).map(([k, v]) => [normalizeName(k), Number(v)]));
-    const nameOf = id => (names instanceof Map ? names.get(String(id))?.name || names.get(id)?.name : null) || null;
-    const transportUnitCost = settings.transportUnitCost != null ? settings.transportUnitCost : (typeof priceOf === 'function' ? priceOf(13, 0) : null);
-    const out = [], skipped = [];
-    for (const r of recipes || []) {
-      const base = rateByName.get(normalizeName(r?.name));
-      if (!pos(base)) { skipped.push({ id: r?.id, name: r?.name, reason: 'no base rate' }); continue; }
-      const sale = priceOf ? priceOf(Number(r.id), quality) : null;
-      if (sale == null) { skipped.push({ id: r.id, name: r.name, reason: 'no price' }); continue; }
-      const inputs = (r.materials || []).map(m => ({
-        id: m.id, name: nameOf(m.id) || `#${m.id}`, qty: Number(m.quantity),
-        unitPrice: priceOf ? priceOf(Number(m.id), inputQuality) : null
-      }));
-      const res = profitPerHour({
-        ...settings, baseRatePerLevel: base, salePrice: sale, inputs,
-        transportUnits: r.transport, transportUnitCost: transportUnitCost ?? 0, level: 1
-      });
-      if (!res.ok) { skipped.push({ id: r.id, name: r.name, reason: res.error }); continue; }
-      out.push({ id: r.id, name: r.name, salePrice: sale, baseRatePerLevel: base, ...res });
-    }
-    out.sort((a, b) => (a.incomplete - b.incomplete) || (b.profitPerHourPerLevel - a.profitPerHourPerLevel));
-    return { rows: out, skipped };
   }
 
   /* ------------------------------------------- Price series, movers, stats */
@@ -285,7 +257,7 @@
     return { ranked, unranked };
   }
 
-  // v2.5.330: movers from SimcoTools trade closes (stored with each current-price row).
+  // Movers from SimcoTools trade closes (stored with each current-price row).
   // priceAt(closes, t) = the close in effect at time t (last trade at or before t).
   function priceAt(closes, t) {
     let v = null;
@@ -347,7 +319,7 @@
     return next;
   }
 
-  /* ------------------------------------------- Production cost history (v2.5.331) */
+  /* ------------------------------------------- Production cost history */
   // One entry per production run: { k: 'buildingId|startedISO', b, bn, id, q, c (unit cost), t (start), n (amount) }.
   // Sources (both from the game API, nothing estimated):
   //   buildings[].busy.resource.unitCost  — the running batch ("Cost per unit" on the building page)
@@ -408,9 +380,9 @@
     return { runs, current, last, diff: last ? current.c - last.c : null, diffPct: last ? (current.c - last.c) / last.c * 100 : null };
   }
 
-  // v2.5.338 economy phase. auth-data temporals.economyState (0 = recession, seen in R2 capture
-  // 2026-10-23). The game's FAQ: the phase changes production quantities; wages per hour do not change,
-  // so labour per unit moves inversely with the rate. A running batch keeps the phase it started in.
+  // Economy phase. auth-data temporals.economyState (0 = recession). The game's FAQ: the phase changes
+  // production quantities; wages per hour do not change, so labour per unit moves inversely with the rate.
+  // A running batch keeps the phase it started in.
   // Log entries: { s: state, f: first seen ISO, l: last seen ISO }.
   function economyLogAppend(log, state, at) {
     const st = Number(state), t = Date.parse(String(at || ''));
@@ -426,7 +398,7 @@
   function economyStateAt(log, at) {
     const list = Array.isArray(log) ? log : [], t = Date.parse(String(at || ''));
     if (!list.length || !Number.isFinite(t)) return null;
-    if (t < Date.parse(list[0].f)) return null; // before the first observation: phase unknown (2.5.340)
+    if (t < Date.parse(list[0].f)) return null; // before the first observation: phase unknown
     for (let i = list.length - 1; i >= 0; i--) {
       const e = list[i];
       if (t >= Date.parse(e.f)) {
@@ -462,7 +434,7 @@
     return { rate: m || null, source: 'measured-stale', changed: true };
   }
 
-  // 2.5.340 when the log can't say which phase a running batch started in (it started before the first
+  // When the log can't say which phase a running batch started in (it started before the first
   // observation), compare its measured rate with the normal-economy reference rate (same modifiers). A batch
   // more than `tolPct` away from it cannot be a normal-economy batch. Only used when the economy is normal now.
   function batchPhaseFromRate(measuredRate, referenceRate, tolPct = 5) {
@@ -472,7 +444,7 @@
     return Math.abs(diffPct) > tolPct ? { differs: true, diffPct } : { differs: false, diffPct };
   }
 
-  // v2.5.341 effective administration overhead, as the game computes it (game bundle index-*.js, 2026-10-23):
+  // Effective administration overhead, as the game computes it (game bundle index-*.js):
   //   effective = base − (base − 1) × COO / 100, base = /administration-overhead/ (e.g. 1.6176).
   //   COO = floor(diminish(floor(Σ))) over active executives: COO 'o' full coo skill, COO apprentice 'v' half
   //   (only if the academy's active size ≥ 5), other C-suite ('f','m','t') a quarter; staff '1'–'5' excluded.
@@ -514,7 +486,7 @@
     return { factor: eff, pct: (eff - 1) * 100, basePct: (b - 1) * 100, reductionPct: (b - 1) * coo, coo };
   }
 
-  // v2.5.374 Executives tab. Roster rows from captured /executives/ data. Name/age/salary/trainings field names are
+  // Executives tab. Roster rows from captured /executives/ data. Name/age/salary/trainings field names are
   // read from the first key present (not verified against the game bundle); missing → null, shown as —.
   const EXEC_ROLE = { o: 'COO', f: 'CFO', m: 'CMO', t: 'CTO', v: 'COO Apprentice', x: 'CFO Apprentice', y: 'CMO Apprentice', z: 'CTO Apprentice' };
   const EXEC_ORDER = ['o', 'v', 'f', 'x', 'm', 'y', 't', 'z'];
@@ -558,7 +530,7 @@
     return { savedPerDay: saved, salariesPerDay: Number.isFinite(sal) ? sal : null, netPerDay: Number.isFinite(sal) ? saved - sal : null, paysForItself: Number.isFinite(sal) ? saved >= sal : null };
   }
 
-  // v2.5.342 game constants (/api/v2/constants/core|buildings|resources/, public). Game code (tSe/eSe):
+  // Game constants (/api/v2/constants/core|buildings|resources/, public). Game code (tSe/eSe):
   //   base/level = producedPerHourRaw × (AVERAGE_SALARY / SALARY_MID[economyState])^building.salaryModifier
   //   rate/level = base × abundance%/100 (abundance resources only) × (1 + event/100) ÷ (1 − bonus/100)
   //   wage $/h/level = AVERAGE_SALARY × building.salaryModifier × (0.97 with robots)
@@ -581,7 +553,7 @@
     const b = c.buildings[String(buildingKind)], sm = Number(b && b.salaryModifier);
     return Number.isFinite(sm) ? c.core.AVERAGE_SALARY * sm * (robots ? 0.97 : 1) : null;
   }
-  // v2.5.348 the game's Profit Calculator (GamePages bundle, encyclopedia resource page, read 2026-10-24):
+  // The game's Profit Calculator (GamePages bundle, encyclopedia resource page):
   //   units/h/level L = tSe(resource, productionModifier, recreationBonus, 90, 1, base, event): abundance resources
   //     (game list xjr) always at 90 % abundance, whatever your building's abundance is.
   //   labour/unit = AVERAGE_SALARY × salaryModifier ÷ L × admin factor (no robots, not rounded).
@@ -591,7 +563,7 @@
   const GAME_PROFIT_CALC_ABUNDANCE_PCT = 90;
   const GAME_ABUNDANCE_RESOURCE_IDS = [10, 14, 15, 42, 44, 68, 74, 104, 105]; // Crude oil, Minerals, Bauxite, Iron ore, Sand, Gold ore, Methane, Clay, Limestone
   function isAbundanceResource(id) { return GAME_ABUNDANCE_RESOURCE_IDS.includes(Number(id)); }
-  // v2.5.350 colour band for a building's abundance (user's thresholds): ≥ 90 % good, > 85 % warn, ≤ 85 % bad.
+  // Colour band for a building's abundance (user's thresholds): ≥ 90 % good, > 85 % warn, ≤ 85 % bad.
   function abundanceTone(pct) { const v = Number(pct); if (pct == null || pct === '' || !Number.isFinite(v)) return null; return v >= 90 ? 'good' : v > 85 ? 'warn' : 'bad'; }
   function warehouseUnitCostAsGame(lots, resourceId) {
     let best = null;
@@ -617,7 +589,7 @@
     }
     return best && best.diffPct <= tolPct ? best : null;
   }
-  // v2.5.345 recipes as the game defines them: inputs per unit = constants resources[id].producedFrom
+  // Recipes as the game defines them: inputs per unit = constants resources[id].producedFrom
   // ({inputId: qty}), transport units = .transportation. The bundled recipes.json is only the fallback.
   function recipesFromGameConstants(recipes, c) {
     const list = Array.isArray(recipes) ? recipes : [];
@@ -630,7 +602,7 @@
       return { ...r, materials, transport: Number.isFinite(t) && t >= 0 ? t : r.transport, recipeSource: 'game-constants' };
     });
   }
-  // v2.5.345 building outputs as the game defines them: every resource lists the building letter it is produced at
+  // Building outputs as the game defines them: every resource lists the building letter it is produced at
   // (constants resources[id].producedAt). Adds buildings missing from buildings.json (research labs …) and outputs
   // missing from a known building (e.g. Cream egg); an output the game places at another building is dropped.
   function buildingsFromGameConstants(defs, recipes, c) {
@@ -661,7 +633,7 @@
     }
     return next;
   }
-  // v2.5.357 Smart insights (pure). One product on the game's Profit Calculator basis (the building card's headline):
+  // Smart insights (pure). One product on the game's Profit Calculator basis (the building card's headline):
   //   L = game rate/level (abundance resources at 90 %, or abundancePct when given), labour = wage ÷ L × (1 + admin%),
   //   inputs = constants producedFrom qty × inputCostOf(id), profit/h/level = (salePrice − sourcing) × L.
   function gameCalcProduct({ c, resourceId, economyState, eventPct = 0, bonusPct = 0, adminPct = 0, robots = false, salePrice = null, inputCostOf, abundancePct = null } = {}) {
@@ -685,7 +657,7 @@
     const sourcing = inputCost + labourPerUnit, profitPerUnit = hasSale ? sale - sourcing : null;
     return { ok: true, resourceId: rid, ratePerLevel: L, wagePerLevel: wage, labourPerUnit, inputCostPerUnit: inputCost, sourcingCostPerUnit: sourcing, inputs, missing, complete: missing.length === 0, salePrice: hasSale ? sale : null, profitPerUnit, profitPerHourPerLevel: profitPerUnit == null ? null : profitPerUnit * L };
   }
-  // Idea 1: every tradable product a building kind can make, ranked by profit/h/level (game basis).
+  // Every tradable product a building kind can make, ranked by profit/h/level (game basis).
   // priceOf(id) -> number | {price, quality, source} | null. Complete, priced products first; then incomplete; then unpriced.
   function rankBuildingProducts({ c, buildingKind, economyState, bonusPct = 0, adminPct = 0, robots = false, eventPctOf, priceOf, inputCostOf } = {}) {
     if (!gameConstantsOk(c) || buildingKind == null || buildingKind === '') return [];
@@ -700,7 +672,7 @@
     const tier = x => (x.profitPerHourPerLevel == null ? 2 : x.complete ? 0 : 1);
     return out.sort((a, b) => tier(a) - tier(b) || (b.profitPerHourPerLevel ?? 0) - (a.profitPerHourPerLevel ?? 0) || a.resourceId - b.resourceId);
   }
-  // Idea 2: how long warehouse stock of each input lasts at the current production of all buildings.
+  // How long warehouse stock of each input lasts at the current production of all buildings.
   //   buildings: [{id, name, kind, level, productId, quality}]   lots: warehouse lots {kind, quality, amount}
   //   Stock counts lots at quality ≥ the lowest quality any consumer needs (production quality − 1, the game's rule).
   //   Own production of the same resource is subtracted (net use). buyQty covers `hours` of net use.
@@ -735,7 +707,7 @@
     }
     return rows.sort((a, b) => (a.hoursLeft == null) - (b.hoursLeft == null) || (a.hoursLeft ?? 0) - (b.hoursLeft ?? 0) || a.id - b.id);
   }
-  // Idea 3: make or buy one input. ownCost = sourcing cost/unit if you made it (null = can't make it); marketPrice = cheapest
+  // Make or buy one input. ownCost = sourcing cost/unit if you made it (null = can't make it); marketPrice = cheapest
   // listing at the needed quality. saves > 0 means making is cheaper by that much per unit.
   function makeOrBuy(ownCost, marketPrice) {
     const o = ownCost != null && Number.isFinite(Number(ownCost)) ? Number(ownCost) : null, m = pos(marketPrice);
@@ -744,7 +716,7 @@
     return { verdict: saves >= 0 ? 'make' : 'buy', ownCost: o, marketPrice: m, savesPerUnit: Math.abs(saves), savesPct: Math.abs(saves) / m * 100 };
   }
 
-  // v2.5.359 #5 profit/h/level in every economy phase. Same sale price and input costs; the game's rate (and so labour
+  // Profit/h/level in every economy phase. Same sale price and input costs; the game's rate (and so labour
   // per unit, wage per hour being phase-independent) changes with SALARY_MID[phase]. {state: value|null}.
   function phaseProfits(args = {}) {
     const c = args.c; if (!gameConstantsOk(c)) return null;
@@ -752,21 +724,7 @@
     for (const st of Object.keys(c.core.SALARY_MID)) { const r = gameCalcProduct({ ...args, economyState: Number(st) }); out[st] = r.ok ? r.profitPerHourPerLevel : null; }
     return out;
   }
-  // Rate factor when the economy goes from → to, for a building kind: rate ∝ (AVERAGE_SALARY / SALARY_MID)^salaryModifier.
-  function phaseRateRatio(c, buildingKind, from, to) {
-    if (!gameConstantsOk(c)) return null;
-    const b = c.buildings[String(buildingKind)], sm = Number(b && b.salaryModifier);
-    const mf = pos(c.core.SALARY_MID[String(from)]), mt = pos(c.core.SALARY_MID[String(to)]);
-    return Number.isFinite(sm) && mf && mt ? Math.pow(mf / mt, sm) : null;
-  }
-  // #7 upgrade payback: hours until the extra level's profit pays the construction materials.
-  function upgradePayback({ cost, gainPerHour } = {}) {
-    const c = pos(cost), g = Number(gainPerHour);
-    if (!c) return { hours: null, reason: 'no-cost' };
-    if (!(g > 0)) return { hours: null, reason: 'not-profitable' };
-    return { hours: c / g };
-  }
-  // v2.5.360 full upgrade payback (game code, user-confirmed 2026-10-24):
+  // Full upgrade payback (game code, user-confirmed):
   //   admin overhead base = 1 + (total building levels − 1) / 170 → one more level adds 1/170 to the base; the COO cuts
   //   (base − 1) by coo %, so the effective factor rises by (1/170) × (1 − coo/100), on the wages of every producing level.
   //   upgrade time = level × buildDuration ÷ acceleration (default 1) — the building does not produce meanwhile.
@@ -779,7 +737,7 @@
     if (!(net > 0)) return { hours: null, reason: 'not-profitable', netGainPerHour: net, lostProfit: lost, upgradeHours: up };
     return { hours: up + (c + lost) / net, netGainPerHour: net, lostProfit: lost, upgradeHours: up };
   }
-  // #4 sell price advice for a lot of quality q. Competing listings = quality ≥ q (the game's sell page shows
+  // Sell price advice for a lot of quality q. Competing listings = quality ≥ q (the game's sell page shows
   // "Current exchange orders for Q<q>+"), your own listings excluded. history = daily VWAP [{date, vwap}] of id:q.
   function sellPriceAdvice({ listings, quality, history, unitCost = null, feePct = null, companyId = null, ownIds = [], now = Date.now(), days = 7 } = {}) {
     const q = Number(quality) || 0, own = new Set((ownIds || []).map(Number)), cid = companyId == null ? null : Number(companyId);
@@ -799,7 +757,7 @@
     if (suggested != null && cost != null && (net != null ? net : suggested) < cost) warnings.push('below-cost');
     return { suggested, cheapestQuality: cheapest ? Number(cheapest.quality) : null, competing: comp.length, range, unitCost: cost, feePct: fee, net, warnings };
   }
-  // #6 incoming contract (you buy): unit price vs the cheapest exchange listing at quality ≥ the contract's, and vs
+  // Incoming contract (you buy): unit price vs the cheapest exchange listing at quality ≥ the contract's, and vs
   // your warehouse cost of that product. Positive saves = the contract is cheaper.
   function contractVerdict({ price, quantity, exchangePrice = null, stockCost = null } = {}) {
     const p = pos(price), qty = pos(quantity) || 0, x = pos(exchangePrice), s = pos(stockCost);
@@ -810,18 +768,10 @@
     return out;
   }
 
-  // 2.5.396 the Manager always prices the exchange seller fee at 4% (owner's call); listing/sales-derived fees are not used.
+  // The Manager always prices the exchange seller fee at 4% (owner's call); listing/sales-derived fees are not used.
   const EXCHANGE_FEE_PCT = 4;
 
-  // Exchange fee % from your own listings (/api/v2/companies/<id>/market-orders/): fees ÷ (quantity × price).
-  function listingFeePct(orders) {
-    const ok = (Array.isArray(orders) ? orders : []).filter(o => pos(o && o.fees) && pos(o.quantity) && pos(o.price));
-    if (!ok.length) return null;
-    const v = ok.reduce((a, o) => a + o.quantity * o.price, 0), f = ok.reduce((a, o) => a + o.fees, 0);
-    return f / v * 100;
-  }
-
-  /* Game Accounting screens (GamePages bundle, read 2026-10-25): income statement, balance sheet,
+  /* Game Accounting screens (GamePages bundle): income statement, balance sheet,
    * cash-flow statement and Financial Ratios. Lines, order, subtotals and ratio formulas copy the
    * game's components; inputs are the raw /api/v2/companies/me/{income-statement,balance-sheet,
    * cashflow-statement}/ fields. kind: head | sub (sub-heading) | line | subtotal | total. */
@@ -915,10 +865,10 @@
   }
 
   const api = {
-    gameFinancialStatements, economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, listingFeePct, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, phaseProfits, phaseRateRatio, upgradePayback, adminIncreasePerLevel, upgradePaybackFull, sellPriceAdvice, contractVerdict, effectiveAdminOverhead, executiveSkill, academyActiveSize, executiveRoster, dailyBaseLabour, executiveAdminWhatIf, executiveRoi, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
-    HOUR, WINDOWS, normalizeName, roi, loan, allocate, profitPerHour, buildingProfit, rankProducts,
-    cleanSeries, seriesForResource, changeOver, volatility, rangeStats, sliceRange, moversTable,
-    seriesToCsv, headlineFromVwapRows, appendObservations, priceAt, moversFromTrend,
+    gameFinancialStatements, economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, phaseProfits, adminIncreasePerLevel, upgradePaybackFull, sellPriceAdvice, contractVerdict, effectiveAdminOverhead, executiveSkill, academyActiveSize, executiveRoster, dailyBaseLabour, executiveAdminWhatIf, executiveRoi, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
+    HOUR, roi, loan, allocate, profitPerHour, buildingProfit,
+    cleanSeries, seriesForResource, rangeStats, sliceRange, moversTable,
+    seriesToCsv, appendObservations, moversFromTrend,
     productionCostEntriesFromBuildings, productionCostEntriesFromHistory, mergeProductionCostHistory, productionCostSummary,
     EXCHANGE_FEE_PCT
   };

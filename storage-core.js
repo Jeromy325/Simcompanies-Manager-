@@ -1,7 +1,7 @@
-// v2.5.439 storage retention: pure helpers for scmPruneStorage (background.js). No chrome.* here.
+// Storage retention: pure helpers for scmPruneStorage (background.js). No chrome.* here.
 // Every helper takes a value as stored, returns {value, removed}; removed === 0 means "unchanged, do not write".
 // Corrupt / unexpected shapes are returned untouched (removed 0) so a bad key is never made worse.
-// See research_notes/storage_inventory.md for what reads each family and how far back.
+// The comment on each helper says which reader needs the family kept and how far back.
 (function (root) {
   'use strict';
   const DAY = 86400000;
@@ -72,7 +72,7 @@
   // statements (/day/N/) and generic endpoints are never dropped by age.
   const STATEMENT_DAY = /\/(income-statement|cashflow-statement|balance-sheet)\/day\/\d+\/?$/;
   const PER_ITEM = /\/\d{2,}(\/[a-z-]+)?\/?(\?|$)/i;
-  // v2.5.442: large game replies the Manager never reads (collectibles ~1.4 MB, messages, auctions, transaction
+  // Large game replies the Manager never reads (collectibles ~1.4 MB, messages, auctions, transaction
   // pages). They are not stored on capture and are removed from existing stores by the daily trim.
   const UNUSED_ENDPOINT = /\/api\/v\d+\/(?:market-collectibles|building-auctions|resources-transactions)\/|\/api\/messages_by_company\//i;
   function pruneEndpointData(map, cut) {
@@ -114,7 +114,7 @@
     apply('sellingHistory', pruneTimedMap(store.sellingHistory, v => v?.datetime, cut));
     apply('contractEvents', pruneList(store.contractEvents, e => e?.receivedAt, cut, 10));
     apply('endpointData', pruneEndpointData(store.endpointData, cut));
-    // v2.5.443 Accounting chart series {v,days:{'YYYY-MM-DD':{…}}}: same 90-day trim as the other time series.
+    // Accounting chart series {v,days:{'YYYY-MM-DD':{…}}}: same 90-day trim as the other time series.
     if (isObj(store.accountingDailySeries) && isObj(store.accountingDailySeries.days)) { const r = pruneTimedMap(Object.fromEntries(Object.keys(store.accountingDailySeries.days).map(k => [k, k])), k => `${k}T23:59:59Z`, cut); if (r.removed > 0) apply('accountingDailySeries', { removed: r.removed, value: { ...store.accountingDailySeries, days: Object.fromEntries(Object.keys(r.value).map(k => [k, store.accountingDailySeries.days[k]])) } }); }
     return { patch, removed };
   }
@@ -130,7 +130,48 @@
       .sort((a, b) => b[1] - a[1]).slice(0, n).map(([key, bytes]) => ({ key: String(key).replace(/^([A-Za-z_]+(?::\d+)?).*$/, '$1').slice(0, 60), bytes: Number(bytes) }));
   }
   const approxBytes = v => { try { return v === undefined ? 0 : JSON.stringify(v).length; } catch { return 0; } };
+  // Storage the Manager no longer writes or reads; scmPruneStorage removes what older versions left behind.
+  const OBSOLETE_KEYS = ['marketSyncCycleStartedAt', 'marketSyncCycleReason', 'marketSyncCycleFinishedAt', 'scmRealmDiagnosticSchema', 'scmProductionEventMonitor:0', 'scmProductionEventMonitor:1', 'frozenNetworkPlan'];
+  const OBSOLETE_REALM_FIELDS = ['activeRealmIdentity', 'vwapLegacyDiscarded', 'realmIsolationNote', 'productionEventMonitor', 'buildingAlarms'];
+  // Realm store without the obsolete fields; removed = number of fields dropped.
+  function withoutObsoleteRealmFields(store) {
+    if (!isObj(store)) return same(store);
+    const hit = OBSOLETE_REALM_FIELDS.filter(f => Object.prototype.hasOwnProperty.call(store, f));
+    if (!hit.length) return same(store);
+    const value = { ...store }; for (const f of hit) delete value[f];
+    return { value, removed: hit.length };
+  }
 
-  root.SCM_STORAGE_CORE = { UNUSED_ENDPOINT, DAY, cutoff, pruneList, prunePriceLog, pruneProductionCostHistory, pruneStatementHistory, pruneVwapHistory, pruneTimedMap, pruneEndpointData, planRealmKeys, planRealmStore, planGlobal, topKeys, approxBytes };
+  // Production figures come only from the game's runs (planner-core). Older versions kept rates in the plans (base and
+  // observed rate, protection), a frozen network plan, and reference-rate snapshots (formula values stored as if
+  // measured). Nothing reads them. Plans keep their identity (product, quality, level, mode); snapshots measured from a
+  // run's history row ('production history') stay. plannerState = the frozen plan's planner UI state, for the caller
+  // to keep when no separate planner state is stored.
+  const PRODUCTION_PLAN_RATE_FIELDS = ['baseRatePerLevel', 'observedRatePerHour', 'rateCapturedAt', 'rateSource', 'productionProtection'];
+  function withoutProductionRateData(store) {
+    if (!isObj(store)) return { ...same(store), plannerState: null };
+    let removed = 0; const value = { ...store };
+    const frozen = store.frozenNetworkPlan;
+    const plannerState = isObj(frozen) && isObj(frozen.plannerState) ? frozen.plannerState : null;
+    if (Object.prototype.hasOwnProperty.call(store, 'frozenNetworkPlan')) { delete value.frozenNetworkPlan; removed++; }
+    if (isObj(store.productionPlans)) {
+      let changed = 0; const plans = {};
+      for (const [k, p] of Object.entries(store.productionPlans)) {
+        const hit = isObj(p) ? PRODUCTION_PLAN_RATE_FIELDS.filter(f => Object.prototype.hasOwnProperty.call(p, f)) : [];
+        if (!hit.length) { plans[k] = p; continue; }
+        const next = { ...p }; for (const f of hit) delete next[f];
+        plans[k] = next; changed++;
+      }
+      if (changed) { value.productionPlans = plans; removed += changed; }
+    }
+    if (isObj(store.productionRateSnapshots)) {
+      const keep = Object.entries(store.productionRateSnapshots).filter(([, x]) => String(x?.source || '') === 'production history');
+      const dropped = Object.keys(store.productionRateSnapshots).length - keep.length;
+      if (dropped) { value.productionRateSnapshots = Object.fromEntries(keep); removed += dropped; }
+    }
+    return removed ? { value, removed, plannerState } : { ...same(store), plannerState: null };
+  }
+
+  root.SCM_STORAGE_CORE = { UNUSED_ENDPOINT, OBSOLETE_KEYS, OBSOLETE_REALM_FIELDS, withoutObsoleteRealmFields, PRODUCTION_PLAN_RATE_FIELDS, withoutProductionRateData, cutoff, prunePriceLog, pruneProductionCostHistory, pruneStatementHistory, pruneVwapHistory, pruneTimedMap, pruneEndpointData, planRealmKeys, planRealmStore, planGlobal, topKeys, approxBytes };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.SCM_STORAGE_CORE;
 })(typeof globalThis !== 'undefined' ? globalThis : self);

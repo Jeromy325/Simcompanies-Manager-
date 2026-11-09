@@ -15,7 +15,7 @@
   const make = (price, quality, want, source, at, now, stale) => ({ price, quality, source, at: at ?? null, ageMs: at != null ? Math.max(0, now - at) : null, stale: !!stale, exact: quality === want });
 
   // Sole VWAP reader. Exact quality only. Rows: resourceId|id|kind, quality, value|vwap|price.
-  function vwap(store, realm, id, quality, now = Date.now()) {
+  function vwap(store, realm, id, quality) {
     const d = store?.vwapData; if (!d || !Array.isArray(d.rows)) return null;
     if (!realmOk(d.sourceRealm, realm)) return null;
     id = Number(id); quality = Number(quality);
@@ -31,7 +31,7 @@
     id = Number(id); const want = Number(quality) || 0;
     const mode = opts.mode === 'min' || opts.mode === 'any' ? opts.mode : 'exact';
     const now = opts.now ?? Date.now();
-    const bookMax = opts.bookMaxAgeMs ?? BOOK_MAX_AGE_MS, stMax = opts.simcotoolsMaxAgeMs ?? SIMCOTOOLS_MAX_AGE_MS;
+    const bookMax = opts.bookMaxAgeMs ?? BOOK_MAX_AGE_MS;
     const cid = n(opts.companyId);
     const own = opts.ownIds ? new Set([...(opts.ownIds.values ? opts.ownIds.values() : opts.ownIds)].map(String)) : null;
 
@@ -54,21 +54,21 @@
     if (!best && store?.liveMarketProductCache && typeof store.liveMarketProductCache === 'object') { // keyed id:q; the realm store is already per realm
       for (const [k, p] of Object.entries(store.liveMarketProductCache)) {
         const pq = Number(p?.quality);
-        if (Number(p?.resourceId) !== id || k !== `${id}:${pq}` ||!eligible(mode, want, pq)) continue;
+        if (Number(p?.resourceId) !== id || k !== `${id}:${pq}` || !eligible(mode, want, pq)) continue;
         const pr = n(p?.selected?.price); if (!(pr > 0)) continue;
         if (!best || pr < best.price) best = { price: pr, quality: pq, at: ts(p.fetchedAt || p.updatedAt || p.receivedAt), flagged: p.stale === true };
       }
     }
-    if (best) return make(best.price, best.quality, want, 'simcotools', best.at, now, best.flagged || best.at == null || now - best.at >= stMax);
+    if (best) return make(best.price, best.quality, want, 'simcotools', best.at, now, best.flagged || best.at == null || now - best.at >= SIMCOTOOLS_MAX_AGE_MS);
 
     if (!opts.noVwap) {
-      const v = vwap(store, realm, id, want, now);
+      const v = vwap(store, realm, id, want);
       if (v) return make(v.value, want, want, 'vwap', v.at, now, v.stale);
     }
     return null;
   }
 
-  const api = { marketPrice, vwap, BOOK_MAX_AGE_MS, SIMCOTOOLS_MAX_AGE_MS };
+  const api = { marketPrice, vwap, SIMCOTOOLS_MAX_AGE_MS };
   root.SCM_MARKET_CORE = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
