@@ -1229,7 +1229,7 @@ function scmPageTextNoLayout(){
   const marketLabel=record=>(record?.marketPriceSource==='realm-vwap'||record?.marketPriceSource==='vwap')?'VWAP':'market price';
   const oldTag=record=>record?.marketPriceStale?' (old)':'';
   // Origin label for a price that is not a real exchange order-book price; absent fields or 'exchange' => no label.
-  const priceSrcLabel=(src,stale)=>src==='vwap'||src==='realm-vwap'?'VWAP fallback':src==='simcotools'?(stale?'SimcoTools · stale':'SimcoTools'):'';
+  const priceSrcLabel=(src,stale)=>src==='vwap'||src==='realm-vwap'?'VWAP fallback':src==='ticker'?'Game ticker':src==='simcotools'?(stale?'SimcoTools · stale':'SimcoTools'):'';
   const priceSrcSuffix=(src,stale)=>{const l=priceSrcLabel(src,stale);return l?` · ${l}`:'';};
   const detailLines=record=>{
     const marketPrice=Number(record?.marketPrice),p=Number(record?.price),qty=Number(record?.quantity),rk=record?._scmRank;
@@ -1243,8 +1243,8 @@ function scmPageTextNoLayout(){
     if(!hasMarket){lines.push({k:'Market price',v:'not captured yet (no VWAP either)'});return lines;}
     lines.push({k:label==='VWAP'?'VWAP (no market price)':'Market price',v:priceText(marketPrice)+(record?.marketPriceSource==='simcotools'?'':oldTag(record))+priceSrcSuffix(record?.marketPriceSource,record?.marketPriceStale)});
     lines.push({k:'Vs '+label,v:Math.abs(pct)<0.05?`At ${label}`:`${Math.abs(pct).toFixed(2)}% ${pct<0?'cheaper than':'above'} ${label}`,cls:pct< -0.0001?'cheap':pct>0.0001?'expensive':'flat'});
-    const refName=record?.marketPriceSource==='realm-vwap'?'VWAP':record?.marketPriceSource==='simcotools'?'SimcoTools':'exchange';
-    if(ex)lines.push({k:refName==='VWAP'?`VWAP Q${Number(record?.quality)||0}`:`${refName==='exchange'?'Exchange':refName} Q${Number(record?.quality)||0}+`,v:ex.savesPerUnit>=0?`saves ${priceText(ex.savesPerUnit)}/u vs ${refName} ${priceText(ex.exchangePrice)} (${money(ex.savesTotal)})`:`${refName} ${priceText(ex.exchangePrice)} is ${priceText(-ex.savesPerUnit)}/u cheaper (${money(-ex.savesTotal)})`,cls:ex.savesPerUnit>0.0000001?'cheap':ex.savesPerUnit< -0.0000001?'expensive':'flat'});
+    const refName=record?.marketPriceSource==='realm-vwap'?'VWAP':record?.marketPriceSource==='simcotools'?'SimcoTools':record?.marketPriceSource==='ticker'?'Game ticker':'exchange';
+    if(ex)lines.push({k:refName==='VWAP'?`VWAP Q${Number(record?.quality)||0}`:refName==='Game ticker'?'Game ticker Q0':`${refName==='exchange'?'Exchange':refName} Q${Number(record?.quality)||0}+`,v:ex.savesPerUnit>=0?`saves ${priceText(ex.savesPerUnit)}/u vs ${refName} ${priceText(ex.exchangePrice)} (${money(ex.savesTotal)})`:`${refName} ${priceText(ex.exchangePrice)} is ${priceText(-ex.savesPerUnit)}/u cheaper (${money(-ex.savesTotal)})`,cls:ex.savesPerUnit>0.0000001?'cheap':ex.savesPerUnit< -0.0000001?'expensive':'flat'});
     else lines.push({k:'Exchange',v:'order book not captured yet'});
     if(v&&Number(v.stockCost)>0)lines.push({k:'Your stock',v:`${priceText(v.stockCost)}/u`});
     return lines;
@@ -1389,7 +1389,7 @@ function scmPageTextNoLayout(){
   const S={data:null,realm:null,styled:false,collapsed:readCollapsedPreference(),signature:'',contractSignature:'',contractCardSignature:'',contractDismissedKey:'',contractQtyMode:'saved',contractCustomQty:'',refreshTimer:null,recoveryTimer:null,lastUrl:location.href,observer:null,loadInFlight:false,loadQueued:false,loadEpoch:0,helperTimer:null,positionRaf:0,contractFillTimer:0,leftCopyDiscount:3,leftCopySignature:'',leftCopyOpen:false};
   const esc=v=>String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   // Origin suffix for a price that is not a real exchange order-book price; absent fields or 'exchange' => ''.
-  const priceSrcSuffix=(src,stale)=>{const l=src==='vwap'||src==='realm-vwap'?'VWAP fallback':src==='simcotools'?(stale?'SimcoTools · stale':'SimcoTools'):'';return l?` · ${l}`:'';};
+  const priceSrcSuffix=(src,stale)=>{const l=src==='vwap'||src==='realm-vwap'?'VWAP fallback':src==='ticker'?'Game ticker':src==='simcotools'?(stale?'SimcoTools · stale':'SimcoTools'):'';return l?` · ${l}`:'';};
   const num=v=>Number.isFinite(Number(v))?Number(v).toLocaleString(undefined,{maximumFractionDigits:0}):'—';
   const money=v=>Number.isFinite(Number(v))?'$'+Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
   const norm=v=>String(v??'').toLowerCase().replace(/[’']/g,'').replace(/[^a-z0-9]+/g,'').replace(/s$/,'');

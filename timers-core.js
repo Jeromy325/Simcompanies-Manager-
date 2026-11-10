@@ -12,18 +12,18 @@
   'use strict';
   const UNIT_MS = { sec: 1000, min: 60000, day: 86400000 };
   const TIMERS = [
-    { id: 'orderBook', label: 'Game market prices (order books)', group: 'Service worker', kind: 'interval', unit: 'min', default: 1, min: 1, max: 30, hitsServer: true, server: 'game', alarmName: 'scm-order-book-refresh',
-      description: 'Reads the game\'s own lowest exchange offers, one product per run in turn. This is the price the Manager shows first and matches the game market page. When off, these game prices stop updating.' },
+    { id: 'orderBook', label: 'Game market prices (order books)', group: 'Service worker', kind: 'interval', unit: 'min', default: 5, min: 5, max: 30, hitsServer: true, server: 'game', alarmName: 'scm-order-book-refresh',
+      description: 'Reads one product\'s game order book when the shared game-request slot is free (at most one game request every 5 minutes for all background jobs). This is the price the Manager shows first. When off, these game prices stop updating.' },
     { id: 'liveMarket', label: 'SimcoTools backup prices and VWAP', group: 'Service worker', kind: 'interval', unit: 'min', default: 5, min: 5, max: 720, hitsServer: true, server: 'SimcoTools', alarmName: 'scm-live-market-refresh',
       description: "One SimcoTools request per run (1 per 5 min, shared with the dashboard): VWAP when due, else one product's backup price, oldest first, so each renews about every 5 min x products. Used only when no game order book from the last 6 h exists." },
     { id: 'criticalGuard', label: 'Lost data check', group: 'Service worker', kind: 'interval', unit: 'min', default: 10, min: 10, max: 120, hitsServer: true, server: 'game', alarmName: 'scm-critical-data-guard',
-      description: 'Checks that saved contracts and VWAP are still there and reads them again from the game only if they went missing. When off, lost contracts or VWAP stay missing until the next Sync.' },
+      description: 'Checks that saved contracts and VWAP are still there; a missing one is read again in the shared game-request slot (one background game request every 5 min). When off, lost contracts or VWAP stay missing until the next Sync.' },
     { id: 'prodEventsWatch', label: 'Production events check', group: 'Service worker', kind: 'interval', unit: 'min', default: 15, min: 15, max: 120, hitsServer: false, server: null, alarmName: 'scm-production-events-watch',
       description: 'Asks open game tabs to read production speed events from the page. No server request. When off, events are only picked up while you have the game page open.' },
     { id: 'prodEventsDaily', label: 'Production events daily scan', group: 'Service worker', kind: 'daily', unit: null, default: null, defaultText: 'every 12 h', min: null, max: null, hitsServer: false, server: null, alarmName: 'scm-production-events-daily',
       description: 'A once-a-day scan of open game tabs for production speed events. No server request. When off, only the 15-minute check and the open game page pick up events.' },
     { id: 'gameConstants', label: 'Game constants refresh', group: 'Service worker', kind: 'interval', unit: 'min', default: 360, min: 360, max: 1440, hitsServer: true, server: 'game', alarmName: 'scm-game-constants',
-      description: 'Reads the game\'s building, recipe and resource constants. When off, they only refresh after a Sync, so a game update to recipes or buildings shows up late.' },
+      description: 'Reads the game\'s building, recipe and resource constants, one read per free slot of the shared game-request lane (1 per 5 min). When off, they only refresh after a Sync, so a game update to recipes or buildings shows up late.' },
     { id: 'resourceImages', label: 'Resource image check', group: 'Service worker', kind: 'interval', unit: 'day', default: 7, min: 7, max: 30, hitsServer: true, server: 'game', alarmName: 'scm-resource-image-validation',
       description: 'Checks the saved product images against the game\'s image files. When off, a product image the game changed keeps its old picture.' },
     { id: 'storagePrune', label: 'Old history clean-up', group: 'Service worker', kind: 'daily', unit: null, default: null, defaultText: 'every 24 h', min: null, max: null, hitsServer: false, server: null, alarmName: 'scm-storage-prune',
@@ -35,9 +35,9 @@
     { id: 'warehouseCostCapture', label: 'Warehouse cost page read', group: 'Game page', kind: 'interval', unit: 'sec', default: 10, min: 10, max: 120, hitsServer: false, server: null,
       description: 'While a warehouse product page is visible, reads its sourcing cost from the page. No server request. When off, the cost is only read when you open or return to the page.' },
     { id: 'overlayRefresh', label: 'Game page card refresh', group: 'Game page', kind: 'interval', unit: 'sec', default: 10, min: 10, max: 120, hitsServer: true, server: 'game',
-      description: 'While the game tab is visible, refreshes the Manager card on the game page; this re-reads your warehouse from the game at most every 30 s. When off, the card updates only when you return to the tab or after a game action.' },
+      description: 'While the game tab is visible, refreshes the Manager card on the game page from saved data; your warehouse is re-read from the game about every 15 min in the shared slot (1 game request per 5 min). When off, the card updates only after a game action.' },
     { id: 'listingsRefresh', label: 'My listings and contracts refresh', group: 'Game page', kind: 'interval', unit: 'sec', default: 15, min: 15, max: 300, hitsServer: true, server: 'game',
-      description: 'While the game tab is visible and the listings card is open, reads your exchange listings and outgoing contracts from the game. When off, the card updates only when you return to the tab or after a game action.' },
+      description: 'While the game tab is visible and the listings card is open, re-reads your exchange listings and outgoing contracts about every 15 min each in the shared slot (1 game request per 5 min). When off, the card updates only after a game action.' },
     { id: 'dashLiveMarket', label: 'Dashboard market refresh', group: 'Dashboard', kind: 'interval', unit: 'min', default: 5, min: 5, max: 60, hitsServer: true, server: 'SimcoTools',
       description: "While the dashboard Market or Warehouse tab is open, refreshes prices for the realm and the product you look at, within the shared SimcoTools limit (1 request per 5 min). When off, those prices update only when you press Refresh." },
     { id: 'syncMarketCrawl', label: 'Market prices during Sync', group: 'Sync', kind: 'toggle', unit: null, default: null, defaultText: 'on', min: null, max: null, hitsServer: true, server: 'game',
@@ -120,6 +120,99 @@
   }
   function timerForAlarm(name) { for (const t of TIMERS) if (t.alarmName && t.alarmName === name) return t.id; return null; }
 
-  root.SCM_TIMERS_CORE = { KEY: 'scmSyncTimers', TIMERS, byId, IDS, UNIT_MS, defaults, normalize, normalizeAt, merge, toStored, isDefault, clamp, intervalMs, intervalMinutes, nextDailyAt, clockOf, timerForAlarm };
+  // Shared game-request lane (pure; the service worker keeps the state in chrome.storage.session scmGameLane).
+  // The game's API guide: GET only, at most one request every 5 minutes. Every UNATTENDED (timer / alarm / card poll)
+  // Manager read of www.simcompanies.com/api/ takes a slot: at most one per GAP_MS across all realms and all jobs.
+  // A user-initiated read (Sync, Refresh press, opening a product, the dashboard refresh button) is not in the lane but
+  // moves lastAt, so the next unattended read waits 5 min after it.
+  // Jobs (key = job or job:realm): prio 1 = your stock (warehouse), 2 = order books, 3 = contracts / own orders /
+  // lost-data check, 4 = market ticker (once an hour), 5 = everything else. everyMs = the job's own minimum spacing
+  // (per key). wantTtlMs = how long a refused job keeps its place in the queue without asking again (card polls ask
+  // every 10-15 s; alarm jobs are run again by the lane alarm). A want older than STARVE_MS goes before the wants
+  // that are younger (priority order among the starved), so lower jobs are never starved by an always-due higher one.
+  const LANE_MIN = 60000;
+  const LANE = Object.freeze({
+    KEY: 'scmGameLane', ALARM: 'scm-game-lane', GAP_MS: 5 * LANE_MIN, STARVE_MS: 10 * LANE_MIN, STARVE_LONG_MS: 30 * LANE_MIN,
+    JOBS: Object.freeze({
+      warehouse: Object.freeze({ prio: 1, everyMs: 15 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Warehouse (your stock)' }),
+      // Only while no auth-data was ever captured for the realm (the warehouse read needs its company id); the game's
+      // own pages capture it for free, so this is rare. Same priority as the warehouse, ties go to the older want.
+      authData: Object.freeze({ prio: 1, everyMs: 15 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Company auth-data' }),
+      orderBook: Object.freeze({ prio: 2, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Game order book' }),
+      contractBook: Object.freeze({ prio: 2, everyMs: 5 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Order book for an incoming contract' }),
+      contracts: Object.freeze({ prio: 3, everyMs: 15 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Outgoing contracts' }),
+      marketOrders: Object.freeze({ prio: 3, everyMs: 15 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Your exchange listings' }),
+      lostData: Object.freeze({ prio: 3, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Lost data check' }),
+      ticker: Object.freeze({ prio: 4, everyMs: 60 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Market ticker' }),
+      gameConstants: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Game constants' }),
+      abundance: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Abundance' }),
+      // Retries of the after-Sync week sales ledger (capped at 3, 5/10/20 min apart; its own alarm asks again).
+      accountingWeek: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, label: 'Week sales ledger retry' }),
+      other: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Other' })
+    })
+  });
+  const laneNum = v => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0; };
+  function laneBase(key) { return String(key || '').split(':')[0]; }
+  function laneSpec(key) { return LANE.JOBS[laneBase(key)] || LANE.JOBS.other; }
+  function laneKeyOk(key) { return typeof key === 'string' && /^[A-Za-z]+(?::[01])?$/.test(key); }
+  // Stored value (any shape) -> {v:1, lastAt, lastJob, jobs:{key:lastTakenAt}, wants:{key:{since, at}}}. A time in
+  // the future (clock moved back) is pulled back to now, so a bad stamp can never close the lane for long.
+  function laneState(raw, now = Date.now()) {
+    const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const cap = v => Math.min(laneNum(v), now);
+    const out = { v: 1, lastAt: cap(src.lastAt), lastJob: typeof src.lastJob === 'string' ? src.lastJob.slice(0, 40) : null, jobs: {}, wants: {} };
+    for (const [k, v] of Object.entries(src.jobs && typeof src.jobs === 'object' ? src.jobs : {})) { const t = cap(v); if (laneKeyOk(k) && t && now - t < 86400000) out.jobs[k] = t; }
+    for (const [k, w] of Object.entries(src.wants && typeof src.wants === 'object' ? src.wants : {})) {
+      const at = cap(w && w.at), since = Math.min(cap(w && w.since) || at, at);
+      if (laneKeyOk(k) && at && now - at <= laneSpec(k).wantTtlMs) out.wants[k] = { since, at };
+    }
+    return out;
+  }
+  function laneNextSlotAt(raw, now = Date.now()) { const st = laneState(raw, now); return st.lastAt ? st.lastAt + LANE.GAP_MS : now; }
+  // Who gets the free slot: among the starved wants if there are any, else among all: the lowest prio, then the
+  // oldest, then the key. So a job waiting 10 min goes before a higher job that has not waited that long; a want
+  // older than STARVE_LONG_MS (30 min) goes first whatever its priority (oldest first), so every job gets a turn.
+  function laneWinner(wants, now = Date.now()) {
+    const list = Object.entries(wants || {}).map(([k, w]) => ({ k, since: laneNum(w && w.since), prio: laneSpec(k).prio }));
+    if (!list.length) return null;
+    // A waiting priority-1 job (your warehouse, the company auth-data it needs) always goes first: those have their
+    // own 15 min spacing, so they never hold the lane for more than two slots in three.
+    const top = list.filter(x => x.prio === 1);
+    if (top.length) { top.sort((a, b) => a.since - b.since || (a.k < b.k ? -1 : a.k > b.k ? 1 : 0)); return top[0].k; }
+    const long = list.filter(x => now - x.since >= LANE.STARVE_LONG_MS);
+    if (long.length) { long.sort((a, b) => a.since - b.since || a.prio - b.prio || (a.k < b.k ? -1 : a.k > b.k ? 1 : 0)); return long[0].k; }
+    const starved = list.filter(x => now - x.since >= LANE.STARVE_MS);
+    const pool = starved.length ? starved : list;
+    pool.sort((a, b) => a.prio - b.prio || a.since - b.since || (a.k < b.k ? -1 : a.k > b.k ? 1 : 0));
+    return pool[0].k;
+  }
+  // One decision for job `key` at `now`. take:true -> the caller may send ONE request now (state has the slot stamped).
+  // take:false -> reason 'job-gap' (this job's own spacing; no want kept), 'gap' (5 min since the last game request
+  // not over; want kept), 'yield' (slot free, another job is first; want kept). nextAt = when to ask again.
+  // peek:true decides without stamping the slot (a want is still recorded).
+  function laneDecide(raw, key, now = Date.now(), { peek = false } = {}) {
+    const st = laneState(raw, now);
+    if (!laneKeyOk(key)) return { take: false, reason: 'bad-key', nextAt: now + LANE.GAP_MS, state: st };
+    const spec = laneSpec(key), own = st.jobs[key] || 0;
+    if (own && now - own < spec.everyMs) return { take: false, reason: 'job-gap', nextAt: own + spec.everyMs, state: st };
+    const prev = st.wants[key];
+    st.wants[key] = { since: prev ? prev.since : now, at: now };
+    if (st.lastAt && now - st.lastAt < LANE.GAP_MS) return { take: false, reason: 'gap', nextAt: st.lastAt + LANE.GAP_MS, state: st };
+    const winner = laneWinner(st.wants, now);
+    if (winner !== key) return { take: false, reason: 'yield', winner, nextAt: now, state: st };
+    if (peek) return { take: true, peek: true, nextAt: now, state: st };
+    delete st.wants[key];
+    st.lastAt = now; st.lastJob = key; st.jobs[key] = now;
+    return { take: true, nextAt: now + LANE.GAP_MS, state: st };
+  }
+  // A user-initiated game request went out: the lane waits GAP_MS after it.
+  function laneNote(raw, now = Date.now(), job = 'user') {
+    const st = laneState(raw, now);
+    if (now >= st.lastAt) { st.lastAt = now; st.lastJob = String(job || 'user').slice(0, 40); }
+    return st;
+  }
+
+  root.SCM_TIMERS_CORE = { KEY: 'scmSyncTimers', TIMERS, byId, IDS, UNIT_MS, defaults, normalize, normalizeAt, merge, toStored, isDefault, clamp, intervalMs, intervalMinutes, nextDailyAt, clockOf, timerForAlarm,
+    LANE, laneBase, laneSpec, laneKeyOk, laneState, laneNextSlotAt, laneWinner, laneDecide, laneNote };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.SCM_TIMERS_CORE;
 })(typeof globalThis !== 'undefined' ? globalThis : self);

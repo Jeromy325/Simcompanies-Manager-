@@ -1269,7 +1269,7 @@ function requestLiveMarketRefresh(realm,force=false){
   if(__liveMarketBusy&&!force)return;
   const n=validRealmNumber(realm); if(n==null)return;
   __liveMarketBusy=true;
-  chrome.runtime.sendMessage({type:'LIVE_MARKET_REFRESH',realm:n}).catch(()=>{}).finally(()=>{__liveMarketBusy=false;});
+  return chrome.runtime.sendMessage({type:'LIVE_MARKET_REFRESH',realm:n}).catch(()=>null).finally(()=>{__liveMarketBusy=false;});
 }
 async function requestLiveMarketProduct(realm,resourceId,quality,force=false){
   const n=validRealmNumber(realm),id=Number(resourceId),q=Number(quality);
@@ -1309,6 +1309,68 @@ async function requestLiveMarketProduct(realm,resourceId,quality,force=false){
   }finally{
     __liveMarketProductPending.delete(requestKey);
   }
+}
+// Game order book (/api/v3/market/<realm>/<id>/) read through the game tab: stored receivedAt for one product, newest of the
+// root state and the realm store, only entries captured for this realm.
+function marketBookStamp(s,realm,id){
+  let best=0;const paths=[`/api/v3/market/${realm}/${id}/`,`/api/v3/market/${realm}/${id}`];
+  for(const st of [s,s?.realmStores?.[`realm:${realm}`]]){
+    for(const p of paths){const e=st?.endpointData?.[p];if(!e||(e.captureRealm!=null&&Number(e.captureRealm)!==Number(realm)))continue;const t=Date.parse(String(e.receivedAt||''));if(Number.isFinite(t)&&t>best)best=t;}
+  }
+  return best||null;
+}
+function marketClock(v){const d=new Date(v);return Number.isFinite(d.getTime())?d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',hour12:false}):'';}
+// Newest of the game order book and the SimcoTools fetch, with the name of the source.
+function marketNewestStamp(bookAt,toolsAt,bookSource='Game market'){
+  const t=toolsAt?Date.parse(String(toolsAt)):NaN,tools=Number.isFinite(t)?t:null;
+  if(bookAt&&(!tools||bookAt>=tools))return {at:bookAt,source:bookSource};
+  if(tools)return {at:tools,source:'SimcoTools'};
+  return null;
+}
+let __marketRefreshNote='';let __marketRefreshBusy=false;
+function setMarketRefreshNote(text){__marketRefreshNote=String(text||'');const el=$('#marketRefreshNote');if(el)el.textContent=__marketRefreshNote;}
+const MARKET_BLOCKED_NOTE='The game now blocks direct reads; data updates from game pages you open and from Sync.';
+const __marketBookAsked=new Map();
+// Ask the background for the product's game order book. manual=true is the Refresh press (30 s gap there), otherwise automatic (5 min gap).
+async function requestMarketOrderBook(realm,id,manual){
+  const n=validRealmNumber(realm),rid=Number(id);if(n==null||!(rid>0))return null;
+  const epoch=__realmViewEpoch;const stampBefore=marketBookStamp(window.__scmState,n,rid)||0;
+  let r=null;try{r=await chrome.runtime.sendMessage(manual?{type:'FETCH_EXCHANGE_ORDER_BOOK',realm:n,resourceId:rid,manual:true}:{type:'FETCH_EXCHANGE_ORDER_BOOK',realm:n,resourceId:rid});}catch{r=null;}
+  if(r?.ok&&!r.throttled&&epoch===__realmViewEpoch){
+    // The background answers when the read is saved; local storage can show it a moment later. Up to 4 local reads (no game request) until the newer book is there.
+    try{for(let i=0;i<4;i++){const fresh=await get();if(epoch!==__realmViewEpoch||marketRealmFromState(fresh)!==n)break;const at=marketBookStamp(fresh,n,rid)||0;if(at>stampBefore||i===3){commitDashboardState(fresh);renderLiveMarketProduct(fresh);break;}await new Promise(x=>setTimeout(x,500));}}catch{}
+  }
+  return r;
+}
+function marketAutoOrderBook(realm,id){
+  const n=validRealmNumber(realm);if(n==null||!(Number(id)>0))return;
+  const at=marketBookStamp(window.__scmState,n,id);if(at&&Date.now()-at<5*60000)return;
+  const k=`${n}:${id}`;if(Date.now()-(__marketBookAsked.get(k)||0)<60000)return;__marketBookAsked.set(k,Date.now());
+  requestMarketOrderBook(n,id,false);
+}
+async function marketManualRefresh(btn){
+  if(__marketRefreshBusy)return;
+  const realm=marketRealmFromState(window.__scmState);if(realm==null)return;
+  const [id,q]=String(__selectedMarketKey).split(':').map(Number);const haveProduct=Number.isFinite(id)&&id>0&&Number.isFinite(q);
+  __marketRefreshBusy=true;if(btn)btn.disabled=true;setMarketRefreshNote('Updating game price…');
+  const epoch=__realmViewEpoch;
+  try{
+    const [tools,,book]=await Promise.all([requestLiveMarketRefresh(realm,true),haveProduct?requestLiveMarketProduct(realm,id,q,true):null,haveProduct?requestMarketOrderBook(realm,id,true):null]);
+    if(epoch!==__realmViewEpoch)return;
+    // The two parallel requests each render from their own read; one last local read so the newest storage wins.
+    try{const fresh=await get();if(epoch===__realmViewEpoch&&marketRealmFromState(fresh)===realm){commitDashboardState(fresh);renderLiveMarketProduct(fresh);}}catch{}
+    if(epoch!==__realmViewEpoch)return;
+    let text;
+    if(!haveProduct)text='Select a warehouse resource first.';
+    else if(book?.directReadsBlocked)text=MARKET_BLOCKED_NOTE;
+    else if(book?.ok&&!book.throttled)text=`Game price updated ${marketClock(Date.now())}`;
+    else if(book?.ok){const at=marketBookStamp(window.__scmState,realm,id)||Number(book.lastAt)||0;text=at?`Game price is from ${marketClock(at)}`:'Game price is up to date.';}
+    else if(book?.realmMismatch||book?.skipped)text='Game price not updated: open the game tab on this realm.';
+    else text='Game price could not be updated now. Try again in a minute.';
+    const next=tools&&tools.simcoNextAt?marketClock(tools.simcoNextAt):'';
+    if(next)text+=` · Next SimcoTools refresh at ${next}`;
+    setMarketRefreshNote(text);
+  }finally{__marketRefreshBusy=false;if(btn)btn.disabled=false;}
 }
 // Dashboard market refresh (Settings > Background timers, 'dashLiveMarket'): on/off and the interval come from the saved
 // timer config; re-armed after a save and when the dashboard becomes visible again. Default 5 min, never faster.
@@ -1384,13 +1446,13 @@ function cachedMarketVwap(s,resourceId,quality){
   return m.vwaps.get(key)?.value??null;
 }
 // Origin label for a price that is not a real exchange order-book price (shared rule: exchange => no label).
-function scmSrcLabel(p){return p?(p.source==='vwap'?'VWAP fallback':p.source==='simcotools'?(p.stale?'SimcoTools · stale':'SimcoTools'):''):'';}
+function scmSrcLabel(p){return p?(p.source==='vwap'?'VWAP fallback':p.source==='ticker'?'Game ticker':p.source==='simcotools'?(p.stale?'SimcoTools · stale':'SimcoTools'):''):'';}
 function scmSrcTag(p,cls){const l=scmSrcLabel(p);return l?`<small class="${cls||'market-inline-vwap'}">${escapeHtml(l)}</small>`:'';}
 // Short origin text for a shared-source price: where it came from, how old, and "old" when it is stale.
 function scmMarketSourceText(p){
   if(!p)return 'Market price not captured';
   const age=p.ageMs!=null?plannerAge(p.ageMs):'';
-  const base=p.source==='exchange'?'Exchange listing':p.source==='simcotools'?'SimcoTools':scmSrcLabel(p);
+  const base=p.source==='exchange'?'Exchange listing':p.source==='ticker'?'Game ticker':p.source==='simcotools'?'SimcoTools':scmSrcLabel(p);
   return `${base}${age?` · ${age}`:''}${p.stale?(p.source==='simcotools'?' · stale':p.source==='exchange'?' · old':''):''}`;
 }
 function renderWarehouseMarketTimestamp(s){ensureLiveMarketTimer(s);const el=$('#warehouseMarketUpdated');if(!el)return;const data=s?.liveMarketPriceData;const realm=Number(s?.viewRealm??s?.captureRealm??s?.authData?.authCompany?.realmId);const valid=Number(data?.realm)===realm;const stamp=valid?(data?.updatedAt||data?.fetchedAt):null;const rows=valid&&Array.isArray(data?.rows)?data.rows:[];const pairs=new Set(warehouseRows(s).filter(r=>Number(r?._qty||0)>0&&Number.isFinite(Number(r?._id))&&Number(r?._id)>0&&Number.isFinite(Number(r?._q))&&Number(r?._q)>=0).map(r=>`${Number(r._id)}:${Number(r._q)}`));const captured=new Set(rows.filter(r=>Number(r?.price)>0&&pairs.has(`${Number(r?.resourceId)}:${Number(r?.quality)}`)).map(r=>`${Number(r.resourceId)}:${Number(r.quality)}`));const completeness=pairs.size?` · ${captured.size}/${pairs.size} warehouse prices captured`:'';el.textContent=stamp?`Market prices last updated: ${marketDate(stamp)}${completeness}`:'Market prices last updated: not captured for this realm';}
@@ -1432,8 +1494,13 @@ function renderLiveMarketProduct(s){
   const {fullProduct,currentPriceRow,vwap,selected}=resolveLiveMarketProductView(activeStore,s,item);
   const liveStatus=$('#marketLiveStatus'),liveUpdated=$('#marketLiveUpdated'),realmEl=$('#marketSiteRealm');
   if(realmEl)realmEl.textContent=realm===1?'R2':'R1';
-  if(liveStatus)liveStatus.textContent=selected?.fetchedAt?'Live':'Waiting';
-  if(liveUpdated)liveUpdated.textContent=selected?.fetchedAt?`Updated ${marketDate(selected.fetchedAt)}`:'Waiting for market data…';
+  const sharedForLabel=scmMarketPrice(activeStore,item.id,item.quality,'exact');
+  // A price from the game ticker is a real game price: its time counts like the order book's.
+  const bookOrTickerAt=Math.max(marketBookStamp(s,realm,item.id)||0,sharedForLabel?.source==='ticker'&&Number(sharedForLabel.at)>0?Number(sharedForLabel.at):0)||null;
+  const newest=marketNewestStamp(bookOrTickerAt,selected?.fetchedAt,sharedForLabel?.source==='ticker'&&Number(sharedForLabel.at)===bookOrTickerAt?'Game ticker':'Game market');
+  const newestText=newest?`Updated ${marketDate(newest.at)} · ${newest.source}`:'';
+  if(liveStatus)liveStatus.textContent=newest?'Live':'Waiting';
+  if(liveUpdated)liveUpdated.textContent=newest?newestText:'Waiting for market data…';
   const snap=selected?.selected||{};
   const candle=marketSnapshotCandle(selected);
   const cost=Number.isFinite(item.cost)?item.cost:null;
@@ -1449,9 +1516,9 @@ function renderLiveMarketProduct(s){
   const tableRows=qualityRows.map(q=>{const qp=scmMarketPrice(activeStore,item.id,q.quality,'exact'),price=qp?.price??null,qv=cachedMarketVwap(activeStore,item.id,q.quality);const discounted=price==null?null:roundCurrencyUp(price*(1-discount/100));return `<tr><td>Q${q.quality}</td><td><strong>${marketMoney(price)}</strong>${scmSrcTag(qp)}${qv!=null?`<small class="market-inline-vwap">VWAP ${marketMoney(qv)}</small>`:''}</td><td>${marketMoney(discounted)}</td><td>${marketDate(q.lastTrade)}</td></tr>`;}).join('')||'<tr><td colspan="4">Waiting for exchange data…</td></tr>';
   const candles=Array.isArray(selected?.selected?.candles)?selected.selected.candles.slice(-36):[];
   const volume=marketNumeric(snap.volume)??marketNumeric(snap.candleVolume)??marketNumeric(selected?.volume)??marketNumeric(selected?.raw?.summary?.fiveMinutesCandlestick?.volume)??marketNumeric(selected?.raw?.summary?.volume);
-  host.innerHTML=`<div class="market-product-head"><div class="market-product-title">${img}<div><h2>${escapeHtml(item.name)} Q${item.quality}</h2><p>${num(item.qty)} units in warehouse · Your cost ${cost==null?'—':money(cost)}</p></div></div><span class="market-follow">★</span></div><div class="market-primary-grid"><div class="market-primary-price"><small>MARKET PRICE</small><strong>${marketMoney(currentMarketPrice)}</strong><span>${change==null?'':`${change>=0?'+':''}${change.toFixed(2)}%`} · Last trade ${marketDate(snap.lastTrade??currentPriceRow?.lastTrade)}${sharedPrice?` · ${escapeHtml(scmMarketSourceText(sharedPrice))}`:''}</span></div><div class="market-primary-stat"><span>Volume</span><strong>${volume==null?'—':num(volume)}</strong><small>${escapeHtml(selected?.volumePeriod||'Current market')}</small></div><div class="market-primary-stat"><span>VWAP</span><strong>${marketMoney(vwap)}</strong><small>${contract==null?'':`Contract ${money(contract)} at ${discount.toFixed(1)}% off`}</small></div></div><div class="market-five"><div><strong>5 minutes</strong><span>Open ${marketMoney(candle.open)}</span><span>Close ${marketMoney(candle.close)}</span><span>Range ${marketMoney(candle.low)} – ${marketMoney(candle.high)}</span><span>Volume ${candle.volume==null?'—':num(candle.volume)}</span></div></div><div class="market-contract-table"><div class="market-contract-table-head"><strong>EXCHANGE / CONTRACT DATA</strong><span>Discount ${discount.toFixed(1)}%</span></div><div class="table-wrap"><table class="mobile-cards"><thead><tr><th>QUALITY</th><th>MARKET DATA</th><th>CONTRACT PRICE</th><th>LAST TRADE</th></tr></thead><tbody>${tableRows}</tbody></table></div></div><div class="market-candle-wrap"><div class="market-candle-head"><strong>MARKET CHART</strong><span>${candles.length?`${candles.length} recent candles`:'Waiting for chart data'}</span></div><div id="marketLiveCandleChart" class="market-live-candle-chart">${renderLiveCandleChart(candles)}</div></div><div class="market-product-footer"><span>Live SimcoTools market data</span><span>${selected?.fetchedAt?`Updated ${marketDate(selected.fetchedAt)}`:'Waiting for update…'}</span></div>`;
+  host.innerHTML=`<div class="market-product-head"><div class="market-product-title">${img}<div><h2>${escapeHtml(item.name)} Q${item.quality}</h2><p>${num(item.qty)} units in warehouse · Your cost ${cost==null?'—':money(cost)}</p></div></div><span class="market-follow">★</span></div><div class="market-primary-grid"><div class="market-primary-price"><small>MARKET PRICE</small><strong>${marketMoney(currentMarketPrice)}</strong><span>${change==null?'':`${change>=0?'+':''}${change.toFixed(2)}%`} · Last trade ${marketDate(snap.lastTrade??currentPriceRow?.lastTrade)}${sharedPrice?` · ${escapeHtml(scmMarketSourceText(sharedPrice))}`:''}</span></div><div class="market-primary-stat"><span>Volume</span><strong>${volume==null?'—':num(volume)}</strong><small>${escapeHtml(selected?.volumePeriod||'Current market')}</small></div><div class="market-primary-stat"><span>VWAP</span><strong>${marketMoney(vwap)}</strong><small>${contract==null?'':`Contract ${money(contract)} at ${discount.toFixed(1)}% off`}</small></div></div><div class="market-five"><div><strong>5 minutes</strong><span>Open ${marketMoney(candle.open)}</span><span>Close ${marketMoney(candle.close)}</span><span>Range ${marketMoney(candle.low)} – ${marketMoney(candle.high)}</span><span>Volume ${candle.volume==null?'—':num(candle.volume)}</span></div></div><div class="market-contract-table"><div class="market-contract-table-head"><strong>EXCHANGE / CONTRACT DATA</strong><span>Discount ${discount.toFixed(1)}%</span></div><div class="table-wrap"><table class="mobile-cards"><thead><tr><th>QUALITY</th><th>MARKET DATA</th><th>CONTRACT PRICE</th><th>LAST TRADE</th></tr></thead><tbody>${tableRows}</tbody></table></div></div><div class="market-candle-wrap"><div class="market-candle-head"><strong>MARKET CHART</strong><span>${candles.length?`${candles.length} recent candles`:'Waiting for chart data'}</span></div><div id="marketLiveCandleChart" class="market-live-candle-chart">${renderLiveCandleChart(candles)}</div></div><div class="market-product-footer"><span>${newest?escapeHtml(newest.source==='SimcoTools'?'Live SimcoTools market data':newest.source==='Game ticker'?'Game ticker data':'Game market data'):'Live market data'}</span><span>${newest?escapeHtml(newestText):'Waiting for update…'}</span></div>`;
   if(!select.dataset.bound){
-    select.addEventListener('change',()=>{__selectedMarketKey=select.value;const [id,q]=select.value.split(':').map(Number);const currentRealm=marketRealmFromState(window.__scmState);if(Number.isFinite(id)&&Number.isFinite(q)&&currentRealm!=null)requestLiveMarketProduct(currentRealm,id,q,true);if(window.__scmState)renderLiveMarketProduct(window.__scmState);});
+    select.addEventListener('change',()=>{__selectedMarketKey=select.value;const [id,q]=select.value.split(':').map(Number);const currentRealm=marketRealmFromState(window.__scmState);if(Number.isFinite(id)&&Number.isFinite(q)&&currentRealm!=null){requestLiveMarketProduct(currentRealm,id,q,true);marketAutoOrderBook(currentRealm,id);}setMarketRefreshNote('');if(window.__scmState)renderLiveMarketProduct(window.__scmState);});
     $('#marketContractDiscount')?.addEventListener('input',()=>{
       const state=window.__scmState;if(!state)return;
       const input=$('#marketContractDiscount');
@@ -1462,7 +1529,7 @@ function renderLiveMarketProduct(s){
       renderLiveMarketProduct(state);
       if($('#buildingPlanner'))renderBuildingPlanner(state);
     });
-    $('#marketRefreshNow')?.addEventListener('click',()=>{const currentRealm=marketRealmFromState(window.__scmState);if(currentRealm!=null){requestLiveMarketRefresh(currentRealm,true);const [id,q]=String(__selectedMarketKey).split(':').map(Number);if(Number.isFinite(id)&&Number.isFinite(q))requestLiveMarketProduct(currentRealm,id,q,true);}});
+    $('#marketRefreshNow')?.addEventListener('click',e=>{marketManualRefresh(e.currentTarget).catch(()=>{});});
     select.dataset.bound='1';
   }
   if(!fullProduct)requestLiveMarketProduct(realm,item.id,item.quality);
@@ -2335,6 +2402,7 @@ function plannerMarketPrice(s,id,q,mode){
   if(!p)return null;
   const age=p.ageMs!=null?plannerAge(p.ageMs):'',old=p.stale?(p.source==='simcotools'?' · stale':' · old'):'';
   const where=p.source==='exchange'?(mode==='any'?'cheapest exchange listing, any quality (as game)':'exchange listing')
+    :p.source==='ticker'?'Game ticker (lowest Q0 ask)'
     :p.source==='simcotools'?(mode==='any'?'SimcoTools, cheapest captured quality':'SimcoTools current price')
     :'VWAP fallback';
   const hint=p.source==='simcotools'&&mode==='any'?' — open the game to load the exchange':'';
@@ -2694,7 +2762,7 @@ function analyzeContext(s){
   const lots=plannerWarehouseLots(s),realm=validRealmNumber(s?.viewRealm??s?.selectedRealm??s?.authData?.authCompany?.realmId);
   let d=null;try{d=plannerInsightsData({s,recipes:[],bonusPct:plannerBonusPct(s)});}catch{}
   const owned=Array.isArray(s?.buildings)?s.buildings:[];
-  const maker=id=>owned.find(b=>Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId)===Number(id))||null;
+  const maker=id=>owned.find(b=>Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId)===Number(id))||owned.find(b=>Number(b?.pinnedResource)===Number(id))||null;
   return {realm,lots,buildingIds:owned.map(b=>Number(b?.id)).filter(id=>id>0),companyName:s?.authData?.authCompany?.company||'',
     nameOf:id=>resourceName({_id:Number(id),kind:Number(id)},s),
     // CSV import: the background stores it (realm-keyed queues; captured data wins).
@@ -2724,7 +2792,7 @@ function renderPlannerInsights(host){
   if(best&&cur&&cur.profitPerHourPerLevel!=null&&best.resourceId!==curId){const gain=best.profitPerHourPerLevel-cur.profitPerHourPerLevel,pct=cur.profitPerHourPerLevel>0?gain/cur.profitPerHourPerLevel*100:null;verdict=gain>0.005?`Switching to <b>${escapeHtml(nameOf(best.resourceId))}</b> earns ${plannerMoney(gain*lvl)}/h more at level ${num(lvl)}${pct!=null?` (+${num(+pct.toFixed(1))}%)`:''}.`:'';}
   else if(best&&best.resourceId===curId)verdict=`${escapeHtml(nameOf(curId))} is already the best product for this building.`;
   const priced=ranked.filter(x=>x.profitPerHourPerLevel!=null),unpriced=ranked.filter(x=>x.profitPerHourPerLevel==null);const top=priced.slice(0,5);if(cur&&!top.includes(cur))top.push(cur);
-  const srcShort=v=>String(v||'').split(' — ')[0].replace('cheapest exchange listing, any quality (as game)','exchange').replace('SimcoTools, cheapest captured quality','SimcoTools');
+  const srcShort=v=>String(v||'').split(' — ')[0].replace('cheapest exchange listing, any quality (as game)','exchange').replace('SimcoTools, cheapest captured quality','SimcoTools').replace('Game ticker (lowest Q0 ask)','Game ticker');
   // Profit / h / level in each economy phase (same prices; the game's rate and labour per unit change).
   const phaseOf=x=>x.complete&&x.salePrice!=null?C.phaseProfits({c:gc,resourceId:x.resourceId,bonusPct,adminPct,robots:Boolean(ctx.robots),eventPct:eventPctOf(x.resourceId),salePrice:x.salePrice,inputCostOf}):null;
   const phases=new Map(priced.map(x=>[x.resourceId,phaseOf(x)]));
@@ -2795,7 +2863,7 @@ function plannerRunOutHtml(ctx){
   const lastCls=h=>h==null?'si-good':h<6?'si-bad':h<hours?'si-warn':'si-good';
   const runRows=runout.map(r=>{
     const mk=plannerMarketPrice(s,r.id,r.minQuality,'min');
-    const maker=ownedKinds.get(String(gc.resources[String(r.id)]?.producedAt??''));
+    const maker=owned.find(b=>Number(b?.currentResourceId)===Number(r.id))||owned.find(b=>Number(b?.pinnedResource)===Number(r.id))||ownedKinds.get(String(gc.resources[String(r.id)]?.producedAt??''));
     let own=null,ownMissing='';if(maker){const res=C.gameCalcProduct({c:gc,resourceId:r.id,economyState,eventPct:eventPctOf(r.id),bonusPct,adminPct,robots:Boolean(maker.robotsSpecialization),inputCostOf,abundancePct:plannerAbundancePct(s,maker.raw?.id??maker.id,r.id)});if(res.ok&&res.complete)own=res.sourcingCostPerUnit;else if(res.ok)ownMissing=res.missing.map(nameOf).join(', ');}
     const mob=C.makeOrBuy(own,mk?.price);
     const mkTag=mk?.srcLabel?` <small>${escapeHtml(mk.srcLabel)}</small>`:'';const mobText=mob.verdict==='make'?`<span class="si-good">Make</span>: your cost ${plannerMoney(mob.ownCost)} vs market ${plannerMoney(mob.marketPrice)}${mkTag} — saves ${plannerMoney(mob.savesPerUnit)}/unit (${num(+mob.savesPct.toFixed(1))}%)`:mob.verdict==='buy'?`<span class="si-bad">Buy</span>: market ${plannerMoney(mob.marketPrice)}${mkTag} vs your cost ${plannerMoney(mob.ownCost)} — ${plannerMoney(mob.savesPerUnit)}/unit cheaper (${num(+mob.savesPct.toFixed(1))}%)`:maker&&mob.verdict==='no-price'?`Your cost ${plannerMoney(mob.ownCost)}/unit · no market price captured`:maker&&ownMissing?`Make or buy: your cost unknown — no price for ${escapeHtml(ownMissing)}`:'';
@@ -2930,7 +2998,7 @@ function renderBuildingPlanner(s,options={}){
       const cardOvr=(b.produces||[]).includes(productOverrides[String(b.id)])?productOverrides[String(b.id)]:null;
       const cardQ=Number(ui.qualityByBuilding?.[String(b.id)]);
       const cardPlan=cardOvr?{product:cardOvr,quality:Number.isFinite(cardQ)?cardQ:(b.currentQuality??0)}:b.testKind?{product:b.produces?.[0]||'',quality:Number.isFinite(cardQ)?cardQ:0}:b.productionPlan||null;
-      const cardProduct=String(cardPlan?.product||b.currentResource||b.produces?.[0]||'').trim();
+      const cardProduct=String(cardPlan?.product||plannerCurrentProduct(b,recipes)||'').trim();
       const cardQuality=Number.isFinite(Number(cardPlan?.quality))?Number(cardPlan.quality):b.currentQuality;
       const cardRecipe=cardProduct?recipeBy.get(plannerNormalizeName(cardProduct)):null;
       const cardInputs=(cardRecipe?.materials||[]).map(m=>`${plannerResourceNameById(recipes,Number(m.id),s)}${cardQuality!=null?` Q${Math.max(0,Number(cardQuality)-1)}`:''}`).filter(Boolean);
