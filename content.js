@@ -623,6 +623,8 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
   }).observe(document.documentElement || document, {subtree:true, childList:true});
 
   startPing();
+  // The page is going away (realm switch, reload, bfcache): answer every open PAGE_API_GET now.
+  try { window.addEventListener('pagehide', () => { for (const p of Array.from(pending.values())) { try { p.resolve({ ok:false, status:0, error:'The game page was reloaded or closed before the API answered.', pageClosed:true }); } catch {} } }); } catch {}
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if(message?.type==='RUN_DOM_RUNTIME_DIAGNOSTIC'){
@@ -734,9 +736,19 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
       return true;
     }
     if (message?.type !== 'PAGE_API_GET') return;
+    // Every path answers: the page-hook's API_RESULT, a failed bridge send, a last-resort timeout (after the
+    // background's own race, so it never changes timing; it only frees the entry), or pagehide (the realm switch or a
+    // reload unloads the page; background treats pageClosed as a quiet skip). Without this, a page unload left the
+    // channel open and Chrome reported "message channel closed before a response was received".
     const id = `${Date.now()}-${++seq}`;
-    pending.set(id, { resolve: sendResponse });
-    globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'API_GET', id, path: message.path, timeoutMs: message.timeoutMs });
+    const requested = Number(message.timeoutMs);
+    const hookTimeoutMs = Number.isFinite(requested) && requested >= 3000 ? Math.min(requested, 60000) : 8000;
+    let settled = false;
+    const reply = (result) => { if (settled) return; settled = true; clearTimeout(timer); pending.delete(id); try { sendResponse(result); } catch {} };
+    const timer = setTimeout(() => reply({ ok:false, status:0, error:'Sim Companies page API request timed out.' }), hookTimeoutMs + 3000);
+    pending.set(id, { resolve: reply });
+    try { globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'API_GET', id, path: message.path, timeoutMs: message.timeoutMs }); }
+    catch (e) { reply({ ok:false, status:0, error:e?.message || String(e) }); }
     return true;
   });
 })();
@@ -1453,7 +1465,7 @@ function scmPageTextNoLayout(){
     try{
       const v=JSON.parse(localStorage.getItem(OPEN_KEY)||'null');
       if(v&&typeof v.open==='boolean')L.open=v.open;
-      else{const old=k=>{try{const o=JSON.parse(localStorage.getItem(k)||'null');return o&&typeof o.open==='boolean'?o.open:null;}catch{return null;}};const a=old('scm-listings-card-v1'),b=old('scm-contracts-card-v1');if(a!=null||b!=null)L.open=!!(a||b);}
+      else{const old=k=>{try{const o=JSON.parse(localStorage.getItem(k)||'null');return o&&typeof o.open==='boolean'?o.open:null;}catch{return null;}};const a=old('scm-listings-card-v1'),b=old('scm-contracts-card-v1');if(a!=null||b!=null)L.open=!!(a||b);else if(Math.min(window.innerWidth,window.screen?.width||9999)<700)L.open=false;/* phone (content scripts can start before the page viewport is applied, so innerWidth alone may read 980): the card is nearly full width and would cover the game's content; start as the small pill until the player opens it */}
     }catch{}
     const saveOpen=()=>{try{localStorage.setItem(OPEN_KEY,JSON.stringify({open:L.open}));}catch{}};
     const readPos=id=>{try{const v=JSON.parse(localStorage.getItem('scmCardPos:'+id)||'null');return v&&Number.isFinite(v.x)&&Number.isFinite(v.y)?v:null;}catch{return null;}};
@@ -1477,7 +1489,7 @@ function scmPageTextNoLayout(){
 .scm-ls-total{text-align:right;white-space:nowrap;font-weight:600}.scm-ls-sub{color:#afaaa8;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .scm-ls-vs{text-align:right;white-space:nowrap;font-size:11px;color:#afaaa8}.scm-ls-vs.hi{color:#f0c674}.scm-ls-vs.lo{color:#f5a37a}
 .scm-ls-none{color:#afaaa8;font-size:11px;padding:10px 4px;text-align:center}
-#scm-listings-pill{position:fixed;z-index:2147483000;box-sizing:border-box;border:1px solid #514d4b;border-radius:14px;background:rgba(36,34,33,.9);color:#e9e8e8;font:700 11px/1 system-ui,-apple-system,sans-serif;padding:6px 9px;min-height:26px;cursor:pointer;touch-action:none;-webkit-user-select:none;user-select:none;box-shadow:0 3px 10px rgba(0,0,0,.3);opacity:.85}`;
+#scm-listings-pill{white-space:nowrap;position:fixed;z-index:2147483000;box-sizing:border-box;border:1px solid #514d4b;border-radius:14px;background:rgba(36,34,33,.9);color:#e9e8e8;font:700 11px/1 system-ui,-apple-system,sans-serif;padding:6px 9px;min-height:26px;cursor:pointer;touch-action:none;-webkit-user-select:none;user-select:none;box-shadow:0 3px 10px rgba(0,0,0,.3);opacity:.85}`;
       (document.head||document.documentElement).appendChild(st);
     };
     // Card: default top-right under the game header; pill: right edge, a little below the middle (clear of the
@@ -1519,7 +1531,7 @@ function scmPageTextNoLayout(){
       if(s===L.sig&&have){if(L.open)updateAgo();return;}
       L.sig=s;render();};
     const requestL=(refresh=false)=>{
-      if(!L.open&&!refresh)return;
+      if(!L.open&&!refresh&&L.data)return;
       const realm=currentRealm();if(realm==null){paint();return;}
       const seq=++L.seq;
       try{chrome.runtime.sendMessage({type:'GET_OWN_LISTINGS_DATA',realm,refresh},r=>{
@@ -1538,7 +1550,7 @@ function scmPageTextNoLayout(){
     };
     const request=(refresh=false)=>{requestL(refresh);if(L.open||refresh)requestC(refresh);};
     const tickAgo=()=>{if(document.hidden||!L.open)return;updateAgo();if(!document.getElementById(CARD))paint();};
-    const setOpen=open=>{L.open=open;saveOpen();L.sig='';paint();if(open)request(true);};
+    const setOpen=open=>{L.open=open;saveOpen();L.sig='';paint();if(open)request(true);else{if(!L.data)requestL(true);if(!L.cdata)requestC(false);}};
     // drag (card header / pill), clamped; a tap on the pill reopens the card
     let drag=null;
     document.addEventListener('pointerdown',e=>{

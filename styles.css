@@ -1757,3 +1757,9 @@ html.scm-mobile table.mobile-cards tr:has(>td[colspan]:only-child){border:0!impo
 .planner-output-planned{border-style:dashed}
 @media(min-width:801px){.planner-output-grid.has-planned{grid-template-columns:1.2fr 1fr 1fr 1fr 1fr}}
 @media(min-width:981px){.planner-output-grid.has-planned.has-diff{grid-template-columns:1.2fr repeat(6,1fr)}}
+
+/* Building image failed to load (game slow / blocked): category icon fills the same box as the image. */
+.owned-building-image.planner-icon-fallback{width:64px;height:58px;font-size:30px;box-sizing:border-box}
+.planner-building-hero-image.planner-icon-fallback{font-size:34px;box-sizing:border-box}
+.production-page .owned-building-image.planner-icon-fallback{width:58px;height:50px;font-size:26px}
+@media(max-width:800px){.owned-building-image.planner-icon-fallback{width:58px;height:52px;font-size:26px}.production-page .owned-building-image.planner-icon-fallback{width:54px;height:47px;font-size:24px}}
