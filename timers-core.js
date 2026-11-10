@@ -5,6 +5,7 @@
 //   server: slower and off are allowed, faster is not) and never above `max`.
 // - daily timers: `at` is a local clock time 'HH:MM'. at:null (the default) keeps the old fixed-period schedule
 //   that is described in `defaultText`.
+// - toggle timers (kind 'toggle'): on/off only, no interval or time ({enabled}).
 // accountingWalk is listed here but its setting lives in scmAccountingWalkSchedule (see `source`); the service
 // worker reads and writes that key for it.
 (function (root) {
@@ -13,8 +14,8 @@
   const TIMERS = [
     { id: 'orderBook', label: 'Game market prices (order books)', group: 'Service worker', kind: 'interval', unit: 'min', default: 1, min: 1, max: 30, hitsServer: true, server: 'game', alarmName: 'scm-order-book-refresh',
       description: 'Reads the game\'s own lowest exchange offers, one product per run in turn. This is the price the Manager shows first and matches the game market page. When off, these game prices stop updating.' },
-    { id: 'liveMarket', label: 'SimcoTools backup prices and VWAP', group: 'Service worker', kind: 'interval', unit: 'min', default: 60, min: 60, max: 720, hitsServer: true, server: 'SimcoTools', alarmName: 'scm-live-market-refresh',
-      description: 'Reads VWAP and backup prices for both realms from SimcoTools. A backup price is used only when no game order book from the last 6 h exists for a product. When off, VWAP and backup prices go stale.' },
+    { id: 'liveMarket', label: 'SimcoTools backup prices and VWAP', group: 'Service worker', kind: 'interval', unit: 'min', default: 5, min: 5, max: 720, hitsServer: true, server: 'SimcoTools', alarmName: 'scm-live-market-refresh',
+      description: "One SimcoTools request per run (1 per 5 min, shared with the dashboard): VWAP when due, else one product's backup price, oldest first, so each renews about every 5 min x products. Used only when no game order book from the last 6 h exists." },
     { id: 'criticalGuard', label: 'Lost data check', group: 'Service worker', kind: 'interval', unit: 'min', default: 10, min: 10, max: 120, hitsServer: true, server: 'game', alarmName: 'scm-critical-data-guard',
       description: 'Checks that saved contracts and VWAP are still there and reads them again from the game only if they went missing. When off, lost contracts or VWAP stay missing until the next Sync.' },
     { id: 'prodEventsWatch', label: 'Production events check', group: 'Service worker', kind: 'interval', unit: 'min', default: 15, min: 15, max: 120, hitsServer: false, server: null, alarmName: 'scm-production-events-watch',
@@ -38,7 +39,9 @@
     { id: 'listingsRefresh', label: 'My listings and contracts refresh', group: 'Game page', kind: 'interval', unit: 'sec', default: 15, min: 15, max: 300, hitsServer: true, server: 'game',
       description: 'While the game tab is visible and the listings card is open, reads your exchange listings and outgoing contracts from the game. When off, the card updates only when you return to the tab or after a game action.' },
     { id: 'dashLiveMarket', label: 'Dashboard market refresh', group: 'Dashboard', kind: 'interval', unit: 'min', default: 5, min: 5, max: 60, hitsServer: true, server: 'SimcoTools',
-      description: 'While the dashboard Market or Warehouse tab is open, refreshes market prices for the realm and the product you are looking at. When off, those prices update only when you press Refresh.' }
+      description: "While the dashboard Market or Warehouse tab is open, refreshes prices for the realm and the product you look at, within the shared SimcoTools limit (1 request per 5 min). When off, those prices update only when you press Refresh." },
+    { id: 'syncMarketCrawl', label: 'Market prices during Sync', group: 'Sync', kind: 'toggle', unit: null, default: null, defaultText: 'on', min: null, max: null, hitsServer: true, server: 'game',
+      description: "After each Sync, opens the game market page of each product you stock or produce, so the game loads its order book and the Manager keeps the exact game price. Adds about 1-3 s per product (max 6 s). When off, only pages you open update prices." }
   ];
   const byId = Object.create(null);
   for (const t of TIMERS) { Object.freeze(t); byId[t.id] = t; }
@@ -47,7 +50,7 @@
 
   function defaultEntry(t) {
     const e = { enabled: t.defaultEnabled !== false };
-    if (t.kind === 'interval') e.every = t.default; else e.at = null;
+    if (t.kind === 'interval') e.every = t.default; else if (t.kind !== 'toggle') e.at = null;
     return e;
   }
   function defaults() { const out = {}; for (const t of TIMERS) out[t.id] = defaultEntry(t); return out; }
@@ -71,7 +74,7 @@
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return e;
     if (typeof raw.enabled === 'boolean') e.enabled = raw.enabled;
     if (t.kind === 'interval') { if ('every' in raw) e.every = clamp(id, raw.every); }
-    else if ('at' in raw) e.at = normalizeAt(raw.at);
+    else if (t.kind !== 'toggle' && 'at' in raw) e.at = normalizeAt(raw.at);
     return e;
   }
   // Stored value (any shape) → full config with every id. Unknown ids and bad entries are dropped / defaulted.

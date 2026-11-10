@@ -1646,6 +1646,9 @@ async function scmLoadTimers(){
   })().finally(()=>{__timersLoading=null;});
   return __timersLoading;
 }
+// The block notice from the background (game blocks direct reads) is information, not a failure: no "failed" wording.
+function scmIsBlockNotice(t){return /blocks direct reads/i.test(String(t||''));}
+function scmSyncProblemText(err,fallback){const m=String(err||fallback||'');return scmIsBlockNotice(m)?m:`Sync failed: ${m}`;}
 function timersClock(ms){const d=new Date(Number(ms));if(!Number.isFinite(d.getTime()))return null;const same=new Date().toDateString()===d.toDateString();const t=d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});return same?t:`${d.toLocaleDateString(undefined,{weekday:'short'})} ${t}`;}
 function timersAgo(ms){const d=Date.now()-Number(ms);if(!Number.isFinite(d))return null;if(d<60000)return 'just now';if(d<3600000)return `${Math.round(d/60000)} min ago`;if(d<86400000)return `${Math.round(d/3600000)} h ago`;return `${Math.round(d/86400000)} d ago`;}
 function timersUnitText(t,n){return t.unit==='sec'?'sec':t.unit==='min'?'min':(n===1?'day':'days');}
@@ -1656,6 +1659,8 @@ function timersRowHtml(t,e){
     const u=timersUnitText(t,e.every);
     value=`<span class="nf-val"><input type="number" inputmode="numeric" min="${Number(t.min)}" max="${Number(t.max)}" step="1" value="${escapeHtml(e.every)}" data-tm-every="${escapeHtml(t.id)}" aria-label="${name}: every, in ${escapeHtml(u)}"><span class="tm-unit">${t.unit==='day'?'days':escapeHtml(u)}</span></span>`;
     hint=`min ${Number(t.min)} – max ${Number(t.max)} ${t.unit==='day'?'days':escapeHtml(t.unit)}${t.hitsServer?' · can’t be faster than today, to keep game-server requests low':''}`;
+  }else if(t.kind==='toggle'){
+    value='';hint='';
   }else{
     const isWalk=t.id==='accountingWalk';
     value=`<span class="nf-val"><input type="time" value="${escapeHtml(e.at||'')}" data-tm-at="${escapeHtml(t.id)}" aria-label="${name}: time of day"></span>`;
@@ -3331,7 +3336,7 @@ function renderDiagnostics(s){
     <div><span>Active realm key</span><strong>${escapeHtml(s?.activeRealmKey||'—')}</strong></div>
     <div><span>Capture realm</span><strong>${escapeHtml(store?.authData?.authCompany?.realmId??store?.gameOverlaySnapshot?.realm??'—')}</strong></div>
     <div><span>Sync status</span><strong>${escapeHtml(store?.syncStatus||'—')}</strong></div>
-    <div><span>Sync error</span><strong>${escapeHtml(store?.syncError||'None')}</strong></div>
+    <div><span>Sync error</span><strong>${escapeHtml(store?.syncError&&scmIsBlockNotice(store.syncError)?`Note: ${store.syncError}`:(store?.syncError||'None'))}</strong></div>
     <div><span>Buildings</span><strong>${buildingArrayFromState(store||{}).length}</strong></div>
     <div><span>Warehouse lines</span><strong>${warehouseRowsNow.length}</strong></div>
     <div><span>Overlay rows</span><strong>${overlayRows.length}</strong></div>
@@ -3972,9 +3977,9 @@ $('#contractForm').onsubmit=async e=>{
       $('#syncInfo').textContent=`${realmDisplayNumber(r.realm)} Sync complete · ${r.successful||0}/${r.total||0} game pages captured · finishing weekly sales ledger…`;
       requestAccountingWeekLedgerRefresh('sync-complete').catch(()=>{});
     }
-    else { $('#syncInfo').textContent=`Sync failed: ${r?.error||'No response from extension service worker.'}`; }
+    else { $('#syncInfo').textContent=scmSyncProblemText(r?.error,'No response from extension service worker.'); }
   }catch(e){
-    $('#syncInfo').textContent=`Sync failed: ${e?.message||String(e)}`;
+    $('#syncInfo').textContent=scmSyncProblemText(e?.message||String(e));
   }finally{ btn.disabled=false; btn.textContent='Sync'; }
 };
 let __renderTimer=null;
@@ -4555,7 +4560,7 @@ scmOnStorageChanged((changes, area)=>{
     const el=$('#syncInfo');
     const status=(changes.syncStatus?.newValue??__scmState?.syncStatus)||'';
     const error=(changes.syncError?.newValue??__scmState?.syncError)||'';
-    if(el)el.textContent=__realmHydrationPending&&__scmState?.viewRealm!=null?`Switching to ${realmName(Number(__scmState.viewRealm))}…`:error?`${status||'Error'}: ${error}`:String(status||'No sync yet');
+    if(el)el.textContent=__realmHydrationPending&&__scmState?.viewRealm!=null?`Switching to ${realmName(Number(__scmState.viewRealm))}…`:error?(scmIsBlockNotice(error)?String(error):`${status||'Error'}: ${error}`):String(status||'No sync yet');
     if(changes.syncStatus&&/Sync complete/i.test(String(status))&&__scmState){
       setTimeout(()=>{
         try{patchOverviewGrossResources(__scmState);}catch(e){console.debug('Reactive gross-resource sync patch failed',e);}

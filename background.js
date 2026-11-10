@@ -39,7 +39,16 @@ let scmTimersMemo=null,scmTimersWriteTail=Promise.resolve();
 async function scmTimersConfig(){
   const C=globalThis.SCM_TIMERS_CORE;if(!C)return null;
   if(scmTimersMemo)return scmTimersMemo;
-  try{const raw=(await chrome.storage.local.get({[C.KEY]:null}))[C.KEY];scmTimersMemo=C.normalize(raw);}catch{return C.defaults();}
+  try{
+    const got=await chrome.storage.local.get({[C.KEY]:null,scmTimersMigrations:{}});const raw=got[C.KEY];scmTimersMemo=C.normalize(raw);
+    // One-time move (2.5.456): the SimcoTools timer floor went from 60 to 5 min. A stored 60 was the old default and
+    // floor, so it becomes the new default 5; a value the player sets later is kept. Written in the timers write lane.
+    const mig=got.scmTimersMigrations&&typeof got.scmTimersMigrations==='object'?got.scmTimersMigrations:{};
+    if(raw&&!mig.liveMarket5){
+      const cfg=scmTimersMemo;if(raw&&Number(raw?.timers?.liveMarket?.every)===60)cfg.liveMarket={...cfg.liveMarket,every:5};
+      scmTimersWriteTail=scmTimersWriteTail.then(()=>chrome.storage.local.set({[C.KEY]:(o=>{delete o.timers.accountingWalk;return o;})(C.toStored(cfg)),scmTimersMigrations:{...mig,liveMarket5:true}})).catch(()=>{});
+    }
+  }catch{return C.defaults();}
   return scmTimersMemo;
 }
 async function scmTimerEntry(id){const cfg=await scmTimersConfig();return cfg?.[id]||null;}
@@ -269,6 +278,14 @@ const SIMCOTOOLS_MAX_RATE_LIMIT_COOLDOWN_MS=30*60*1000;
 const SIMCOTOOLS_MAX_CONCURRENT_REQUESTS=1;
 const SIMCOTOOLS_PAIR_RATE_LIMIT_COOLDOWN_MS=5*60*1000;
 const SIMCOTOOLS_MIN_REQUEST_SPACING_MS=1200;
+// SimcoTools allows 1 request per 5 min (user-confirmed). ONE gate for every api.simcotools.com call (simcoFetch is the
+// only caller of fetch for that host): the time of the last request lives in storage.session (scmSimcoToolsGate), so a
+// worker restart does not reset it. A call inside the gap is SKIPPED (never queued): it returns
+// {ok:false,status:429,rateLimited:true,limited:true,skipped:true,retryAt}; each caller keeps its stored data and its
+// next scheduled run tries again. No retries (a retry would be a second request inside the gap).
+const SIMCOTOOLS_SHARED_GAP_MS=5*60*1000;
+const SIMCOTOOLS_GATE_KEY='scmSimcoToolsGate';
+let simcoGateMem=null,simcoGateTail=Promise.resolve();
 let simcoLastRequestAt=0;
 let simcoRateLimitUntil=0;
 let simcoActiveRequests=0;
@@ -421,8 +438,16 @@ function scmGateStampSet(name,at){if(at)scmGateStampsMem[name]=at;else delete sc
   scmGateStampTail=run;return run;}
 function refreshGameConstants(force=false,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,opts={}){
   if(gameConstantsInFlight)return gameConstantsInFlight;
-  gameConstantsInFlight=refreshGameConstantsOnce(force,maxAgeMs,opts).finally(()=>{gameConstantsInFlight=null;});
+  gameConstantsInFlight=refreshGameConstantsOnce(force,maxAgeMs,opts).then(gameConstantsResultSource).finally(()=>{gameConstantsInFlight=null;});
   return gameConstantsInFlight;
+}
+// Every refresh answer says where the stored constants come from (source 'bundled' | 'game'); with the built-in copy
+// it carries the status text (message) as well, whatever happened with the API read (skipped, backoff, failure).
+async function gameConstantsResultSource(r){
+  if(!r||typeof r!=='object'||r.source)return r;
+  try{const cur=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;
+    if(globalThis.SCM_TOOLS_CORE.gameConstantsOk(cur)){const bi=cur.source==='bundled';return {...r,source:bi?'bundled':'game',...(bi&&!r.message?{bundle:cur.bundle||null,message:bundledGameConstantsText(cur)}:{})};}}catch{}
+  return r;
 }
 // The game tab cannot be asked right now (no content script / page hook yet, or the page unloaded): not a failed read.
 function pageBridgeUnavailable(e){return Boolean(e?.pageClosed||e?.bridgeNotReady||e?.noGameTab)||/page bridge is not (?:ready|connected)|Open Sim Companies and log in/i.test(String(e?.message||e||''));}
@@ -433,10 +458,54 @@ async function logActivityAnyRealm(job,outcome,details={},error=null){
   if(r!=null)return logActivity(r,job,outcome,details,error);
   if(outcome==='failure'||outcome==='partial')logError(job,error||outcome);
 }
+// Built-in copy of the game constants: constants.json in the extension package, same shape as scmGameConstants
+// ({core,buildings,resources,at,source,bundle}; `at` = the date of the game bundle it was taken from). Under the game's
+// bot protection /api/v2/constants/* cannot be read, and the game's own pages never load them (they are compiled into
+// its bundle), so without this a fresh install or Clear data had no constants at all. Read with fetch() of the
+// extension's own file (no network, no web_accessible_resources entry needed). When scmGameConstants is missing (or
+// unusable) it is written from the built-in copy with source:'bundled'; a stored copy is kept unless the built-in one
+// is newer (`at`), so a newer live-read copy is never overwritten. Every scmGameConstants write (built-in or API) goes
+// through gameConstantsWrite (one at a time; the built-in check re-reads the stored copy inside the queue).
+const GAME_CONSTANTS_BUNDLED_FILE='constants.json';
+let bundledGameConstantsPromise=null,gameConstantsWriteTail=Promise.resolve();
+function bundledGameConstants(){
+  if(!bundledGameConstantsPromise)bundledGameConstantsPromise=fetch(chrome.runtime.getURL(GAME_CONSTANTS_BUNDLED_FILE),{cache:'no-store'})
+    .then(r=>r?.ok?r.json():null).then(c=>c&&typeof c==='object'&&globalThis.SCM_TOOLS_CORE.gameConstantsOk(c)&&Number.isFinite(Date.parse(c.at||''))?c:null)
+    .catch(()=>null).then(c=>{if(!c)bundledGameConstantsPromise=null;return c;});
+  return bundledGameConstantsPromise;
+}
+function gameConstantsWrite(fn){const run=gameConstantsWriteTail.then(fn);gameConstantsWriteTail=run.catch(()=>{});return run;}
+function bundledGameConstantsText(c){return `Game constants from the Manager's built-in copy (game version ${String(c?.bundle||String(c?.at||'').slice(0,10)||'unknown').slice(0,80)})`;}
+async function applyBundledGameConstants(){
+  const b=await bundledGameConstants();
+  if(!b)return {ok:false,applied:false,error:'The built-in game constants (constants.json) are missing or unreadable.'};
+  return gameConstantsWrite(async()=>{
+    const cur=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;
+    const curAt=Date.parse(cur?.at||''),bAt=Date.parse(b.at);
+    if(globalThis.SCM_TOOLS_CORE.gameConstantsOk(cur)&&Number.isFinite(curAt)&&curAt>=bAt)return {ok:true,applied:false,source:cur.source==='bundled'?'bundled':'game',bundle:b.bundle||null};
+    await rawStorageSet({scmGameConstants:{...b,source:'bundled'}});
+    return {ok:true,applied:true,source:'bundled',bundle:b.bundle||null,replaced:cur?(cur.source==='bundled'?'bundled':'game'):null};
+  });
+}
+// Result of a refresh that did not read the API because direct reads are blocked: the stored copy stays (built-in or live).
+function gameConstantsBlockedResult(cur,extra={}){
+  const ok=Boolean(globalThis.SCM_TOOLS_CORE.gameConstantsOk(cur)),bundled=cur?.source==='bundled';
+  return {ok,skipped:true,directReadsBlocked:true,kept:true,source:ok?(bundled?'bundled':'game'):null,bundle:bundled?(cur.bundle||null):null,
+    message:bundled?bundledGameConstantsText(cur):ok?'Game constants from the last read of the game (direct reads are blocked now).':'Game constants missing: direct reads are blocked and the built-in copy could not be loaded.',
+    error:DIRECT_READS_BLOCKED_TEXT,...extra};
+}
 async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,opts={}){
+  // Missing constants are filled from the built-in copy first, whatever happens with the API read below.
+  let bundled=null;try{bundled=await applyBundledGameConstants();}catch{}
+  if(bundled?.applied){try{const b=await bundledGameConstants();logActivityAnyRealm('game-constants','success',{source:'bundled',bundle:bundled.bundle,replaced:bundled.replaced,note:bundledGameConstantsText(b)});}catch{}}
   try{
     const cur=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;
-    if(!force&&cur&&Date.now()-Date.parse(cur.at||0)<Math.max(GAME_CONSTANTS_PERIOD_MS,Number(maxAgeMs)||0))return {ok:true,cached:true};
+    if(!force&&cur&&Date.now()-Date.parse(cur.at||0)<Math.max(GAME_CONSTANTS_PERIOD_MS,Number(maxAgeMs)||0))return {ok:true,cached:true,source:cur.source==='bundled'?'bundled':'game',...(cur.source==='bundled'?{message:bundledGameConstantsText(cur)}:{})};
+    // While the game blocks direct reads the API is not tried at all (the block's own recheck runs through pageGet
+    // when its pause ends); the built-in or last live copy stays. The API path below stays for when the block is lifted.
+    if(await directReadsBlockedNow())return gameConstantsBlockedResult(cur);
+    // A real backoff / missing tab only matters for the API read: the built-in copy already covers missing constants.
+    if(cur?.source==='bundled'&&!(await simTab())?.id)return {ok:true,skipped:true,source:'bundled',bundle:cur.bundle||null,message:bundledGameConstantsText(cur),error:'No Sim Companies tab open.'};
     const retry=await gameConstantsRetryGet();
     if(!force&&!opts?.ignoreBackoff&&retry&&Number(retry.nextAt)>Date.now())return {ok:false,backoff:true,error:retry.error||null,nextAt:retry.nextAt};
     if(!(await simTab())?.id)return {ok:false,skipped:true,error:'No Sim Companies tab open.'};
@@ -447,13 +516,16 @@ async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,
     const core=await get('/api/v2/constants/core/'),buildings=await get('/api/v2/constants/buildings/'),resources=await get('/api/v2/constants/resources/');
     const next={core,buildings,resources,at:new Date().toISOString()};
     if(!globalThis.SCM_TOOLS_CORE.gameConstantsOk(next))throw new Error('constants missing fields');
-    await rawStorageSet({scmGameConstants:next});
+    await gameConstantsWrite(()=>rawStorageSet({scmGameConstants:next}));
     await gameConstantsRetrySet(null);
     logActivityAnyRealm('game-constants','success',{});
     return {ok:true};
   }catch(e){
     const error=capRefreshError(e?.message||e);
     if(pageBridgeUnavailable(e))return {ok:false,skipped:true,reason:'bridge-not-ready',reachedTab:!(e?.bridgeNotReady||e?.noGameTab)&&!/page bridge is not (?:ready|connected)|Open Sim Companies and log in/i.test(error),error};
+    // The game does not load /api/v2/constants/* on its own pages (2026-11-10 bundle), so there is no capture to use:
+    // the stored constants stay, and the next read is the block's recheck.
+    if(isDirectReadsBlockedError(error)){let cur=null;try{cur=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;}catch{}return gameConstantsBlockedResult(cur);}
     try{const prev=await gameConstantsRetryGet();const failures=Math.min(30,(Number(prev?.failures)||0)+1);
       const waitMs=Math.min(GAME_CONSTANTS_PERIOD_MS,GAME_CONSTANTS_RETRY_MIN_MS*2**(failures-1));
       await gameConstantsRetrySet({failures,nextAt:Date.now()+waitMs,error,at:new Date().toISOString()});}catch{}
@@ -553,6 +625,8 @@ async function marketOrdersReadOnce(r,cur,background){
     const x=await pageGet(`/api/v2/companies/${cid}/market-orders/`,r,null,'own-listings-card',{timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS,attempts:1});
     // The tab moved to the other realm meanwhile: quiet skip (the gap still counts, no backoff step, no log).
     if(x?.realmMismatch)return {ok:false,skipped:true,reason:'other-realm'};
+    // The game blocks direct reads: an info note on the card (directReadsBlocked), no backoff step, no failure line.
+    if(x?.directReadsBlocked){if(cleared())return cancelled;const error=x.error||DIRECT_READS_BLOCKED_TEXT;ownListingsRefreshError.set(r,{error,at:new Date().toISOString(),directReadsBlocked:true});notifyGameCardsKeyChanged(k);return {ok:false,skipped:true,directReadsBlocked:true,error};}
     if(!x?.ok||x.data==null)return await fail(x?.error||`HTTP ${x?.status||0}`);
     if(!Array.isArray(x.data)&&!(x.data&&typeof x.data==='object'&&['data','items','results','orders','marketOrders'].some(f=>Array.isArray(x.data[f]))))return await fail('not a list');
     const orders=helperArray(x.data,['data','items','results','orders','marketOrders']);
@@ -578,6 +652,7 @@ async function refreshOutgoingContracts(realm,minGapMs=OUTGOING_CONTRACTS_REFRES
   outgoingContractsRefreshAt.set(r,now);
   try{
     const x=await pageGet('/api/v3/contracts-outgoing/me/',r,null,'outgoing-contracts-card',{timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS,attempts:1});
+    if(x?.directReadsBlocked)return {ok:false,skipped:true,directReadsBlocked:true,error:x.error||DIRECT_READS_BLOCKED_TEXT};
     if(!x?.ok||x.data==null)return {ok:false,error:x?.error||`HTTP ${x?.status||0}`};
     await rawStorageSet({[`scmOutgoingContracts:${r}`]:{data:x.data,at:new Date().toISOString()}});notifyGameCardsKeyChanged(`scmOutgoingContracts:${r}`);
     return {ok:true};
@@ -759,7 +834,8 @@ async function fillMissingGameDataOnce(reason,afterSync,onlyMissing){
   const imagesDue=Date.now()-(Number(r.scmResourceImagesValidatedAt)||0)>RESOURCE_IMAGE_VALIDATE_EVERY_MS;
   if(cached===0||(!onlyMissing&&imagesOn&&imagesDue)){out.images=true;syncAllResourceImages({forceValidate:false,trigger:reason}).catch(()=>{});}
   const c=out.constants;if(!c||!c.skipped||c.reachedTab){gameDataFillAt=Date.now();scmGateStampSet('gameDataFill',gameDataFillAt);}
-  gameDataPresent=Boolean(r.scmGameConstants)&&cached>0;
+  let present=Boolean(r.scmGameConstants);if(!present&&out.constants){try{present=Boolean((await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants);}catch{}}
+  gameDataPresent=present&&cached>0;
   return out;
 }
 // Economy phase log per realm (scmEconomyStateLog:<realm>) from auth-data temporals.economyState.
@@ -1600,6 +1676,14 @@ const BACKGROUND_JOB_HISTORY_LIMIT=300;
 async function recordBackgroundJobEvent(realm,event={}){
   const n=validRealmNumber(realm);if(n==null)return {ok:false,error:'Invalid realm for background job history.'};
   const key=realmKeyFromRealm(n);if(!key)return {ok:false,error:'Invalid realm for background job history.'};
+  // While the game blocks direct reads, the one 'direct-reads-blocked' line says it; reads skipped by the block add none.
+  if(String(event?.job||'')!=='direct-reads-blocked'&&(isDirectReadsBlockedError(event?.error)||isDirectReadsBlockedError(event?.details?.error))&&directReadBlockMem)return {ok:true,suppressed:'direct-reads-blocked'};
+  // Not suppressed (block state not read back yet after a worker restart, or the block's own line): a block is a skip, never a failure.
+  // The stored line carries details.directReadsBlocked so the monitor can tell it from a failure without reading the text.
+  if(event?.directReadsBlocked||event?.details?.directReadsBlocked||isDirectReadsBlockedError(event?.error)||isDirectReadsBlockedError(event?.details?.error)){
+    const details=event.details&&typeof event.details==='object'?event.details:{};
+    event={...event,outcome:event.outcome==='failure'||event.outcome==null?'skipped':event.outcome,details:{...details,directReadsBlocked:true}};
+  }
   const normalized={id:`${Date.now()}-${Math.random().toString(36).slice(2,8)}`,realm:n,job:String(event.job||'unknown'),trigger:String(event.trigger||'unknown'),startedAt:event.startedAt||new Date().toISOString(),finishedAt:event.finishedAt||new Date().toISOString(),durationMs:Math.max(0,Number(event.durationMs)||0),outcome:['success','partial','failure','skipped','running','retrying','rate-limited','deferred-core-sync'].includes(event.outcome)?event.outcome:'failure',requested:Number.isFinite(Number(event.requested))?Number(event.requested):null,fetched:Number.isFinite(Number(event.fetched))?Number(event.fetched):null,refreshed:Number.isFinite(Number(event.refreshed))?Number(event.refreshed):null,checked:Number.isFinite(Number(event.checked))?Number(event.checked):null,failed:Number.isFinite(Number(event.failed))?Number(event.failed):null,cached:Number.isFinite(Number(event.cached))?Number(event.cached):null,stale:Number.isFinite(Number(event.stale))?Number(event.stale):null,error:event.error?String(event.error).slice(0,400):null,details:event.details&&typeof event.details==='object'?event.details:{}};
   // Job history lives in its own small key so appending an entry does not rewrite the whole realm store under the
   // realm write lock. Entries for one realm are appended through a serial queue so none are lost.
@@ -1983,7 +2067,7 @@ function warehouseOverlayRefreshInBackoff(realm,maxAgeMs,now=Date.now()){
 }
 function noteWarehouseOverlayRefreshResult(realm,maxAgeMs,result,now=Date.now()){
   if(result?.ok){warehouseOverlayBackoffUntil.delete(realm);return;}
-  if(Number(maxAgeMs)===0||result?.stale||result?.notReady||result?.otherRealm||result?.pageClosed)return;
+  if(Number(maxAgeMs)===0||result?.stale||result?.notReady||result?.otherRealm||result?.pageClosed||result?.directReadsBlocked)return;
   warehouseOverlayBackoffUntil.set(realm,now+WAREHOUSE_OVERLAY_FAILURE_BACKOFF_MS);
 }
 async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000){
@@ -2011,6 +2095,7 @@ async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000){
     const r=await pageGet(path,n,null,null,{timeoutMs:WAREHOUSE_REFRESH_PAGE_TIMEOUT_MS,attempts:1});
     const requestDurationMs=Date.now()-requestStartedAt;
     if(r?.realmMismatch){s=await state(n);return {...otherRealmSkip(),requestDurationMs};}
+    if(r?.directReadsBlocked)return {ok:false,skipped:true,directReadsBlocked:true,error:r.error||DIRECT_READS_BLOCKED_TEXT,status:r.status||403,requestDurationMs};
     if(!r?.ok)return {ok:false,error:r?.error||`HTTP ${r?.status||0}`,status:r?.status||0,requestDurationMs};
     const rows=normalizeWarehouse(r.data);
     if(!looksLikeWarehouseRows(rows))return {ok:false,error:'Current game warehouse response was not recognizable.',status:r.status,requestDurationMs};
@@ -2671,6 +2756,16 @@ async function scheduleAccountingWeekRefresh(realm,delayMs=1500){
 function syncSessionForRealm(realm){
   const n=validRealmNumber(realm);
   return n==null?null:(realmSyncSessions.get(n)||null);
+}
+// Walk and Sync captures come only from the Sync's game tab, top frame (session.gameTabId, set where the walk picks
+// its tab). Another simcompanies.com tab or a subframe with the content script cannot feed a required path.
+function syncCaptureFromSyncTab(session,sender){const id=session?.gameTabId;return id!=null&&sender?.tab?.id===id&&sender?.frameId===0;}
+function recordSyncWalkCapture(session,m,sender){
+  if(!session||!syncCaptureFromSyncTab(session,sender))return false;
+  const url=String(m?.url||'');
+  if(session?.syncCaptures&&session.syncCapturePaths&&validRealmNumber(m.captureRealm)===validRealmNumber(session.realm)&&Number(m.status)>=200&&Number(m.status)<300){const p=url.replace(/^https?:\/\/[^/]+/,'').split('?')[0];if(session.syncCapturePaths.has(p))session.syncCaptures[p]={status:m.status,data:m.data,receivedAt:new Date().toISOString(),at:Date.now()};}
+  if(session?.walkCaptures&&validRealmNumber(m.captureRealm)===validRealmNumber(session.realm)){session.walkCaptures[url]={status:m.status,data:m.data,receivedAt:new Date().toISOString(),at:Date.now()};if(/\/buildings\/\d+\/abundance\//.test(url)&&Number(m.status)>=200&&Number(m.status)<300)(session.abundanceCaptures||(session.abundanceCaptures={}))[url]=session.walkCaptures[url];}
+  return true;
 }
 function currentCaptureSyncSession(){
   return validRealmNumber(syncCaptureRealm)!=null?syncSessionForRealm(syncCaptureRealm):null;
@@ -3491,6 +3586,9 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
         // reload): it cannot say which realm the answer is for, so nothing is saved. A quiet skip like the other realm;
         // the statement is still not fresh, so the next refresh reads it again.
         if(response?.realmUnknown){results.push({path,ok:false,skipped:true,realmUnknown:true,status:0,captureRealm:null,error:response.error||'Skipped: the game tab has not shown which realm it is in yet.'});continue;}
+        // The game blocks the Manager's own reads: a quiet skip (no request was made during the pause); the statements
+        // come from the Accounting page Sync walks or the player opens.
+        if(response?.directReadsBlocked){results.push({path,ok:false,skipped:true,directReadsBlocked:true,status:Number(response.status)||403,captureRealm:null,error:response.error||DIRECT_READS_BLOCKED_TEXT});continue;}
         const ok=Boolean(response?.ok)&&responseRealm===realm;
         if(ok) await saveData(path,response.data,response.status,'GET',realm);
         results.push({path,ok,status:Number(response?.status)||0,captureRealm:responseRealm,error:ok?null:(response?.error||'Accounting response realm mismatch.')});
@@ -3505,11 +3603,14 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
   // Statements skipped because the game tab switched realm are not failures: no failure/partial entry, the realm
   // load status is left alone, and the caller sees realmMismatch so it can try again on its next cycle.
   const skippedOtherRealm=results.filter(r=>r.realmMismatch||r.realmUnknown);
-  const failed=results.filter(r=>!r.ok&&!r.realmMismatch&&!r.realmUnknown);
+  const failed=results.filter(r=>!r.ok&&!r.realmMismatch&&!r.realmUnknown&&!r.directReadsBlocked);
+  const blockedReads=results.filter(r=>r.directReadsBlocked);
   // Keep the Executives readout from the last Sync on the header line this refresh overwrites.
   const executivesSummary=freshState.realmStores?.[realmKeyFromRealm(realm)]?.executivesSyncSummary||'';
   const status=(successful===paths.length?`${realmDisplayNumber(realm)||'Realm'} Accounting captured · ${successful}/${paths.length} APIs`:`${realmDisplayNumber(realm)||'Realm'} Accounting partial · ${successful}/${paths.length} APIs`)+executivesSummary;
   if(skippedOtherRealm.length&&!failed.length)return {ok:false,skipped:true,realmMismatch:skippedOtherRealm.some(r=>r.realmMismatch),realmUnknown:skippedOtherRealm.every(r=>r.realmUnknown),realm,reason,requested:pending.length,successful,total:paths.length,failed,skippedOtherRealm:skippedOtherRealm.length,results,error:skippedOtherRealm[0].error};
+  // Blocked reads only (no real failure): no failure entry, the load status from the last Sync stays.
+  if(blockedReads.length&&!failed.length&&!results.some(r=>r.ok))return {ok:false,skipped:true,directReadsBlocked:true,realm,reason,requested:pending.length,successful,total:paths.length,failed,results,error:DIRECT_READS_BLOCKED_TEXT};
   await setRealmLoadStatus(realm,status,successful===paths.length?null:`${failed.length} Accounting API request(s) failed.`);
   logActivity(realm,'accounting-refresh',failed.length?(successful?'partial':'failure'):'success',{rows:successful,wanted:pending.length},failed.length?`${failed.length} of ${pending.length} statements failed`:null,Date.now(),reason);
   return {ok:successful>0,realm,reason,requested:pending.length,successful,total:paths.length,failed,results,status};
@@ -3912,6 +4013,72 @@ const PAGE_GET_BACKGROUND_GRACE_MS=2000;
 // channel closed before a response was received" (or the content script answered pageClosed from pagehide). Not a
 // failed request: callers treat a pageClosed error as a quiet skip; their next cycle reads again.
 function pageMessageChannelClosed(e){return Boolean(e?.pageClosed)||/message channel closed|message port closed|Receiving end does not exist|Extension context invalidated|No tab with id/i.test(String(e?.message||e||''));}
+// Since 2026-11-10 the game signs its own API requests (bot protection); a plain read the Manager makes through the
+// game tab gets HTTP 403. The Manager does not imitate that signature. After the first 403 it stops direct reads for
+// 30 min (storage.session scmDirectReadsBlocked, survives a worker restart), logs one line, and then lets one read
+// through to recheck: another 403 renews the pause quietly, so does a recheck with no answer (timeout, status 0,
+// closed page); a success clears it. Only one recheck is out at a time. Data keeps coming from the game's own
+// responses (pages the player opens, and the pages Sync walks). Code paths stay, so reads work again if the game drops it.
+const DIRECT_READ_BLOCK_KEY='scmDirectReadsBlocked';
+const DIRECT_READ_BLOCK_MS=30*60*1000;
+const DIRECT_READS_BLOCKED_TEXT='The game now blocks direct reads; data updates from game pages you open and from Sync.';
+// The buildings list has its own Cloudflare 403 (see Warehouse in Sync): it is not evidence of the new block.
+const DIRECT_READ_BLOCK_EXEMPT_RX=/\/api\/v2\/companies\/me\/buildings\/?(?:\?.*)?$/i;
+let directReadBlockMem,directReadRecheckInFlight=false,directReadBlockTail=Promise.resolve();
+async function directReadBlockGet(){
+  if(directReadBlockMem!==undefined)return directReadBlockMem;
+  let v=null;try{if(chrome.storage?.session)v=(await chrome.storage.session.get(DIRECT_READ_BLOCK_KEY))?.[DIRECT_READ_BLOCK_KEY]||null;}catch{}
+  if(directReadBlockMem===undefined)directReadBlockMem=v&&typeof v==='object'?v:null;
+  return directReadBlockMem;
+}
+function directReadBlockSet(v){
+  directReadBlockMem=v;
+  const run=directReadBlockTail.then(async()=>{try{if(!chrome.storage?.session)return;if(v)await chrome.storage.session.set({[DIRECT_READ_BLOCK_KEY]:v});else await chrome.storage.session.remove(DIRECT_READ_BLOCK_KEY);}catch{}});
+  directReadBlockTail=run;return run;
+}
+// True while the pause runs; also true for concurrent callers while the one recheck read is out.
+async function directReadsBlockedNow(){
+  const b=await directReadBlockGet();
+  if(!b)return false;
+  if(Date.now()<Number(b.until))return true;
+  return Boolean(directReadRecheckInFlight);
+}
+function directReadsBlockedResponse(path,extra={}){
+  return {ok:false,status:403,skipped:true,directReadsBlocked:true,error:DIRECT_READS_BLOCKED_TEXT,path:String(path||''),...extra};
+}
+function isDirectReadsBlockedError(v){return String(v?.error??v?.message??v??'').includes(DIRECT_READS_BLOCKED_TEXT);}
+// The one Activity line goes to the realm of the read (else the active / selected realm); logged:true once it is
+// written, so a block first seen before any realm is known gets its line at the next recheck.
+async function directReadBlockLogRealm(realm){
+  let n=validRealmNumber(realm);if(n==null)n=await activeRealmNumber();
+  if(n==null){try{n=validRealmNumber((await chrome.storage.local.get({selectedRealm:null})).selectedRealm);}catch{}}
+  return n;
+}
+async function noteDirectReadBlocked(path,status=403,realm=null){
+  const prev=await directReadBlockGet(),now=Date.now();
+  const next={since:Number(prev?.since)||now,at:now,until:now+DIRECT_READ_BLOCK_MS,path:String(path||'').slice(0,200),status:Number(status)||403,rechecks:prev?(Number(prev.rechecks)||0)+1:0,logged:Boolean(prev?.logged),logRealm:validRealmNumber(prev?.logRealm)};
+  const lr=next.logged?null:await directReadBlockLogRealm(realm);
+  if(lr!=null){next.logged=true;next.logRealm=lr;}
+  await directReadBlockSet(next);
+  if(lr!=null){try{await logActivity(lr,'direct-reads-blocked','skipped',{path:next.path,status:next.status,pauseMinutes:DIRECT_READ_BLOCK_MS/60000,directReadsBlocked:true},DIRECT_READS_BLOCKED_TEXT);}catch{}}
+  else if(!prev)logError('direct-reads-blocked',DIRECT_READS_BLOCKED_TEXT);
+  return next;
+}
+async function clearDirectReadBlock(path,realm=null){
+  const prev=await directReadBlockGet();if(!prev)return;
+  await directReadBlockSet(null);
+  try{const lr=validRealmNumber(prev?.logRealm)??await directReadBlockLogRealm(realm);if(lr!=null)await logActivity(lr,'direct-reads-blocked','success',{path:String(path||'').slice(0,200),recovered:true},null);}catch{}
+}
+// The recheck got no answer from the game (timeout, status 0 or 5xx, closed page, bridge not ready): nothing shows
+// the block has gone, so the pause is renewed for the same 30 min, quietly (no Activity line). Renewed only if the
+// block is still the one the recheck started from (Clear All or a newer 403 may have replaced it meanwhile).
+async function renewDirectReadBlockAfterFailedRecheck(block,reason){
+  if(!block||directReadBlockMem!==block)return null;
+  const now=Date.now();
+  const next={...block,at:now,until:now+DIRECT_READ_BLOCK_MS,rechecks:(Number(block.rechecks)||0)+1,lastRecheckError:String(reason||'').slice(0,200)};
+  await directReadBlockSet(next);
+  return next;
+}
 async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticLabel=null, options=null){
   const customTimeout=Number(options?.timeoutMs);
   const hasCustomTimeout=Number.isFinite(customTimeout)&&customTimeout>0;
@@ -3924,6 +4091,21 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
     try{ diagnosticTrace?.(type,{realm:targetRealm,path,label:diagnosticLabel,attempt:extra.attempt,...extra}); }catch{}
   };
   let lastError=null,lastClosed=false;
+  // The game blocks the Manager's own reads (HTTP 403): no request during the pause, one recheck after it.
+  const blockExempt=DIRECT_READ_BLOCK_EXEMPT_RX.test(String(path||''));
+  // recheck: this call is the one read let through after the pause (token, so only its owner clears the flag).
+  let recheck=null,recheckSettled=false;
+  if(!blockExempt){
+    const b=await directReadBlockGet();
+    if(b&&(Date.now()<Number(b.until)||directReadRecheckInFlight)){traceDiag('pageget-direct-reads-blocked',{until:Number(b.until)||0});return directReadsBlockedResponse(path,{until:Number(b.until)||0});}
+    if(b){recheck={block:b};directReadRecheckInFlight=recheck;}
+  }
+  const recheckFailed=async(reason)=>{
+    const next=await renewDirectReadBlockAfterFailedRecheck(recheck.block,reason);
+    traceDiag('pageget-direct-reads-recheck-failed',{error:String(reason||''),until:Number(next?.until)||0});
+    return directReadsBlockedResponse(path,{until:Number(next?.until)||0,recheckFailed:true});
+  };
+  try{
   for(let attempt=1;attempt<=attempts;attempt++){
     const tab=await simTab();
     if(!tab?.id){ lastError=new Error('Open Sim Companies and log in before syncing.'); lastClosed=false; break; }
@@ -3948,8 +4130,17 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
       // A /me/ answer from a tab that is in the other realm belongs to that realm: never hand it to a
       // caller that will file it under targetRealm. (auth-data is exempt: Sync checks it and explains the mismatch.)
       const tr=validRealmNumber(targetRealm),rr=validRealmNumber(r?.captureRealm);
+      // Any 2xx shows reads work again (also one from the other realm, handled below): the block is cleared.
+      if(!blockExempt&&r?.ok&&directReadBlockMem){recheckSettled=true;await clearDirectReadBlock(path,tr??rr);}
       if(r?.ok&&tr!=null&&rr==null&&/\/me\//.test(String(path))&&!/\/api\/v3\/companies\/auth-data\//.test(String(path))){traceDiag('pageget-realm-unknown',{attempt,tabId:tab.id,targetRealm:tr});return {ok:false,status:0,error:'The game tab has not shown which realm it is in yet.',realmUnknown:true};}
       if(r?.ok&&tr!=null&&rr!=null&&rr!==tr&&!/\/api\/v3\/companies\/auth-data\//.test(String(path))){traceDiag('pageget-realm-mismatch',{attempt,tabId:tab.id,targetRealm:tr,tabRealm:rr});return {ok:false,status:0,error:`The game tab is in ${realmDisplayNumber(rr)||'the other realm'}, not ${realmDisplayNumber(tr)||'the requested realm'}.`,captureRealm:rr,realmMismatch:true};}
+      if(!blockExempt&&Number(r?.status)===403&&!r?.ok){
+        recheckSettled=true;
+        await noteDirectReadBlocked(path,403,tr??rr);
+        traceDiag('pageget-direct-reads-blocked-now',{attempt,tabId:tab.id});
+        return directReadsBlockedResponse(path,{captureRealm:rr,firstBlock:true});
+      }
+      if(recheck&&!recheckSettled&&!r?.ok)return await recheckFailed(r?.error||`HTTP ${Number(r?.status)||0}`);
       return r||{ok:false,status:0,error:'No response from Sim Companies page.'};
     }catch(e){
       traceDiag('pageget-error',{attempt,tabId:tab.id,error:e?.message||String(e)});
@@ -3962,6 +4153,67 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
   if(!lastError||/page bridge is not ready/i.test(String(lastError?.message||'')))finalError.bridgeNotReady=true;
   if(/Open Sim Companies and log in/i.test(String(lastError?.message||'')))finalError.noGameTab=true;
   throw finalError;
+  }catch(e){
+    if(recheck&&!recheckSettled)return await recheckFailed(e?.message||String(e));
+    throw e;
+  }finally{if(recheck&&directReadRecheckInFlight===recheck)directReadRecheckInFlight=false;}
+}
+// Sync's realm boundary from the game's own auth-data (the game loads it on every page load and every 3 min):
+// 1. a stored capture for this realm received in the last 10 min; 2. else reload the game tab so the game loads it,
+// and wait up to 15 s for that capture; 3. else, only while direct reads are not blocked, read it directly.
+const SYNC_AUTH_CAPTURE_MAX_AGE_MS=10*60*1000,SYNC_AUTH_RELOAD_WAIT_MS=15000;
+const AUTH_DATA_PATH='/api/v3/companies/auth-data/';
+function authDataRealmOf(data){return validRealmNumber(data?.authCompany?.realmId??data?.authCompany?.realm??data?.realmId??data?.realm);}
+function freshCapturedAuthData(s,realm,sinceMs,now=Date.now()){
+  const item=endpointDataForSyncRealm(s,realm)?.[AUTH_DATA_PATH];
+  const at=Date.parse(String(item?.receivedAt||''));
+  if(!item||Number(item.status)!==200||!item.data||typeof item.data!=='object')return null;
+  if(validRealmNumber(item.captureRealm)!==validRealmNumber(realm))return null;
+  const dataRealm=authDataRealmOf(item.data);if(dataRealm!=null&&dataRealm!==validRealmNumber(realm))return null;
+  if(!Number.isFinite(at)||at<sinceMs||now-at>SYNC_AUTH_CAPTURE_MAX_AGE_MS)return null;
+  // The tab may have switched realm since: the active view (set by the latest auth-data) must be this realm.
+  if(s?.activeRealmKey&&s.activeRealmKey!==realmKeyFromRealm(realm))return null;
+  return {ok:true,status:200,data:item.data,captureRealm:validRealmNumber(realm),fromPageCapture:true,receivedAt:item.receivedAt,ageMs:now-at};
+}
+function walkCapturedAuthData(session,realm){
+  for(const [url,c] of Object.entries(session?.walkCaptures||{})){
+    if(String(url).replace(/^https?:\/\/[^/]+/,'').split('?')[0]!==AUTH_DATA_PATH)continue;
+    if(Number(c?.status)!==200||!c?.data||typeof c.data!=='object')continue;
+    const dr=authDataRealmOf(c.data);if(dr!=null&&dr!==validRealmNumber(realm))continue;
+    return {ok:true,status:200,data:c.data,captureRealm:validRealmNumber(realm),fromPageCapture:true,receivedAt:c.receivedAt,ageMs:Date.now()-Number(c.at||Date.now())};
+  }
+  return null;
+}
+async function syncAuthBoundaryFromGame(realm,tabId,session,trace){
+  if(typeof trace!=='function')trace=()=>{};
+  const n=validRealmNumber(realm);
+  const stored=freshCapturedAuthData(await state(n),n,0);
+  if(stored){trace('auth-from-game-capture',{realm:n,source:'stored',ageMs:stored.ageMs});return stored;}
+  // Reload so the game itself loads auth-data; its response is kept for this Sync (walkCaptures) and stored.
+  const reloadAt=Date.now();
+  const prevPaths=session.capturePaths,prevWalk=session.walkCaptures;
+  session.capturePaths=[AUTH_DATA_PATH];session.walkCaptures={};session.gameTabId=tabId;
+  let found=null;
+  try{
+    trace('auth-reload-for-capture',{realm:n,tabId});
+    await chrome.tabs.reload(tabId);
+    const deadline=reloadAt+SYNC_AUTH_RELOAD_WAIT_MS;
+    let boundarySet=false;
+    while(Date.now()<deadline&&!found){
+      if(session.cancelled)throw new SyncCancelledByClear();
+      if(!boundarySet){
+        try{const br=await chrome.tabs.sendMessage(tabId,{type:'BRIDGE_STATUS'});if(br?.ready){const sr=await chrome.tabs.sendMessage(tabId,{type:'SET_SYNC_REALM',realm:n,ttlMs:120000});boundarySet=Boolean(sr?.ok);if(boundarySet)trace('capture-boundary-set',{realm:n,afterReload:true});}}catch{}
+      }
+      found=walkCapturedAuthData(session,n)||freshCapturedAuthData(await state(n),n,reloadAt);
+      if(!found)await new Promise(r=>setTimeout(r,250));
+    }
+    if(!boundarySet&&await waitForBridge(tabId,5000)){try{await chrome.tabs.sendMessage(tabId,{type:'SET_SYNC_REALM',realm:n,ttlMs:120000});}catch{}}
+  }catch(e){if(e instanceof SyncCancelledByClear)throw e;trace('auth-reload-error',{error:e?.message||String(e)});}
+  finally{session.capturePaths=prevPaths;session.walkCaptures=prevWalk;}
+  if(found){trace('auth-from-game-capture',{realm:n,source:'reload',ms:Date.now()-reloadAt});return found;}
+  trace('auth-capture-missing',{realm:n,waitedMs:Date.now()-reloadAt});
+  if(await directReadsBlockedNow())return directReadsBlockedResponse(AUTH_DATA_PATH);
+  return pageGet(AUTH_DATA_PATH,n);
 }
 const BUILDING_HISTORY_REFETCH_COOLDOWN_MS=15000;
 async function fetchBuildingHistoryForRealm(realm, buildingId){
@@ -4014,7 +4266,7 @@ async function fetchExchangeOrderBookForRealm(realm,resourceId){
   // The game tab is in (or just moved to) the other realm: a quiet skip, nothing saved. realmMismatch is passed on
   // so the order-book alarm logs no failure and takes no backoff step; the 5 min gap for this product still counts.
   if(response?.realmMismatch||(responseRealm!=null&&responseRealm!==target))return {ok:false,skipped:true,realmMismatch:true,reason:'other-realm',error:'Order book came from the wrong realm.'};
-  if(!response?.ok||!hasUsableMarketRows(response.data)){orderBookFetchAt.set(k,last);return {ok:false,status:response?.status||0,error:response?.error||'No usable order book returned (is the game tab open?).'};}
+  if(!response?.ok||!hasUsableMarketRows(response.data)){orderBookFetchAt.set(k,last);return {ok:false,status:response?.status||0,directReadsBlocked:Boolean(response?.directReadsBlocked),skipped:Boolean(response?.directReadsBlocked),error:response?.error||'No usable order book returned (is the game tab open?).'};}
   await saveData(path,response.data,response.status,'GET',target);
   return {ok:true,rows:Array.isArray(response.data)?response.data.length:null};
 }
@@ -4090,6 +4342,8 @@ async function runOrderBookRefreshFiring(){
     const saved=(await chrome.storage.local.get({[ORDER_BOOK_REFRESH_STATE_KEY]:null}))[ORDER_BOOK_REFRESH_STATE_KEY]||{};
     const now=Date.now();
     if(Number(saved.backoffUntil)>now)return {ok:true,skipped:true};
+    // While the game blocks the Manager's own reads, order books come from game pages (and Sync's market crawl): skip quietly.
+    if(await directReadsBlockedNow())return {ok:true,skipped:true,reason:'direct-reads-blocked'};
     const tab=await simTab();if(!tab?.id)return {ok:true,skipped:true};
     const bridge=await withSyncTimeout(chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),3000,'Order book refresh bridge check').catch(()=>null);
     const realm=bridge?.ready&&(bridge.realm===0||bridge.realm===1)?bridge.realm:null;
@@ -4107,6 +4361,8 @@ async function runOrderBookRefreshFiring(){
     const status=Number(result?.status)||0;
     // The game tab switched realm during the read: quiet skip (no failure entry, no backoff, nothing saved).
     if(result?.realmMismatch)return {...result,realm,resourceId};
+    // The game blocked this read (pageGet logged the block once): quiet skip, no back-off, no failure line.
+    if(result?.directReadsBlocked)return {...result,realm,resourceId,skipped:true};
     // A 2xx without usable rows is an empty book, not a failed request.
     if(!result?.ok&&!(status>=200&&status<300)){
       const backoffMs=status===429?ORDER_BOOK_REFRESH_429_BACKOFF_MS:ORDER_BOOK_REFRESH_FAILURE_BACKOFF_MS;
@@ -4230,6 +4486,26 @@ async function hydrateSimcoCooldowns(){
 async function persistSimcoCooldowns(){
   try{const byUrl={};for(const [url,until] of simcoRateLimitUntilByUrl.entries())if(Number(until)>Date.now())byUrl[url]=Number(until);await chrome.storage.local.set({simcoToolsRateLimitUntil:simcoRateLimitUntil,simcoToolsRateLimitUntilByUrl:byUrl});}catch{}
 }
+async function simcoGateLoad(){
+  if(simcoGateMem)return simcoGateMem;
+  let v=null;try{if(chrome.storage?.session)v=(await chrome.storage.session.get(SIMCOTOOLS_GATE_KEY))?.[SIMCOTOOLS_GATE_KEY]||null;}catch{}
+  if(!simcoGateMem)simcoGateMem=v&&typeof v==='object'?v:{lastAt:0};
+  return simcoGateMem;
+}
+// Time the next SimcoTools request may go out (0 when it may go now).
+async function simcoGateNextAt(){const g=await simcoGateLoad();const next=(Number(g.lastAt)||0)+SIMCOTOOLS_SHARED_GAP_MS;return next>Date.now()?next:0;}
+// Serialized check-and-take of the one request slot; persisted before the request goes out.
+function simcoGateReserve(url){
+  const run=simcoGateTail.then(async()=>{
+    const g=await simcoGateLoad(),now=Date.now(),next=(Number(g.lastAt)||0)+SIMCOTOOLS_SHARED_GAP_MS;
+    if(now<next)return {ok:false,retryAt:next,lastUrl:g.lastUrl||null};
+    simcoGateMem={lastAt:now,lastUrl:String(url||'').slice(0,200),count:(Number(g.count)||0)+1};
+    try{if(chrome.storage?.session)await chrome.storage.session.set({[SIMCOTOOLS_GATE_KEY]:simcoGateMem});}catch{}
+    return {ok:true,at:now};
+  });
+  simcoGateTail=run.catch(()=>{});
+  return run;
+}
 async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS){
   const normalizedUrl=String(url);
   await hydrateSimcoCooldowns();
@@ -4239,6 +4515,14 @@ async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS){
   for(let attempt=0;attempt<SIMCOTOOLS_RETRY_DELAYS_MS.length;attempt++){
     const waitMs=SIMCOTOOLS_RETRY_DELAYS_MS[attempt];
     if(waitMs) await new Promise(resolve=>setTimeout(resolve,waitMs+Math.floor(Math.random()*500)));
+    // Shared 1-per-5-min gate. A retry is a request too: once the gate is closed the last failure is returned.
+    const gate=await simcoGateReserve(normalizedUrl);
+    if(!gate.ok){
+      const retryAt=new Date(gate.retryAt).toISOString();
+      if(attempt>0)break;
+      await scmMobileNetLogBackground({kind:'request-skipped',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',status:429,reason:'simcotools-shared-gap',retryAt});
+      return {ok:false,status:429,text:'SimcoTools limit: one request per 5 minutes',retryAt,rateLimited:true,limited:true,skipped:true};
+    }
     await simcoAcquireRequestSlot();
     const controller=new AbortController();
     const timer=setTimeout(()=>controller.abort(),timeoutMs);
@@ -4394,6 +4678,7 @@ async function fetchSimcoVwapPairs(realm,pairs){
     const url=`https://api.simcotools.com/v1/realms/${requested}/market/vwaps/${rid}/${q}`;
     try{
       const resp=await simcoFetch(url,15000);
+      if(resp?.limited){failures.push({resourceId:rid,quality:q,error:'Waiting for the SimcoTools limit',status:429,rateLimited:true,limited:true,retryAt:resp.retryAt});break;}
       if(!resp.ok){const error=new Error(`HTTP ${resp.status}`);error.status=resp.status;error.retryAt=resp.retryAt||null;error.rateLimited=Boolean(resp.rateLimited);throw error;}
       const data=parseSimcoResponse(resp.text);
       const value=extractSimcoExactVwap(data);
@@ -4414,6 +4699,7 @@ async function fetchSimcoVwapDataset(realm){
   try{
     const url=`https://api.simcotools.com/v1/realms/${requestedRealm}/market/vwaps`;
     const resp=await simcoFetch(url);
+    if(resp?.limited)return {ok:false,rows:[],source:'SimcoTools',realm:requestedRealm,failed:0,total:0,limited:true,retryAt:resp.retryAt,failures:[{error:'Waiting for the SimcoTools limit (one request per 5 min)',status:429,rateLimited:true,limited:true,retryAt:resp.retryAt}]};
     const data=parseSimcoResponse(resp.text);
     if(!resp.ok) return {ok:false,rows:[],source:'SimcoTools',realm:requestedRealm,failed:0,total:0,failures:[{error:`HTTP ${resp.status} from SimcoTools realm ${requestedRealm}`}]};
     const allRows=normalizeSimcoVwapRows(data);
@@ -4471,6 +4757,11 @@ async function runVwapSyncUnlocked(options={}){
   }
 
   let result=await fetchSimcoVwapDataset(realm);
+  // Inside the shared SimcoTools gap: nothing was requested; the stored VWAP stays and the next run asks again.
+  if(result.limited){
+    await vwapLockedStatus({message:`R${realm===0?'1':'2'} VWAP waits for the SimcoTools limit (one request per 5 min).`,vwapSyncing:false,vwapRealm:realm},realm);
+    return {ok:false,skipped:true,limited:true,realm,requested:0,failed:0,retryAt:result.retryAt,failures:result.failures};
+  }
   let allVwaps=Array.isArray(result.allRows)?result.allRows:(Array.isArray(result.rows)?result.rows:[]);
   let sourceMode='live-bulk';
   let failures=(result.failures||[]).slice(0,50);
@@ -4603,7 +4894,7 @@ function simcoTrendFromSummary(root){
 async function fetchSimcoMarketSnapshot(realm,resourceId,quality){
   const url=`https://api.simcotools.com/v1/realms/${realm}/market/resources/${resourceId}/${quality}`;
   const resp=await simcoFetch(url,12000);
-  if(!resp.ok){const error=new Error(`HTTP ${resp.status}`);error.status=resp.status;error.retryAt=resp.retryAt||null;error.rateLimited=Boolean(resp.rateLimited);throw error;}
+  if(!resp.ok){const error=new Error(resp.limited?'Waiting for the SimcoTools limit (one request per 5 min)':`HTTP ${resp.status}`);error.status=resp.status;error.retryAt=resp.retryAt||null;error.rateLimited=Boolean(resp.rateLimited);error.limited=Boolean(resp.limited);throw error;}
   return normalizeSimcoMarketSnapshot(parseSimcoResponse(resp.text),resourceId,quality);
 }
 function simcoCandleRows(data){
@@ -4648,7 +4939,7 @@ function normalizeSimcoCandle(row){
 async function fetchSimcoMarketCandles(realm,resourceId,quality){
   const url=`https://api.simcotools.com/v1/realms/${realm}/market/resources/${resourceId}/${quality}/candlesticks`;
   const resp=await simcoFetch(url,12000);
-  if(!resp.ok)throw new Error(`HTTP ${resp.status}`);
+  if(!resp.ok){const error=new Error(resp.limited?'Waiting for the SimcoTools limit (one request per 5 min)':`HTTP ${resp.status}`);error.status=resp.status;error.limited=Boolean(resp.limited);error.retryAt=resp.retryAt||null;throw error;}
   const data=parseSimcoResponse(resp.text);
   return simcoCandleRows(data).map(normalizeSimcoCandle).filter(Boolean);
 }
@@ -4692,8 +4983,21 @@ async function runLiveMarketProduct(realmArg,resourceIdArg,qualityArg){
 
   // Fetch one selected SimcoTools product only. Preserve each completed product
   // by resource+quality so out-of-order responses cannot erase the user's selection.
-  const selectedRaw=await fetchSimcoMarketSnapshot(realm,resourceId,quality);
-  try{selectedRaw.candles=await fetchSimcoMarketCandles(realm,resourceId,quality);}catch{selectedRaw.candles=[];}
+  // One SimcoTools request per call (shared 1-per-5-min gate): the current price, or - when the stored price is
+  // under 15 min old and the chart is missing or over 3 h old - the chart. A call inside the gap throws (limited).
+  const pre=(await state(realm)).realmStores?.[realmKeyFromRealm(realm)]?.liveMarketProductCache?.[`${resourceId}:${quality}`]||null;
+  const preAt=Date.parse(String(pre?.fetchedAt||'')),preCandlesAt=Date.parse(String(pre?.candlesFetchedAt||''));
+  const preCandles=Array.isArray(pre?.selected?.candles)?pre.selected.candles:[];
+  const snapFresh=Boolean(pre?.selected)&&Number.isFinite(preAt)&&Date.now()-preAt<15*60e3;
+  const candlesStale=!preCandles.length||!(Date.now()-preCandlesAt<3*3600e3);
+  let selectedRaw,snapshotAt=new Date().toISOString(),candlesFetchedAt=pre?.candlesFetchedAt||null;
+  if(snapFresh&&candlesStale){
+    selectedRaw={...pre.selected};snapshotAt=pre.fetchedAt;
+    selectedRaw.candles=await fetchSimcoMarketCandles(realm,resourceId,quality);candlesFetchedAt=new Date().toISOString();
+  }else{
+    selectedRaw=await fetchSimcoMarketSnapshot(realm,resourceId,quality);
+    selectedRaw.candles=preCandles;
+  }
   // The candlestick endpoint can return no rows for thinly traded products.
   // In that case, use the real last-day candle if the snapshot supplies one;
   // do not invent intermediate candles or synthetic prices.
@@ -4724,7 +5028,7 @@ async function runLiveMarketProduct(realmArg,resourceIdArg,qualityArg){
       if(Number.isFinite(id)&&id>0&&Number.isFinite(q)&&q>=0&&price!=null)currentPriceData.set(`${id}:${q}`,{...row,resourceId:id,quality:q,price});
     }
     const selectedPrice=validPositiveMarketNumber(selected?.price);
-    const selectedPriceRow={resourceId,quality,price:selectedPrice,lastTrade:selected.lastTrade||null,vwap:selected.vwap??bulkVwap,fetchedAt:checkedAt};
+    const selectedPriceRow={resourceId,quality,price:selectedPrice,lastTrade:selected.lastTrade||null,vwap:selected.vwap??bulkVwap,fetchedAt:snapshotAt};
     // Do not overwrite a good cached exchange value with an empty/invalid payload.
     if(selectedPrice!=null)currentPriceData.set(productKey,selectedPriceRow);
     const qualityRows=Array.from(currentPriceData.values())
@@ -4735,7 +5039,7 @@ async function runLiveMarketProduct(realmArg,resourceIdArg,qualityArg){
         vwap:validPositiveMarketNumber(row.vwap)??cachedSimcoVwapForProduct(store,realm,row.resourceId,row.quality)
       }))
       .sort((a,b)=>a.quality-b.quality);
-    data={...existingProduct,resourceId,quality,selected,qualities:qualityRows,vwap:selected.vwap??bulkVwap,failures:[],fetchedAt:checkedAt,updatedAt:checkedAt,source:'SimcoTools'};
+    data={...existingProduct,resourceId,quality,selected,qualities:qualityRows,vwap:selected.vwap??bulkVwap,failures:[],fetchedAt:snapshotAt,candlesFetchedAt,updatedAt:checkedAt,source:'SimcoTools'};
     productCache[productKey]=data;
     // Selected-product lookups must never replace the warehouse-wide current-price
     // dataset. That dataset is owned exclusively by runLiveMarketRefresh; a product
@@ -4779,6 +5083,11 @@ async function runLiveMarketRefreshUnlocked(realmArg=null){
   for(const [url,until] of Object.entries(endpointCooldowns)){if(!Number.isFinite(Number(until))||Number(until)<=nowMs)delete endpointCooldowns[url];else simcoRateLimitUntilByUrl.set(url,Number(until));}
   const out=[],failures=[];let index=0;let freshCacheHits=0;
   const existingPriceByKey=new Map((Array.isArray(previousPriceData.rows)?previousPriceData.rows:[]).map(row=>[vwapPairKey(row.resourceId,row.quality),row]));
+  // SimcoTools allows one request per 5 min: one product per run, the one with the oldest (or no) backup price first.
+  // The others keep their stored price and come up on later runs (queued, not failed).
+  const pairAge=p=>{const t=Date.parse(String(existingPriceByKey.get(vwapPairKey(p.resourceId,p.quality))?.fetchedAt||''));return Number.isFinite(t)?t:0;};
+  pairs.sort((a,b)=>pairAge(a)-pairAge(b));
+  let networkAttempts=0,queued=0;
   const worker=async()=>{while(true){const i=index++;if(i>=pairs.length)return;const pair=pairs[i],pairKey=vwapPairKey(pair.resourceId,pair.quality);
     if(realmSyncSessions.size>0){failures.push({resourceId:Number(pair.resourceId),quality:Number(pair.quality),error:'Deferred because core Sync started',deferredByCoreSync:true});continue;}
     const cachedRow=existingPriceByKey.get(pairKey);const cachedAt=Date.parse(String(cachedRow?.fetchedAt||''));
@@ -4790,34 +5099,38 @@ async function runLiveMarketRefreshUnlocked(realmArg=null){
       const until=Math.max(cooldownUntil,endpointCooldown,simcoRateLimitUntil);
       failures.push({resourceId:Number(pair.resourceId),quality:Number(pair.quality),status:429,rateLimited:true,retryAt:new Date(until).toISOString(),error:'Skipped during shared rate-limit cooldown'});continue;
     }
+    if(networkAttempts>=1){queued++;continue;}
+    networkAttempts++;
     try{const snap=await fetchSimcoMarketSnapshot(realm,pair.resourceId,pair.quality);const price=validPositiveMarketNumber(snap?.price);if(price==null)throw new Error('No valid current price returned');delete pairCooldowns[pairKey];delete endpointCooldowns[endpoint];out.push({resourceId:Number(pair.resourceId),quality:Number(pair.quality),price,lastTrade:snap.lastTrade||null,trend:snap.trend||null,fetchedAt:new Date().toISOString(),stale:false});}
-    catch(e){const failure={resourceId:Number(pair.resourceId),quality:Number(pair.quality),error:e?.message||String(e)};if(Number(e?.status)===429||e?.rateLimited){const parsed=Date.parse(String(e?.retryAt||''));const until=Number.isFinite(parsed)&&parsed>Date.now()?parsed:Date.now()+SIMCOTOOLS_PAIR_RATE_LIMIT_COOLDOWN_MS;pairCooldowns[pairKey]=until;endpointCooldowns[endpoint]=until;simcoRateLimitUntilByUrl.set(endpoint,until);failure.status=429;failure.rateLimited=true;failure.retryAt=new Date(until).toISOString();await persistSimcoCooldowns();}failures.push(failure);}
+    catch(e){const failure={resourceId:Number(pair.resourceId),quality:Number(pair.quality),error:e?.message||String(e)};if(e?.limited){failure.status=429;failure.rateLimited=true;failure.limited=true;failure.retryAt=e?.retryAt||null;}else if(Number(e?.status)===429||e?.rateLimited){const parsed=Date.parse(String(e?.retryAt||''));const until=Number.isFinite(parsed)&&parsed>Date.now()?parsed:Date.now()+SIMCOTOOLS_PAIR_RATE_LIMIT_COOLDOWN_MS;pairCooldowns[pairKey]=until;endpointCooldowns[endpoint]=until;simcoRateLimitUntilByUrl.set(endpoint,until);failure.status=429;failure.rateLimited=true;failure.retryAt=new Date(until).toISOString();await persistSimcoCooldowns();}failures.push(failure);}
   }};
   await worker();
   const merged=new Map();
   for(const row of (Array.isArray(previousPriceData.rows)?previousPriceData.rows:[])){
     const id=Number(row?.resourceId),q=Number(row?.quality),price=validPositiveMarketNumber(row?.price),pairKey=vwapPairKey(id,q),cachedAt=Date.parse(String(row?.fetchedAt||''));
-    const stillFresh=!row?.stale&&Number.isFinite(cachedAt)&&Date.now()-cachedAt<15*60*1000;
+    // One product per run means most rows are minutes to hours old: a row is stale only after 3 h (market-core's SimcoTools age).
+    const stillFresh=!row?.stale&&Number.isFinite(cachedAt)&&Date.now()-cachedAt<(globalThis.SCM_MARKET_CORE?.SIMCOTOOLS_MAX_AGE_MS||3*3600e3);
     if(id>0&&Number.isFinite(id)&&q>=0&&Number.isFinite(q)&&price!=null)merged.set(pairKey,{...row,resourceId:id,quality:q,price,fetchedAt:row.fetchedAt||previousPriceData.fetchedAt||null,stale:!stillFresh});
   }
   for(const row of out)merged.set(vwapPairKey(row.resourceId,row.quality),{...row,stale:false});
   const priceRows=[...merged.values()];
   const lastSuccessfulUpdate=out.map(row=>Date.parse(String(row.fetchedAt||''))).filter(Number.isFinite).reduce((max,value)=>Math.max(max,value),0);
   const lastSuccessfulUpdateAt=lastSuccessfulUpdate?new Date(lastSuccessfulUpdate).toISOString():(previousPriceData.updatedAt||previousPriceData.fetchedAt||null);
-  const priceData={...previousPriceData,rows:priceRows,fetchedAt:lastSuccessfulUpdateAt,updatedAt:lastSuccessfulUpdateAt,lastAttemptAt:checkedAt,source:'SimcoTools',sourceMode:'live-warehouse-and-production-current-prices',realm,warehouseCount:warehouseRows.filter(row=>warehouseQuantity(row)>0).length,productionAndWarehousePairCount:pairs.length,requested:pairs.length,checked:pairs.length-failures.filter(f=>/cooldown/i.test(String(f.error||''))).length,fetched:out.length,updated:out.length,refreshed:out.length,cacheHits:freshCacheHits,cached:priceRows.filter(row=>row.stale).length,freshRows:out.length+freshCacheHits,staleRows:priceRows.filter(row=>row.stale).length,failed:failures.length,failures:failures.slice(0,50),rateLimitedUntilByPair:{...pairCooldowns},rateLimitedUntilByEndpoint:{...endpointCooldowns}};
+  const priceData={...previousPriceData,rows:priceRows,fetchedAt:lastSuccessfulUpdateAt,updatedAt:lastSuccessfulUpdateAt,lastAttemptAt:checkedAt,source:'SimcoTools',sourceMode:'live-warehouse-and-production-current-prices',realm,warehouseCount:warehouseRows.filter(row=>warehouseQuantity(row)>0).length,productionAndWarehousePairCount:pairs.length,requested:pairs.length,checked:pairs.length-failures.filter(f=>/cooldown/i.test(String(f.error||''))).length,fetched:out.length,updated:out.length,refreshed:out.length,cacheHits:freshCacheHits,cached:priceRows.filter(row=>row.stale).length,freshRows:out.length+freshCacheHits,staleRows:priceRows.filter(row=>row.stale).length,failed:failures.length,queued,failures:failures.slice(0,50),rateLimitedUntilByPair:{...pairCooldowns},rateLimitedUntilByEndpoint:{...endpointCooldowns}};
   const productCache={...(targetStore.liveMarketProductCache||{})};
   for(const row of out){const productKey=`${row.resourceId}:${row.quality}`,existing=productCache[productKey]&&typeof productCache[productKey]==='object'?productCache[productKey]:{};const selected={...(existing.selected||{}),resourceId:row.resourceId,quality:row.quality,price:row.price,lastTrade:row.lastTrade,fetchedAt:row.fetchedAt};productCache[productKey]={...existing,resourceId:row.resourceId,quality:row.quality,selected,fetchedAt:row.fetchedAt,updatedAt:row.fetchedAt,source:'SimcoTools'};}
   await withRealmWriteLock(realm,async()=>{const latest=await state(realm),stores={...(latest.realmStores||{})},store={...(stores[key]||{})};stores[key]={...store,liveMarketPriceData:priceData,liveMarketProductCache:productCache};const rootPatch=key===latest.activeRealmKey?{liveMarketPriceData:priceData,liveMarketProductCache:productCache}:{};await storageSet({realmStores:stores,...rootPatch});});
   scheduleGameOverlayRefreshNotification(realm,150);
   const finishedAt=new Date().toISOString(),durationMs=Date.now()-jobStartedMs;
   // Nothing downloaded because every price was still fresh (<15 min) is a skip, not a failure.
-  const outcome=out.length?(failures.length?'partial':'success'):((freshCacheHits>0&&!failures.length)?'skipped':'failure');
+  const onlyLimited=failures.length>0&&failures.every(f=>f?.limited);
+  const outcome=out.length?(failures.length&&!onlyLimited?'partial':'success'):(((freshCacheHits>0||queued>0)&&!failures.length)||onlyLimited?'skipped':'failure');
   // One cause text for the job entry and the returned result, so market-current-price-stage and market-prices-stage agree.
   const firstFailure=failures[0];
   const noFreshPriceError=`No fresh current-price data returned (${failures.length}/${pairs.length} failed${firstFailure?.error?`: ${String(firstFailure.error).slice(0,160)}`:''}).`;
   await recordBackgroundJobEvent(realm,{job:'market-current-price-stage',trigger:'scheduled-or-message',startedAt:jobStartedAt,finishedAt,durationMs,outcome,requested:pairs.length,fetched:out.length,refreshed:out.length,checked:pairs.length-failures.filter(f=>/cooldown/i.test(String(f.error||''))).length,cacheHits:freshCacheHits,cached:priceRows.filter(row=>row.stale).length,stale:priceRows.filter(row=>row.stale).length,error:outcome==='failure'?noFreshPriceError:null,details:{failed:failures.length,rateLimited:failures.filter(f=>f.rateLimited).length}}).catch(()=>{});
   if(outcome!=='failure')notifyAfterPriceUpdate(realm).catch(()=>{});
-  return {ok:out.length>0||freshCacheHits>0,realm,stage:'prices',requested:pairs.length,checked:pairs.length-failures.filter(f=>/cooldown/i.test(String(f.error||''))).length,fetched:out.length,refreshed:out.length,cacheHits:freshCacheHits,cached:priceRows.filter(row=>row.stale).length,stale:priceRows.filter(row=>row.stale).length,failed:failures.length,currentPricesUpdated:out.length,currentPricesFailed:failures.length,errors:failures.slice(0,10),error:(out.length>0||freshCacheHits>0)?null:noFreshPriceError,startedAt:jobStartedAt,finishedAt,durationMs};
+  return {ok:out.length>0||freshCacheHits>0,queued,limited:onlyLimited&&!out.length,realm,stage:'prices',requested:pairs.length,checked:pairs.length-failures.filter(f=>/cooldown/i.test(String(f.error||''))).length,fetched:out.length,refreshed:out.length,cacheHits:freshCacheHits,cached:priceRows.filter(row=>row.stale).length,stale:priceRows.filter(row=>row.stale).length,failed:failures.length,currentPricesUpdated:out.length,currentPricesFailed:failures.length,errors:failures.slice(0,10),error:(out.length>0||freshCacheHits>0)?null:noFreshPriceError,startedAt:jobStartedAt,finishedAt,durationMs};
 }
 
 // All callers (scheduled, popup/message, and future triggers) share one refresh per realm.
@@ -4849,13 +5162,16 @@ async function runVwapSync(options={}){
 }
 
 const LIVE_MARKET_REFRESH_ALARM_NAME='scm-live-market-refresh';
-const LIVE_MARKET_REFRESH_PERIOD_MINUTES=60;
+const LIVE_MARKET_REFRESH_PERIOD_MINUTES=5;
+// {lastPricesRealm, at}: which realm the last timer run took a backup price for, so runs alternate realms.
+const LIVE_MARKET_ROTATION_KEY='scmLiveMarketRotation';
 const MARKET_STAGE_ALARM_PREFIX='scm-market-stage-r';
 // Start optional market work as soon as core Sync releases its capture lock.
 // Resource-image downloads continue independently and provide natural API quiet time.
 const POST_SYNC_MARKET_COOLDOWN_MS=1000;
-const MARKET_STAGE_COOLDOWN_MS=120000;
-const MARKET_STAGE_REALM_COOLDOWN_MS=120000;
+// Chained stages (after Sync / Refresh) each make one SimcoTools request, so they are spaced by the shared gap.
+const MARKET_STAGE_COOLDOWN_MS=SIMCOTOOLS_SHARED_GAP_MS+5000;
+const MARKET_STAGE_REALM_COOLDOWN_MS=SIMCOTOOLS_SHARED_GAP_MS+5000;
 let liveMarketRefreshAlarmRun=null;
 let marketStageRun=null;
 function marketStageAlarmName(realm,stage){const n=validRealmNumber(realm);return n==null?null:`${MARKET_STAGE_ALARM_PREFIX}${n}-${stage}`;}
@@ -4933,9 +5249,28 @@ async function runScheduledLiveMarketRefresh(reason='scheduled'){
     if(await hasPendingMarketStageAlarm())return {ok:true,skipped:true,reason:'market-stage-already-scheduled'};
     const s=await state();
     const selected=validRealmNumber(s.activeRealmKey?.replace(/^realm:/,'')??s.selectedRealm??s.authData?.authCompany?.realmId);
-    const first=selected??0;
-    const scheduled=await scheduleMarketCycle(first,reason);
-    return {...scheduled,queued:true};
+    const first=selected??0,other=first===0?1:0;
+    // Every run (default every 5 min) makes at most ONE SimcoTools request (the shared gate enforces it too):
+    // 1. VWAP of the game's realm, then of the other realm, when due (one bulk call each, ~1-3 a day, see VWAP_RECHECK_MS);
+    // 2. otherwise one backup price, alternating realms, the product with the oldest backup price first.
+    // A step that needs no request (VWAP still current, no products) moves on to the next step in the same run.
+    if(coreSyncActive())return {ok:true,skipped:true,reason:'core-sync-active'};
+    if(await simcoGateNextAt())return {ok:true,skipped:true,reason:'simcotools-gap',retryAt:new Date(await simcoGateNextAt()).toISOString()};
+    let rot={};try{rot=(await chrome.storage.local.get({[LIVE_MARKET_ROTATION_KEY]:{}}))[LIVE_MARKET_ROTATION_KEY]||{};}catch{}
+    const pricesFirst=validRealmNumber(rot.lastPricesRealm)===first?other:first;
+    const steps=[['vwap',first],['vwap',other],['prices',pricesFirst],['prices',pricesFirst===first?other:first]];
+    const ran=[];
+    for(const [stage,realm] of steps){
+      if(coreSyncActive())break;
+      const before=Number((await simcoGateLoad()).lastAt)||0;
+      let result=null;
+      try{result=stage==='vwap'?await runVwapSync({realm,reason:'timer-market-vwap'}):await runLiveMarketRefresh(realm);}catch(e){result={ok:false,error:e?.message||String(e)};}
+      const requested=(Number((await simcoGateLoad()).lastAt)||0)!==before;
+      ran.push({stage,realm,ok:Boolean(result?.ok),requested,limited:Boolean(result?.limited)});
+      if(stage==='prices'&&requested){try{await rawStorageSet({[LIVE_MARKET_ROTATION_KEY]:{lastPricesRealm:realm,at:Date.now()}});}catch{}}
+      if(requested||result?.limited)break;
+    }
+    return {ok:true,reason,steps:ran};
   })().finally(()=>{liveMarketRefreshAlarmRun=null;});
   return liveMarketRefreshAlarmRun;
 }
@@ -5812,6 +6147,49 @@ async function waitForWalkTraffic(session,sinceMs,capMs=SYNC_CAPTURE_FALLBACK_MS
   }
   return {seen,reason:'cap',ms:Date.now()-started};
 }
+// Final durability recovery for a target's required endpoints whose durable write was not verified in time. Under the
+// game's bot protection the direct read gets 403, so the sources are tried in this order: (1) the game's own fresh
+// 2xx page response for that path from this Sync (captureFor(path,sinceMs)); (2) one revisit of the target's page,
+// then its capture; (3) the direct read, only while reads are not blocked. Bounded by budgetMs (each record call has
+// its own persist timeout). Returns one {path,ok,source} per path.
+const SYNC_FINAL_RECOVERY_BUDGET_MS=60000;
+async function recoverRequiredEndpointsFinal({paths,sinceMs,captureFor,revisit=null,readsBlocked=async()=>false,directRead=null,record,trace=()=>{},budgetMs=SYNC_FINAL_RECOVERY_BUDGET_MS}){
+  const started=Date.now(),out=[];
+  const overBudget=()=>Date.now()-started>=budgetMs;
+  const fromCapture=async(path,since,source)=>{
+    const c=captureFor(path,since);
+    if(!c)return false;
+    // record() throws only when Sync was stopped; that ends the recovery.
+    const ok=Boolean(await record(path,c));
+    trace('required-endpoint-final-retry-result',{path,source,ok,status:Number(c.status)||0});
+    if(ok)out.push({path,ok:true,source});
+    return ok;
+  };
+  let pending=[];
+  for(const path of paths){if(!await fromCapture(path,sinceMs,'walk-capture'))pending.push(path);}
+  if(pending.length&&revisit&&!overBudget()){
+    const visitStartedAt=Date.now();
+    let visit=null;try{visit=await revisit(pending.slice());}catch(e){visit={ok:false,error:e?.message||String(e)};}
+    trace('required-endpoint-final-revisit',{paths:pending.slice(),ok:Boolean(visit?.ok),error:visit?.ok?undefined:(visit?.error||visit?.skipped||null),durationMs:Date.now()-visitStartedAt});
+    const next=[];
+    for(const path of pending){if(!await fromCapture(path,visitStartedAt,'page-revisit'))next.push(path);}
+    pending=next;
+  }
+  for(const path of pending){
+    if(overBudget()){trace('required-endpoint-final-retry-skipped',{path,reason:'recovery-time-budget'});out.push({path,ok:false,source:null,reason:'recovery-time-budget'});continue;}
+    let blocked=false;try{blocked=Boolean(await readsBlocked());}catch{}
+    if(blocked||!directRead){trace('required-endpoint-final-retry-skipped',{path,reason:blocked?'direct-reads-blocked':'no-direct-read'});out.push({path,ok:false,source:null,reason:blocked?'direct-reads-blocked':'no-direct-read'});continue;}
+    let ok=false,status=0;
+    try{
+      const response=await directRead(path);
+      status=Number(response?.status)||0;
+      ok=response?.directReadsBlocked?false:Boolean(await record(path,response));
+    }catch(e){if(e instanceof SyncCancelledByClear)throw e;trace('required-endpoint-final-retry-error',{path,error:e?.message||String(e)});}
+    trace('required-endpoint-final-retry-result',{path,source:'direct-read',ok,status});
+    out.push({path,ok,source:'direct-read'});
+  }
+  return out;
+}
 async function executeGameClickRaw(tabId,target){
   const execution=chrome.scripting.executeScript({target:{tabId},func:async(cfg)=>{
     const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -6207,6 +6585,9 @@ function endpointFailureSuggestsMove(response,path=''){
 // Research is a tab under Warehouse (/headquarters/warehouse/research/, confirmed by the user opening it 2026-11-09), so
 // it has a route and is reached by history when its link is not on the current page. Government orders is still
 // unconfirmed: if its link is not found the visit is reported as failed rather than forced to a guessed address.
+// Sync market crawl: at most this many product pages per Sync, each waited on at most this long.
+const SYNC_MARKET_CRAWL_MAX_PRODUCTS=60;
+const SYNC_MARKET_CRAWL_WAIT_MS=6000;
 function syncExtraWalkPages(realm){
   return [
     {name:'Map',labels:['Map'],hrefHints:['/landscape/','/map/','/map'],route:'/landscape/',expects:[/\/api\/v2\/companies\/me\/buildings\/?$/i],paths:[]},
@@ -6311,7 +6692,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     // Only the game-page capture itself remains single-flight because one
     // logged-in Sim Companies tab can represent only one authenticated realm
     // at a time. Background VWAP jobs do not use this capture lock.
-    const session={realm:selected,startedAt,phase:'preflight'};
+    const session={realm:selected,startedAt,phase:'preflight',gameTabId:null};
     realmSyncSessions.set(selected,session);
     scmMirrorSyncSessions();
     // Whatever this key says from now on is about this run.
@@ -6362,6 +6743,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
 
     const tab=await simTab();
     if(!tab?.id) throw new Error('Open the logged-in Sim Companies tab before syncing.');
+    // Walk and Sync captures are taken only from this game tab (top frame); a walk that moves to another tab updates it.
+    session.gameTabId=tab.id;
     const bridgeReady=await waitForBridge(tab.id,8000);
     if(!bridgeReady) throw new Error('Sim Companies page bridge could not be established. Keep the logged-in game tab open and try Sync again.');
     trace('bridge-ready',{tabId:tab.id});
@@ -6381,13 +6764,14 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     // any page walk, then promote the verified realm to the active Manager
     // store. This makes R1 and R2 symmetric and prevents cross-realm writes.
     session.phase='auth-boundary';
-    const authBoundary=await pageGet('/api/v3/companies/auth-data/',selected);
+    const authBoundary=await syncAuthBoundaryFromGame(selected,tab.id,session,trace);
     const authRealm=validRealmNumber(authBoundary?.data?.authCompany?.realmId
       ??authBoundary?.data?.authCompany?.realm
       ??authBoundary?.data?.realmId
       ??authBoundary?.data?.realm
       ??authBoundary?.captureRealm);
-    if(!authBoundary?.ok) throw new Error(`Could not verify the game session for ${realmDisplayNumber(selected)||'selected realm'} before sync (HTTP ${authBoundary?.status||0}).`);
+    if(!authBoundary?.ok) throw new Error(authBoundary?.directReadsBlocked?`Could not verify the game session for ${realmDisplayNumber(selected)||'selected realm'}: the game page did not load its session data within ${Math.round(SYNC_AUTH_RELOAD_WAIT_MS/1000)} s after a reload. ${DIRECT_READS_BLOCKED_TEXT}`:`Could not verify the game session for ${realmDisplayNumber(selected)||'selected realm'} before sync (HTTP ${authBoundary?.status||0}).`);
+    trace('auth-boundary-source',{source:authBoundary.fromPageCapture?'game-capture':'direct-read',ageMs:authBoundary.ageMs??null});
     if(authRealm!==selected) throw new Error(`Game session is still ${realmDisplayNumber(authRealm)||'an unknown realm'}; selected sync target is ${realmDisplayNumber(selected)||'the selected realm'}. Switch the game first, then Sync again.`);
     trace('auth-verified',{realm:selected,captureRealm:validRealmNumber(authBoundary.captureRealm),status:Number(authBoundary.status)||0});
     // The explicit auth-data GET bypasses saveData, so record the economy phase from it here
@@ -6427,8 +6811,38 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     // If a fixed path is gone, use the same endpoint the game was captured calling under another API version.
     // The response is still stored under the fixed path, so every reader keeps working.
     let walkSinceMs=Date.now();
+    // The game's own response to a walked page is the source of truth: a fresh 2xx capture of this path from this
+    // page visit is used without a request. Otherwise the direct read runs (non-fatal); when the game blocks it, the
+    // capture is looked for again (a slow page can answer after the visit wait).
+    const walkCaptureFor=path=>{
+      for(const [url,c] of Object.entries(session.walkCaptures||{})){
+        if(String(url).replace(/^https?:\/\/[^/]+/,'').split('?')[0]!==path)continue;
+        const st=Number(c?.status)||0;
+        if(st<200||st>=300||!endpointDataIsValid(path,c?.data)||Number(c?.at)<walkSinceMs)continue;
+        return {ok:true,status:st,data:c.data,captureRealm:selected,fromPageCapture:true,receivedAt:c.receivedAt};
+      }
+      return null;
+    };
+    // Every target's required paths keep their latest 2xx page response for the whole Sync (walkCaptures is reset
+    // per page), so the final durability recovery can re-save the game's own answer without a direct read.
+    session.syncCapturePaths=new Set();session.syncCaptures={};
+    const syncCaptureFor=(path,sinceMs)=>{
+      const c=session.syncCaptures?.[path];
+      const st=Number(c?.status)||0;
+      if(!c||st<200||st>=300||Number(c.at)<Number(sinceMs)||!endpointDataIsValid(path,c.data))return null;
+      return {ok:true,status:st,data:c.data,captureRealm:selected,fromPageCapture:true,receivedAt:c.receivedAt};
+    };
     const pageGetWalked=async(path,...rest)=>{
+      const page=walkCaptureFor(path);
+      if(page){trace('walk-page-capture-used',{path,status:page.status});return page;}
       const raw=await pageGet(path,...rest);
+      if(raw?.directReadsBlocked){
+        const late=walkCaptureFor(path);
+        if(late){trace('walk-page-capture-used',{path,status:late.status,late:true});return late;}
+        trace('direct-read-blocked-not-on-page',{path});
+        session.directReadsBlocked=true;
+        return raw;
+      }
       if(!endpointFailureSuggestsMove(raw,path))return raw;
       // A success that is not data is never stored as this endpoint's data.
       const first=endpointResponseRejected(path,raw)?{...raw,ok:false,data:null,error:'The address did not return data.'}:raw;
@@ -6473,6 +6887,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
           if(spa?.ok)visit={ok:true,navigated:true,via:`route-${spa.via}`,urlAfterClick:spa.url,clickError:visit?.error||null};
         }
         if(visit?.ok&&visit.navigated)visit.traffic=await waitForWalkTraffic(sess,startedAt);
+        if(visit)visit.loaded=[...new Set(Object.keys(sess.walkCaptures||{}).map(u=>safeWalkText(String(u).split('?')[0])))].slice(0,40);
         return visit;
       }catch(e){return {ok:false,error:e?.message||String(e)};}
     };
@@ -6527,6 +6942,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       if(session.cancelled)throw new SyncCancelledByClear();
       const currentTab=await simTab();
       if(!currentTab?.id) throw new Error('The logged-in Sim Companies tab is no longer available.');
+      session.gameTabId=currentTab.id;
       const row={name:target.name,ok:false,status:'api-pending',endpoint:null,reason:null};
       await persistTransientSyncUi(selected,`${realmDisplayNumber(selected)||'Realm'} Sync: ${step}/${targets.length} ${target.name}…`,null);
       trace('target-start',{name:target.name,step});
@@ -6560,13 +6976,15 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       row.startedAtMs=targetStartedAt;
       row.requestedPaths=authoritativePaths.slice();
       session.capturePaths=authoritativePaths.slice();
+      for(const p of authoritativePaths)session.syncCapturePaths.add(p);
       if(!authoritativePaths.length){
         row.authoritativeFailures=[{path:null,status:0,error:'No authoritative API path could be resolved from the selected realm state.'}];
       }
 
       // A Sync the player clicked walks every page first, so moved endpoints are captured. Automatic runs
       // only walk Executives here and use the page fallback below when a call fails.
-      if(fullWalk || (target.name==='Executives' && authoritativePaths.length)){
+      // While the game blocks direct reads every run walks the pages: their own responses are the only data source.
+      if(fullWalk || session.directReadsBlocked || await directReadsBlockedNow() || (target.name==='Executives' && authoritativePaths.length)){
         // Walk the game's own page first, so its requests run as they do for a player. A failed visit only
         // skips the wait and is reported; the direct reads below (and their fallback) still run.
         row.pageVisit=await visitWalkPage(currentTab.id,target,session);
@@ -6849,14 +7267,20 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         try{
           const extraTab=await simTab();
           if(!extraTab?.id)throw new Error('The game tab is no longer available.');
+          session.gameTabId=extraTab.id;
           extra.pageVisit=await visitWalkPage(extraTab.id,page,session);
           const urls=Object.keys(session.walkCaptures||{});
           extra.seen=[...new Set(urls.map(u=>safeWalkText(u.split('?')[0])).filter(u=>page.expects.some(rx=>rx.test(u))))];
+          // Every URL the page loaded (not only the expected ones), for the walk report.
+          extra.loaded=[...new Set(urls.map(u=>safeWalkText(u.split('?')[0])))].slice(0,40);
           for(const path of page.paths){
             // Same per-read timeout as the other slow-server reads: at 5 s a game answering in 6-9 s showed as HTTP 0, and the
             // failed read also turned an unreachable Research link into a "page not reached" warning. Still one attempt.
             const r=await pageGetWalked(path,selected,null,'sync-walk-check',{timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS,attempts:1}).catch(e=>({ok:false,status:0,error:e?.message||String(e)}));
-            extra.paths.push({path,ok:Boolean(r?.ok),status:Number(r?.status)||0,walkedPath:r?.walkedPath||null,valid:Boolean(r?.ok)&&!endpointFailureSuggestsMove(r,path)});
+            extra.paths.push({path,ok:Boolean(r?.ok),status:Number(r?.status)||0,walkedPath:r?.walkedPath||null,valid:Boolean(r?.ok)&&!endpointFailureSuggestsMove(r,path),fromPage:Boolean(r?.fromPageCapture)});
+            // The game's own answer on this page is stored like any capture outside Sync (refreshExtraGameData cannot read it now).
+            if(r?.fromPageCapture){try{await withSyncTimeout(saveData(path,r.data,r.status,'GET',selected),SYNC_PERSIST_VERIFY_TIMEOUT_MS,`Save ${path}`);}catch(e){trace('walk-extra-save-failed',{path,error:e?.message||String(e)});}}
+            if(r?.directReadsBlocked){session.warnings.push(`${path}: the ${page.name} page did not load it, and the game blocks direct reads`);continue;}
             if(r?.walkedPath)session.warnings.push(`${path} moved to ${r.walkedPath}`);
             else if(!r?.ok&&!endpointFailureSuggestsMove(r,path))session.warnings.push(`${path} failed (HTTP ${Number(r?.status)||0})`);
           }
@@ -6867,6 +7291,52 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         trace('walk-extra-page',{name:page.name,ok:Boolean(extra.pageVisit?.ok),error:extra.pageVisit?.ok?undefined:safeWalkText(extra.pageVisit?.error||''),reads:`${extra.paths.filter(r=>r.valid).length}/${page.paths.length}`,seen:extra.seen.length,durationMs:extra.durationMs});
       }
       session.walkCaptures=null;
+    }
+
+    // Market crawl (timer syncMarketCrawl, default on): after the targets, open the game's own market page of every
+    // product the company stocks or produces (orderBookRefreshResourceIds), so the game itself loads
+    // /api/v3/market/<realm>/<id>/. Its response is stored in endpointData, where marketPrice() reads exact game
+    // prices. No request of the Manager's own. Each page waits at most SYNC_MARKET_CRAWL_WAIT_MS and moves on as soon
+    // as the response lands. Stops when the player takes over the tab; the start page is restored below as for any walk.
+    const marketCrawl={enabled:false,products:0,captured:0,missed:[],durationMs:0};
+    if(!session.cancelled&&await scmTimerEnabled('syncMarketCrawl').catch(()=>true)){
+      marketCrawl.enabled=true;const crawlStart=Date.now();
+      try{
+        try{await withSyncTimeout(apiStorageQueueForRealm(selected),20000,'Market crawl queue drain');}catch{}
+        const cs=await state(selected),cst=cs.realmStores?.[realmKeyFromRealm(selected)]||{};
+        let networkRows=[];try{const {network}=await overlayProductionStock(cst,selected,null);networkRows=[...network.productionRows,...network.demandRows];}catch{}
+        const ids=[...orderBookRefreshResourceIds(cst,selected,networkRows)].sort((a,b)=>a-b).slice(0,SYNC_MARKET_CRAWL_MAX_PRODUCTS);
+        marketCrawl.products=ids.length;
+        const crawlTab=ids.length?await simTab():null;
+        if(crawlTab?.id)session.gameTabId=crawlTab.id;
+        const origin=crawlTab?.id?(await gameTabUrl(crawlTab.id)||'').match(/^https:\/\/[^/]+/)?.[0]:null;
+        session.capturePaths=[];
+        for(const id of ids){
+          if(session.cancelled)throw new SyncCancelledByClear();
+          if(!origin)break;
+          if(await pageReturn.checkUser(crawlTab.id)){marketCrawl.stopped='user-navigated';break;}
+          const path=`/api/v3/market/${selected}/${id}/`,t0=Date.now();
+          session.walkCaptures={};
+          const nav=await pageReturn.walkTo(crawlTab.id,`${origin}/market/resource/${id}/`).catch(e=>({ok:false,error:e?.message||String(e)}));
+          let got=null;
+          while(nav?.ok&&!got&&Date.now()-t0<SYNC_MARKET_CRAWL_WAIT_MS){
+            for(const [url,c] of Object.entries(session.walkCaptures||{})){
+              if(String(url).replace(/^https?:\/\/[^/]+/,'').split('?')[0]!==path)continue;
+              const st=Number(c?.status)||0;if(st>=200&&st<300&&Array.isArray(c?.data)){got=c;break;}
+            }
+            if(!got)await new Promise(res=>setTimeout(res,100));
+          }
+          if(got){
+            try{await withSyncTimeout(saveData(path,got.data,Number(got.status)||200,'GET',selected),SYNC_PERSIST_VERIFY_TIMEOUT_MS,`Save ${path}`);marketCrawl.captured++;}
+            catch(e){marketCrawl.missed.push({id,reason:'save-failed'});}
+          }else marketCrawl.missed.push({id,reason:nav?.ok?'no-response':'not-reached',ms:Date.now()-t0});
+        }
+      }catch(e){if(e instanceof SyncCancelledByClear)throw e;marketCrawl.error=e?.message||String(e);}
+      session.walkCaptures=null;session.capturePaths=[];
+      marketCrawl.durationMs=Date.now()-crawlStart;
+      marketCrawl.missed=marketCrawl.missed.slice(0,20);
+      trace('market-crawl',marketCrawl);
+      if(marketCrawl.products&&marketCrawl.captured<marketCrawl.products)session.warnings.push(`Market prices: ${marketCrawl.captured}/${marketCrawl.products} product pages loaded their order book`);
     }
 
     // Drain is best-effort: the final durable verification below re-reads and
@@ -6911,14 +7381,32 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       }
       // Retry failed reads/writes after the main queue drain. The retry writes
       // retain priority and are read back only after their queue slot completes.
-      for(const requiredPath of retryPaths){
-        session.capturePaths=[requiredPath];
-        trace('required-endpoint-final-retry',{name:result.name,path:requiredPath,reason:verificationByPath.get(requiredPath)?.reason||'unverified'});
-        try{
-          const response=await pageGet(requiredPath,selected,null,`final-durability-retry:${target.name}`);
-          const retryOk=await recordAuthoritative(requiredPath,response,result);
-          trace('required-endpoint-final-retry-result',{name:result.name,path:requiredPath,ok:retryOk,status:Number(response?.status)||0});
-        }catch(e){trace('required-endpoint-final-retry-error',{name:result.name,path:requiredPath,error:e?.message||String(e)});}
+      for(const requiredPath of retryPaths)trace('required-endpoint-final-retry',{name:result.name,path:requiredPath,reason:verificationByPath.get(requiredPath)?.reason||'unverified'});
+      if(retryPaths.length){
+        if(session.cancelled)throw new SyncCancelledByClear();
+        // The game's own response from this Sync first; a direct read gets 403 under bot protection.
+        result.finalRecovery=await recoverRequiredEndpointsFinal({
+          paths:retryPaths,
+          sinceMs:result.startedAtMs||startedAt,
+          captureFor:syncCaptureFor,
+          revisit:async paths=>{
+            const tab=await simTab();
+            if(!tab?.id)return {ok:false,error:'The game tab is no longer available.'};
+            session.gameTabId=tab.id;
+            session.capturePaths=paths.slice();session.walkCaptures={};
+            try{
+              const visitStartedAt=Date.now();
+              const visit=await visitWalkPage(tab.id,target,session);
+              // A slow page can answer after its traffic went quiet; wait for these paths up to the capture window.
+              while(visit?.ok&&Date.now()-visitStartedAt<SYNC_CAPTURE_FALLBACK_MS&&!paths.every(p=>syncCaptureFor(p,visitStartedAt)))await new Promise(r=>setTimeout(r,100));
+              return visit;
+            }finally{session.walkCaptures=null;}
+          },
+          readsBlocked:async()=>Boolean(session.directReadsBlocked)||await directReadsBlockedNow(),
+          directRead:async path=>{session.capturePaths=[path];return pageGet(path,selected,null,`final-durability-retry:${target.name}`);},
+          record:(path,response)=>recordAuthoritative(path,response,result),
+          trace:(event,detail)=>trace(event,{name:result.name,...detail})
+        });
       }
       session.capturePaths=[];
       if(retryPaths.length){
@@ -6945,7 +7433,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         trace('target-durable-verification-failed',{name:result.name,requiredCount:verification.requiredCount,verifiedCount:verification.verifiedCount,missingEndpoints:missing});
       }
     }
-    session.capturePaths=[];
+    session.capturePaths=[];session.syncCaptures=null;session.syncCapturePaths=null;
     const missingRequiredEndpoints=results.filter(result=>!result.optional).flatMap(result=>(result.finalDurableVerification?.endpoints||[]).filter(item=>!item.ok).map(item=>({target:result.name,path:item.path,reason:item.reason||'unverified'})));
     const missingRequiredWrites=[...new Set(missingRequiredEndpoints.map(item=>item.target))];
     const successfulAfterDurability=results.filter(result=>result.ok&&result.finalDurableVerification?.ok).length;
@@ -6956,6 +7444,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     const successful=successfulAfterDurability;
     const failed=failedAfterDurability;
     const executivesSummary=executivesSyncSuffix(results.find(result=>result.name==='Executives'));
+    if(session.directReadsBlocked||await directReadsBlockedNow())session.warnings.unshift(DIRECT_READS_BLOCKED_TEXT);
     const endpointWarnings=[...new Set((session.warnings||[]).map(w=>safeWalkText(w)))];
     if(endpointWarnings.length)trace('endpoint-warnings',{count:endpointWarnings.length,warnings:endpointWarnings});
     const finalStatusBase=`${realmDisplayNumber(selected)||'Realm'} Sync ${requiredOk?'complete':'finished with errors'} · ${successful}/${targets.length} targets captured${accountingSuffix}${executivesSummary}`;
@@ -7096,9 +7585,9 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       }
       // Cleanup is centralized in finally so the capture boundary is released
       // exactly once and cannot hold the caller open indefinitely.
-      return {ok:true,realm:selected,results,walkReport,endpointWarnings,total,successful,failed,elapsedMs:Date.now()-startedAt};
+      return {ok:true,realm:selected,results,walkReport,marketCrawl,endpointWarnings,total,successful,failed,elapsedMs:Date.now()-startedAt};
     }
-    return {ok:false,realm:selected,results,walkReport,endpointWarnings,total,successful,failed,missingRequiredWrites,missingRequiredEndpoints,elapsedMs:Date.now()-startedAt,error:finalSyncError};
+    return {ok:false,realm:selected,results,walkReport,marketCrawl,endpointWarnings,total,successful,failed,missingRequiredWrites,missingRequiredEndpoints,elapsedMs:Date.now()-startedAt,error:finalSyncError};
   }catch(e){
     const error=e?.message||String(e);
     // A transient failure that the automatic retry will run again is not an error-log entry; the retry's own failure is.
@@ -7448,7 +7937,7 @@ async function refreshRealmWarehouseForOverlay(realm,maxAgeMs=15000){
   const run=refreshRealmWarehouseForOverlayUnlocked(n,maxAgeMs).then(async result=>{
     noteWarehouseOverlayRefreshResult(n,maxAgeMs,result);
     const finishedAt=new Date().toISOString();
-    await recordBackgroundJobEvent(n,{job:'warehouse-refresh',trigger:maxAgeMs===0?'stock-mutation-or-forced':'overlay-refresh',startedAt,finishedAt,durationMs:Date.now()-startedMs,outcome:result?.ok?(result?.cached?'skipped':'success'):(result?.notReady||result?.otherRealm||result?.pageClosed?'skipped':(result?.stale||result?.incomplete?'partial':'failure')),requested:1,fetched:result?.refreshed?1:0,refreshed:result?.refreshed?1:0,checked:1,cached:result?.cached?1:0,error:result?.error||null,details:{rows:result?.rows??null,requestDurationMs:result?.requestDurationMs??null,storageCommitDurationMs:result?.storageCommitDurationMs??null,totalDurationMs:result?.totalDurationMs??null}}).catch(()=>{});
+    await recordBackgroundJobEvent(n,{job:'warehouse-refresh',trigger:maxAgeMs===0?'stock-mutation-or-forced':'overlay-refresh',startedAt,finishedAt,durationMs:Date.now()-startedMs,outcome:result?.ok?(result?.cached?'skipped':'success'):(result?.notReady||result?.otherRealm||result?.pageClosed||result?.directReadsBlocked?'skipped':(result?.stale||result?.incomplete?'partial':'failure')),requested:1,fetched:result?.refreshed?1:0,refreshed:result?.refreshed?1:0,checked:1,cached:result?.cached?1:0,error:result?.error||null,details:{rows:result?.rows??null,requestDurationMs:result?.requestDurationMs??null,storageCommitDurationMs:result?.storageCommitDurationMs??null,totalDurationMs:result?.totalDurationMs??null}}).catch(()=>{});
     return {...result,jobStartedAt:startedAt,jobFinishedAt:finishedAt,jobDurationMs:Date.now()-startedMs};
   }).finally(()=>{if(warehouseOverlayRefreshRuns.get(n)===run)warehouseOverlayRefreshRuns.delete(n);});
   warehouseOverlayRefreshRuns.set(n,run);return run;
@@ -7784,8 +8273,10 @@ async function scmTimersView(){
   const status={};
   let alarms=[];try{alarms=await chrome.alarms.getAll();}catch{}
   for(const t of C.TIMERS){if(!t.alarmName)continue;const a=alarms.find(x=>x?.name===t.alarmName);status[t.id]=a?{nextRun:Number(a.scheduledTime)||null}:{nextRun:null};}
-  try{const r=await chrome.storage.local.get({scmStoragePruneLast:null,scmResourceImagesValidatedAt:0});
+  try{const r=await chrome.storage.local.get({scmStoragePruneLast:null,scmResourceImagesValidatedAt:0,scmGameConstants:null});
     const p=Date.parse(r.scmStoragePruneLast?.at||'');if(Number.isFinite(p))status.storagePrune.lastRun=p;
+    // Where the stored constants came from: the built-in copy (constants.json) or a live read of the game.
+    if(r.scmGameConstants&&status.gameConstants){const bi=r.scmGameConstants.source==='bundled';status.gameConstants.source=bi?'bundled':'game';status.gameConstants.note=bi?bundledGameConstantsText(r.scmGameConstants):null;}
     if(Number(r.scmResourceImagesValidatedAt)>0)status.resourceImages.lastRun=Number(r.scmResourceImagesValidatedAt);}catch{}
   const lw=Date.parse(sch.lastResult?.at||'');if(Number.isFinite(lw))status.accountingWalk.lastRun=lw;
   status.accountingWalk.realm=realm;status.accountingWalk.offsetMin=accountingWalkOffset(sch.offsetMin);
@@ -7807,7 +8298,8 @@ function scmSetTimers(patch,realmHint=null){
     const changed=C.IDS.filter(id=>id!=='accountingWalk'&&JSON.stringify(next[id])!==JSON.stringify(before[id]));
     if(changed.length){
       const stored=C.toStored(next);delete stored.timers.accountingWalk;
-      await chrome.storage.local.set({[C.KEY]:stored});scmTimersMemo=next;
+      // A value saved from here on is the player's own: the one-time liveMarket move (scmTimersConfig) never touches it.
+      await chrome.storage.local.set({[C.KEY]:stored,scmTimersMigrations:{liveMarket5:true}});scmTimersMemo=next;
       for(const id of changed){const t=C.byId[id];if(!t.alarmName)continue;
         try{await scmEnsureTimerAlarm(id,scmTimerLegacyInfo(id),'always');}catch(e){errors[id]=e?.message||String(e);}}
       if(changed.some(id=>C.byId[id].group==='Game page'))notifyGameTabsTimersChanged(next).catch(()=>{});
@@ -7911,8 +8403,11 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const results=await Promise.allSettled([refreshRealmWarehouseForOverlay(realm,0),refreshOutgoingContracts(realm,0),refreshMarketOrders(realm,0)]);
         const outcomes=results.map(r=>r.status==='fulfilled'?r.value:{ok:false,error:r.reason?.message||String(r.reason)});
         if(outcomes.some(r=>r?.ok))scheduleGameOverlayRefreshNotification(realm,150);
-        const errors=outcomes.filter(r=>!r?.ok).map(r=>r?.error||'Refresh failed.');
-        send({ok:errors.length===0,throttled:false,error:errors.length?errors.join(' '):null});
+        // One text per cause: under the direct-read block all three reads fail with the same notice.
+        const bad=outcomes.filter(r=>!r?.ok);
+        const errors=[...new Set(bad.map(r=>r?.error||'Refresh failed.'))];
+        const directReadsBlocked=bad.length>0&&bad.every(r=>r?.directReadsBlocked);
+        send({ok:errors.length===0,throttled:false,directReadsBlocked,error:directReadsBlocked?DIRECT_READS_BLOCKED_TEXT:errors.length?errors.join(' '):null});
       }catch(e){send({ok:false,throttled:false,error:e?.message||String(e)});}
     })();return true;
   }
@@ -8304,11 +8799,16 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         // The constants were just cleared: drop their retry backoff too, so the scm-game-constants alarm that
         // ensureStandingAlarms re-creates below (1 min delay) reads them again instead of waiting out an old backoff.
         await gameConstantsRetrySet(null);
+        // Direct-read block (scmDirectReadsBlocked) and the shared SimcoTools gate (scmSimcoToolsGate) live in
+        // storage.session: drop both, so the next read rechecks the block and the gate starts empty.
+        directReadRecheckInFlight=false;await directReadBlockSet(null);
+        {const run=simcoGateTail.then(async()=>{simcoGateMem=null;try{await chrome.storage.session?.remove(SIMCOTOOLS_GATE_KEY);}catch{}});simcoGateTail=run.catch(()=>{});await run.catch(()=>{});}
         scmTimersMemo=null; // scmSyncTimers was cleared: every timer is back to its default
         realmStorageMigrationChecked=false;realmMigrationPromise=null;
         const resetDefaults={...DEFAULTS,selectedRealm:null,activeRealmKey:null,vwapStatus:{message:'Waiting for VWAP sync.'},marketQueueStatus:{message:'Waiting for the logged-in Sim Companies tab.',updatedAt:new Date().toISOString()},resourceImageData:{}};
         await storageSet(resetDefaults);
         await ensureStandingAlarms();
+        await applyBundledGameConstants().catch(()=>{}); // scmGameConstants back from the built-in copy (constants.json) at once
         await ensureCriticalDataGuard('clear-extension-data');
         await ensureLiveMarketRefreshAlarm('clear-extension-data'); // ClearAll removed it too
         await ensureOrderBookRefreshAlarm();
@@ -8508,7 +9008,9 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
       const session=currentCaptureSyncSession();
       // Every response in a walked page's traffic is kept in memory for this section: Sync times the page by it
       // and uses it to spot an endpoint that moved. Stored or not is decided next.
-      if(session?.walkCaptures&&validRealmNumber(m.captureRealm)===validRealmNumber(session.realm)){session.walkCaptures[url]={status:m.status,data:m.data,receivedAt:new Date().toISOString(),at:Date.now()};if(/\/buildings\/\d+\/abundance\//.test(url)&&Number(m.status)>=200&&Number(m.status)<300)(session.abundanceCaptures||(session.abundanceCaptures={}))[url]=session.walkCaptures[url];}
+      // A target's required path also keeps its latest 2xx answer for the whole Sync (final durability recovery).
+      // Only the Sync's own game tab (top frame) feeds these; another simcompanies.com tab or a subframe cannot.
+      recordSyncWalkCapture(session,m,sender);
       if(!shouldPersistPassiveApiCaptureDuringSync(session,url,m.method||'GET')){
         replayEvent('sync-passive-api-capture-skipped',{realm:validRealmNumber(m.captureRealm),url,method:String(m.method||'GET').toUpperCase(),targetPaths:session?.capturePaths?.length||0});
         send({ok:true,skipped:true,reason:'outside-current-sync-target-paths'});

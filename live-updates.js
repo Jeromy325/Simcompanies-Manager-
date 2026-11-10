@@ -71,7 +71,8 @@
     'market-orders': 'Your exchange listings checked',
     'accounting-refresh': 'Accounting statements refreshed',
     'alert-sent': 'Alert sent',
-    'game-data-saved': 'Saved from the game'
+    'game-data-saved': 'Saved from the game',
+    'direct-reads-blocked': 'Game blocks direct reads'
   };
   // Extra detail per line (what, alert title, counts).
   const detail = j => { const d = j.details || {}; const out = [];
@@ -111,12 +112,17 @@
     const wh = lastOf(j => j.job === 'warehouse-refresh' && j.outcome === 'success');
     const action = lastOf(j => j.job === 'warehouse-refresh' && j.trigger === 'stock-mutation-or-forced' && j.outcome === 'success');
     const price = lastOf(j => /^market-(?:current-price|vwap)-stage$/.test(j.job) && j.outcome === 'success');
-    const fails = jobs.filter(j => j.outcome === 'failure' && Date.now() - t(j) < 3600e3).length;
+    // A read stopped by the game's direct-read block (details.directReadsBlocked) is never a failure.
+    const fails = jobs.filter(j => j.outcome === 'failure' && !j.details?.directReadsBlocked && Date.now() - t(j) < 3600e3).length;
+    // The block is on while its newest line is the block (not the recovery) and no Manager read has succeeded since.
+    const blockLine = lastOf(j => j.job === 'direct-reads-blocked');
+    const blocked = blockLine && blockLine.details?.directReadsBlocked && !jobs.some(j => t(j) > t(blockLine) && j.outcome === 'success' && /^(?:warehouse-refresh|market-orders|accounting-refresh|order-book-refresh)$/.test(j.job)) ? (blockLine.error || 'The game now blocks direct reads; data updates from game pages you open and from Sync.') : '';
     const fresh = !!(wh && Date.now() - t(wh) < 15 * 60e3);
     const parts = [
       wh ? `Warehouse <b>${esc(ago(t(wh)))}</b>` : 'Warehouse: waiting',
       action ? `last game action <b>${esc(ago(t(action)))}</b>` : null,
       price ? `prices <b>${esc(ago(t(price)))}</b>` : null,
+      blocked ? `<span class="lu-info" role="note">${esc(blocked)}</span>` : null,
       fails ? `<span class="lu-bad">${fails} failed in the last hour</span>` : null
     ].filter(Boolean);
     ui.dot.classList.toggle('on', fresh);
