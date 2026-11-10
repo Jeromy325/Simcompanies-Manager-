@@ -6,6 +6,7 @@ import './notify-core.js';
 import './analyze-core.js';
 import './self-test-core.js';
 import './storage-core.js';
+import './timers-core.js';
 import {
   REALM_DEFINITIONS, validRealmNumber, realmDefinition, realmKeyFromRealm, realmStorageKey,
   realmDisplayNumber, realmDisplayName, realmContractPaths
@@ -30,6 +31,36 @@ async function scmAlarmCreate(name,info){
     catch(e){if(scmAlarmPersistSupported===true)throw e;scmAlarmPersistSupported=false;}
   }
   return chrome.alarms.create(name,info);
+}
+// Background sync timers (Settings): scmSyncTimers, table and rules in timers-core.js. Read once per worker and kept
+// in memory; only SCM_SET_TIMERS writes it (serialized), and Clear Stored Data drops the memo (no storage.onChanged).
+// With nothing stored every alarm keeps the exact info it had before (legacy info passed by each caller).
+let scmTimersMemo=null,scmTimersWriteTail=Promise.resolve();
+async function scmTimersConfig(){
+  const C=globalThis.SCM_TIMERS_CORE;if(!C)return null;
+  if(scmTimersMemo)return scmTimersMemo;
+  try{const raw=(await chrome.storage.local.get({[C.KEY]:null}))[C.KEY];scmTimersMemo=C.normalize(raw);}catch{return C.defaults();}
+  return scmTimersMemo;
+}
+async function scmTimerEntry(id){const cfg=await scmTimersConfig();return cfg?.[id]||null;}
+async function scmTimerEnabled(id){const e=await scmTimerEntry(id);return e?e.enabled!==false:true;}
+// Alarm info for a timer: null when off; the caller's legacy info while the setting is at its default.
+async function scmTimerAlarmInfo(id,legacy){
+  const C=globalThis.SCM_TIMERS_CORE,t=C?.byId?.[id],e=await scmTimerEntry(id);
+  if(!t||!e)return legacy;
+  if(!e.enabled)return null;
+  if(t.kind==='interval'){if(e.every===t.default)return legacy;const p=C.intervalMinutes(id,e);return {delayInMinutes:p,periodInMinutes:p};}
+  if(e.at){const when=C.nextDailyAt(e.at);if(when)return {when,periodInMinutes:1440};}
+  return legacy;
+}
+// mode 'missing': create only when absent; 'period': also when its period differs; 'always': re-create.
+// A timer that is off has its alarm cleared and is never re-created here.
+async function scmEnsureTimerAlarm(id,legacy,mode='missing'){
+  const name=globalThis.SCM_TIMERS_CORE?.byId?.[id]?.alarmName;if(!name)return false;
+  const info=await scmTimerAlarmInfo(id,legacy);
+  if(!info){await chrome.alarms.clear(name).catch(()=>{});return false;}
+  if(mode!=='always'){const cur=await chrome.alarms.get(name);if(cur&&(mode==='missing'||Number(cur.periodInMinutes)===Number(info.periodInMinutes)))return false;}
+  await scmAlarmCreate(name,info);return true;
 }
 self.addEventListener('unhandledrejection',e=>logError('unhandledrejection',e?.reason));
 // The service worker does not listen to chrome.storage.onChanged: every listener receives a full copy of each changed
@@ -366,8 +397,11 @@ const GAME_CONSTANTS_ALARM='scm-game-constants';
 // Read through the game tab (pageGet): a plain service-worker fetch of /api/v2/constants/ now gets a Cloudflare 403
 // page or "Failed to fetch". After a failed read the next one waits 15 min, doubling up to the 6 h period. The
 // backoff is kept in storage.session (scmGameConstantsRetry) so a restarted service worker keeps it; it is cleared
-// on success and when the browser restarts or the extension is reloaded/updated. No game tab: nothing is fetched,
-// nothing is logged and the backoff is not touched.
+// on success and when the browser restarts or the extension is reloaded/updated. No game tab, a page bridge that is
+// not ready yet (fresh install / worker start before the tab's content script runs) or a page that unloaded mid-read:
+// quiet skip (nothing logged, backoff not touched). After a finished Sync (opts.ignoreBackoff) the backoff is ignored:
+// the Sync just proved the bridge works. A real failure is always logged: under the active realm, else the selected
+// realm, else the extension error log (scmErrorLog).
 const GAME_CONSTANTS_PERIOD_MS=6*3600000,GAME_CONSTANTS_RETRY_MIN_MS=15*60000,GAME_CONSTANTS_RETRY_KEY='scmGameConstantsRetry';
 let gameConstantsRetryMem=null,gameConstantsInFlight=null;
 // Per-read timeout for reads through the game tab that a slow game server can take 6-9 s to answer (constants,
@@ -378,17 +412,33 @@ const REFRESH_ERROR_MAX_CHARS=200;
 function capRefreshError(e){const t=String(e??'');return t.length>REFRESH_ERROR_MAX_CHARS?`${t.slice(0,REFRESH_ERROR_MAX_CHARS-1)}…`:t;}
 async function gameConstantsRetryGet(){try{if(chrome.storage?.session){const v=(await chrome.storage.session.get(GAME_CONSTANTS_RETRY_KEY))?.[GAME_CONSTANTS_RETRY_KEY];return v&&typeof v==='object'?v:null;}}catch{}return gameConstantsRetryMem;}
 async function gameConstantsRetrySet(v){gameConstantsRetryMem=v;try{if(chrome.storage?.session){if(v)await chrome.storage.session.set({[GAME_CONSTANTS_RETRY_KEY]:v});else await chrome.storage.session.remove(GAME_CONSTANTS_RETRY_KEY);}}catch{}}
-function refreshGameConstants(force=false){
+// Rate-limit stamps that must survive a service-worker restart (name -> ms): chrome.storage.session key
+// scmGateStamps (TRUSTED_CONTEXTS, not readable by content scripts), memory fallback; writes serialized.
+const SCM_GATE_STAMPS_KEY='scmGateStamps',scmGateStampsMem={};let scmGateStampTail=Promise.resolve();
+async function scmGateStampGet(name){let v=Number(scmGateStampsMem[name])||0;try{if(chrome.storage?.session){const s=(await chrome.storage.session.get(SCM_GATE_STAMPS_KEY))?.[SCM_GATE_STAMPS_KEY];const x=Number(s?.[name])||0;if(x>v)v=x;}}catch{}return v;}
+function scmGateStampSet(name,at){if(at)scmGateStampsMem[name]=at;else delete scmGateStampsMem[name];
+  const run=scmGateStampTail.then(async()=>{try{if(!chrome.storage?.session)return;const cur=(await chrome.storage.session.get(SCM_GATE_STAMPS_KEY))?.[SCM_GATE_STAMPS_KEY];const next={...(cur&&typeof cur==='object'?cur:{})};if(at)next[name]=at;else delete next[name];await chrome.storage.session.set({[SCM_GATE_STAMPS_KEY]:next});}catch{}});
+  scmGateStampTail=run;return run;}
+function refreshGameConstants(force=false,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,opts={}){
   if(gameConstantsInFlight)return gameConstantsInFlight;
-  gameConstantsInFlight=refreshGameConstantsOnce(force).finally(()=>{gameConstantsInFlight=null;});
+  gameConstantsInFlight=refreshGameConstantsOnce(force,maxAgeMs,opts).finally(()=>{gameConstantsInFlight=null;});
   return gameConstantsInFlight;
 }
-async function refreshGameConstantsOnce(force){
+// The game tab cannot be asked right now (no content script / page hook yet, or the page unloaded): not a failed read.
+function pageBridgeUnavailable(e){return Boolean(e?.pageClosed||e?.bridgeNotReady||e?.noGameTab)||/page bridge is not (?:ready|connected)|Open Sim Companies and log in/i.test(String(e?.message||e||''));}
+// Activity line when the active realm is not known yet (fresh install): the selected realm, else the error log.
+async function logActivityAnyRealm(job,outcome,details={},error=null){
+  let r=await activeRealmNumber();
+  if(r==null){try{r=validRealmNumber((await chrome.storage.local.get({selectedRealm:null})).selectedRealm);}catch{}}
+  if(r!=null)return logActivity(r,job,outcome,details,error);
+  if(outcome==='failure'||outcome==='partial')logError(job,error||outcome);
+}
+async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,opts={}){
   try{
     const cur=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;
-    if(!force&&cur&&Date.now()-Date.parse(cur.at||0)<GAME_CONSTANTS_PERIOD_MS)return {ok:true,cached:true};
+    if(!force&&cur&&Date.now()-Date.parse(cur.at||0)<Math.max(GAME_CONSTANTS_PERIOD_MS,Number(maxAgeMs)||0))return {ok:true,cached:true};
     const retry=await gameConstantsRetryGet();
-    if(!force&&retry&&Number(retry.nextAt)>Date.now())return {ok:false,backoff:true,error:retry.error||null,nextAt:retry.nextAt};
+    if(!force&&!opts?.ignoreBackoff&&retry&&Number(retry.nextAt)>Date.now())return {ok:false,backoff:true,error:retry.error||null,nextAt:retry.nextAt};
     if(!(await simTab())?.id)return {ok:false,skipped:true,error:'No Sim Companies tab open.'};
   }catch(e){return {ok:false,error:String(e?.message||e)};}
   try{
@@ -399,14 +449,15 @@ async function refreshGameConstantsOnce(force){
     if(!globalThis.SCM_TOOLS_CORE.gameConstantsOk(next))throw new Error('constants missing fields');
     await rawStorageSet({scmGameConstants:next});
     await gameConstantsRetrySet(null);
-    logActivity(await activeRealmNumber(),'game-constants','success',{});
+    logActivityAnyRealm('game-constants','success',{});
     return {ok:true};
   }catch(e){
     const error=capRefreshError(e?.message||e);
+    if(pageBridgeUnavailable(e))return {ok:false,skipped:true,reason:'bridge-not-ready',reachedTab:!(e?.bridgeNotReady||e?.noGameTab)&&!/page bridge is not (?:ready|connected)|Open Sim Companies and log in/i.test(error),error};
     try{const prev=await gameConstantsRetryGet();const failures=Math.min(30,(Number(prev?.failures)||0)+1);
       const waitMs=Math.min(GAME_CONSTANTS_PERIOD_MS,GAME_CONSTANTS_RETRY_MIN_MS*2**(failures-1));
       await gameConstantsRetrySet({failures,nextAt:Date.now()+waitMs,error,at:new Date().toISOString()});}catch{}
-    logActivity(await activeRealmNumber(),'game-constants','failure',{},error);return {ok:false,error};
+    await logActivityAnyRealm('game-constants','failure',{},error);return {ok:false,error};
   }
 }
 // Targeted delivery for the game-page cards: instead of the content script listening to every storage.local
@@ -534,15 +585,17 @@ async function refreshOutgoingContracts(realm,minGapMs=OUTGOING_CONTRACTS_REFRES
 }
 // After the game confirms an action (list or cancel on the exchange, send or cancel a contract, …) both cards'
 // sources are read again ~0.8 s later; a burst of actions collapses into one read.
-const ownOrdersRefreshTimers=new Map();
+const ownOrdersRefreshTimers=new Map(),ownOrdersRefreshFiredAt=new Map(),OWN_ORDERS_ACTION_MIN_GAP_MS=3000;
 function scheduleOwnOrdersRefresh(realm,delayMs=800){
   const n=validRealmNumber(realm);if(n==null)return;
   clearTimeout(ownOrdersRefreshTimers.get(n));
+  // A page reporting actions back to back gets one read per 3 s at most (the last one trails, so no change is missed).
+  const wait=Math.max(delayMs,(ownOrdersRefreshFiredAt.get(n)||0)+OWN_ORDERS_ACTION_MIN_GAP_MS-Date.now());
   ownOrdersRefreshTimers.set(n,setTimeout(()=>{
-    ownOrdersRefreshTimers.delete(n);
+    ownOrdersRefreshTimers.delete(n);ownOrdersRefreshFiredAt.set(n,Date.now());
     refreshMarketOrders(n,0).catch(()=>{}); // through the gate: within 15 s of the last read → one trailing read
     refreshOutgoingContracts(n,0).catch(()=>{});
-  },delayMs));
+  },wait));
 }
 // Buildings that make an abundance resource. The game constants (scmGameConstants, downloaded in the
 // background) are one source; if they are missing on the phone, the bundled buildings.json/recipes.json (same game
@@ -652,11 +705,63 @@ async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
   logActivity(r,'extra-game-data',errs.length?(out.length?'partial':'failure'):'success',{rows:out.length,wanted:paths.length,abundance:`${abOk}/${abN}`},errs.slice(0,4).join(' · ')||null,t0,'after-sync');
   return {ok:true,saved:out,warnings};
 }
-chrome.alarms.onAlarm.addListener(a=>{if(a?.name===GAME_CONSTANTS_ALARM)refreshGameConstants().catch(()=>{});});
+// Sync timers (gameConstants): off = no alarm and no read on worker start (Sync still reads them); a slower
+// interval also raises the age below which the stored constants count as fresh.
+function gameConstantsMaxAge(e){const C=globalThis.SCM_TIMERS_CORE;return e&&C&&!C.isDefault('gameConstants',{...e,enabled:true})?Math.max(GAME_CONSTANTS_PERIOD_MS,C.intervalMs('gameConstants',e)-60000):GAME_CONSTANTS_PERIOD_MS;}
+chrome.alarms.onAlarm.addListener(a=>{if(a?.name!==GAME_CONSTANTS_ALARM)return;(async()=>{const e=await scmTimerEntry('gameConstants');if(e&&!e.enabled){await chrome.alarms.clear(GAME_CONSTANTS_ALARM);return;}await refreshGameConstants(false,gameConstantsMaxAge(e));})().catch(()=>{});});
 // Only created when missing or its period changed: re-creating it on every service-worker start (delay 1 min)
 // re-armed it each time and, with stale constants, retried the read about every minute.
-async function ensureGameConstantsAlarm(){try{await scmEnsurePeriodicAlarm(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});}catch{}refreshGameConstants().catch(()=>{});}
+// Timer off: the stored constants count as fresh whatever their age, so only completely missing constants are read.
+async function ensureGameConstantsAlarm(){try{await scmEnsureTimerAlarm('gameConstants',{delayInMinutes:1,periodInMinutes:360},'period');}catch{}const e=await scmTimerEntry('gameConstants').catch(()=>null);refreshGameConstants(false,e&&!e.enabled?Infinity:gameConstantsMaxAge(e)).catch(()=>{});}
 ensureGameConstantsAlarm();
+// Data the Manager cannot work without: game constants (scmGameConstants) and resource images (scmResourceImages).
+// Triggers: a finished Sync (afterSync: constants by age as before, backoff ignored since the Sync proved the bridge
+// works; images when the cache is empty or the last clean run is over 6.5 days old, i.e. failures since), a game tab
+// reporting its state (GAME_STATE, onlyMissing), a realm switch (SET_VIEW_REALM) and the dashboard (SCM_ENSURE_GAME_DATA).
+// Sync timers off (Settings) = no scheduled runs, but a store that is completely missing is still filled.
+// Non-Sync triggers run at most once per 2 min, counted from a run that reached the game tab (a constants backoff
+// or a page that unloaded mid-read counts; no tab / bridge not ready before any request does not).
+// Page-originated triggers (onlyMissing: GAME_STATE from the page bridge) also start their own 2-min gap when they
+// start, whatever the outcome, so a page cannot fire more than one fill per gap. SCM_ENSURE_GAME_DATA is accepted
+// from extension pages only (SCM_PRIVILEGED_MESSAGE_TYPES).
+// Once both are seen present, onlyMissing calls (every game-state report) return at once for this worker's life.
+// The gap stamps (gameDataFill, gameDataPageFill) are mirrored to chrome.storage.session (scmGateStamps), so a
+// service-worker restart does not reopen a gap; memory is the fallback and the larger of the two wins.
+const GAME_DATA_FILL_GAP_MS=2*60000;let gameDataFillAt=0,gameDataPageFillAt=0,gameDataFillRun=null,gameDataPresent=false,gameDataFillGateChecks=new Map();
+function fillMissingGameData(reason='manager',{afterSync=false,onlyMissing=false}={}){
+  if(onlyMissing&&gameDataPresent)return Promise.resolve({ok:true,skipped:true,reason:'present'});
+  if(gameDataFillRun)return gameDataFillRun;
+  const start=()=>{gameDataFillRun=fillMissingGameDataOnce(reason,afterSync,onlyMissing).finally(()=>{gameDataFillRun=null;});return gameDataFillRun;};
+  if(afterSync)return start();
+  // One gate check at a time per kind (page-originated / manager); callers meanwhile share its answer.
+  const mode=onlyMissing?'page':'manager',pending=gameDataFillGateChecks.get(mode);
+  if(pending)return pending;
+  const check=(async()=>{
+    const [fillAt,pageAt]=await Promise.all([scmGateStampGet('gameDataFill'),scmGateStampGet('gameDataPageFill')]);
+    gameDataFillAt=Math.max(gameDataFillAt,Number(fillAt)||0);gameDataPageFillAt=Math.max(gameDataPageFillAt,Number(pageAt)||0);
+    if(gameDataFillRun)return gameDataFillRun;
+    const now=Date.now();
+    if(now-gameDataFillAt<GAME_DATA_FILL_GAP_MS)return {ok:true,skipped:true,reason:'recent'};
+    if(onlyMissing){if(now-gameDataPageFillAt<GAME_DATA_FILL_GAP_MS)return {ok:true,skipped:true,reason:'recent'};gameDataPageFillAt=now;scmGateStampSet('gameDataPageFill',now);}
+    return start();
+  })().finally(()=>{if(gameDataFillGateChecks.get(mode)===check)gameDataFillGateChecks.delete(mode);});
+  gameDataFillGateChecks.set(mode,check);
+  return check;
+}
+async function fillMissingGameDataOnce(reason,afterSync,onlyMissing){
+  const out={ok:true};
+  const r=await chrome.storage.local.get({scmGameConstants:null,scmResourceImagesValidatedAt:0});
+  const cEntry=await scmTimerEntry('gameConstants').catch(()=>null);
+  if(!r.scmGameConstants)out.constants=await refreshGameConstants(false,GAME_CONSTANTS_PERIOD_MS,{ignoreBackoff:afterSync});
+  else if(afterSync)out.constants=await refreshGameConstants(false,gameConstantsMaxAge(cEntry),{ignoreBackoff:true});
+  let cached=0;try{cached=Object.keys((await resourceImagesStore())?.cache||{}).length;}catch{}
+  const imagesOn=await scmTimerEnabled('resourceImages').catch(()=>true);
+  const imagesDue=Date.now()-(Number(r.scmResourceImagesValidatedAt)||0)>RESOURCE_IMAGE_VALIDATE_EVERY_MS;
+  if(cached===0||(!onlyMissing&&imagesOn&&imagesDue)){out.images=true;syncAllResourceImages({forceValidate:false,trigger:reason}).catch(()=>{});}
+  const c=out.constants;if(!c||!c.skipped||c.reachedTab){gameDataFillAt=Date.now();scmGateStampSet('gameDataFill',gameDataFillAt);}
+  gameDataPresent=Boolean(r.scmGameConstants)&&cached>0;
+  return out;
+}
 // Economy phase log per realm (scmEconomyStateLog:<realm>) from auth-data temporals.economyState.
 // Seeds from the previously stored auth-data so the phase before a change is kept. Storage only, no network.
 let economyLogChain=Promise.resolve();
@@ -683,19 +788,33 @@ function recordEconomyState(realm,prevEntry,data){
 // realm writes do not serialize them; only the code that draws images reads them. Any realm write that still
 // carries image fields is routed here and merged (image writes are additive).
 const RESOURCE_IMAGES_KEY='scmResourceImages';
+// Resource / building ids from messages: integers only, bounded (numbers or digit strings).
+function validResourceId(v){const n=typeof v==='string'&&/^\d{1,6}$/.test(v)?Number(v):v;return Number.isInteger(n)&&n>0&&n<100000?n:null;}
+function validQuality(v){const n=typeof v==='string'&&/^\d{1,2}$/.test(v)?Number(v):v;return Number.isInteger(n)&&n>=0&&n<=20?n:null;}
+function validBuildingId(v){const n=typeof v==='string'&&/^\d{1,13}$/.test(v)?Number(v):v;return Number.isSafeInteger(n)&&n>0?n:null;}
+// Stored images: only a valid resource id with a raster data URL up to 1 MB (resourceImageDataUrlParts) is kept.
+// The meta of a dropped image is dropped too, so the image counts as missing and is fetched again.
+function cleanResourceImageEntries(cache,meta){
+  const c={},m={},bad=new Set();let dropped=0;
+  for(const [k,v] of Object.entries(cache&&typeof cache==='object'?cache:{})){const id=validResourceId(k);if(id!=null&&resourceImageDataUrlParts(v))c[String(id)]=v;else{dropped++;bad.add(String(k));}}
+  for(const [k,v] of Object.entries(meta&&typeof meta==='object'?meta:{})){const id=validResourceId(k);if(id==null||!v||typeof v!=='object'||bad.has(String(k))){dropped++;continue;}m[String(id)]=v;}
+  return {cache:c,meta:m,dropped};
+}
 const RESOURCE_IMAGE_FIELDS=['resourceImageCache','resourceImageData','resourceImageMeta'];
 let resourceImagesMemo=null;
 async function resourceImagesStore(){
   if(resourceImagesMemo)return resourceImagesMemo;
   const raw=(await chrome.storage.local.get({[RESOURCE_IMAGES_KEY]:null}))[RESOURCE_IMAGES_KEY];
-  resourceImagesMemo={cache:{...(raw?.cache||{})},meta:{...(raw?.meta||{})}};
+  const clean=cleanResourceImageEntries(raw?.cache,raw?.meta);
+  resourceImagesMemo={cache:clean.cache,meta:clean.meta};
   return resourceImagesMemo;
 }
 globalThis.__scmOwnWriteHooks?.push(items=>{if(Object.prototype.hasOwnProperty.call(items,RESOURCE_IMAGES_KEY)){const v=items[RESOURCE_IMAGES_KEY];resourceImagesMemo=v&&typeof v==='object'?{cache:{...(v.cache||{})},meta:{...(v.meta||{})}}:null;}});
 async function routeResourceImagesOut(out){
   if(!out||typeof out!=='object')return out;
   let cache=null,meta=null;
-  const take=(f,v)=>{if(!v||typeof v!=='object')return;if(f==='resourceImageMeta')meta={...(meta||{}),...v};else cache={...(cache||{}),...v};};
+  const bad=new Set();
+  const take=(f,v)=>{if(!v||typeof v!=='object')return;if(f==='resourceImageMeta')meta={...(meta||{}),...cleanResourceImageEntries({},v).meta};else{const x=cleanResourceImageEntries(v,{}).cache;for(const k of Object.keys(v))if(!x[k])bad.add(String(k));cache={...(cache||{}),...x};}};
   for(const k of Object.keys(out)){
     if(!/^scmRealmStore:\d+$/.test(k))continue;
     const v=out[k];if(!v||typeof v!=='object')continue;
@@ -703,6 +822,8 @@ async function routeResourceImagesOut(out){
     const clean={...v};for(const f of RESOURCE_IMAGE_FIELDS){take(f,clean[f]);delete clean[f];}out[k]=clean;
   }
   for(const f of RESOURCE_IMAGE_FIELDS){if(Object.prototype.hasOwnProperty.call(out,f)){take(f,out[f]);delete out[f];}}
+  // the meta of an image that failed the check is not kept (the image is fetched again)
+  if(meta)for(const k of bad)if(!cache?.[k])delete meta[k];
   const hasCache=cache&&Object.keys(cache).length,hasMeta=meta&&Object.keys(meta).length;
   if(!hasCache&&!hasMeta)return out;
   const cur=await resourceImagesStore();
@@ -718,9 +839,18 @@ async function moveResourceImagesOutOfRealmStores(){
     const raw=await chrome.storage.local.get(Object.fromEntries(keys.map(k=>[k,null])));
     const out={};
     for(const k of keys){const v=raw[k];if(v&&typeof v==='object'&&RESOURCE_IMAGE_FIELDS.some(f=>Object.prototype.hasOwnProperty.call(v,f)))out[k]=v;}
-    if(!Object.keys(out).length)return {moved:false};
+    // Root-level legacy copies (pre-realm-store versions) are moved too, then removed.
+    const root=await chrome.storage.local.get(Object.fromEntries(RESOURCE_IMAGE_FIELDS.map(f=>[f,null])));
+    const rootFields=RESOURCE_IMAGE_FIELDS.filter(f=>root[f]&&typeof root[f]==='object');
+    for(const f of rootFields)out[f]=root[f];
+    // Stored images that fail the image check (type, size, id) are dropped with their meta, so they are fetched again.
+    const imgRaw=(await chrome.storage.local.get({[RESOURCE_IMAGES_KEY]:null}))[RESOURCE_IMAGES_KEY];
+    const clean=cleanResourceImageEntries(imgRaw?.cache,imgRaw?.meta);
+    if(imgRaw&&clean.dropped){const next={cache:clean.cache,meta:clean.meta,updatedAt:new Date().toISOString()};await rawStorageSet({[RESOURCE_IMAGES_KEY]:next});resourceImagesMemo={cache:next.cache,meta:next.meta};}
+    if(!Object.keys(out).length)return {moved:false,dropped:clean.dropped};
     await rawStorageSet(await routeResourceImagesOut(out));
-    return {moved:true,stores:Object.keys(out)};
+    if(rootFields.length)await chrome.storage.local.remove(rootFields);
+    return {moved:true,stores:Object.keys(out).filter(k=>!RESOURCE_IMAGE_FIELDS.includes(k)),rootFields,dropped:clean.dropped};
   });
 }
 const PHYSICAL_REALM_FORBIDDEN_KEYS=new Set([
@@ -2315,6 +2445,18 @@ function sanitizeRealmStore(store, realm){
   return next;
 }
 
+// Realm-key part of a read-early/write-late step. before = what the step read at its start, fresh = a re-read just before
+// the write, wanted = what the step would write. A key someone changed in between is left alone (activeChanged says the
+// active realm moved); an unchanged key is written only when the value differs, so a null is never written over null.
+function realmMetaPatchUnlessChanged(before,fresh,wanted){
+  const same=(a,b)=>(a??null)===(b??null);
+  const patch={};let activeChanged=false;
+  for(const key of ['activeRealmKey','selectedRealm']){
+    if(!same(before?.[key],fresh?.[key])){if(key==='activeRealmKey')activeChanged=true;continue;}
+    if(!same(wanted?.[key],fresh?.[key]))patch[key]=wanted?.[key]??null;
+  }
+  return {patch,activeChanged,fresh};
+}
 let realmMigrationPromise=null;
 let realmStorageMigrationChecked=false;
 async function ensureRealmStorageMigration(){
@@ -2396,12 +2538,21 @@ async function ensureRealmStorageMigration(){
       migrated[key]=store;
     }
     const selected=validRealmNumber(s.selectedRealm??rootRealm);
-    const active=validRealmNumber(s.activeRealmKey?.replace(/^realm:/,'')??rootRealm??selected);
-    const patch={realmStores:migrated,realmIsolationSchemaVersion:REALM_ISOLATION_SCHEMA,activeRealmKey:active!=null?realmKeyFromRealm(active):null,selectedRealm:selected!=null?selected:null};
+    let active=validRealmNumber(s.activeRealmKey?.replace(/^realm:/,'')??rootRealm??selected);
+    const patch={realmStores:migrated,realmIsolationSchemaVersion:REALM_ISOLATION_SCHEMA};
     // Clear every realm-scoped root mirror. It will be rehydrated from the
     // selected realm store by activateRealmByRealmUnlocked below.
     for(const k of REALM_SCOPED_KEYS) patch[k]=defaultRealmValue(k);
-    await storageSet(patch);
+    // The realm keys were read at the top (s); a game tab may have set them since (fresh install: null -> realm).
+    // Re-read them in the commit lane and only write the migrated value when nobody changed them meanwhile.
+    const realmMeta=await withRealmStorageCommit(async()=>{
+      const fresh=await chrome.storage.local.get({activeRealmKey:null,selectedRealm:null});
+      const plan=realmMetaPatchUnlessChanged(s,fresh,{activeRealmKey:active!=null?realmKeyFromRealm(active):null,selectedRealm:selected!=null?selected:null});
+      await storageSetUnlocked({...patch,...plan.patch});
+      return plan;
+    });
+    // Whoever moved the active realm meanwhile already activated it; activating the stale one would switch it back.
+    if(realmMeta.activeChanged) active=null;
     // Physical realm stores are now authoritative. Remove the old monolithic
     // realmStores blob so future writes cannot keep serializing it.
     try{ await chrome.storage.local.remove('realmStores'); }catch{}
@@ -2680,13 +2831,136 @@ function resourceImageHint(data){
   };
   return walk(data);
 }
+// Bounds for page-sent payloads (RESOURCE_CATALOG, MARKET_CACHE, JAVASCRIPT_DIAGNOSTIC). Any page script can forge
+// these before the port handshake, so only JSON-safe plain data within these caps is stored.
+// Real sizes (storage export 2026-11-02): 151 resources, max id 155, game constants resources 56 KB, 146 cached images
+// 2.79 MB in total (max 86 KB each). The caps leave several times that headroom.
+const PAGE_CATALOG_MAX_IDS=1000,PAGE_CATALOG_NAME_MAX=120,PAGE_CATALOG_TEXT_MAX_BYTES=512*1024,PAGE_CATALOG_IMAGES_MAX_BYTES=8*1024*1024;
+const PAGE_MARKET_MAX_ROWS=1000,PAGE_MARKET_ENTRY_MAX_BYTES=512*1024,PAGE_MARKET_MAX_ENTRIES=200,PAGE_MARKET_TOTAL_MAX_BYTES=8*1024*1024;
+const PAGE_JS_DIAG_MAX_BYTES=2*1024*1024;
+function isPlainObject(v){if(!v||typeof v!=='object'||Array.isArray(v))return false;const p=Object.getPrototypeOf(v);return p===Object.prototype||p===null;}
+// JSON-safe copy: depth, array length, key count and string length capped; functions and non-finite numbers dropped.
+// o.left (optional) is a running size budget in characters: once spent, the rest is left out.
+function boundedPageJson(v,o,depth=0){
+  if(o.left!=null&&(o.left-=8)<0)return undefined;
+  if(v==null)return null;
+  const t=typeof v;
+  if(t==='string'){const x=v.length>o.str?v.slice(0,o.str):v;if(o.left!=null)o.left-=x.length;return x;}
+  if(t==='number')return Number.isFinite(v)?v:null;
+  if(t==='boolean')return v;
+  if(t!=='object'||depth>=o.depth)return undefined;
+  if(Array.isArray(v)){const out=[];for(const x of v.slice(0,o.arr)){const c=boundedPageJson(x,o,depth+1);if(c!==undefined)out.push(c);}return out;}
+  if(!isPlainObject(v))return undefined;
+  const out={};let n=0;
+  for(const k of Object.keys(v)){if(n>=o.keys)break;if(k==='__proto__'||k.length>200)continue;if(o.left!=null)o.left-=k.length;const c=boundedPageJson(v[k],o,depth+1);if(c!==undefined){out[k]=c;n++;}}
+  return out;
+}
+function validPageIso(v){if(typeof v!=='string'||v.length>40)return null;const t=Date.parse(v);return Number.isFinite(t)?new Date(t).toISOString():null;}
+// A catalog image is a game image path (validResourceImagePath; a leading / or static/ is stripped), a game https URL
+// (safeResourceImageUrl) or an image data URL that passes resourceImageDataUrlParts (allowed type, 1 MB cap).
+function pageCatalogImage(v){
+  if(typeof v!=='string')return null;const s=v.trim();
+  if(/^data:/i.test(s))return resourceImageDataUrlParts(s)?s:null;
+  if(/^https?:/i.test(s))return s.length<=1024?safeResourceImageUrl(s):null;
+  if(s.length>200)return null;
+  const p=s.replace(/^\/+/,'').replace(/^static\//,'');
+  return validResourceImagePath(p)?p:null;
+}
+const PAGE_CATALOG_NAME_KEYS=['name','resourceName','displayName','title','label','enName','englishName'],PAGE_CATALOG_IMAGE_KEYS=['image','icon','iconUrl','imageUrl','picture','img'];
+// Keeps only what the readers use: constantsResources (id -> {name,image}), resourceNames (id -> name), resourceImages
+// (id -> image). Ids must be resource ids (1..99999, at most 1000 per map); names capped at 120 chars; names and
+// constants share a 512 KB budget, images an 8 MB budget (ids past a budget are dropped). Null for a non-object.
+function sanitizePageResourceCatalog(c){
+  if(!isPlainObject(c))return null;
+  const idOf=k=>validResourceId(typeof k==='number'?k:String(k??''));
+  const nameOf=v=>typeof v==='string'&&v.trim()?v.trim().slice(0,PAGE_CATALOG_NAME_MAX):null;
+  let text=0,imgBytes=0;
+  const fits=(k,val,isImage)=>{const n=JSON.stringify(val).length+String(k).length+4;if(isImage){if(imgBytes+n>PAGE_CATALOG_IMAGES_MAX_BYTES)return false;imgBytes+=n;return true;}if(text+n>PAGE_CATALOG_TEXT_MAX_BYTES)return false;text+=n;return true;};
+  const out={resourceNames:{},resourceImages:{}};
+  const rawC=c.constantsResources;
+  if(rawC!=null){
+    const constants={};
+    const entries=Array.isArray(rawC)?rawC.map(o=>[o&&typeof o==='object'?(o.resourceId??o.productId??o.kind??o.id??o.dbLetter):null,o]):isPlainObject(rawC)?Object.entries(rawC):[];
+    let n=0;
+    for(const [k,o] of entries){
+      if(n>=PAGE_CATALOG_MAX_IDS)break;
+      const id=idOf(k);if(id==null||!isPlainObject(o))continue;
+      const e={};
+      for(const nk of PAGE_CATALOG_NAME_KEYS){const v=nameOf(o[nk]);if(v){e.name=v;break;}}
+      for(const ik of PAGE_CATALOG_IMAGE_KEYS){if(o[ik]==null)continue;const v=pageCatalogImage(o[ik]);if(v){e.image=v;break;}}
+      if(!fits(id,e,false))break;
+      constants[String(id)]=e;n++;
+    }
+    out.constantsResources=constants;
+  }
+  if(isPlainObject(c.resourceNames)){let n=0;for(const [k,v] of Object.entries(c.resourceNames)){if(n>=PAGE_CATALOG_MAX_IDS)break;const id=idOf(k),name=nameOf(v);if(id==null||!name)continue;if(!fits(id,name,false))break;out.resourceNames[String(id)]=name;n++;}}
+  if(isPlainObject(c.resourceImages)){let n=0;for(const [k,v] of Object.entries(c.resourceImages)){if(n>=PAGE_CATALOG_MAX_IDS)break;const id=idOf(k),img=pageCatalogImage(v);if(id==null||!img)continue;if(!fits(id,img,true))continue;out.resourceImages[String(id)]=img;n++;}}
+  return out;
+}
+// Market rows: plain objects; quality (quality/q) an integer 0-20 when present; price/unitPrice/amountPrice finite
+// and >= 0 when present; at most 1000 rows and 512 KB per resource. Rows failing a check are dropped.
+function sanitizePageMarketRows(rows){
+  if(!Array.isArray(rows))return null;
+  const out=[];let size=2;
+  for(const r of rows.slice(0,PAGE_MARKET_MAX_ROWS)){
+    if(!isPlainObject(r))continue;
+    const q=r.quality??r.q;
+    if(q!=null&&!((typeof q==='number'||typeof q==='string')&&String(q).trim()!==''&&Number.isInteger(Number(q))&&Number(q)>=0&&Number(q)<=20))continue;
+    let bad=false;
+    for(const k of ['price','unitPrice','amountPrice']){const v=r[k];if(v!=null&&!((typeof v==='number'||typeof v==='string')&&String(v).trim()!==''&&Number.isFinite(Number(v))&&Number(v)>=0)){bad=true;break;}}
+    if(bad)continue;
+    const c=boundedPageJson(r,{depth:4,arr:50,keys:60,str:512,left:64*1024});
+    const len=JSON.stringify(c).length+1;
+    if(size+len>PAGE_MARKET_ENTRY_MAX_BYTES)break;
+    size+=len;out.push(c);
+  }
+  return out;
+}
+// At most 200 resources and 8 MB per realm marketCache; the oldest entries (receivedAt) go first, never the one in keep.
+function boundPageMarketCache(cache,keep){
+  const sizeOf=e=>Number.isFinite(e?.bytes)?e.bytes:JSON.stringify(e??null).length;
+  const entries=Object.entries(cache).map(([k,e])=>({k,t:Date.parse(e?.receivedAt)||0,b:sizeOf(e)}));
+  let total=entries.reduce((a,x)=>a+x.b,0),count=entries.length;
+  if(count<=PAGE_MARKET_MAX_ENTRIES&&total<=PAGE_MARKET_TOTAL_MAX_BYTES)return cache;
+  const out={...cache};
+  for(const x of entries.filter(x=>x.k!==keep).sort((a,b)=>a.t-b.t)){
+    if(count<=PAGE_MARKET_MAX_ENTRIES&&total<=PAGE_MARKET_TOTAL_MAX_BYTES)break;
+    delete out[x.k];count--;total-=x.b;
+  }
+  return out;
+}
+// JavaScript diagnostic: JSON-safe copy (depth 7, arrays 2000, keys 200, strings 4096). Over 2 MB it is truncated in
+// steps (per-bundle excerpts, category excerpts, all but the last 100 performance entries, then tighter caps) and
+// marked limits.truncatedBySize; refused (null) only if it still does not fit.
+function sanitizePageJsDiagnostic(d){
+  if(!isPlainObject(d))return null;
+  let c=boundedPageJson(d,{depth:7,arr:2000,keys:200,str:4096,left:4*PAGE_JS_DIAG_MAX_BYTES});
+  const size=()=>JSON.stringify(c).length;
+  if(size()<=PAGE_JS_DIAG_MAX_BYTES)return c;
+  const steps=[
+    ()=>{if(Array.isArray(c.bundles))c.bundles=c.bundles.map(b=>isPlainObject(b)?{...b,categories:{}}:b);},
+    ()=>{c.categoryHits={};},
+    ()=>{if(Array.isArray(c.performanceResources))c.performanceResources=c.performanceResources.slice(-100);},
+    ()=>{c=boundedPageJson(c,{depth:5,arr:200,keys:100,str:512,left:PAGE_JS_DIAG_MAX_BYTES-4096});}
+  ];
+  for(const step of steps){
+    step();
+    if(size()<=PAGE_JS_DIAG_MAX_BYTES){c.limits={...(isPlainObject(c.limits)?c.limits:{}),truncatedBySize:true,maxBytes:PAGE_JS_DIAG_MAX_BYTES};return c;}
+  }
+  return null;
+}
 async function saveMarketCache(resource, value, receivedAt, capturedRealm=null){
-  if(!resource || !value) return;
+  const rid=validResourceId(resource);
+  if(rid==null) return;
+  value=sanitizePageMarketRows(value);
+  if(!value) return;
+  receivedAt=validPageIso(receivedAt);
+  resource=String(rid);
   const initial=await state();
   const realm=validRealmNumber(capturedRealm) ?? validRealmNumber(realmNumberFromKey(initial.activeRealmKey||identityFromAuth(initial.authData)));
   if(realm==null){
     const q={...(initial.realmQuarantine||{}),marketCache:Array.isArray(initial.realmQuarantine?.marketCache)?initial.realmQuarantine.marketCache.slice(-199):[]};
-    q.marketCache.push({resource:Number(resource),receivedAt:receivedAt||new Date().toISOString(),reason:'No capture realm'});
+    q.marketCache.push({resource:rid,receivedAt:receivedAt||new Date().toISOString(),reason:'No capture realm'});
     await storageSet({realmQuarantine:q});
     return;
   }
@@ -2697,7 +2971,9 @@ async function saveMarketCache(resource, value, receivedAt, capturedRealm=null){
     const store={...(stores[key]||{})};
     // Never replace a known-good page cache with an empty/non-market payload.
     if(!hasUsableMarketRows(value) && hasUsableMarketRows(store.marketCache?.[String(resource)]?.data)) return;
-    const marketCache={...(store.marketCache||{}),[String(resource)]:{data:value,receivedAt:receivedAt||new Date().toISOString(),source:'page-localStorage',captureRealm:realm}};
+    const entry={data:value,receivedAt:receivedAt||new Date().toISOString(),source:'page-localStorage',captureRealm:realm};
+    entry.bytes=JSON.stringify(entry).length;
+    const marketCache=boundPageMarketCache({...(store.marketCache||{}),[resource]:entry},resource);
     stores[key]={...store,marketCache};
     const activeKey=s.activeRealmKey||identityFromAuth(s.authData);
     if(activeKey===key) await storageSet({marketCache,realmStores:stores});
@@ -2705,18 +2981,24 @@ async function saveMarketCache(resource, value, receivedAt, capturedRealm=null){
   });
 }
 async function saveResourceCatalog(catalog, receivedAt){
-  if(!catalog||typeof catalog!=='object')return;
+  catalog=sanitizePageResourceCatalog(catalog);
+  if(!catalog)return;
+  receivedAt=validPageIso(receivedAt);
   // Only the realm is needed here; the full store is read once, inside the lock.
   const {activeRealmKey}=await chrome.storage.local.get({activeRealmKey:null});
   const realm=realmNumberFromKey(activeRealmKey); if(realm==null)return;
   return withRealmWriteLock(realm,async()=>{
     const latest=await state(realm); const key=realmKeyFromRealm(realm);
     const stores={...(latest.realmStores||{})}; const store={...(stores[key]||{})};
-    const old=store.resourceCatalog&&typeof store.resourceCatalog==='object'?store.resourceCatalog:{};
-    const merged={...old,...catalog,receivedAt:receivedAt||new Date().toISOString()};
-    merged.constantsResources=catalog.constantsResources||old.constantsResources||{};
-    merged.resourceNames={...(old.resourceNames||{}),...(catalog.resourceNames||{})};
-    merged.resourceImages={...(old.resourceImages||{}),...(catalog.resourceImages||{})};
+    // The stored catalog is rebuilt from the known fields only (drops the old unread `data` copy of the constants);
+    // the union is bounded again so repeated emits cannot grow it past the caps.
+    const old=(store.resourceCatalog&&typeof store.resourceCatalog==='object'&&sanitizePageResourceCatalog(store.resourceCatalog))||{};
+    const merged=sanitizePageResourceCatalog({
+      constantsResources:catalog.constantsResources||old.constantsResources||{},
+      resourceNames:{...(old.resourceNames||{}),...catalog.resourceNames},
+      resourceImages:{...(old.resourceImages||{}),...catalog.resourceImages}
+    });
+    merged.receivedAt=receivedAt||new Date().toISOString();
     store.resourceCatalog=merged; stores[key]=store;
     const patch={realmStores:stores}; if(key===latest.activeRealmKey) patch.resourceCatalog=merged;
     await storageSet(patch);
@@ -2767,7 +3049,7 @@ async function saveWarehouseCostDetail(message){
   const key=realm!=null?realmKeyFromRealm(realm):(s.activeRealmKey||identityFromAuth(s.authData));
   if(!key) return {ok:false,error:'No active realm for warehouse cost detail.'};
   const resourceId=Number(message?.resourceId), quality=Number(message?.quality), quantity=Number(message?.quantity), unitCost=Number(message?.unitCost);
-  if(!Number.isFinite(resourceId)||resourceId<=0||!Number.isFinite(unitCost)||unitCost<0) return {ok:false,error:'Invalid warehouse cost detail.'};
+  if(validResourceId(resourceId)==null||!Number.isFinite(unitCost)||unitCost<0) return {ok:false,error:'Invalid warehouse cost detail.'};
   return withRealmWriteLock(realm,async()=>{
     const latest=await state(realm); const stores={...(latest.realmStores||{})}; const store={...(stores[key]||{})};
     const details={...(store.warehouseCostDetails||{})};
@@ -3479,7 +3761,7 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
       patch.marketQueueCursor=0;
     }
     const rid=resourceIdFromUrl(url);
-    const image=resourceImageHint(data);
+    const image=pageCatalogImage(resourceImageHint(data));
     if(rid&&image){
       const rc=working.resourceCatalog&&typeof working.resourceCatalog==='object'?working.resourceCatalog:{};
       patch.resourceCatalog={...rc,resourceImages:{...(rc.resourceImages||{}),[String(rid)]:image},receivedAt:new Date().toISOString()};
@@ -3677,13 +3959,15 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
   }
   const finalError=new Error(lastError?.message||'Sim Companies page bridge is not connected.');
   if(lastClosed)finalError.pageClosed=true;
+  if(!lastError||/page bridge is not ready/i.test(String(lastError?.message||'')))finalError.bridgeNotReady=true;
+  if(/Open Sim Companies and log in/i.test(String(lastError?.message||'')))finalError.noGameTab=true;
   throw finalError;
 }
 const BUILDING_HISTORY_REFETCH_COOLDOWN_MS=15000;
 async function fetchBuildingHistoryForRealm(realm, buildingId){
   const target=validRealmNumber(realm);
-  const id=Number(buildingId);
-  if(target==null||!Number.isFinite(id)||id<=0)return {ok:false,error:'Invalid realm or building.'};
+  const id=validBuildingId(buildingId);
+  if(target==null||id==null)return {ok:false,error:'Invalid realm or building.'};
   const path=`/api/v2/companies/buildings/${id}/history/`;
   const current=await state(realm);
   const store=current.realmStores?.[realmKeyFromRealm(target)]||{};
@@ -3719,8 +4003,8 @@ async function fetchBuildingHistoryForRealm(realm, buildingId){
 // (which takes the realm lock) — no lock is held while fetching. One fetch per product per 5 min.
 const ORDER_BOOK_REFETCH_MS=5*60*1000;const orderBookFetchAt=new Map();
 async function fetchExchangeOrderBookForRealm(realm,resourceId){
-  const target=validRealmNumber(realm),id=Number(resourceId);
-  if(target==null||!Number.isFinite(id)||id<=0)return {ok:false,error:'Invalid realm or resource.'};
+  const target=validRealmNumber(realm),id=validResourceId(resourceId);
+  if(target==null||id==null)return {ok:false,error:'Invalid realm or resource.'};
   const path=`/api/v3/market/${target}/${id}/`,k=`${target}:${id}`;
   const last=orderBookFetchAt.get(k)||0;
   if(Date.now()-last<ORDER_BOOK_REFETCH_MS)return {ok:true,throttled:true};
@@ -3770,7 +4054,7 @@ async function scmOrderBookShouldThrottle(){
   }catch{return false;}
 }
 async function ensureOrderBookRefreshAlarm(){
-  try{if(!(await chrome.alarms.get(ORDER_BOOK_REFRESH_ALARM)))await scmAlarmCreate(ORDER_BOOK_REFRESH_ALARM,{delayInMinutes:1,periodInMinutes:1});}catch{}
+  try{await scmEnsureTimerAlarm('orderBook',{delayInMinutes:1,periodInMinutes:1},'period');}catch{}
 }
 // networkRows: the overlay network's production and demand rows of this realm (overlayProductionStock).
 function orderBookRefreshResourceIds(store,realm,networkRows=[]){
@@ -4382,8 +4666,8 @@ function validPositiveMarketNumber(value){
 const PRICE_HISTORY_TTL_MS=3*60*60*1000;
 let priceHistoryWriteTail=Promise.resolve();
 async function getPriceHistory(realm,resourceIdArg,qualityArg,force=false){
-  const resourceId=Number(resourceIdArg),quality=Number(qualityArg);
-  if(realm==null||!(resourceId>0)||!(quality>=0))return {ok:false,error:'Invalid product selection.'};
+  const resourceId=validResourceId(resourceIdArg),quality=validQuality(qualityArg);
+  if(validRealmNumber(realm)==null||resourceId==null||quality==null)return {ok:false,error:'Invalid product selection.'};
   const storeKey=`scmPriceHistory:${realm}`,pairKey=`${resourceId}:${quality}`;
   const cached=(await chrome.storage.local.get({[storeKey]:null}))[storeKey]?.pairs?.[pairKey]||null;
   if(!force&&cached&&Date.now()-Date.parse(cached.fetchedAt||0)<PRICE_HISTORY_TTL_MS)return {ok:true,cached:true,...cached};
@@ -4403,8 +4687,8 @@ async function getPriceHistory(realm,resourceIdArg,qualityArg,force=false){
   return {ok:true,cached:false,...entry};
 }
 async function runLiveMarketProduct(realmArg,resourceIdArg,qualityArg){
-  const realm=validRealmNumber(realmArg),resourceId=Number(resourceIdArg),quality=Number(qualityArg);
-  if(realm==null||!Number.isFinite(resourceId)||resourceId<=0||!Number.isFinite(quality)||quality<0)return {ok:false,error:'Invalid market resource selection.'};
+  const realm=validRealmNumber(realmArg),resourceId=validResourceId(resourceIdArg),quality=validQuality(qualityArg);
+  if(realm==null||resourceId==null||quality==null)return {ok:false,error:'Invalid market resource selection.'};
 
   // Fetch one selected SimcoTools product only. Preserve each completed product
   // by resource+quality so out-of-order responses cannot erase the user's selection.
@@ -4629,13 +4913,13 @@ async function runMarketStage(realm,stage,reason='alarm'){
 
 async function ensureLiveMarketRefreshAlarm(reason='ensure'){
   try{
-    const existing=await chrome.alarms.get(LIVE_MARKET_REFRESH_ALARM_NAME);
-    if(existing)return {ok:true,created:false,alarm:existing,reason};
-    await scmAlarmCreate(LIVE_MARKET_REFRESH_ALARM_NAME,{
+    // Sync timers (liveMarket): off clears it; a changed interval re-creates it, otherwise it is only created when missing.
+    const created=await scmEnsureTimerAlarm('liveMarket',{
       delayInMinutes:LIVE_MARKET_REFRESH_PERIOD_MINUTES,
       periodInMinutes:LIVE_MARKET_REFRESH_PERIOD_MINUTES
-    });
+    },'period');
     const alarm=await chrome.alarms.get(LIVE_MARKET_REFRESH_ALARM_NAME);
+    if(!created)return {ok:true,created:false,alarm:alarm||null,disabled:!alarm,reason};
     return {ok:!!alarm,created:true,alarm:alarm||null,reason};
   }catch(e){
     return {ok:false,created:false,error:e?.message||String(e),reason};
@@ -4679,7 +4963,9 @@ async function migrateResourceImageCache(){
   if(!key) return {cache:{},meta:{}};
   const store=s.realmStores?.[key]||{};
   const imgs=await resourceImagesStore();
-  return {cache:{...imgs.cache,...(store.resourceImageCache||{}),...(store.resourceImageData||{})},meta:{...imgs.meta,...(store.resourceImageMeta||{})},key};
+  // Legacy realm-store fields (normally moved out at start-up) pass the same image check as scmResourceImages.
+  const legacy=cleanResourceImageEntries({...(store.resourceImageCache||{}),...(store.resourceImageData||{})},store.resourceImageMeta);
+  return {cache:{...imgs.cache,...legacy.cache},meta:{...imgs.meta,...legacy.meta},key};
 }
 // Images are written to their own key only (scmResourceImages), never through the realm store, so the weekly
 // validation of ~150 images does not flood open pages with storage events.
@@ -4722,8 +5008,62 @@ async function constantsResourceImages(){
 // Bundled-manifest file names the game answers 404 for (same list as dashboard.js RESOURCE_IMAGE_404_FILENAMES).
 // With no game path known for such a resource nothing is fetched and it counts as unavailable, not as failed.
 const RESOURCE_IMAGE_KNOWN_404_FILENAMES=new Set(['smartphones.png','basic-interior.png','economy-electric-car.png','luxury-electric-car.png','economy-fuel-car.png','luxury-fuel-car.png','skirt.png','high-heels.png','handbag.png','sports-shoes.png','luxury-watch.png','carbon-fibers.png','high-grade-e-comps.png','propellant-tank.png','solid-fuel-booster.png','aerospace-research.png','beams.png','cows.png','pigs.png','frozen-pizza.png','meat-balls.png','cocoa.png','sauce.png','samosa.png','chocolate-icecream.png','apple-icecream.png']);
+// Resource images through the game tab. Since the game moved behind Cloudflare a plain service-worker fetch of
+// /static/images/ gets a 403 page or "Failed to fetch"; the page hook then reads the image same-origin (IMAGE_GET via
+// content.js PAGE_IMAGE_GET; safeResourceImageUrl paths only, checked again in content.js and page-hook.js). One read
+// at a time with a short gap (the game page loads these images itself, usually from the browser cache).
+const RESOURCE_IMAGE_PAGE_TIMEOUT_MS=10000,RESOURCE_IMAGE_PAGE_GAP_MS=150;
+// Stored resource images: raster types only (no SVG, which can carry script), at most 1 MB decoded. Same list and cap
+// as page-hook.js IMAGE_GET; checked again here on every source (worker fetch, game tab, RESOURCE_IMAGE_RESULT).
+const RESOURCE_IMAGE_MIME_RE=/^image\/(?:png|jpeg|webp|gif|avif)$/,RESOURCE_IMAGE_MAX_BYTES=1024*1024;
+// Parses a base64 image data URL; returns {mime,b64} or null (type not allowed, not base64, or over the cap; the
+// size is checked from the base64 length before anything is decoded).
+function resourceImageDataUrlParts(u){
+  const m=typeof u==='string'&&u.length<=Math.ceil(RESOURCE_IMAGE_MAX_BYTES/3)*4+64?u.match(/^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/]*={0,2})$/i):null;
+  if(!m)return null;const mime=m[1].toLowerCase();if(!RESOURCE_IMAGE_MIME_RE.test(mime))return null;
+  const pad=m[2].endsWith('==')?2:m[2].endsWith('=')?1:0;if(Math.floor(m[2].length*3/4)-pad>RESOURCE_IMAGE_MAX_BYTES)return null;
+  return {mime,b64:m[2]};
+}
+let resourceImagePageChain=Promise.resolve();
+// Resource ids the Manager knows: bundled manifest, game constants, the active realm's resource catalog.
+async function knownResourceIds(){
+  const ids=new Set();const add=o=>{for(const k of Object.keys(o&&typeof o==='object'?o:{})){const id=validResourceId(k);if(id!=null)ids.add(id);}};
+  try{add((await resourceImageManifest())?.resources);}catch{}
+  try{add((await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants?.resources);}catch{}
+  try{const s=await state();const key=s.activeRealmKey||identityFromAuth(s.authData);const c=(key&&s.realmStores?.[key]?.resourceCatalog)||s.resourceCatalog||{};add(c.resourceImages);add(c.constantsResources);add(c.resourceNames);}catch{}
+  return ids;
+}
+// RESOURCE_IMAGE_RESULT is accepted only as the answer to a PAGE_RESOURCE_IMAGE ask (GET_RESOURCE_IMAGE) made in the
+// last RESOURCE_IMAGE_PAGE_ASK_MS for that id; one answer per ask.
+const RESOURCE_IMAGE_PAGE_ASK_MS=30000,resourceImagePageAsks=new Map();
+// skip(): checked when this read's turn comes (a batch whose game tab turned out not ready stops its queued reads).
+function pageImageGet(safeUrl,skip=null){
+  let read=false;
+  const run=resourceImagePageChain.then(()=>{const why=skip?.();if(why){const e=new Error(why);e.bridgeNotReady=true;throw e;}read=true;return pageImageGetOnce(safeUrl);});
+  resourceImagePageChain=run.catch(()=>{}).then(()=>read?new Promise(r=>setTimeout(r,RESOURCE_IMAGE_PAGE_GAP_MS)):null);
+  return run;
+}
+async function pageImageGetOnce(safeUrl){
+  const ok=safeResourceImageUrl(safeUrl);if(!ok)throw new Error('Image address is not on the game image path; not fetched.');
+  const path=new URL(ok).pathname;
+  const tab=await simTab();
+  if(!tab?.id){const e=new Error('No Sim Companies tab open.');e.noGameTab=true;throw e;}
+  if(!(await waitForBridge(tab.id,3000))){const e=new Error('Sim Companies page bridge is not ready.');e.bridgeNotReady=true;throw e;}
+  let r;
+  try{r=await Promise.race([chrome.tabs.sendMessage(tab.id,{type:'PAGE_IMAGE_GET',path,timeoutMs:RESOURCE_IMAGE_PAGE_TIMEOUT_MS}),new Promise((_,rej)=>setTimeout(()=>rej(new Error('Game tab image read timed out.')),RESOURCE_IMAGE_PAGE_TIMEOUT_MS+PAGE_GET_BACKGROUND_GRACE_MS))]);}
+  catch(e){if(pageMessageChannelClosed(e)){const x=new Error(e?.message||String(e));x.pageClosed=true;throw x;}throw e;}
+  if(r?.pageClosed){const x=new Error(r.error||'The game page was reloaded or closed.');x.pageClosed=true;throw x;}
+  if(!r?.ok)throw new Error(r?.error||`Image HTTP ${r?.status||0}`);
+  const m=String(r.dataUrl||'').match(/^data:(image\/[a-z0-9.+-]+);base64,/i);
+  if(!m)throw new Error('Game tab answer was not an image.');
+  const p=resourceImageDataUrlParts(r.dataUrl);
+  if(!p)throw new Error(RESOURCE_IMAGE_MIME_RE.test(m[1].toLowerCase())?'Game tab image is too large or not base64.':`Image type not allowed (${m[1].toLowerCase()}).`);
+  const bin=atob(p.b64);if(bin.length>RESOURCE_IMAGE_MAX_BYTES)throw new Error('Game tab image is too large.');
+  const bytes=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+  return {mime:p.mime,bytes};
+}
 async function fetchAndCacheResourceImage(id,{forceValidate=false,batch=null}={}){
-  const n=Number(id); if(!Number.isFinite(n)||n<=0) return {ok:false,error:'Invalid resource id'};
+  const n=validResourceId(id); if(n==null) return {ok:false,error:'Invalid resource id'};
   const {cache,meta,key}=batch?.base||await migrateResourceImageCache();
   if(!key) return {ok:false,error:'No active realm for resource image cache'};
   const sid=String(n), previous=meta[sid]||{};
@@ -4744,10 +5084,26 @@ async function fetchAndCacheResourceImage(id,{forceValidate=false,batch=null}={}
   const safeUrl=safeResourceImageUrl(url);
   if(!safeUrl) return cache[sid]?{ok:true,dataUrl:cache[sid],cached:true,changed:false}:{ok:false,unavailable:true,error:'Image address is not on the game image path; not fetched.'};
   try{
-    const r=await fetch(safeUrl,{cache:'no-store',credentials:'omit'});
-    if(!r.ok) throw new Error(`Image HTTP ${r.status}`);
-    const mime=(r.headers.get('content-type')||'image/png').split(';')[0];
-    const bytes=new Uint8Array(await r.arrayBuffer());
+    let mime=null,bytes=null,workerError=batch?.workerError||null;
+    // Worker fetch first (still works where Cloudflare lets it through). In a batch, a 403/503/network error stops
+    // the worker fetch for the rest of the run, so ~150 blocked requests are not repeated.
+    if(!batch?.workerError){
+      try{
+        const r=await fetch(safeUrl,{cache:'no-store',credentials:'omit'});
+        if(!r.ok){const he=new Error(`Image HTTP ${r.status}`);he.status=r.status;throw he;}
+        mime=(r.headers.get('content-type')||'image/png').split(';')[0].trim().toLowerCase();
+        if(!RESOURCE_IMAGE_MIME_RE.test(mime))throw Object.assign(new Error(`Image type not allowed (${mime}).`),{status:r.status});
+        const len=Number(r.headers.get('content-length'));if(Number.isFinite(len)&&len>RESOURCE_IMAGE_MAX_BYTES)throw Object.assign(new Error('Image too large.'),{status:r.status});
+        const got=new Uint8Array(await r.arrayBuffer());if(got.length>RESOURCE_IMAGE_MAX_BYTES)throw Object.assign(new Error('Image too large.'),{status:r.status});
+        bytes=got;
+      }catch(we){workerError=we?.message||String(we);if(batch&&(!we?.status||we.status===403||we.status===503))batch.workerError=workerError;}
+    }
+    if(!bytes){
+      // Through the game tab. No tab / bridge not ready / page closed: the rest of the batch does not wait on it again.
+      if(batch?.pageError)throw new Error(`${workerError}; game tab: ${batch.pageError}`);
+      try{const p=await pageImageGet(safeUrl,batch?()=>batch.pageError:null);mime=p.mime;bytes=p.bytes;}
+      catch(pe){const t=pe?.message||String(pe);if(batch&&pageBridgeUnavailable(pe))batch.pageError=t;throw new Error(`${workerError}; game tab: ${t}`);}
+    }
     const hash=await sha256Bytes(bytes);
     const changed=Boolean(cache[sid]&&previous.sha256&&previous.sha256!==hash);
     const dataUrl=bytesToDataUrl(bytes,mime);
@@ -4765,29 +5121,51 @@ async function fetchAndCacheResourceImage(id,{forceValidate=false,batch=null}={}
 }
 // onInstalled (an update, or a Chrome update) and onStartup can both fire as the browser starts: one run at a time,
 // and a non-forced run within 10 min of the last one is not repeated (it would only re-try the same images).
-const RESOURCE_IMAGE_SYNC_REPEAT_GAP_MS=10*60000;
-let resourceImageSyncRun=null,resourceImageSyncRunForced=false,resourceImageSyncLastAt=0;
-function syncAllResourceImages({forceValidate=false}={}){
+// A run that could not reach the game tab (no tab / bridge not ready) or had no realm yet does not start that gap.
+const RESOURCE_IMAGE_SYNC_REPEAT_GAP_MS=10*60000,RESOURCE_IMAGE_VALIDATE_EVERY_MS=6.5*24*3600e3;
+// The 10-min gap stamp is mirrored to chrome.storage.session (scmGateStamps 'resourceImageSync') so a worker restart
+// does not start a new run of ~150 image reads at once.
+let resourceImageSyncRun=null,resourceImageSyncRunForced=false,resourceImageSyncLastAt=0,resourceImageSyncGateCheck=null;
+function syncAllResourceImages({forceValidate=false,trigger=null}={}){
   // The weekly forced validation that meets a running startup run waits for it, then validates.
-  if(resourceImageSyncRun)return forceValidate&&!resourceImageSyncRunForced?resourceImageSyncRun.catch(()=>null).then(()=>syncAllResourceImages({forceValidate:true})):resourceImageSyncRun;
-  if(!forceValidate&&Date.now()-resourceImageSyncLastAt<RESOURCE_IMAGE_SYNC_REPEAT_GAP_MS)return Promise.resolve({ok:true,skipped:true,reason:'recent-run'});
-  resourceImageSyncRunForced=Boolean(forceValidate);
-  resourceImageSyncRun=syncAllResourceImagesOnce({forceValidate}).finally(()=>{resourceImageSyncLastAt=Date.now();resourceImageSyncRun=null;});
-  return resourceImageSyncRun;
+  if(resourceImageSyncRun)return forceValidate&&!resourceImageSyncRunForced?resourceImageSyncRun.catch(()=>null).then(()=>syncAllResourceImages({forceValidate:true,trigger})):resourceImageSyncRun;
+  const stamp=()=>{resourceImageSyncLastAt=Date.now();scmGateStampSet('resourceImageSync',resourceImageSyncLastAt);};
+  const start=()=>{
+    resourceImageSyncRunForced=Boolean(forceValidate);
+    resourceImageSyncRun=syncAllResourceImagesOnce({forceValidate,trigger})
+      .then(r=>{if(!r?.skipped)stamp();return r;},e=>{stamp();throw e;})
+      .finally(()=>{resourceImageSyncRun=null;});
+    return resourceImageSyncRun;
+  };
+  if(forceValidate)return start();
+  if(Date.now()-resourceImageSyncLastAt<RESOURCE_IMAGE_SYNC_REPEAT_GAP_MS)return Promise.resolve({ok:true,skipped:true,reason:'recent-run'});
+  if(resourceImageSyncGateCheck)return resourceImageSyncGateCheck;
+  const check=(async()=>{
+    const saved=Number(await scmGateStampGet('resourceImageSync'))||0;if(saved>resourceImageSyncLastAt)resourceImageSyncLastAt=saved;
+    if(resourceImageSyncRun)return resourceImageSyncRun;
+    if(Date.now()-resourceImageSyncLastAt<RESOURCE_IMAGE_SYNC_REPEAT_GAP_MS)return {ok:true,skipped:true,reason:'recent-run'};
+    return start();
+  })().finally(()=>{if(resourceImageSyncGateCheck===check)resourceImageSyncGateCheck=null;});
+  resourceImageSyncGateCheck=check;
+  return check;
 }
-async function syncAllResourceImagesOnce({forceValidate=false}={}){
+async function syncAllResourceImagesOnce({forceValidate=false,trigger=null}={}){
   const jobStarted=Date.now(),jobStartedAt=new Date(jobStarted).toISOString();
   const manifest=await resourceImageManifest();
   const ids=Object.keys(manifest?.resources||{}).map(Number).filter(Number.isFinite);
-  let updated=0,verified=0,failed=0,unavailable=0;
+  let updated=0,verified=0,failed=0,unavailable=0,stale=0,firstError=null;
   // One state read and ONE image write for the whole run.
-  const base=await migrateResourceImageCache();const s0=await state();const catalog=(base.key&&s0.realmStores?.[base.key]?.resourceCatalog)||s0.resourceCatalog||{};
-  const batch={base,catalog,captured:capturedResourceImages(base.key&&s0.realmStores?.[base.key]),constantsImages:await constantsResourceImages(),cache:{},meta:{}};
+  const base=await migrateResourceImageCache();
+  // Before the first Sync there is no realm to file the cache under: nothing is tried (not a run).
+  if(!base?.key)return {ok:false,skipped:true,reason:'no-realm',error:'No active realm for resource image cache'};
+  const s0=await state();const catalog=(base.key&&s0.realmStores?.[base.key]?.resourceCatalog)||s0.resourceCatalog||{};
+  const batch={base,catalog,captured:capturedResourceImages(base.key&&s0.realmStores?.[base.key]),constantsImages:await constantsResourceImages(),cache:{},meta:{},workerError:null,pageError:null};
   const queue=[...ids], workers=Array.from({length:4},async()=>{
     while(queue.length){
       const id=queue.shift();
       const r=await fetchAndCacheResourceImage(id,{forceValidate,batch});
-      if(r.ok){verified++;if(r.changed||!r.cached)updated++;}else if(r.unavailable)unavailable++;else failed++;
+      if(r.ok){verified++;if(r.changed||!r.cached)updated++;if(r.stale){stale++;if(!firstError)firstError=r.error||null;}}
+      else if(r.unavailable)unavailable++;else{failed++;if(!firstError)firstError=r.error||null;}
     }
   });
   await Promise.all(workers);
@@ -4795,15 +5173,27 @@ async function syncAllResourceImagesOnce({forceValidate=false}={}){
   const s=await state(); const key=s.activeRealmKey||identityFromAuth(s.authData); const realm=realmNumberFromKey(key); if(realm!=null){
     await withRealmWriteLock(realm,async()=>{
       const latest=await state(realm); const stores={...(latest.realmStores||{})}; const store={...(stores[key]||{})};
-      const status={lastRunAt:new Date().toISOString(),forceValidate,resourceCount:ids.length,verified,updated,failed,unavailable};
+      const status={lastRunAt:new Date().toISOString(),forceValidate,resourceCount:ids.length,verified,updated,failed,stale,unavailable};
       store.resourceImageCacheStatus=status; stores[key]=store;
       const patch={realmStores:stores}; if(key===latest.activeRealmKey) patch.resourceImageCacheStatus=status;
       await storageSet(patch);
     });
   }
+  // scmResourceImagesValidatedAt (the weekly validation clock) is stamped only after a clean run: nothing failed and
+  // nothing was only kept stale from the cache. With failures it stays as it was, so the next Sync / game tab retries.
+  const clean=failed===0&&stale===0&&verified>0;
+  if(clean){try{const v=Number((await chrome.storage.local.get({scmResourceImagesValidatedAt:0})).scmResourceImagesValidatedAt)||0;
+    if(forceValidate||Date.now()-v>RESOURCE_IMAGE_VALIDATE_EVERY_MS)await rawStorageSet({scmResourceImagesValidatedAt:Date.now()});}catch{}}
+  const bad=failed+stale;
+  const errorText=bad?capRefreshError(`${[failed?`${failed} resource image(s) failed`:'',stale?`${stale} kept from cache (could not re-check)`:''].filter(Boolean).join(', ')}. First error: ${firstError||'unknown'}`):null;
+  // The game tab could not be asked (no tab / bridge not ready / page closed): a skipped run, not the 10-min gap.
+  const tabSkipped=Boolean(batch.pageError)&&bad>0;
+  const outcome=tabSkipped?'skipped':bad?(verified-stale>0?'partial':'failure'):'success';
   const finishedAt=new Date().toISOString();
-  if(realm!=null) await recordBackgroundJobEvent(realm,{job:'resource-image-cache-sync',trigger:forceValidate?'forced-validation':'startup-or-install',startedAt:jobStartedAt,finishedAt,durationMs:Date.now()-jobStarted,outcome:failed?(verified?'partial':'failure'):'success',requested:ids.length,fetched:updated,refreshed:updated,checked:verified,cached:Math.max(0,verified-updated),stale:0,error:failed?`${failed} resource image(s) failed to validate.`:null,details:{resourceCount:ids.length,verified,updated,failed,unavailable,forceValidate}}).catch(()=>{});
-  return {ok:true,resourceCount:ids.length,verified,updated,failed,unavailable,durationMs:Date.now()-jobStarted};
+  const event={job:'resource-image-cache-sync',trigger:trigger||(forceValidate?'forced-validation':'startup-or-install'),startedAt:jobStartedAt,finishedAt,durationMs:Date.now()-jobStarted,outcome,requested:ids.length,fetched:updated,refreshed:updated,checked:verified,cached:Math.max(0,verified-updated),stale,error:errorText,details:{resourceCount:ids.length,verified,updated,failed,stale,unavailable,forceValidate,firstError:firstError?capRefreshError(firstError):null,workerError:batch.workerError?capRefreshError(batch.workerError):null,gameTabError:batch.pageError?capRefreshError(batch.pageError):null}};
+  if(realm!=null) await recordBackgroundJobEvent(realm,event).catch(()=>{});
+  else if(bad&&!tabSkipped) logError('resource-image-cache-sync',errorText);
+  return {ok:true,skipped:tabSkipped||undefined,reason:tabSkipped?'game-tab-not-ready':undefined,resourceCount:ids.length,verified,updated,failed,stale,unavailable,firstError,clean,durationMs:Date.now()-jobStarted};
 }
 
 function criticalContractRowsFromStore(store){
@@ -4845,7 +5235,7 @@ async function refreshContractsScheduled(reason='critical-data-guard',realmArg=n
   return {ok:results.every(x=>x.ok)&&count>0,realm,reason,results,count};
 }
 const CRITICAL_DATA_GUARD_ALARM='scm-critical-data-guard';
-async function ensureCriticalDataGuard(reason='ensure'){try{await scmAlarmCreate(CRITICAL_DATA_GUARD_ALARM,{delayInMinutes:10,periodInMinutes:10});return {ok:true,reason};}catch(e){return {ok:false,error:e?.message||String(e)}}}
+async function ensureCriticalDataGuard(reason='ensure'){try{const created=await scmEnsureTimerAlarm('criticalGuard',{delayInMinutes:10,periodInMinutes:10},'always');return {ok:true,reason,...(created?{}:{disabled:true})};}catch(e){return {ok:false,error:e?.message||String(e)}}}
 async function runCriticalDataGuard(reason='scheduled'){
   const report=[];
   for(const realm of [0,1]){
@@ -4886,17 +5276,16 @@ function forgetFollowupAlarm(name){
   });
 }
 // Periodic jobs both onInstalled and onStartup must leave in place. Created only when missing, so a browser start does not push them back.
+// [alarm, info while the Sync timers setting is at its default, timer id]. A timer switched off is not created.
 const STANDING_ALARMS=[
-  ['scm-production-events-daily',{periodInMinutes:720}],
-  ['scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15}],
-  ['scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080}],
-  ['scm-storage-prune',{delayInMinutes:30,periodInMinutes:1440}],
+  ['scm-production-events-daily',{periodInMinutes:720},'prodEventsDaily'],
+  ['scm-production-events-watch',{delayInMinutes:15,periodInMinutes:15},'prodEventsWatch'],
+  ['scm-resource-image-validation',{delayInMinutes:1,periodInMinutes:10080},'resourceImages'],
+  ['scm-storage-prune',{delayInMinutes:30,periodInMinutes:1440},'storagePrune'],
 ];
-// Idempotent: (re)create a periodic alarm only when it is missing or its period changed, so it is not pushed back.
-async function scmEnsurePeriodicAlarm(name,info){const cur=await chrome.alarms.get(name);if(cur&&Number(cur.periodInMinutes)===Number(info.periodInMinutes))return false;await scmAlarmCreate(name,info);return true;}
 async function ensureStandingAlarms(){
-  for(const [name,info] of STANDING_ALARMS)if(!(await chrome.alarms.get(name)))await scmAlarmCreate(name,info);
-  if(!(await chrome.alarms.get(GAME_CONSTANTS_ALARM)))await scmAlarmCreate(GAME_CONSTANTS_ALARM,{delayInMinutes:1,periodInMinutes:360});
+  for(const [,info,id] of STANDING_ALARMS)await scmEnsureTimerAlarm(id,info,'missing');
+  await scmEnsureTimerAlarm('gameConstants',{delayInMinutes:1,periodInMinutes:360},'missing'); // GAME_CONSTANTS_ALARM
 }
 // Chrome drops an extension's alarms when it is updated (and may on a browser restart), so the alarms that
 // carry your state are re-created from storage: follow-ups, the daily summary, batch-finished alerts (from the stored
@@ -5019,22 +5408,21 @@ async function scmPruneStorage({days=STORAGE_PRUNE_DAYS,reason='manual'}={}){
 globalThis.scmPruneStorage=scmPruneStorage;
 // Each lifecycle step is isolated: one failing step is logged and must not skip the rest.
 async function scmLifecycleStep(label,fn){try{return await fn();}catch(e){logError(`lifecycle:${label}`,e);return undefined;}}
+// Global keys onInstalled never reads or writes back. The realm keys are set by the game tab (activateRealmByRealmFast)
+// and by Sync while this step runs; writing back an earlier read would null out (or roll back) the realm they just set.
+// Every reader treats an absent selectedRealm/activeRealmKey as null, so a fresh install needs no default written.
+const INSTALL_GLOBAL_PATCH_SKIP_KEYS=new Set(['realmStores','scmRealmStoreSchema','activeRealmKey','selectedRealm','realmSwitchHint']);
+async function scmInstalledGlobalPatch(){
+  // Targeted read of only the global keys we preserve (never storage.local.get(null)). Preserve existing physical realm
+  // containers and global settings, but do not recreate the old root mirror for realm-owned caches.
+  const keys=Object.keys(GLOBAL_DEFAULTS).filter(k=>!INSTALL_GLOBAL_PATCH_SKIP_KEYS.has(k));
+  const current=await chrome.storage.local.get(keys);
+  const globalPatch={};
+  for(const key of keys){if(Object.prototype.hasOwnProperty.call(current,key)) globalPatch[key]=current[key];}
+  if(Object.keys(globalPatch).length) await storageSet(globalPatch);
+}
 chrome.runtime.onInstalled.addListener(async()=>{
-  await scmLifecycleStep('installed:global-patch',async()=>{
-    // Targeted read of only the global keys we preserve (never storage.local.get(null)).
-    const keys=[...Object.keys(GLOBAL_DEFAULTS).filter(k=>k!=='realmStores'&&k!=='scmRealmStoreSchema'&&k!=='activeRealmKey'),'selectedRealm','activeRealmKey'];
-    const current=await chrome.storage.local.get([...new Set(keys)]);
-    // Preserve existing physical realm containers and global settings, but do
-    // not recreate the old root mirror for realm-owned caches.
-    const globalPatch={};
-    for(const key of Object.keys(GLOBAL_DEFAULTS)){
-      if(key==='realmStores'||key==='scmRealmStoreSchema'||key==='activeRealmKey') continue;
-      if(Object.prototype.hasOwnProperty.call(current,key)) globalPatch[key]=current[key];
-    }
-    globalPatch.selectedRealm=current.selectedRealm??null;
-    globalPatch.activeRealmKey=current.activeRealmKey??null;
-    await storageSet(globalPatch);
-  });
+  await scmLifecycleStep('installed:global-patch',()=>scmInstalledGlobalPatch());
   await scmLifecycleStep('installed:live-bridge-token',()=>migrateLiveBridgeToken());
   await scmLifecycleStep('installed:realm-migration',()=>ensureRealmStorageMigration());
   // Only the scheduler alarms re-created below (and retired legacy ones) are cleared; batch-finished alerts,
@@ -5042,7 +5430,7 @@ chrome.runtime.onInstalled.addListener(async()=>{
   await scmLifecycleStep('installed:clear-alarms',async()=>{for(const a of await chrome.alarms.getAll()){if(!INSTALL_KEEP_ALARM_PREFIXES.some(p=>String(a?.name||'').startsWith(p)))await chrome.alarms.clear(a.name);}});
   await scmLifecycleStep('installed:live-market-alarm',()=>ensureLiveMarketRefreshAlarm('installed'));
   await scmLifecycleStep('installed:order-book-alarm',()=>ensureOrderBookRefreshAlarm());
-  for(const [name,info] of STANDING_ALARMS)await scmLifecycleStep(`installed:alarm:${name}`,()=>scmEnsurePeriodicAlarm(name,info));
+  for(const [name,info,id] of STANDING_ALARMS)await scmLifecycleStep(`installed:alarm:${name}`,()=>scmEnsureTimerAlarm(id,info,'period'));
   await scmLifecycleStep('installed:critical-data-guard',()=>ensureCriticalDataGuard('installed'));
   await scmLifecycleStep('installed:storage-prune',()=>scmPruneStorage({reason:'installed'}));
   await scmLifecycleStep('installed:restore-alarms',()=>restorePersistedAlarms('installed'));
@@ -5094,6 +5482,10 @@ async function scanOpenGameTabsForProductionEvents(reason='scheduled') {
 }
 
 chrome.alarms.onAlarm.addListener(async a=>{
+  // Sync timers: an alarm that survived its timer being switched off is cleared, not run. (accountingWalk checks its own
+  // schedule, the constants alarm its own listener.)
+  const timerId=globalThis.SCM_TIMERS_CORE?.timerForAlarm(a?.name);
+  if(timerId&&timerId!=='accountingWalk'&&timerId!=='gameConstants'&&!(await scmTimerEnabled(timerId).catch(()=>true))){await chrome.alarms.clear(a.name).catch(()=>{});return;}
   const syncRetryMatch=String(a?.name||'').match(/^scm-sync-retry-r([01])$/);
   if(syncRetryMatch){
     const realm=Number(syncRetryMatch[1]);
@@ -5156,7 +5548,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
   if(a.name==='scm-production-events-daily') scanOpenGameTabsForProductionEvents('daily').catch(()=>{});
   if(a.name==='scm-production-events-watch') scanOpenGameTabsForProductionEvents('watch').catch(()=>{});
   // The install/update handler re-creates this alarm 1 min after every update; re-validate at most once a week.
-  if(a.name==='scm-resource-image-validation') (async()=>{const r=await chrome.storage.local.get({scmResourceImagesValidatedAt:0});if(Date.now()-Number(r.scmResourceImagesValidatedAt||0)<6.5*24*3600e3)return;const res=await syncAllResourceImages({forceValidate:true});if(res?.ok)await rawStorageSet({scmResourceImagesValidatedAt:Date.now()});})().catch(()=>{});
+  if(a.name==='scm-resource-image-validation') (async()=>{const r=await chrome.storage.local.get({scmResourceImagesValidatedAt:0});if(Date.now()-Number(r.scmResourceImagesValidatedAt||0)<RESOURCE_IMAGE_VALIDATE_EVERY_MS)return;await syncAllResourceImages({forceValidate:true,trigger:'forced-validation'});/* the run stamps scmResourceImagesValidatedAt itself, clean runs only */})().catch(()=>{});
 });
 function endpointCapturedAfter(s,target,sinceMs){
   const ep=s.endpointData||{};
@@ -5226,7 +5618,7 @@ async function waitForBridge(tabId, timeoutMs=10000){
     // If the tab was already open before the extension loaded, inject the
     // isolated content script without reloading the game page. content.js is
     // idempotent and will inject page-hook.js only when needed.
-    try{ await chrome.scripting.executeScript({target:{tabId},files:['content.js']}); }catch{}
+    try{ await chrome.scripting.executeScript({target:{tabId},files:['timers-core.js','content.js']}); }catch{}
     await new Promise(r=>setTimeout(r,300));
   }
   return false;
@@ -6635,7 +7027,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const committedStore=committed.realmStores?.[key]||{};
       trace('realm-store-commit',{realm:selected,endpointCount:Object.keys(committedStore.endpointData||{}).length,warehouseRows:Array.isArray(committedStore.warehouseResources)?committedStore.warehouseResources.length:0,fullSyncStatus:committedStore.syncStatus||null});
       trace('sync-complete',{ok:true,successful,failed,total,elapsedMs:Date.now()-startedAt});
-      refreshMarketOrders(selected,0,{background:true}).catch(()=>{});refreshGameConstants().catch(()=>{});
+      refreshMarketOrders(selected,0,{background:true}).catch(()=>{});fillMissingGameData('after-sync',{afterSync:true}).catch(()=>{});
       // Awaited (bounded) so its failures can reach this run's status; the final status is written again after the tail.
       try{
         const extra=await withSyncTimeout(refreshExtraGameData(selected,{movedReads:session.movedReads||null,captured:session.abundanceCaptures||null}),15000,'After-Sync reads');
@@ -7022,22 +7414,25 @@ const warehouseMutationRefreshTimers=new Map();
 // Several quick actions ("accept all" across buildings) are batched into one warehouse fetch.
 // If an action lands while a fetch is already running, one more fetch runs afterwards so it is never missed.
 const warehouseMutationLastAt=new Map();
+const warehouseMutationRefreshStartAt=new Map(),WAREHOUSE_MUTATION_MIN_GAP_MS=3000;
 function scheduleWarehouseRefreshAfterStockMutation(realm,delayMs=300){
   const n=validRealmNumber(realm); if(n==null)return;
   warehouseMutationLastAt.set(n,Date.now());
   const prior=warehouseMutationRefreshTimers.get(n); if(prior)clearTimeout(prior);
+  // Page-reported actions start at most one warehouse read per 3 s per realm (trailing).
+  const floor=(warehouseMutationRefreshStartAt.get(n)||0)+WAREHOUSE_MUTATION_MIN_GAP_MS-Date.now();
   const timer=setTimeout(()=>{
     warehouseMutationRefreshTimers.delete(n);
     const inFlight=warehouseOverlayRefreshRuns.get(n);
     const start=()=>{
-      const startedAt=Date.now();
+      const startedAt=Date.now();warehouseMutationRefreshStartAt.set(n,startedAt);
       refreshRealmWarehouseForOverlay(n,0).then(result=>{
         if(result?.ok&&result?.refreshed)scheduleGameOverlayRefreshNotification(n,50);
         if((warehouseMutationLastAt.get(n)||0)>startedAt&&!warehouseMutationRefreshTimers.has(n))scheduleWarehouseRefreshAfterStockMutation(n,150);
       }).catch(()=>{});
     };
     if(inFlight)inFlight.finally(start); else start();
-  },Math.max(150,Number(delayMs)||300));
+  },Math.max(150,Number(delayMs)||300,floor));
   warehouseMutationRefreshTimers.set(n,timer);
 }
 
@@ -7201,8 +7596,15 @@ function diffJsRuntime(previous,next){
   };
 }
 async function saveJavascriptDiagnostic(diagnostic, realm){
-  const n=validRealmNumber(realm ?? diagnostic?.runtime?.realm);
-  if(n==null) return {ok:false,error:'No valid realm in JavaScript diagnostic.'};
+  // Page-sent (JAVASCRIPT_DIAGNOSTIC) or MAIN-world results: bounded copy, truncated over 2 MB.
+  diagnostic=sanitizePageJsDiagnostic(diagnostic);
+  if(!diagnostic) return {ok:false,error:'JavaScript diagnostic is missing, not an object, or too large.'};
+  // The realm store comes from the caller (background-run collectors) or the Manager's active realm (activeRealmKey,
+  // moved by REALM_SWITCH_CONFIRMED), never from the payload's runtime.realm: a page script can forge that. A
+  // differing page value is kept as runtime.pageRealm for troubleshooting.
+  const n=validRealmNumber(realm) ?? await activeRealmNumber();
+  if(n==null) return {ok:false,error:'No active realm for the JavaScript diagnostic.'};
+  if(isPlainObject(diagnostic.runtime)&&diagnostic.runtime.realm!==n){diagnostic.runtime.pageRealm=validRealmNumber(diagnostic.runtime.realm);diagnostic.runtime.realm=n;}
   const key=realmKeyFromRealm(n);
   return withRealmWriteLock(n,async()=>{
     // This diagnostic is explicitly realm-scoped. Reading state() here would
@@ -7302,7 +7704,7 @@ async function scmRunSelfTest(opts={}){
   // 1. Extension health
   await safe('ext-version','Extension version & service worker',async()=>{add('ext-version','Extension version & service worker','pass',`v${BUILD_VERSION}, service worker answered`,{version:BUILD_VERSION,manifestVersion:chrome.runtime.getManifest().manifest_version});});
   await safe('ext-permissions','Permissions',async()=>{const want=['storage','alarms','tabs','scripting'];const p=await chrome.permissions.getAll();const missing=want.filter(x=>!(p.permissions||[]).includes(x));const hostOk=(p.origins||[]).some(o=>/simcompanies\.com/.test(o));add('ext-permissions','Permissions',missing.length||!hostOk?'fail':'pass',missing.length?`Missing: ${missing.join(', ')}`:hostOk?'Required permissions and game host access granted':'No host access to simcompanies.com',{missing:missing.length,hostAccess:hostOk,notifications:(p.permissions||[]).includes('notifications')});});
-  await safe('ext-alarms','Background alarms',async()=>{const present=await chrome.alarms.getAll();const expected=[...STANDING_ALARMS.map(a=>a[0]),GAME_CONSTANTS_ALARM,CRITICAL_DATA_GUARD_ALARM];const r=C.evalAlarms(expected,present);add('ext-alarms','Background alarms',r.status,r.missing.length?`Missing: ${r.missing.join(', ')}`:`All ${r.expected} standing alarms registered`,{expected:r.expected,present:r.present,missing:r.missing});});
+  await safe('ext-alarms','Background alarms',async()=>{const present=await chrome.alarms.getAll();const expected=[];for(const [name,id] of [...STANDING_ALARMS.map(a=>[a[0],a[2]]),[GAME_CONSTANTS_ALARM,'gameConstants'],[CRITICAL_DATA_GUARD_ALARM,'criticalGuard']])if(await scmTimerEnabled(id).catch(()=>true))expected.push(name);/* a timer switched off in Settings is not missing */const r=C.evalAlarms(expected,present);add('ext-alarms','Background alarms',r.status,r.missing.length?`Missing: ${r.missing.join(', ')}`:`All ${r.expected} standing alarms registered`,{expected:r.expected,present:r.present,missing:r.missing});});
   await safe('ext-storage','Storage usage',async()=>{let bytes=null;try{bytes=await chrome.storage.local.getBytesInUse(null);}catch{}let top=[];try{top=await scmStorageTopKeys(8);}catch{}const last=(await chrome.storage.local.get({scmStoragePruneLast:null})).scmStoragePruneLast;const topTxt=top.length?`; largest: ${top.map(t=>`${t.key} ${(t.bytes/1024).toFixed(0)} KB`).join(', ')}`:'';let inner=null;try{inner=await scmRealmStoreTopFields(6);}catch{}const innerTxt=inner?.top?.length?`; inside ${inner.key}: ${inner.top.map(t=>`${t.key} ${(t.bytes/1024).toFixed(0)} KB`).join(', ')}`:'';const egTxt=inner?.endpointGroups?.length?`; endpointData by path: ${inner.endpointGroups.map(g=>`${g.path} x${g.count} ${(g.bytes/1024).toFixed(0)} KB`).join(', ')}`:'';add('ext-storage','Storage usage',bytes==null?'skip':'pass',bytes==null?'getBytesInUse not supported':`${(bytes/1048576).toFixed(2)} MB in storage.local${topTxt}${innerTxt}${egTxt}`,{bytes,top,realmStoreFields:inner,lastPruneAt:last?.at||null,lastPruneFreed:last?.freed??null});});
   await safe('ext-errors','Error log (24 h)',async()=>{const ver=chrome.runtime.getManifest().version;const r=C.evalErrorLog(await getErrorLog(),now,86400000,ver);const olderTxt=r.older24h?` (${r.older24h} more from older versions, ignored)`:'';add('ext-errors','Error log (24 h)',r.status,(r.count24h?`${r.count24h} error(s) in 24 h on v${ver}; top: ${r.top.map(t=>`${t.context} x${t.count}`).join(', ')}`:`No errors in the last 24 h on v${ver}`)+olderTxt,{count24h:r.count24h,older24h:r.older24h,total:r.total,top:r.top});});
   // 2. Game tab
@@ -7353,7 +7755,90 @@ async function scmRunSelfTest(opts={}){
     add('notify','Notifications & badge',!chrome.notifications&&!badge?'skip':level==='denied'?'warn':'pass',!chrome.notifications?'Notifications API not available in this browser':`Notifications ${level||'available'}; badge ${badge?'available':'unavailable'}`,{notifications:!!chrome.notifications,permissionLevel:level,badge});});
   return {ok:true,version:BUILD_VERSION,at:new Date(now).toISOString(),totals:C.totals(out),results:out};
 }
-const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['RUN_SELF_TEST','PRUNE_STORAGE','SYNC_NOW','RUN_ACCOUNTING_WALK_NOW','RUN_JAVASCRIPT_DIAGNOSTIC','LIVE_MARKET_REFRESH','CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','GET_COMPANY_AUTH_DATA','GET_ERROR_LOG','GET_LIVE_BRIDGE_TOKEN']);
+// Sync timers (Settings card): SCM_GET_TIMERS / SCM_SET_TIMERS. scmSyncTimers holds every timer except accountingWalk,
+// whose setting stays scmAccountingWalkSchedule {enabled, offsetMin, realm} (one control, one key): its clock time is
+// shown as statements-ready time + offsetMin and a picked time is stored back as offsetMin (5..240 min after ready).
+function scmTimerLegacyInfo(id){
+  const std=STANDING_ALARMS.find(a=>a[2]===id);if(std)return std[1];
+  return {liveMarket:{delayInMinutes:LIVE_MARKET_REFRESH_PERIOD_MINUTES,periodInMinutes:LIVE_MARKET_REFRESH_PERIOD_MINUTES},orderBook:{delayInMinutes:1,periodInMinutes:1},
+    criticalGuard:{delayInMinutes:10,periodInMinutes:10},gameConstants:{delayInMinutes:1,periodInMinutes:360}}[id]||null;
+}
+// Walk offset (min after the statements are ready) for a local clock time, or null outside 5 min..4 h.
+function accountingWalkOffsetForClock(readyAtMs,at){
+  const C=globalThis.SCM_TIMERS_CORE,s=C.normalizeAt(at),r=C.clockOf(readyAtMs);if(!s||!r)return null;
+  const mins=x=>Number(x.slice(0,2))*60+Number(x.slice(3));
+  const off=(mins(s)-mins(r)+1440)%1440;return off>=5&&off<=240?off:null;
+}
+// Realm the walk setting applies to: the stored one, else the active realm, else the selected realm (a fresh user has
+// no stored walk realm until the walk is first set, but already knows when their statements are ready after a Sync).
+async function scmAccountingWalkRealm(stored){
+  const r=validRealmNumber(stored);if(r!=null)return r;
+  const a=await activeRealmNumber();if(a!=null)return a;
+  try{return validRealmNumber((await chrome.storage.local.get({selectedRealm:null})).selectedRealm);}catch{return null;}
+}
+async function scmTimersView(){
+  const C=globalThis.SCM_TIMERS_CORE;const timers={...(await scmTimersConfig())};
+  const sch=await readAccountingWalkSchedule();const realm=await scmAccountingWalkRealm(sch.realm);
+  const ready=realm!=null?await accountingStatementsReadyAt(realm).catch(()=>null):null;
+  timers.accountingWalk={enabled:Boolean(sch.enabled),at:ready!=null?C.clockOf(ready+accountingWalkOffset(sch.offsetMin)*60000):null};
+  const status={};
+  let alarms=[];try{alarms=await chrome.alarms.getAll();}catch{}
+  for(const t of C.TIMERS){if(!t.alarmName)continue;const a=alarms.find(x=>x?.name===t.alarmName);status[t.id]=a?{nextRun:Number(a.scheduledTime)||null}:{nextRun:null};}
+  try{const r=await chrome.storage.local.get({scmStoragePruneLast:null,scmResourceImagesValidatedAt:0});
+    const p=Date.parse(r.scmStoragePruneLast?.at||'');if(Number.isFinite(p))status.storagePrune.lastRun=p;
+    if(Number(r.scmResourceImagesValidatedAt)>0)status.resourceImages.lastRun=Number(r.scmResourceImagesValidatedAt);}catch{}
+  const lw=Date.parse(sch.lastResult?.at||'');if(Number.isFinite(lw))status.accountingWalk.lastRun=lw;
+  status.accountingWalk.realm=realm;status.accountingWalk.offsetMin=accountingWalkOffset(sch.offsetMin);
+  if(ready!=null){status.accountingWalk.readyAt=ready;status.accountingWalk.earliest=ready+5*60000;status.accountingWalk.latest=ready+240*60000;} // timestamps (ms); the dashboard formats them
+  return {timers,status};
+}
+async function notifyGameTabsTimersChanged(timers){
+  try{const tabs=await chrome.tabs.query({url:['https://www.simcompanies.com/*','https://simcompanies.com/*']});
+    for(const t of tabs){if(t?.id!=null)chrome.tabs.sendMessage(t.id,{type:'SCM_TIMERS_CHANGED',timers}).catch(()=>{});}}catch{}
+}
+// patch: {<id>:{enabled?, every?, at?}}; values are clamped (never faster than the default for server timers).
+// Writes are serialized; only timers that changed get their alarm re-created (or cleared when off).
+function scmSetTimers(patch,realmHint=null){
+  const run=scmTimersWriteTail.catch(()=>{}).then(async()=>{
+    const C=globalThis.SCM_TIMERS_CORE;
+    if(!patch||typeof patch!=='object'||Array.isArray(patch))return {ok:false,error:'No timer settings given.'};
+    const errors={};const own={...patch};const walk=own.accountingWalk;delete own.accountingWalk;
+    const before=await scmTimersConfig();const next=C.merge(before,own);
+    const changed=C.IDS.filter(id=>id!=='accountingWalk'&&JSON.stringify(next[id])!==JSON.stringify(before[id]));
+    if(changed.length){
+      const stored=C.toStored(next);delete stored.timers.accountingWalk;
+      await chrome.storage.local.set({[C.KEY]:stored});scmTimersMemo=next;
+      for(const id of changed){const t=C.byId[id];if(!t.alarmName)continue;
+        try{await scmEnsureTimerAlarm(id,scmTimerLegacyInfo(id),'always');}catch(e){errors[id]=e?.message||String(e);}}
+      if(changed.some(id=>C.byId[id].group==='Game page'))notifyGameTabsTimersChanged(next).catch(()=>{});
+    }
+    if(walk&&typeof walk==='object'){
+      const sch=await readAccountingWalkSchedule();
+      const realm=validRealmNumber(walk.realm)??validRealmNumber(realmHint)??await scmAccountingWalkRealm(sch.realm);
+      const p={attempt:0,retryAt:null};if(realm!=null)p.realm=realm;
+      if(typeof walk.enabled==='boolean')p.enabled=walk.enabled;
+      if(walk.at===null)p.offsetMin=ACCOUNTING_WALK_DEFAULT_OFFSET_MIN; // cleared time: back to the default offset
+      else if(walk.at!==undefined){
+        const ready=realm!=null?await accountingStatementsReadyAt(realm):null;
+        if(!C.normalizeAt(walk.at))errors.accountingWalk='Pick a time as HH:MM.';
+        else if(ready==null)errors.accountingWalk='Sync once so the Manager knows when the game finishes your statements.';
+        else{const off=accountingWalkOffsetForClock(ready,walk.at);
+          if(off==null)errors.accountingWalk=`Pick a time from ${C.clockOf(ready+5*60000)} to ${C.clockOf(ready+240*60000)} (5 min to 4 h after the game finishes statements at ${C.clockOf(ready)}).`;
+          else p.offsetMin=off;}
+      }
+      if(!errors.accountingWalk){
+        if(p.enabled&&realm==null)errors.accountingWalk='Sync a realm first.';
+        else{await writeAccountingWalkSchedule(p);const r=await ensureAccountingWalkSchedule('timers');if(r?.error)errors.accountingWalk=r.error;}
+      }
+    }
+    const view=await scmTimersView();const failed=Object.keys(errors);
+    return {ok:!failed.length,...view,...(failed.length?{errors,error:Object.values(errors).join(' ')}:{})};
+  });
+  scmTimersWriteTail=run.catch(()=>{});
+  return run;
+}
+const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['SCM_GET_TIMERS','SCM_SET_TIMERS','RUN_SELF_TEST','PRUNE_STORAGE','SYNC_NOW','RUN_ACCOUNTING_WALK_NOW','RUN_JAVASCRIPT_DIAGNOSTIC','LIVE_MARKET_REFRESH','CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','GET_COMPANY_AUTH_DATA','GET_ERROR_LOG','GET_LIVE_BRIDGE_TOKEN','SCM_ENSURE_GAME_DATA','REFRESH_ACCOUNTING','REFRESH_ACCOUNTING_WEEK_LEDGER','PRICE_HISTORY','LIVE_MARKET_PRODUCT','FETCH_EXCHANGE_ORDER_BOOK','FETCH_BUILDING_HISTORY','GET_RESOURCE_IMAGE','SET_VIEW_REALM']);
+// The last eight are sent by extension pages only (dashboard / tools); each starts game or SimcoTools reads or writes settings.
 // GET_STATE from a non-extension-page context (content script) never carries secrets.
 // NOTE (authData): authData is the game's /api/v3/companies/auth-data/ payload (company id/name, user/session
 // metadata), captured from the game page itself. It stays in storage.local (top level and per realmStores) because
@@ -7375,6 +7860,8 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='RUN_SELF_TEST'){scmRunSelfTest({liveFetch:m.liveFetch!==false}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='GET_ERROR_LOG'){getErrorLog().then(log=>send({ok:true,log,version:BUILD_VERSION,at:new Date().toISOString()})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_CLEAR_ALERT_BADGE'){if(!scmIsExtensionPageSender(sender))return false;scmClearAlertBadge().then(()=>send({ok:true})).catch(()=>send({ok:false}));return true;}
+  if(m?.type==='SCM_GET_TIMERS'){scmTimersView().then(v=>send({ok:true,...v})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
+  if(m?.type==='SCM_SET_TIMERS'){scmSetTimers(m.timers,m.realm).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SET_ACCOUNTING_WALK_SCHEDULE'){(async()=>{const realm=validRealmNumber(m.realm);const patch={enabled:Boolean(m.enabled),offsetMin:accountingWalkOffset(m.offsetMin),attempt:0,retryAt:null};if(realm!=null)patch.realm=realm;await writeAccountingWalkSchedule(patch);const r=await ensureAccountingWalkSchedule('user');return {...r,schedule:await readAccountingWalkSchedule()};})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   // CSV import from Analyze → Data: statements by date and ledger rows; captured data always wins.
   if(m?.type==='IMPORT_CSV_STATEMENTS'){(async()=>{const realm=validRealmNumber(m.realm);if(realm==null)return {ok:false,error:'Pick a realm first.'};if(!/^(income-statement|cashflow-statement|balance-sheet)$/.test(String(m.field||'')))return {ok:false,error:'Unknown statement.'};return queueStatementHistory(realm,(Array.isArray(m.items)?m.items:[]).map(data=>({kind:m.field,data})),{keep:true});})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
@@ -7395,7 +7882,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='JAVASCRIPT_DIAGNOSTIC'){
     (async()=>{
       try{
-        const saved=await saveJavascriptDiagnostic(m.diagnostic,m.diagnostic?.runtime?.realm);
+        const saved=await saveJavascriptDiagnostic(m.diagnostic);
         send(saved);
       }catch(e){send({ok:false,error:e?.message||String(e)});}
     })();
@@ -7583,8 +8070,8 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='GET_SELL_PRICE_INFO'){
     (async()=>{
       try{
-        const realm=validRealmNumber(m.realm),id=Number(m.resourceId),q=Number(m.quality);
-        if(realm==null||!(id>0)||!Number.isFinite(q)){send({ok:false,error:'Invalid request.'});return;}
+        const realm=validRealmNumber(m.realm),id=validResourceId(m.resourceId),q=validQuality(m.quality);
+        if(realm==null||id==null||q==null){send({ok:false,error:'Invalid request.'});return;}
         const s=await state(realm);const store={...(s.realmStores?.[realmKeyFromRealm(realm)]||{})};const C=globalThis.SCM_TOOLS_CORE;
         const path=`/api/v3/market/${realm}/${id}/`,ep=store.endpointData?.[path],at=Date.parse(String(ep?.receivedAt||''));
         const haveBook=Array.isArray(ep?.data)&&Number.isFinite(at)&&Date.now()-at<6*3600e3;
@@ -7806,7 +8293,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         await scmNetClearAllEvents().catch(()=>{});
         await chrome.storage.session?.remove(LIVE_BRIDGE_TOKEN_SESSION_KEY).catch(()=>{});await liveBridgeBackupClear(); // session token + IDB backup
         // In-memory copies of cleared data would otherwise be served (and written back) until the worker restarts.
-        resourceImagesMemo=null;notifyRecipesMemo=null;gameOverlayAssetsPromise=null;resourceImageSyncLastAt=0;
+        resourceImagesMemo=null;notifyRecipesMemo=null;gameOverlayAssetsPromise=null;resourceImageSyncLastAt=0;gameDataFillAt=0;gameDataPageFillAt=0;gameDataPresent=false;resourceImagePageAsks.clear();await chrome.storage.session?.remove(SCM_GATE_STAMPS_KEY).catch(()=>{});for(const k of Object.keys(scmGateStampsMem))delete scmGateStampsMem[k];
         gameOverlaySnapshotMemo.clear();contractHelperCache.clear();
         gameOverlayLastRefreshAt.clear();gameOverlayDirty.clear();warehouseMutationLastAt.clear();warehouseOverlayBackoffUntil.clear();
         marketOrdersGateMem.clear();for(const t of marketOrdersTrailing.values())clearTimeout(t.id);marketOrdersTrailing.clear();
@@ -7817,6 +8304,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         // The constants were just cleared: drop their retry backoff too, so the scm-game-constants alarm that
         // ensureStandingAlarms re-creates below (1 min delay) reads them again instead of waiting out an old backoff.
         await gameConstantsRetrySet(null);
+        scmTimersMemo=null; // scmSyncTimers was cleared: every timer is back to its default
         realmStorageMigrationChecked=false;realmMigrationPromise=null;
         const resetDefaults={...DEFAULTS,selectedRealm:null,activeRealmKey:null,vwapStatus:{message:'Waiting for VWAP sync.'},marketQueueStatus:{message:'Waiting for the logged-in Sim Companies tab.',updatedAt:new Date().toISOString()},resourceImageData:{}};
         await storageSet(resetDefaults);
@@ -7989,6 +8477,8 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       // back during a live R1/R2 transition.
       const result=await saveGameState(m);
       send({...result,autoDetected:false,autoFollow:{ok:true,changed:false,reason:'game-state-isolation'}});
+      // The game tab is up: fill constants / images that are completely missing (fresh install).
+      fillMissingGameData('game-tab',{onlyMissing:true}).catch(()=>{});
     })().catch(e=>send({ok:false,error:e?.message||String(e)}));
     return true;
   }
@@ -8053,17 +8543,22 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
   }
   if(m?.type==='RESOURCE_CATALOG'){saveResourceCatalog(m.catalog,m.receivedAt).then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='RESOURCE_IMAGE_RESULT'){(async()=>{
-    if(m.resource&&m.dataUrl){
-      const s=await state(); const realm=realmNumberFromKey(s.activeRealmKey||identityFromAuth(s.authData));
-      if(realm!=null) await withRealmWriteLock(realm,async()=>{
-        const latest=await state(realm); const key=realmKeyFromRealm(realm); const stores={...(latest.realmStores||{})}; const store={...(stores[key]||{})};
-        const map={...(store.resourceImageCache||{})}; map[String(Number(m.resource))]=m.dataUrl; store.resourceImageCache=map; stores[key]=store;
-        const patch={realmStores:stores}; if(key===latest.activeRealmKey) patch.resourceImageCache=map; await storageSet(patch);
-      });
-    }
+    // From the page (content.js relay): raster image data URLs up to 1 MB only (resourceImageDataUrlParts).
+    if(m.dataUrl&&!resourceImageDataUrlParts(m.dataUrl)){send({ok:false,error:'Image type not allowed or too large.'});return;}
+    if(!m.dataUrl){send({ok:true});return;}
+    // A known resource id (integer 1..99999 in the manifest, constants or catalog) that was asked for; else nothing is written.
+    const id=validResourceId(m.resource);
+    if(id==null||!(await knownResourceIds()).has(id)){send({ok:false,error:'Unknown resource id.'});return;}
+    const asked=resourceImagePageAsks.get(id);
+    if(!asked||Date.now()-asked>RESOURCE_IMAGE_PAGE_ASK_MS){send({ok:false,error:'No image was asked for this resource.'});return;}
+    resourceImagePageAsks.delete(id);
+    const s=await state(); const realm=realmNumberFromKey(s.activeRealmKey||identityFromAuth(s.authData));
+    if(realm!=null) await saveResourceImages({[String(id)]:m.dataUrl},{});
     send({ok:true});
   })().catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
-  if(m?.type==='GET_RESOURCE_IMAGE'){(async()=>{const r=await fetchAndCacheResourceImage(Number(m.resource),{forceValidate:false}); if(r.ok){send({ok:true,dataUrl:r.dataUrl,cached:r.cached,stale:r.stale||false});return;} const tab=await simTab(); if(!tab?.id){send({ok:false,error:r.error||'Sim Companies tab is not open.'});return;} try{await chrome.tabs.sendMessage(tab.id,{type:'PAGE_RESOURCE_IMAGE',resource:Number(m.resource)}); send({ok:true,queued:true,error:r.error||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})().catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
+  // Dashboard open: read game constants / resource images if they are missing (see fillMissingGameData).
+  if(m?.type==='SCM_ENSURE_GAME_DATA'){fillMissingGameData('dashboard-open').then(r=>send({ok:true,...r})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
+  if(m?.type==='GET_RESOURCE_IMAGE'){(async()=>{const rid=validResourceId(m.resource);if(rid==null||!(await knownResourceIds()).has(rid)){send({ok:false,error:'Invalid resource id'});return;}const r=await fetchAndCacheResourceImage(rid,{forceValidate:false}); if(r.ok){send({ok:true,dataUrl:r.dataUrl,cached:r.cached,stale:r.stale||false});return;} const tab=await simTab(); if(!tab?.id){send({ok:false,error:r.error||'Sim Companies tab is not open.'});return;} try{resourceImagePageAsks.set(rid,Date.now());await chrome.tabs.sendMessage(tab.id,{type:'PAGE_RESOURCE_IMAGE',resource:rid}); send({ok:true,queued:true,error:r.error||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})().catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='MARKET_CACHE'){saveMarketCache(m.resource,m.data,m.receivedAt,m.realm).then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='SYNC_NOW'){syncNow(m.realm,{fullWalk:true}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='SET_VIEW_REALM'){
@@ -8076,6 +8571,7 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
       await ensureRealmStorageMigration();
       await storageSet({selectedRealm:value});
       send({ok:true,selectedRealm:value});
+      fillMissingGameData('view-realm').catch(()=>{});
     })().catch(e=>send({ok:false,error:e?.message||String(e)})); return true;
   }
   if(m?.type==='PUSH_LIVE_BRIDGE'){

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sim Companies Manager",
-  "version": "2.5.454",
+  "version": "2.5.455",
   "description": "Sim Companies Manager, optimized for mobile: lighter background work, phone layouts, Tools tab and building-card profit.",
   "permissions": [
     "storage",
@@ -54,6 +54,7 @@
         "https://simcompanies.com/*"
       ],
       "js": [
+        "timers-core.js",
         "content.js"
       ],
       "run_at": "document_start",

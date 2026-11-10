@@ -186,7 +186,10 @@ let dashboardImagesMemo=null;
 // blob: URLs are not an option here (manifest CSP img-src has no blob:). Icons stay data: URIs in src; the fallback
 // candidate list does not repeat the payload (see scmCandidatesJson).
 // data: entries (~26KB each) are blanked in data-candidates; the src already carries the first image.
-const scmCandidatesJson=list=>JSON.stringify((list||[]).map(u=>typeof u==='string'&&u.startsWith('data:')?'':u));
+// Image src allow-list. EVERY <img src> / img.src built in the UI files goes through this one helper: only base64 raster data URIs,
+// https://www.simcompanies.com/static/images/... and bundled icons/... are allowed; anything else returns '' (= no image / placeholder).
+function scmSafeImgSrc(u){if(typeof u!=='string')return '';const v=u.trim();if(!v||v.length>400000||/[\s"'<>`\\]/.test(v))return '';if(/^data:image\/(png|jpeg|webp|gif|avif);base64,[A-Za-z0-9+\/]+=*$/.test(v))return v;if(/^https:\/\/www\.simcompanies\.com\/static\/images\/[A-Za-z0-9_\-.\/@%]+(\?[A-Za-z0-9_=&.\-]*)?$/.test(v)&&!/\.\.|\/\//.test(v.slice(8)))return v;if(/^icons\/[A-Za-z0-9_\-.]+(\/[A-Za-z0-9_\-.]+)*$/.test(v)&&!v.includes('..'))return v;return '';}
+const scmCandidatesJson=list=>JSON.stringify((list||[]).map(u=>typeof u==='string'&&u.startsWith('data:')?'':scmSafeImgSrc(u)));
 async function dashboardResourceImages(){
   if(dashboardImagesMemo)return dashboardImagesMemo;
   const raw=(await chrome.storage.local.get({scmResourceImages:null})).scmResourceImages;
@@ -927,7 +930,25 @@ function accounting(s, realmStore=null){
   const previousPeriod=accountingPreviousPeriod(history,period.date);
   return {cash,revenue:finalRevenue,expenses,operatingExpenses,cogs:statementNow?.cogs??null,freightOut:statementNow?.freightOut??null,marketFees:statementNow?.marketFees??null,executives:statementNow?.executives??null,cashChange:accountingCashChange(cfObj),profit:finalProfit,netMargin:finalMargin,assets,liabilities,inventory,accountsReceivable,accountsPayable:payable,bondsPayable,currentAssets,currentLiabilities,period,history,previousPeriod,ledgerCheck,source:{bs,cf,recent,pf,income},sourceType: income ? 'income-statement' : (cf ? (transactionRows.length?'cash-flow-transactions':'cash-flow-derived') : 'unavailable')};
 }
-window.scmImageFallback=function(img){try{const c=JSON.parse(img.dataset.candidates||'[]');let i=Number(img.dataset.idx||0)+1;while(i<c.length&&!c[i])i++;if(i<c.length){img.dataset.idx=String(i);img.src=c[i];return;}img.style.display='none';}catch{img.style.display='none';}};
+// Product images: when every URL candidate has failed, ask the game tab for the image (GET_RESOURCE_IMAGE) and use the
+// returned dataUrl. The box is kept (visibility:hidden, never display:none) so the row does not shift. Per page session
+// each resource id is asked once: __scmImgState remembers pending / failed / ok, and re-renders go through scmImgSrcs so
+// a known-bad id never creates another failing <img>.
+const __scmImgState=new Map();
+function scmImgSrcs(rid,srcs){const m=__scmImgState.get(Number(rid));const list=(Array.isArray(srcs)?srcs:[]).filter(u=>scmSafeImgSrc(u));if(!m)return list;if(m.s==='ok'&&scmSafeImgSrc(m.url))return [m.url,...list.filter(u=>u!==m.url)];return list.filter(u=>u.startsWith('data:'));}
+scmOnDashboardResume(()=>{for(const [k,v] of [...__scmImgState])if(v.s!=='ok')__scmImgState.delete(k);});
+function scmResourceImageFallback(rid,img){
+  const m=__scmImgState.get(rid);
+  if(m?.s==='ok'&&m.url){if(img.dataset.scmData==='1'){__scmImgState.set(rid,{s:'failed',t:Date.now()});return;}img.dataset.scmData='1';img.src=scmSafeImgSrc(m.url);img.style.visibility='';return;}
+  if(m)return;
+  __scmImgState.set(rid,{s:'pending',t:Date.now()});
+  let p;try{p=chrome.runtime.sendMessage({type:'GET_RESOURCE_IMAGE',resource:rid});}catch{p=null;}
+  Promise.resolve(p).then(r=>{
+    if(r&&r.ok&&r.dataUrl){__scmImgState.set(rid,{s:'ok',url:r.dataUrl,t:Date.now()});document.querySelectorAll(`img[data-rid="${rid}"]`).forEach(el=>{el.dataset.scmData='1';el.style.visibility='';el.src=scmSafeImgSrc(r.dataUrl);});}
+    else if(!(r&&r.queued))__scmImgState.set(rid,{s:'failed',t:Date.now()});
+  }).catch(()=>__scmImgState.set(rid,{s:'failed',t:Date.now()}));
+}
+window.scmImageFallback=function(img){try{const c=JSON.parse(img.dataset.candidates||'[]');let i=Number(img.dataset.idx||0)+1;while(i<c.length&&!c[i])i++;if(i<c.length){img.dataset.idx=String(i);img.src=scmSafeImgSrc(c[i]);return;}img.style.visibility='hidden';const rid=Number(img.dataset.rid);if(rid>0)scmResourceImageFallback(rid,img);}catch{img.style.visibility='hidden';}};
 function snapshotRealmKey(s){const r=s.viewRealm!=null?Number(s.viewRealm):(s.captureRealm!=null?Number(s.captureRealm):null);return r!=null?`realm:${r}`:'auto';}
 function accountingSnapshotValues(a){return {cash:a.cash,revenue:a.revenue,expenses:a.expenses,profit:a.profit,assets:a.assets,liabilities:a.liabilities,inventory:a.inventory};}
 function topSellingResourcesByProfit(accounting,s){
@@ -1289,16 +1310,30 @@ async function requestLiveMarketProduct(realm,resourceId,quality,force=false){
     __liveMarketProductPending.delete(requestKey);
   }
 }
+// Dashboard market refresh (Settings > Background timers, 'dashLiveMarket'): on/off and the interval come from the saved
+// timer config; re-armed after a save and when the dashboard becomes visible again. Default 5 min, never faster.
+let __liveMarketCfg='unset';
+function scmLiveMarketTick(){
+  if(activeTab!=='market'&&activeTab!=='warehouse')return;
+  const state=window.__scmState;if(!state)return;
+  const n=marketRealmFromState(state); if(n==null)return;
+  requestLiveMarketRefresh(n);
+  const key=String(__selectedMarketKey||'');
+  if(key.includes(':')){const [id,q]=key.split(':').map(Number);if(Number.isFinite(id)&&Number.isFinite(q))requestLiveMarketProduct(n,id,q);}
+}
+function scmApplyLiveMarketTimer(){
+  const C=scmTimersCore();
+  if(__liveMarketTimer){clearInterval(__liveMarketTimer);__liveMarketTimer=null;}
+  const entry=(__timersCfg&&__timersCfg.dashLiveMarket)||(C?C.defaults().dashLiveMarket:{enabled:true});
+  __liveMarketCfg='ready';
+  if(entry.enabled===false)return;
+  const ms=C?C.intervalMs('dashLiveMarket',entry):300000;
+  __liveMarketTimer=setInterval(scmLiveMarketTick,ms||300000);
+}
 function ensureLiveMarketTimer(s){
-  if(__liveMarketTimer)return;
-  __liveMarketTimer=setInterval(()=>{
-    if(activeTab!=='market'&&activeTab!=='warehouse')return;
-    const state=window.__scmState||s;
-    const n=marketRealmFromState(state); if(n==null)return;
-    requestLiveMarketRefresh(n);
-    const key=String(__selectedMarketKey||'');
-    if(key.includes(':')){const [id,q]=key.split(':').map(Number);if(Number.isFinite(id)&&Number.isFinite(q))requestLiveMarketProduct(n,id,q);}
-  },300000);
+  if(__liveMarketTimer||__liveMarketCfg!=='unset')return;
+  __liveMarketCfg='loading';
+  scmLoadTimers().then(scmApplyLiveMarketTimer,scmApplyLiveMarketTimer);
 }
 function marketWarehouseOptions(s){
   const rows=warehouseRows(s).filter(r=>Number(r?._qty||0)>0&&Number.isFinite(Number(r?._id))&&Number.isFinite(Number(r?._quality)));
@@ -1409,7 +1444,7 @@ function renderLiveMarketProduct(s){
   const sharedPrice=scmMarketPrice(activeStore,item.id,item.quality,'exact'),currentMarketPrice=sharedPrice?.price??null;const contract=currentMarketPrice==null?null:roundCurrencyUp(currentMarketPrice*(1-discount/100));
   const qualityRows=Array.isArray(selected?.qualities)?selected.qualities:[];
   const info=resourceInfo(item,s),src=(s.resourceImageCache?.[String(item.id)]||s.resourceImageData?.[String(item.id)]||info.imageCandidates?.[0]||'');
-  const img=src?`<img class="market-resource-icon" src="${escapeHtml(src)}" alt="">`:'';
+  const img=scmSafeImgSrc(src)?`<img class="market-resource-icon" src="${escapeHtml(scmSafeImgSrc(src))}" alt="">`:'';
   const change=marketNumeric(candle.open)!=null&&candle.open!==0&&marketNumeric(candle.close)!=null?(candle.close-candle.open)/candle.open*100:null;
   const tableRows=qualityRows.map(q=>{const qp=scmMarketPrice(activeStore,item.id,q.quality,'exact'),price=qp?.price??null,qv=cachedMarketVwap(activeStore,item.id,q.quality);const discounted=price==null?null:roundCurrencyUp(price*(1-discount/100));return `<tr><td>Q${q.quality}</td><td><strong>${marketMoney(price)}</strong>${scmSrcTag(qp)}${qv!=null?`<small class="market-inline-vwap">VWAP ${marketMoney(qv)}</small>`:''}</td><td>${marketMoney(discounted)}</td><td>${marketDate(q.lastTrade)}</td></tr>`;}).join('')||'<tr><td colspan="4">Waiting for exchange data…</td></tr>';
   const candles=Array.isArray(selected?.selected?.candles)?selected.selected.candles.slice(-36):[];
@@ -1547,7 +1582,7 @@ function accountingComparisonBase(a){
   if(p&&a?.sourceType!=='income-statement'&&p.cashIn!=null)return {...p,revenue:p.cashIn,sales:p.cashIn};
   return p;
 }
-// Daily scheduled Accounting walk: on/off, minutes after the game finishes your statements, Run now.
+// Daily Accounting walk card (Accounting tab): next / last result and Run now. On/off and the time are set in Settings > Background timers.
 function accountingWalkTimes(sch){
   const t=v=>{const d=new Date(v);return v&&Number.isFinite(d.getTime())?d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}):null;};
   const dt=v=>{const d=new Date(v);return v&&Number.isFinite(d.getTime())?`${d.toLocaleDateString(undefined,{weekday:'short'})} ${t(v)}`:'—';};
@@ -1568,30 +1603,21 @@ function accountingWalkScheduleHtml(sch,walk,realm){
   const next=on?(sch?.nextAt?escapeHtml(dt(sch.nextAt)):'Sync first'):'Off';
   const other=on&&r!=null&&realm!=null&&r!==realm?` · ${escapeHtml(realmName(r))}`:'';
   return `<div class="acct-walk">
-<div class="acct-walk-row"><label class="acct-walk-toggle"><input type="checkbox" id="acctWalkEnabled" ${on?'checked':''}> Run daily</label><label class="acct-walk-offset"><input type="number" id="acctWalkOffset" min="5" max="240" step="5" value="${off}" inputmode="numeric" aria-label="Minutes after the game finishes your statements"> min after</label></div>
 <div class="acct-walk-row acct-walk-info"><span>Next <strong>${next}</strong>${other}</span><span>Last <strong>${last}</strong></span></div>
 <div class="acct-walk-row"><button id="acctWalkRunNow" type="button">Run now</button><span id="acctWalkMsg" class="muted">${escapeHtml(accountingWalkMsg||(lr?.error?lr.error:''))}</span></div>
+<div class="acct-walk-row muted">Turn it on and set the time in Settings, Background timers.</div>
 </div>`;
 }
 async function renderAccountingWalkSchedule(s){
   const el=document.querySelector('#accountingWalkSchedule'); if(!el)return;
-  if(el.contains(document.activeElement)&&document.activeElement?.id==='acctWalkOffset')return;
   let sch=null; try{sch=(await chrome.storage.local.get({scmAccountingWalkSchedule:null})).scmAccountingWalkSchedule;}catch{}
   const realm=Number.isFinite(Number(s?.viewRealm))?Number(s.viewRealm):null;
   scmSetHTML(el,accountingWalkScheduleHtml(sch||{},null,realm));
   const head=document.querySelector('#acctWalkHead'); if(head)head.textContent=accountingWalkHeadText(sch||{});
 }
-function accountingWalkRealm(){const s=window.__scmState||{};const r=Number(s.viewRealm??s.selectedRealm);return Number.isFinite(r)?r:null;}
+function accountingWalkRealm(){const s=window.__scmState||{};const v=s.viewRealm??s.selectedRealm;return v==null||v===''?null:validRealmNumber(v);}
 let accountingWalkMsg='';
 function setAccountingWalkMsg(t){accountingWalkMsg=String(t||'');const m=document.querySelector('#acctWalkMsg');if(m)m.textContent=accountingWalkMsg;}
-async function saveAccountingWalkSchedule(){
-  const en=document.querySelector('#acctWalkEnabled'), of=document.querySelector('#acctWalkOffset');
-  if(!en||!of)return;
-  try{const r=await chrome.runtime.sendMessage({type:'SET_ACCOUNTING_WALK_SCHEDULE',enabled:en.checked,offsetMin:Number(of.value),realm:accountingWalkRealm()});setAccountingWalkMsg(r?.error||(en.checked?'Saved.':'Turned off.'));}
-  catch(e){setAccountingWalkMsg(e?.message||String(e));}
-  document.activeElement?.blur?.(); renderAccountingWalkSchedule(window.__scmState||{});
-}
-document.addEventListener('change',e=>{if(e.target?.id==='acctWalkEnabled'||e.target?.id==='acctWalkOffset')saveAccountingWalkSchedule();});
 document.addEventListener('click',async e=>{
   if(e.target?.id!=='acctWalkRunNow')return;
   e.target.disabled=true; setAccountingWalkMsg('Walking the game Accounting page…');
@@ -1600,6 +1626,79 @@ document.addEventListener('click',async e=>{
   finally{renderAccountingWalkSchedule(window.__scmState||{});}
 });
 scmOnStorageChanged((ch,area)=>{if(area==='local'&&ch.scmAccountingWalkSchedule)renderAccountingWalkSchedule(window.__scmState||{});});
+// Settings > Background timers: one list of every background sync timer. On/off, how often (or what time of day),
+// what it does, when it runs next. The service worker owns the values (SCM_GET_TIMERS / SCM_SET_TIMERS); this only
+// shows them and sends the fields that changed. The Dashboard market refresh below reads the same config.
+let __timersCfg=null,__timersStatus={},__timersErrors={},__timersMsg='',__timersLoading=null;
+function scmTimersCore(){return globalThis.SCM_TIMERS_CORE||null;}
+function scmTimersRealm(){const s=window.__scmState||{};const v=s.viewRealm??s.selectedRealm;return v==null||v===''?null:validRealmNumber(v);}
+function scmTimersApply(r){
+  const C=scmTimersCore();if(!C||!r||!r.ok||!r.timers)return false;
+  __timersCfg=C.merge(r.timers,{});__timersStatus=r.status&&typeof r.status==='object'?r.status:{};return true;
+}
+// Reads the saved timer settings. Falls back to the built-in defaults when the service worker does not answer.
+async function scmLoadTimers(){
+  if(__timersLoading)return __timersLoading;
+  __timersLoading=(async()=>{
+    let ok=false;try{ok=scmTimersApply(await chrome.runtime.sendMessage({type:'SCM_GET_TIMERS'}));}catch{}
+    if(!ok&&!__timersCfg&&scmTimersCore())__timersCfg=scmTimersCore().defaults();
+    return __timersCfg;
+  })().finally(()=>{__timersLoading=null;});
+  return __timersLoading;
+}
+function timersClock(ms){const d=new Date(Number(ms));if(!Number.isFinite(d.getTime()))return null;const same=new Date().toDateString()===d.toDateString();const t=d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});return same?t:`${d.toLocaleDateString(undefined,{weekday:'short'})} ${t}`;}
+function timersAgo(ms){const d=Date.now()-Number(ms);if(!Number.isFinite(d))return null;if(d<60000)return 'just now';if(d<3600000)return `${Math.round(d/60000)} min ago`;if(d<86400000)return `${Math.round(d/3600000)} h ago`;return `${Math.round(d/86400000)} d ago`;}
+function timersUnitText(t,n){return t.unit==='sec'?'sec':t.unit==='min'?'min':(n===1?'day':'days');}
+function timersRowHtml(t,e){
+  const st=__timersStatus?.[t.id]||{};const err=__timersErrors[t.id];const on=e.enabled!==false;
+  const name=escapeHtml(t.label);let value='',hint='';
+  if(t.kind==='interval'){
+    const u=timersUnitText(t,e.every);
+    value=`<span class="nf-val"><input type="number" inputmode="numeric" min="${Number(t.min)}" max="${Number(t.max)}" step="1" value="${escapeHtml(e.every)}" data-tm-every="${escapeHtml(t.id)}" aria-label="${name}: every, in ${escapeHtml(u)}"><span class="tm-unit">${t.unit==='day'?'days':escapeHtml(u)}</span></span>`;
+    hint=`min ${Number(t.min)} – max ${Number(t.max)} ${t.unit==='day'?'days':escapeHtml(t.unit)}${t.hitsServer?' · can’t be faster than today, to keep game-server requests low':''}`;
+  }else{
+    const isWalk=t.id==='accountingWalk';
+    value=`<span class="nf-val"><input type="time" value="${escapeHtml(e.at||'')}" data-tm-at="${escapeHtml(t.id)}" aria-label="${name}: time of day"></span>`;
+    const C=scmTimersCore();const defTxt=isWalk?(Number(st.offsetMin)>0?`${Number(st.offsetMin)} min after the game finishes statements`:'after the game finishes statements'):t.defaultText;
+    const parts=[e.at?`Default is ${defTxt}`:`Default (${defTxt})`];
+    if(isWalk){const a=st.earliest?C.clockOf(st.earliest):null,z=st.latest?C.clockOf(st.latest):null;parts.push(a&&z?`allowed time ${a} – ${z}, 5 min to 4 h after the game finishes statements`:'press Sync once to set a time (the allowed time depends on when the game finishes statements)');}
+    hint=escapeHtml(parts.join(' · '))+(e.at?` · <button type="button" class="tm-reset" data-tm-reset="${escapeHtml(t.id)}">Use default</button>`:'');
+  }
+  const bits=[];
+  if(on&&st.nextRun)bits.push(`Next: ${escapeHtml(timersClock(st.nextRun)||'—')}`);
+  if(st.lastRun)bits.push(`Last: ${escapeHtml(timersAgo(st.lastRun)||'—')}`);
+  return `<div class="tm-row${on?'':' is-off'}" data-timer="${escapeHtml(t.id)}"><div class="nf-row${on?'':' is-off'}"><label><input type="checkbox" data-tm-en="${escapeHtml(t.id)}" ${on?'checked':''}><span>${name}</span></label>${value}</div><p class="notify-help tm-desc">${escapeHtml(t.description)}</p><div class="tm-meta">${hint}</div>${bits.length?`<div class="tm-meta tm-status">${bits.join(' · ')}</div>`:''}${err?`<div class="tm-err" role="alert">${escapeHtml(err)}</div>`:''}</div>`;
+}
+function renderTimersUi(){
+  const el=document.querySelector('#timersBody');if(!el)return;
+  const C=scmTimersCore();if(!C){el.textContent='Timers are not available.';return;}
+  if(!__timersCfg){scmSetHTML(el,'<div class="muted">Loading…</div>');return;}
+  const groups=[];for(const id of C.IDS){const t=C.byId[id];let g=groups.find(x=>x.name===t.group);if(!g){g={name:t.group,items:[]};groups.push(g);}g.items.push(t);}
+  const html=`<div class="nf-compact tm-list">${groups.map(g=>`<h3 class="nf-group">${escapeHtml(g.name)}</h3>${g.items.map(t=>timersRowHtml(t,__timersCfg[t.id]||{})).join('')}`).join('')}</div><div class="tm-foot muted" role="status" aria-live="polite">${escapeHtml(__timersMsg)}</div>`;
+  scmSetHTML(el,html);
+}
+async function loadTimersUi(){await scmLoadTimers();renderTimersUi();}
+// Sends only the changed fields. The reply holds the saved values; anything refused comes back in errors[id].
+async function saveTimerPatch(id,patch){
+  __timersErrors={};__timersMsg='';
+  try{
+    const r=await chrome.runtime.sendMessage({type:'SCM_SET_TIMERS',timers:{[id]:patch},realm:scmTimersRealm()});
+    if(r&&r.ok!==false&&scmTimersApply(r)){if(r.errors&&typeof r.errors==='object')__timersErrors=r.errors;else __timersMsg='Saved.';}
+    else{__timersErrors={[id]:(r&&(r.error||(r.errors&&r.errors[id])))||'Could not save.'};await scmLoadTimers();}
+  }catch(e){__timersErrors={[id]:e?.message||String(e)};}
+  document.activeElement?.blur?.();
+  if(document.querySelector('#timersBody')){const el=document.querySelector('#timersBody');el.__scmHtml=null;renderTimersUi();}
+  scmApplyLiveMarketTimer();
+}
+document.addEventListener('change',e=>{
+  const t=e.target;if(!t||!t.dataset)return;
+  if(t.dataset.tmEn){saveTimerPatch(t.dataset.tmEn,{enabled:t.checked});return;}
+  if(t.dataset.tmEvery){const v=Number(t.value);if(!Number.isFinite(v)||t.value===''){renderTimersUi();return;}saveTimerPatch(t.dataset.tmEvery,{every:v});return;}
+  if(t.dataset.tmAt){saveTimerPatch(t.dataset.tmAt,{at:t.value||null});}
+});
+document.addEventListener('click',e=>{const b=e.target?.closest?.('[data-tm-reset]');if(b)saveTimerPatch(b.dataset.tmReset,{at:null});});
+$$('.tab').forEach(b=>b.addEventListener('click',()=>{if(b.dataset.tab==='settings')loadTimersUi();}));
+scmOnDashboardResume(()=>{scmLoadTimers().then(()=>{if(activeTab==='settings')renderTimersUi();scmApplyLiveMarketTimer();});});
 function accountingHistoryTable(history,walk=null){
   const rows=(Array.isArray(history)?history:[]).filter(r=>r.profit!=null||r.assets!=null).slice(-7).reverse();
   if(!rows.length)return '<p class="muted">No daily history captured yet. Open Accounting in the game once, then Sync.</p>';
@@ -2005,7 +2104,7 @@ function plannerResourceImage(id,s){
   return info.imageCandidates[0]||'';
 }
 function plannerImage(src,alt,cls='planner-icon',fallback='•'){
-  return src?`<img class="${cls}" src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy" data-scm-hide-on-error="1" data-scm-fallback-text="${escapeHtml(fallback)}">`:`<span class="${cls} planner-icon-fallback" title="${escapeHtml(alt)}">${escapeHtml(fallback)}</span>`;
+  return scmSafeImgSrc(src)?`<img class="${cls}" src="${escapeHtml(scmSafeImgSrc(src))}" alt="${escapeHtml(alt)}" loading="lazy" data-scm-hide-on-error="1" data-scm-fallback-text="${escapeHtml(fallback)}">`:`<span class="${cls} planner-icon-fallback" title="${escapeHtml(alt)}">${escapeHtml(fallback)}</span>`;
 }
 function plannerResourceNameById(recipes,id,s){
   const r=(recipes||[]).find(x=>Number(x.id)===Number(id));
@@ -2427,7 +2526,7 @@ function renderBoardRoom(s){
   const pct=v=>v==null||!Number.isFinite(v)?'—':`${(+v).toFixed(2)}%`;
   const own={o:'coo',v:'coo',f:'cfo',x:'cfo',m:'cmo',y:'cmo',t:'cto',z:'cto'};
   const bars=r=>['coo','cfo','cmo','cto'].map(k=>{const v=r.skills[k],w=Math.min(100,v/40*100);return `<div class="exec-skill${own[r.position]===k?' own':''}"><span>${k.toUpperCase()}</span><i style="width:${w.toFixed(1)}%"></i><b>${num(v)}</b></div>`;}).join('');
-  const card=r=>`<div class="exec-card${r.staff?' staff':''}"><div class="exec-head"><div><strong>${escapeHtml(r.role)}</strong> ${escapeHtml(r.name||'')}${r.age!=null?` <small>${num(r.age)} y/o</small>`:''}</div><small>${r.trainings!=null?`${num(r.trainings)}/${EXEC_MAX_TRAININGS} trainings`:'trainings —'}</small></div><div class="exec-skills">${bars(r)}</div><div class="exec-foot"><span>Salary ${r.salary!=null?plannerMoney(r.salary):'—'}</span><span class="exec-status ${r.status.replace(' ','-')}">${escapeHtml(r.status)}${r.trainingEndsAt?` · until ${escapeHtml(new Date(r.trainingEndsAt).toLocaleString())}`:''}</span></div></div>`;
+  const card=r=>`<div class="exec-card${r.staff?' staff':''}"><div class="exec-head"><div><strong>${escapeHtml(r.role)}</strong> ${escapeHtml(r.name||'')}${r.age!=null?` <small>${num(r.age)} y/o</small>`:''}</div><small>${r.trainings!=null?`${num(r.trainings)}/${EXEC_MAX_TRAININGS} trainings`:'trainings —'}</small></div><div class="exec-skills">${bars(r)}</div><div class="exec-foot"><span>Salary ${r.salary!=null?plannerMoney(r.salary):'—'}</span><span class="exec-status ${escapeHtml(r.status.replace(' ','-'))}">${escapeHtml(r.status)}${r.trainingEndsAt?` · until ${escapeHtml(new Date(r.trainingEndsAt).toLocaleString())}`:''}</span></div></div>`;
   const row=(l,v,n='',cls='')=>`<div class="pp-row ${cls}"><div class="pp-label">${l}${n?`<small>${n}</small>`:''}</div><div class="pp-value">${v}</div></div>`;
   const skillOf=k=>{try{return C.executiveSkill(ex,k,{now,trainS,settleS,academyActive:C.academyActiveSize(blds)});}catch{return null;}};
   const perDay=r=>labour>0&&r?labour*r.pct/100:null;
@@ -2570,7 +2669,7 @@ ${row('Production / h',num(r.unitsPerHour),`Level ${ctx.level} · ${num(+(r.unit
 // gameCalcProduct reproduces the card's $151.04 / $422.05 / $474.45). No new network requests.
 function plannerInsightsData(ctx){
   const C=globalThis.SCM_TOOLS_CORE,s=ctx?.s,gc=s?.gameConstants;
-  if(!C?.gameCalcProduct||!C.gameConstantsOk?.(gc))return {ok:false,reason:'Game constants not loaded yet — open the Manager again after the next Sync.'};
+  if(!C?.gameCalcProduct||!C.gameConstantsOk?.(gc))return {ok:false,reason:'Game constants not loaded yet — they load on their own; if this stays, press Sync.'};
   const log=Array.isArray(s?.economyStateLog)?s.economyStateLog:[],authSt=Number(s?.authData?.temporals?.economyState);
   const economyState=log.length?Number(log[log.length-1].s):(Number.isFinite(authSt)?authSt:null);
   if(economyState==null)return {ok:false,reason:'Economy phase not captured yet — open the game once.'};
@@ -2812,7 +2911,7 @@ function renderBuildingPlanner(s,options={}){
     // Flat list: optgroups made Yandex's Android picker indent rows unevenly.
     const kindOpts=`<option value="__game__" ${building.testKind?'':'selected'}>Game: ${escapeHtml(building.gameName||building.name)}</option>`+kindList.map(d=>`<option value="${escapeHtml(String(d.id))}" ${building.testKind&&String(d.id)===String(building.kind)?'selected':''}>${escapeHtml(d.name)}</option>`).join('');
     const productOptions=[`<option value="__current__" ${productPickerValue==='__current__'?'selected':''}>Current output${currentProduct?` — ${escapeHtml(currentProduct)}`:''}</option>`].concat((building.produces||[]).map(p=>`<option value="${escapeHtml(p)}" ${p===productPickerValue?'selected':''}>${escapeHtml(p)}</option>`)).join('');
-    const busyText=building.testKind?`Test building — game: ${building.gameName}`:building.expanding?`Under construction${building.expandFinish?` · done ${new Date(building.expandFinish).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}`:''}`:building.currentResource?`Currently producing: ${building.currentResource}${building.currentQuality!=null?` Q${building.currentQuality}`:''}`:'Currently producing: Idle';
+    const busyText=building.testKind?`Test building — game: ${escapeHtml(building.gameName)}`:building.expanding?`Under construction${building.expandFinish?` · done ${new Date(building.expandFinish).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}`:''}`:building.currentResource?`Currently producing: ${escapeHtml(building.currentResource)}${building.currentQuality!=null?` Q${escapeHtml(building.currentQuality)}`:''}`:'Currently producing: Idle';
     const levelOpts=Array.from({length:20},(_,i)=>i+1).map(v=>`<option value="${v}" ${v===level?'selected':''}>Level ${v}</option>`).join('');
     const company=plannerCompanyAuthData(s)||{};
     const productionModifier=Number(company.productionModifier);
@@ -3277,7 +3376,7 @@ function renderDiagnostics(s){
     const rowsHtml=overlayRows.map(r=>{
       const made=producedKeys.has(diagnosticResourceKey(r.id,r.quality));
       const flag=!made&&Number(r.demand||0)>0?'demand-only':made?'output':'other';
-      return `<tr><td>${escapeHtml(r.name||resourceName({kind:r.id},store||{}))}</td><td>${r.id??'—'}</td><td>Q${r.quality??'—'}</td><td>${num(r.warehouse)}</td><td>${num(r.produced)}</td><td>${num(r.demand)}</td><td>${num(r.leftover)}</td><td><span class="diagnostic-pill ${flag}">${escapeHtml(flag)}</span></td></tr>`;
+      return `<tr><td>${escapeHtml(r.name||resourceName({kind:r.id},store||{}))}</td><td>${escapeHtml(r.id??'—')}</td><td>Q${r.quality??'—'}</td><td>${num(r.warehouse)}</td><td>${num(r.produced)}</td><td>${num(r.demand)}</td><td>${num(r.leftover)}</td><td><span class="diagnostic-pill ${flag}">${escapeHtml(flag)}</span></td></tr>`;
     }).join('');
     overlayAudit.innerHTML=`<p class="muted">${outputRows.length} output rows, ${demandOnlyRows.length} demand-only rows. Demand-only rows are the quality mappings we need to trace.</p><div class="table-wrap"><table class="diagnostic-table"><thead><tr><th>Resource</th><th>ID</th><th>Quality</th><th>Warehouse</th><th>Produced</th><th>Demand</th><th>Left</th><th>Status</th></tr></thead><tbody>${rowsHtml||'<tr><td colspan="8">No overlay rows captured.</td></tr>'}</tbody></table></div>`;
   }
@@ -3289,7 +3388,7 @@ function renderDiagnostics(s){
       const br=b?.busy?.resource;
       if(br?.kind!=null&&br?.quality!=null&&br?.unitCost!=null)activeOutputCosts.push({name:br.name,id:Number(br.kind),quality:Number(br.quality),unitCost:Number(br.unitCost),building:b.name||b.id});
     }
-    const costRows=warehouseRowsNow.map(r=>`<tr><td>${escapeHtml(resourceName(r,store||{}))}</td><td>Q${r._quality}</td><td>${num(r._qty)}</td><td>${r._unitCost==null?'—':money(r._unitCost)}</td></tr>`).join('');
+    const costRows=warehouseRowsNow.map(r=>`<tr><td>${escapeHtml(resourceName(r,store||{}))}</td><td>Q${escapeHtml(r._quality)}</td><td>${num(r._qty)}</td><td>${r._unitCost==null?'—':money(r._unitCost)}</td></tr>`).join('');
     const outputRowsCost=activeOutputCosts.map(r=>`<tr><td>${escapeHtml(r.name)}</td><td>Q${r.quality}</td><td>${money(r.unitCost)}</td><td>${escapeHtml(r.building)}</td></tr>`).join('');
     costAudit.innerHTML=`<div class="diagnostic-cost-grid"><div><h4>Warehouse calculated cost</h4><div class="table-wrap"><table class="diagnostic-table"><thead><tr><th>Resource</th><th>Q</th><th>Qty</th><th>Your Cost</th></tr></thead><tbody>${costRows||'<tr><td colspan="4">No warehouse rows.</td></tr>'}</tbody></table></div></div><div><h4>Active production unit cost</h4><div class="table-wrap"><table class="diagnostic-table"><thead><tr><th>Output</th><th>Q</th><th>Unit cost</th><th>Building</th></tr></thead><tbody>${outputRowsCost||'<tr><td colspan="4">No active production costs.</td></tr>'}</tbody></table></div></div></div><details><summary>Captured warehouse cost details</summary><pre class="diagnostic-pre">${escapeHtml(JSON.stringify(store?.warehouseCostDetails||{},null,2).slice(0,50000))}</pre></details>`;
   }
@@ -3354,8 +3453,8 @@ function overviewWarehouseCard(s,rows){
   const row=({r,price})=>{
     const margin=price!=null&&r._unitCost>0?(price-r._unitCost)/r._unitCost*100:null;
     const ri=resourceInfo(r,s),local=s?.resourceImageCache?.[String(r._id)]||s?.resourceImageData?.[String(r._id)]||null;
-    const srcs=local?[local,...(ri.imageCandidates||[])]:(ri.imageCandidates||[]);
-    const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'<span class="resource-icon"></span>';
+    const srcs=scmImgSrcs(r._id,local?[local,...(ri.imageCandidates||[])]:(ri.imageCandidates||[]));
+    const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(scmSafeImgSrc(srcs[0]))}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" data-rid="${Number(r._id)||0}" alt="" loading="lazy" data-scm-fallback="1">`:'<span class="resource-icon"></span>';
     return `<tr><td><div class="product-cell">${img}<span><strong>${escapeHtml(resourceName(r,s))}</strong><small>Q${escapeHtml(String(r._quality??'—'))}</small></span></div></td><td>${num(r._qty)}</td><td>${r._unitCost!=null?money(r._unitCost):'—'}</td><td>${price!=null?money(price):'—'}</td><td class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td></tr>`;
   };
   const body=top.length?`<div class="table-wrap"><table class="warehouse-table ov-wh-table"><thead><tr><th>Product</th><th>Qty</th><th>Cost</th><th>Market</th><th>Margin</th></tr></thead><tbody>${top.map(row).join('')}</tbody></table></div>`:'<div class="overview-selling-empty">No warehouse data captured yet.</div>';
@@ -3401,14 +3500,14 @@ function render(s){
  const acctDailySeries=updateAccountingDailySeries(s,a); if(activeTab==='overview'){ const contractRows=currentContracts(s); const incomingGross=contractRows.filter(c=>c.direction==='Incoming').reduce((sum,c)=>sum+(Number(c.total)||0),0); const outgoingGross=contractRows.filter(c=>c.direction==='Outgoing').reduce((sum,c)=>sum+(Number(c.total)||0),0); const savedRows=savedContracts(s); const savedGross=savedRows.reduce((sum,c)=>sum+roundCurrencyUp((Number(savedContractPrice(c,s))||0)*savedContractEffectiveQuantity(c,s)),0); const buildingCount=buildingArrayFromState(s).length; const warehouseQty=rows.reduce((sum,r)=>sum+(Number(r._qty)||0),0); const vwapCount=Array.isArray(s.vwapData?.rows)?s.vwapData.rows.length:Number(s.vwapData?.count)||0; const topSelling=topSellingResourcesByProfit(accountingDisplayBase,s); const topGross=topGrossResources(accountingDisplayBase,s); const overviewDate=v=>{const d=v!=null?new Date(v):null;return d&&Number.isFinite(d.getTime())?d.toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}):null;}; const overviewRange=overviewDate(topSelling.rangeStart)&&overviewDate(topSelling.rangeEnd)?`${overviewDate(topSelling.rangeStart)} – ${overviewDate(topSelling.rangeEnd)}`:'Captured range unavailable'; const overviewCards=$('#overviewCards'); if(overviewCards) overviewCards.innerHTML=`<div class="overview-grid">
 <div class="overview-section overview-operations-card"><div class="overview-section-head"><div><h3>Operations</h3><span>Company activity at a glance</span></div></div><div class="overview-stat-grid"><div class="overview-stat-card"><span>Buildings</span><strong>${buildingCount||'—'}</strong></div><div class="overview-stat-card"><span>Warehouse Lines</span><strong>${rows.length||'—'}</strong></div><div class="overview-stat-card"><span>Warehouse Qty</span><strong>${warehouseQty?num(warehouseQty):'—'}</strong></div><div class="overview-stat-card"><span>VWAP Values</span><strong>${vwapCount?num(vwapCount):'—'}</strong></div></div></div>
 <div class="overview-section"><div class="overview-section-head"><div><h3>Contracts</h3><span>Current active and saved value</span></div></div><div class="overview-stat-grid overview-stat-grid-compact"><div class="overview-stat-card"><span>Incoming</span><strong>${money(incomingGross)}</strong><small>${contractRows.filter(c=>c.direction==='Incoming').length} active</small></div><div class="overview-stat-card"><span>Outgoing</span><strong>${money(outgoingGross)}</strong><small>${contractRows.filter(c=>c.direction==='Outgoing').length} active</small></div><div class="overview-stat-card"><span>Saved</span><strong>${money(savedGross)}</strong><small>${savedRows.length} saved</small></div></div></div>
-<div class="overview-resource-ranking-stack"><div class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Net Profit Resources</h3><span>Captured selling profit · ${escapeHtml(overviewRange)}</span></div><span class="overview-section-badge">Net Profit</span></div><div class="overview-selling-list">${topSelling.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topSelling.items.length?topSelling.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Net Profit</small><strong>${money(x.profit)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No selling profit data captured yet.</div>'}</div></div>
-<div id="overviewTopGross" class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Gross Resources</h3><span>Captured sales value · ${escapeHtml(overviewDate(topGross.rangeStart)&&overviewDate(topGross.rangeEnd)?`${overviewDate(topGross.rangeStart)} – ${overviewDate(topGross.rangeEnd)}`:'Captured range unavailable')}</span></div><span class="overview-section-badge">Gross</span></div><div class="overview-selling-list">${topGross.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topGross.items.length?topGross.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Gross</small><strong>${money(x.gross)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No gross sales data captured yet.</div>'}</div></div></div>${overviewAccountingCard(s,accountingDisplayBase,accountingComparisonBase(a))}${overviewWarehouseCard(s,rows)}${overviewProductionCard(s)}</div>`; if($('#overviewRealmBadge')){const syncTime=viewStore?.lastSync||s.lastSync;const hasCapturedData=!!(viewStore&&(viewStore.lastSync||viewStore.fullSyncDiagnostics||viewStore.gameOverlaySnapshot||(Array.isArray(viewStore.buildings)&&viewStore.buildings.length)||(Array.isArray(viewStore.warehouseResources)&&viewStore.warehouseResources.length)||(viewStore.endpointData&&Object.keys(viewStore.endpointData).length)||(viewStore.productionRateSnapshots&&Object.keys(viewStore.productionRateSnapshots).length)));const badgeStatus=__realmHydrationPending?'Switching…':syncTime?new Date(syncTime).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):(hasCapturedData?'Captured · sync not completed':'Not synced');$('#overviewRealmBadge').textContent=`${realm!=null?realmName(realm):'Realm —'} · ${badgeStatus}`; } } if(activeTab==='accounting'){ if($('#accountingSource')){const period=accountingDisplay.period?.dateFrom&&accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.dateFrom).toLocaleDateString()}–${new Date(accountingDisplay.period.date).toLocaleDateString()}`:(accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.date).toLocaleDateString()}`:''); $('#accountingSource').textContent=`Source: ${a.sourceType==='income-statement'?'income statement':a.sourceType==='cash-flow-derived'?'cash-flow statement':'unavailable'}${period}`;} if($('#accountingPeriodBadge')){const dateEl=$('#accountingPeriodDate'),metaEl=$('#accountingPeriodMeta');document.querySelectorAll('[data-accounting-period]').forEach(x=>x.classList.toggle('active',String(x.dataset.accountingPeriod||'current')===accountingPeriodView));const labels={current:'Current statements date',day:'Day',week:'Week',month:'Month'};const stmtText=accountingPeriodView==='current'?accountingStatementPeriodText(accountingDisplay.period):'';if(dateEl)dateEl.textContent=labels[accountingPeriodView]||labels.current;if(metaEl)metaEl.textContent=accountingDisplay.periodSource==='recent-cashflow'?`Derived from captured cash-flow rows · ${Number(accountingDisplay.periodTransactionCount)||0} transactions`:(stmtText||'Game accounting view');} if($('#accountingLiveStatus')){
+<div class="overview-resource-ranking-stack"><div class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Net Profit Resources</h3><span>Captured selling profit · ${escapeHtml(overviewRange)}</span></div><span class="overview-section-badge">Net Profit</span></div><div class="overview-selling-list">${topSelling.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topSelling.items.length?topSelling.items.map(x=>{const srcs=scmImgSrcs(x.resourceId,x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images);const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(scmSafeImgSrc(srcs[0]))}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" data-rid="${Number(x.resourceId)||0}" alt="" loading="lazy" data-scm-fallback="1">`:'<span class="overview-resource-icon" aria-hidden="true"></span>';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Net Profit</small><strong>${money(x.profit)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No selling profit data captured yet.</div>'}</div></div>
+<div id="overviewTopGross" class="overview-section overview-top-selling"><div class="overview-section-head"><div><h3>Top 10 Gross Resources</h3><span>Captured sales value · ${escapeHtml(overviewDate(topGross.rangeStart)&&overviewDate(topGross.rangeEnd)?`${overviewDate(topGross.rangeStart)} – ${overviewDate(topGross.rangeEnd)}`:'Captured range unavailable')}</span></div><span class="overview-section-badge">Gross</span></div><div class="overview-selling-list">${topGross.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topGross.items.length?topGross.items.map(x=>{const srcs=scmImgSrcs(x.resourceId,x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images);const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(scmSafeImgSrc(srcs[0]))}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" data-rid="${Number(x.resourceId)||0}" alt="" loading="lazy" data-scm-fallback="1">`:'<span class="overview-resource-icon" aria-hidden="true"></span>';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Gross</small><strong>${money(x.gross)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No gross sales data captured yet.</div>'}</div></div></div>${overviewAccountingCard(s,accountingDisplayBase,accountingComparisonBase(a))}${overviewWarehouseCard(s,rows)}${overviewProductionCard(s)}</div>`; if($('#overviewRealmBadge')){const syncTime=viewStore?.lastSync||s.lastSync;const hasCapturedData=!!(viewStore&&(viewStore.lastSync||viewStore.fullSyncDiagnostics||viewStore.gameOverlaySnapshot||(Array.isArray(viewStore.buildings)&&viewStore.buildings.length)||(Array.isArray(viewStore.warehouseResources)&&viewStore.warehouseResources.length)||(viewStore.endpointData&&Object.keys(viewStore.endpointData).length)||(viewStore.productionRateSnapshots&&Object.keys(viewStore.productionRateSnapshots).length)));const badgeStatus=__realmHydrationPending?'Switching…':syncTime?new Date(syncTime).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):(hasCapturedData?'Captured · sync not completed':'Not synced');$('#overviewRealmBadge').textContent=`${realm!=null?realmName(realm):'Realm —'} · ${badgeStatus}`; } } if(activeTab==='accounting'){ if($('#accountingSource')){const period=accountingDisplay.period?.dateFrom&&accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.dateFrom).toLocaleDateString()}–${new Date(accountingDisplay.period.date).toLocaleDateString()}`:(accountingDisplay.period?.date?` · ${new Date(accountingDisplay.period.date).toLocaleDateString()}`:''); $('#accountingSource').textContent=`Source: ${a.sourceType==='income-statement'?'income statement':a.sourceType==='cash-flow-derived'?'cash-flow statement':'unavailable'}${period}`;} if($('#accountingPeriodBadge')){const dateEl=$('#accountingPeriodDate'),metaEl=$('#accountingPeriodMeta');document.querySelectorAll('[data-accounting-period]').forEach(x=>x.classList.toggle('active',String(x.dataset.accountingPeriod||'current')===accountingPeriodView));const labels={current:'Current statements date',day:'Day',week:'Week',month:'Month'};const stmtText=accountingPeriodView==='current'?accountingStatementPeriodText(accountingDisplay.period):'';if(dateEl)dateEl.textContent=labels[accountingPeriodView]||labels.current;if(metaEl)metaEl.textContent=accountingDisplay.periodSource==='recent-cashflow'?`Derived from captured cash-flow rows · ${Number(accountingDisplay.periodTransactionCount)||0} transactions`:(stmtText||'Game accounting view');} if($('#accountingLiveStatus')){
    const latestTime=accountingLatestTime(s);
    $('#accountingLiveStatus').textContent=latestTime
      ?`Last updated: ${new Date(latestTime).toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'})}`
      :'Waiting for latest financial response';
 } if($('#accountingOverview'))renderAccountingOverview($('#accountingOverview'),accountingDisplay,accountingPeriodView==='current'?accountingComparisonBase(a):null,a.history,acctDailySeries); if($('#accountingHistory')){if(scmSetHTML($('#accountingHistory'),accountingHistoryTable(a.history,(viewStore||s)?.accountingDayWalkStatus||null)))scmApplyCollapse($('#accountingHistory'));renderAccountingWalkSchedule(s);} if($('#accountingBalanceSummary'))scmSetHTML($('#accountingBalanceSummary'),`<div class="overview-stat-grid accounting-balance-summary"><div class="overview-stat-card"><span>Cash</span><strong>${money(a.cash)}</strong></div><div class="overview-stat-card"><span>Accounts Receivable</span><strong>${money(a.accountsReceivable)}</strong></div><div class="overview-stat-card"><span>Inventory</span><strong>${money(a.inventory)}</strong></div><div class="overview-stat-card"><span>Current Assets</span><strong>${money(a.currentAssets)}</strong></div><div class="overview-stat-card"><span>Accounts Payable</span><strong>${money(a.accountsPayable)}</strong></div><div class="overview-stat-card"><span>Bonds Payable</span><strong>${money(a.bondsPayable)}</strong></div><div class="overview-stat-card"><span>Current Liabilities</span><strong>${money(a.currentLiabilities)}</strong></div><div class="overview-stat-card"><span>Total Assets</span><strong>${money(a.assets)}</strong></div><div class="overview-stat-card"><span>Total Liabilities</span><strong>${money(a.liabilities)}</strong></div></div>`); if($('#accountingCashflowSummary'))scmSetHTML($('#accountingCashflowSummary'),accountingCashflowSummary(a.source?.cf)); if($('#accountingIncomeStatement'))scmSetHTML($('#accountingIncomeStatement'),accountingIncomeStatement(a.source?.income)); if($('#balanceDetails'))scmSetHTML($('#balanceDetails'),buildBalanceSections(a.source?.bs)); if($('#accountingRatios'))scmSetHTML($('#accountingRatios'),accountingFinancialRatios(a.source?.income,a.source?.bs)); }
- if(activeTab==='warehouse'){ renderWarehouseMarketTimestamp(s); try{renderWarehouseRunOut(s);}catch(e){console.error('Run-out render failed',e);} const inventoryRowsEl=$('#inventoryRows'); if(inventoryRowsEl) inventoryRowsEl.innerHTML=rows.length?rows.map(r=>{const priceRef=scmMarketPrice(s,r._id,r._quality,'exact'),marketPrice=priceRef?.price??null;const margin=marketPrice!=null&&r._unitCost>0?(marketPrice-r._unitCost)/r._unitCost*100:null;const ri=resourceInfo(r,s);const imgs=ri.imageCandidates||[];const localImage=s.resourceImageCache?.[String(r._id)]||s.resourceImageData?.[String(r._id)]||null;if(!localImage) requestResourceImage(r._id);const srcs=localImage?[localImage,...imgs]:imgs;const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';const activeCost=activeProductionCostCells(s,r);return `<tr data-warehouse-key="${Number(r._id)}:${Number(r._quality)}"><td><div class="product-cell">${img}<span><strong>${resourceName(r,s)}</strong><small>#${r._id}</small></span></div>${warehouseHeadCost(r)}</td><td>${num(r._qty)}</td><td>${r._quality??'—'}</td><td>${r._unitCost==null?'—':money(r._unitCost)}</td><td>${activeCost.costHtml}</td><td>${activeCost.diffHtml}</td><td data-cell="prod-cost-history">${productionCostHistoryCell(s,r)}</td><td><span class="cell-stack">${marketPrice==null?'—':money(marketPrice)}<small class="market-source">${escapeHtml(scmMarketSourceText(priceRef))}</small></span></td><td class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td></tr>`}).join(''):'<tr><td colspan="9">No warehouse data captured.</td></tr>'; }
+ if(activeTab==='warehouse'){ renderWarehouseMarketTimestamp(s); try{renderWarehouseRunOut(s);}catch(e){console.error('Run-out render failed',e);} const inventoryRowsEl=$('#inventoryRows'); if(inventoryRowsEl) inventoryRowsEl.innerHTML=rows.length?rows.map(r=>{const priceRef=scmMarketPrice(s,r._id,r._quality,'exact'),marketPrice=priceRef?.price??null;const margin=marketPrice!=null&&r._unitCost>0?(marketPrice-r._unitCost)/r._unitCost*100:null;const ri=resourceInfo(r,s);const imgs=ri.imageCandidates||[];const localImage=s.resourceImageCache?.[String(r._id)]||s.resourceImageData?.[String(r._id)]||null;if(!localImage) requestResourceImage(r._id);const srcs=scmImgSrcs(r._id,localImage?[localImage,...imgs]:imgs);const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(scmSafeImgSrc(srcs[0]))}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" data-rid="${Number(r._id)||0}" alt="" loading="lazy" data-scm-fallback="1">`:'';const activeCost=activeProductionCostCells(s,r);return `<tr data-warehouse-key="${Number(r._id)}:${Number(r._quality)}"><td><div class="product-cell">${img}<span><strong>${escapeHtml(resourceName(r,s))}</strong><small>#${escapeHtml(r._id)}</small></span></div>${warehouseHeadCost(r)}</td><td>${num(r._qty)}</td><td>${escapeHtml(r._quality??'—')}</td><td>${r._unitCost==null?'—':money(r._unitCost)}</td><td>${activeCost.costHtml}</td><td>${activeCost.diffHtml}</td><td data-cell="prod-cost-history">${productionCostHistoryCell(s,r)}</td><td><span class="cell-stack">${marketPrice==null?'—':money(marketPrice)}<small class="market-source">${escapeHtml(scmMarketSourceText(priceRef))}</small></span></td><td class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td></tr>`}).join(''):'<tr><td colspan="9">No warehouse data captured.</td></tr>'; }
  if(activeTab==='market'){ renderLiveMarketProduct(s); renderMarketHistory(s); } if(activeTab==='production') renderBuildingPlanner(s,{background:true}); // same-HTML repaints are skipped
  renderVwapDiagnostics(s);
  if(activeTab==='executives'){try{renderBoardRoom(s);}catch(e){console.error('Executives tab render failed',e);}} if(activeTab==='tools'){try{globalThis.SCM_TOOLS_UI?.render(s,catalogEntries(s));}catch(e){console.error('Tools tab render failed',e);}} if(activeTab==='analyze'){try{globalThis.SCM_ANALYZE_UI?.render(s,analyzeContext(s));}catch(e){console.error('Analyze tab render failed',e);}} if(activeTab==='contracts') { populateContractProducts(s); renderContracts(s); } if(activeTab==='settings'){ renderDiagnostics(s); }
@@ -3689,7 +3788,7 @@ function contractDiscountHtml(c,s,saved){
   const sign=!saved&&value>0?'+':'';
   return `<span class="${cls}">${sign}${value.toFixed(2)}%</span>`;
 }
-function contractRow(c,s, saved=false, includeDirection=true){const effectiveQty=saved?savedContractEffectiveQuantity(c,s):Number(c.quantity)||0;const qtyText=saved?savedContractQuantityLabel(c,s):num(c.quantity);const qtyLabel=c.count>1?`${qtyText} (${c.count} contracts)`:qtyText;const displayPrice=saved?savedContractPrice(c,s):c.price;const rowTotal=saved?roundCurrencyUp((Number(displayPrice)||0)*effectiveQty):(Number(c.total)||0);const productParts=String(c.product||'').match(/^(\d+)(?::(\d+))?$/);const pid=Number.isFinite(Number(c.productId))?Number(c.productId):(productParts?Number(productParts[1]):null);const pq=Number.isFinite(Number(c.quality))?Number(c.quality):(productParts?Number(productParts[2]):null);const info=pid!=null?resourceInfo({kind:pid,quality:pq},s||{}):{imageCandidates:[]};const src=(info.imageCandidates||[])[0]||'';const image=src?`<img class="contract-product-icon" src="${escapeHtml(src)}" alt="" loading="lazy">`:'';const productLabel=saved&&pid!=null?resourceName({kind:pid,quality:pq},s||{}):(c.productName||c.product||'—');return `<tr>${includeDirection?`<td>${escapeHtml(c.direction||'—')}</td>`:''}<td>${escapeHtml(c.company||'—')}</td><td class="contract-product-cell">${image}<span>${escapeHtml(productLabel)}</span></td><td>${qtyLabel}</td><td>${c.quality??'—'}</td><td>${(()=>{const mi=contractMarketInfo(c,s);if(mi==null)return '—';const nt=contractPriceNote(mi);return `${money(mi.price)}${nt?` <small class="market-inline-vwap">${nt}</small>`:''}`;})()}</td><td>${contractDiscountHtml(c,s,saved)}</td><td>${contractPriceMoney(displayPrice)}</td><td>${money(rowTotal)}</td>${saved?`<td><button class="saved-edit" data-id="${escapeHtml(c.id||'')}">Edit</button> <button class="danger saved-delete" data-id="${escapeHtml(c.id||'')}">Delete</button></td>`:''}</tr>`}
+function contractRow(c,s, saved=false, includeDirection=true){const effectiveQty=saved?savedContractEffectiveQuantity(c,s):Number(c.quantity)||0;const qtyText=saved?savedContractQuantityLabel(c,s):num(c.quantity);const qtyLabel=c.count>1?`${qtyText} (${num(c.count)} contracts)`:qtyText;const displayPrice=saved?savedContractPrice(c,s):c.price;const rowTotal=saved?roundCurrencyUp((Number(displayPrice)||0)*effectiveQty):(Number(c.total)||0);const productParts=String(c.product||'').match(/^(\d+)(?::(\d+))?$/);const pid=Number.isFinite(Number(c.productId))?Number(c.productId):(productParts?Number(productParts[1]):null);const pq=Number.isFinite(Number(c.quality))?Number(c.quality):(productParts?Number(productParts[2]):null);const info=pid!=null?resourceInfo({kind:pid,quality:pq},s||{}):{imageCandidates:[]};const src=(info.imageCandidates||[])[0]||'';const image=scmSafeImgSrc(src)?`<img class="contract-product-icon" src="${escapeHtml(scmSafeImgSrc(src))}" alt="" loading="lazy">`:'';const productLabel=saved&&pid!=null?resourceName({kind:pid,quality:pq},s||{}):(c.productName||c.product||'—');return `<tr>${includeDirection?`<td>${escapeHtml(c.direction||'—')}</td>`:''}<td>${escapeHtml(c.company||'—')}</td><td class="contract-product-cell">${image}<span>${escapeHtml(productLabel)}</span></td><td>${escapeHtml(qtyLabel)}</td><td>${escapeHtml(c.quality??'—')}</td><td>${(()=>{const mi=contractMarketInfo(c,s);if(mi==null)return '—';const nt=contractPriceNote(mi);return `${money(mi.price)}${nt?` <small class="market-inline-vwap">${escapeHtml(nt)}</small>`:''}`;})()}</td><td>${contractDiscountHtml(c,s,saved)}</td><td>${contractPriceMoney(displayPrice)}</td><td>${money(rowTotal)}</td>${saved?`<td><button class="saved-edit" data-id="${escapeHtml(c.id||'')}">Edit</button> <button class="danger saved-delete" data-id="${escapeHtml(c.id||'')}">Delete</button></td>`:''}</tr>`}
 function contractSurplusAfterOutgoing(s,data){
   // Contracts are displayed as signed net inventory impact: outgoing (+) uses stock; incoming (-) adds stock.
   const model=savedContractStockModel(s,data);
@@ -3805,7 +3904,7 @@ function populateContractProducts(s){
   rows.forEach(r=>{const key=`${r._id}:${r._quality}`;if(seen.has(key))return;seen.add(key);const marketPrice=scmMarketPrice(s,r._id,r._quality,'exact')?.price??null;const mwap=marketPrice;options.push({key,id:r._id,quality:r._quality,mwap,note:contractPriceNote(scmMarketPrice(s,r._id,r._quality,'exact')),name:resourceName(r,s)});});
   const signature=options.map(o=>`${o.key}|${o.mwap??''}|${o.note}|${o.name}`).join('||');
   if(el.dataset.optionsSig!==signature){
-    const html=['<option value="">Select warehouse product</option>',...options.map(o=>`<option value="${escapeHtml(o.key)}" data-id="${o.id}" data-quality="${o.quality}" data-mwap="${o.mwap??''}" data-mwap-note="${escapeHtml(o.note||'')}">${escapeHtml(o.name)} · Q${o.quality}</option>`)].join('');
+    const html=['<option value="">Select warehouse product</option>',...options.map(o=>`<option value="${escapeHtml(o.key)}" data-id="${escapeHtml(o.id)}" data-quality="${escapeHtml(o.quality)}" data-mwap="${escapeHtml(o.mwap??'')}" data-mwap-note="${escapeHtml(o.note||'')}">${escapeHtml(o.name)} · Q${escapeHtml(o.quality)}</option>`)].join('');
     el.innerHTML=html;
     el.dataset.optionsSig=signature;
   }
@@ -4209,10 +4308,10 @@ function patchWarehouseCells(state){
     const ri=resourceInfo(r,state); const imgs=ri.imageCandidates||[];
     const localImage=state.resourceImageCache?.[String(r._id)]||state.resourceImageData?.[String(r._id)]||null;
     if(!localImage) requestResourceImage(r._id);
-    const srcs=localImage?[localImage,...imgs]:imgs;
-    const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';
+    const srcs=scmImgSrcs(r._id,localImage?[localImage,...imgs]:imgs);
+    const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(scmSafeImgSrc(srcs[0]))}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" data-rid="${Number(r._id)||0}" alt="" loading="lazy" data-scm-fallback="1">`:'';
     let tr=existing.get(key);
-    const activeCost=activeProductionCostCells(state,r);const html=[`<td><div class="product-cell">${img}<span><strong>${escapeHtml(resourceName(r,state))}</strong><small>#${r._id}</small></span></div>${warehouseHeadCost(r)}</td>`, `<td data-cell="qty">${num(r._qty)}</td>`, `<td data-cell="quality">${r._quality??'—'}</td>`, `<td data-cell="cost">${r._unitCost==null?'—':money(r._unitCost)}</td>`, `<td data-cell="active-production-cost">${activeCost.costHtml}</td>`, `<td data-cell="production-stock-diff">${activeCost.diffHtml}</td>`, `<td data-cell="prod-cost-history">${productionCostHistoryCell(state,r)}</td>`, `<td data-cell="vwap"><span class="cell-stack">${currentMarketPrice==null?'—':money(currentMarketPrice)}<small class="market-source">${escapeHtml(scmMarketSourceText(priceInfo))}</small></span></td>`, `<td data-cell="margin" class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td>`];
+    const activeCost=activeProductionCostCells(state,r);const html=[`<td><div class="product-cell">${img}<span><strong>${escapeHtml(resourceName(r,state))}</strong><small>#${escapeHtml(r._id)}</small></span></div>${warehouseHeadCost(r)}</td>`, `<td data-cell="qty">${num(r._qty)}</td>`, `<td data-cell="quality">${escapeHtml(r._quality??'—')}</td>`, `<td data-cell="cost">${r._unitCost==null?'—':money(r._unitCost)}</td>`, `<td data-cell="active-production-cost">${activeCost.costHtml}</td>`, `<td data-cell="production-stock-diff">${activeCost.diffHtml}</td>`, `<td data-cell="prod-cost-history">${productionCostHistoryCell(state,r)}</td>`, `<td data-cell="vwap"><span class="cell-stack">${currentMarketPrice==null?'—':money(currentMarketPrice)}<small class="market-source">${escapeHtml(scmMarketSourceText(priceInfo))}</small></span></td>`, `<td data-cell="margin" class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td>`];
     if(!tr){tr=document.createElement('tr');tr.dataset.warehouseKey=key;tr.innerHTML=html.join('');}
     else {
       const cells=tr.children;
@@ -4243,13 +4342,13 @@ function patchOverviewGrossResources(state){
     const head=netSection.querySelector('.overview-section-head span:first-of-type');
     if(head)head.textContent=`Captured selling profit · ${range(topSelling)}`;
     const list=netSection.querySelector('.overview-selling-list');
-    if(list)list.innerHTML=topSelling.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topSelling.items.length?topSelling.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Net Profit</small><strong>${money(x.profit)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No selling profit data captured yet.</div>';
+    if(list)list.innerHTML=topSelling.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topSelling.items.length?topSelling.items.map(x=>{const srcs=scmImgSrcs(x.resourceId,x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images);const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(scmSafeImgSrc(srcs[0]))}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" data-rid="${Number(x.resourceId)||0}" alt="" loading="lazy" data-scm-fallback="1">`:'<span class="overview-resource-icon" aria-hidden="true"></span>';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Net Profit</small><strong>${money(x.profit)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No selling profit data captured yet.</div>';
   }
   if(grossSection){
     const head=grossSection.querySelector('.overview-section-head span:first-of-type');
     if(head)head.textContent=`Captured sales value · ${range(topGross)}`;
     const list=grossSection.querySelector('.overview-selling-list');
-    if(list)list.innerHTML=topGross.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topGross.items.length?topGross.items.map(x=>{const srcs=x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images;const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(srcs[0])}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" alt="" loading="lazy" data-scm-fallback="1">`:'';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Gross</small><strong>${money(x.gross)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No gross sales data captured yet.</div>';
+    if(list)list.innerHTML=topGross.loading?'<div class="overview-selling-empty">Loading weekly sales ledger…</div>':topGross.items.length?topGross.items.map(x=>{const srcs=scmImgSrcs(x.resourceId,x.image?[x.image,...x.images.filter(v=>v!==x.image)]:x.images);const img=srcs.length?`<img class="overview-resource-icon" src="${escapeHtml(scmSafeImgSrc(srcs[0]))}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" data-rid="${Number(x.resourceId)||0}" alt="" loading="lazy" data-scm-fallback="1">`:'<span class="overview-resource-icon" aria-hidden="true"></span>';return `<div class="overview-selling-row"><span class="overview-rank">${x.rank}</span>${img}<span class="overview-selling-name">${escapeHtml(x.name)}</span><span class="overview-selling-quantity"><small>Qty sold</small><strong>${num(x.amount)}</strong></span><span class="overview-selling-profit"><small>Gross</small><strong>${money(x.gross)}</strong></span></div>`}).join(''):'<div class="overview-selling-empty">No gross sales data captured yet.</div>';
   }
 }
 function patchConstructionMaterials(state){
@@ -4470,7 +4569,15 @@ scmOnStorageChanged((changes, area)=>{
   }
   const physicalRealmKeys=Object.keys(changes||{}).filter(k=>/^scmRealmStore:\d+$/.test(k));
   if((changes.realmStores||physicalRealmKeys.length>0||Object.keys(changes||{}).some(k=>/^scmRealmDiagnostic:\d+$/.test(k)))&&__scmState)queuePhysicalRealmStateRefresh(previousStateForPhysicalChange,changes);
-  const relevant=dashboardChangeAffectsTab(changes,activeTab);
+  // Game constants / images arrive from the worker (SCM_ENSURE_GAME_DATA, daily refresh): map them onto the view state
+  // and re-render whatever tab is open, so notes like "Game constants not loaded yet" clear without a reload.
+  const gameDataChanged=Boolean(changes.scmGameConstants||changes.scmGameConfig||changes.scmResourceImages);
+  if(gameDataChanged&&__scmState){
+    if(changes.scmGameConstants)__scmState.gameConstants=changes.scmGameConstants.newValue||null;
+    if(changes.scmGameConfig)__scmState.gameConfig=changes.scmGameConfig.newValue||null;
+    if(changes.scmResourceImages){const raw=changes.scmResourceImages.newValue,c=raw&&raw.cache&&typeof raw.cache==='object'?raw.cache:{};dashboardImagesMemo=c;__scmState.resourceImageCache={...(__scmState.resourceImageCache||{}),...c};for(const [k,v] of [...__scmImgState])if(v.s!=='ok')__scmImgState.delete(k);}
+  }
+  const relevant=gameDataChanged||dashboardChangeAffectsTab(changes,activeTab);
   // Physical realm-store writes are already reconciled by queuePhysicalRealmStateRefresh.
   // That path patches the active feature in place (and specifically updates the
   // Production planner only when its actual inputs changed). Scheduling render() again here would
@@ -4479,6 +4586,10 @@ scmOnStorageChanged((changes, area)=>{
     !changes.activeRealmKey && !changes.selectedRealm;
   if(relevant&&!physicalTabHandled)scheduleDashboardRender();
 });
+// Ask the worker once per open/resume to fill any missing game constants and images (it does nothing when nothing is missing).
+function scmEnsureGameData(){try{const p=chrome.runtime.sendMessage({type:'SCM_ENSURE_GAME_DATA'});if(p&&p.catch)p.catch(()=>{});}catch{}}
+scmEnsureGameData();
+scmOnDashboardResume(scmEnsureGameData);
 scmOnDashboardResume(async()=>{
   try{
     const meta=await chrome.storage.local.get({activeRealmKey:null});
@@ -4556,10 +4667,10 @@ document.addEventListener('error',e=>{const t=e.target;if(!t||t.tagName!=='IMG'|
   // items and products your buildings are making now.
   const fillProducts=()=>{const sel=$('#nfTProduct');if(!sel)return;const s=__scmState||{};let opts=[];try{opts=marketWarehouseOptions(s).map(o=>({key:`${o.id}:${o.quality}`,label:`${o.name} Q${o.quality} · ${num(o.qty)} in warehouse`}));}catch{}
     const have=new Set(opts.map(o=>o.key));for(const b of Array.isArray(s.buildings)?s.buildings:[]){const r=b?.busy?.resource;const id=Number(r?.kind),q=Number(r?.quality);if(id>0&&Number.isFinite(q)&&!have.has(`${id}:${q}`)){have.add(`${id}:${q}`);opts.push({key:`${id}:${q}`,label:`${r.name||prodName(id)} Q${q} · producing`});}}
-    const cur=sel.value;sel.innerHTML=opts.length?'<option value="">Choose a product…</option>'+opts.map(o=>`<option value="${o.key}">${escapeHtml(o.label)}</option>`).join(''):'<option value="">Loading your warehouse… tap again</option>';if(cur&&have.has(cur))sel.value=cur;};
+    const cur=sel.value;sel.innerHTML=opts.length?'<option value="">Choose a product…</option>'+opts.map(o=>`<option value="${escapeHtml(o.key)}">${escapeHtml(o.label)}</option>`).join(''):'<option value="">Loading your warehouse… tap again</option>';if(cur&&have.has(cur))sel.value=cur;};
   ['pointerdown','focus'].forEach(ev=>$('#nfTProduct')?.addEventListener(ev,fillProducts));setTimeout(fillProducts,2500);
   const renderTargets=()=>{const host=$('#nfTargets');if(!host)return;const r=realmNow();const list=(cfg?.priceTargets||[]).map((t,i)=>({...t,i})).filter(t=>Number(t.realm??r)===r);
-    host.innerHTML=list.length?list.map(t=>`<div class="notify-target"><span><strong>${escapeHtml(prodName(t.id))} Q${t.q}</strong><br><small>Alert when the price ${t.op==='>='?'rises to':'drops to'} ${money(t.price)} or ${t.op==='>='?'higher':'lower'}</small></span><button type="button" class="secondary" data-nf-del="${t.i}" aria-label="Remove target">×</button></div>`).join(''):'<div class="muted nf-empty">No targets yet. Choose a product, when to alert, and a price, then tap Add.</div>';};
+    host.innerHTML=list.length?list.map(t=>`<div class="notify-target"><span><strong>${escapeHtml(prodName(t.id))} Q${escapeHtml(t.q)}</strong><br><small>Alert when the price ${t.op==='>='?'rises to':'drops to'} ${money(t.price)} or ${t.op==='>='?'higher':'lower'}</small></span><button type="button" class="secondary" data-nf-del="${Number(t.i)}" aria-label="Remove target">×</button></div>`).join(''):'<div class="muted nf-empty">No targets yet. Choose a product, when to alert, and a price, then tap Add.</div>';};
   const show=r=>{
     if(!r?.ok){st.textContent='Could not read notification settings: '+(r?.error||'no answer');return;}
     cfg=r.settings;

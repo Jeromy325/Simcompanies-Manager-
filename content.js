@@ -65,6 +65,29 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
     return true;
   }catch{return true;}
 })();
+// Sync timers (Settings): the four game-page loops below read their interval and on/off here every time they
+// reschedule (self-rescheduling setTimeout). The config is read once from scmSyncTimers (a small key) and then
+// updated by SCM_TIMERS_CHANGED from the background (no storage.onChanged). Until it loads, or without
+// timers-core.js, every loop runs at its old fixed interval. A loop stops once the extension context is gone.
+// Made once per world, like __scmTeardown: a second injection of content.js adds no listener.
+if(!globalThis.__scmTimers)globalThis.__scmTimers=(()=>{
+  const C=globalThis.SCM_TIMERS_CORE||null;
+  let cfg=null;const loops=new Set();
+  const alive=()=>{try{return !!chrome?.runtime?.id;}catch{return false;}};
+  const get=(id,fallbackMs)=>{const e=cfg?.[id];if(!C||!e)return {enabled:true,ms:fallbackMs};return {enabled:e.enabled!==false,ms:C.intervalMs(id,e)||fallbackMs};};
+  const set=next=>{if(!C)return;const prev=JSON.stringify(cfg);cfg=C.normalize({v:1,timers:next});if(JSON.stringify(cfg)!==prev)for(const l of loops)l.reschedule();};
+  // fn runs once per interval; a timer that is off waits for the setting to change. Returns {stop, reschedule}.
+  const loop=(id,fallbackMs,fn)=>{
+    let t=0,stopped=false;
+    const l={stop(){stopped=true;clearTimeout(t);loops.delete(l);},
+      reschedule(){clearTimeout(t);t=0;if(stopped)return;if(!alive()){l.stop();return;}const c=get(id,fallbackMs);if(c.enabled)t=setTimeout(tick,c.ms);}};
+    const tick=()=>{t=0;if(stopped)return;try{fn();}catch{}l.reschedule();};
+    loops.add(l);l.reschedule();return l;
+  };
+  try{const key=C?.KEY||'scmSyncTimers';chrome.storage.local.get({[key]:null}).then(r=>{const s=r?.[key];if(s&&s.v===1)set(s.timers);}).catch(()=>{});}catch{}
+  try{chrome.runtime.onMessage.addListener(msg=>{if(msg?.type==='SCM_TIMERS_CHANGED'&&msg.timers&&typeof msg.timers==='object')set(msg.timers);return false;});}catch{}
+  return {loop,get};
+})();
 (() => {
   if (window.__SCM_BRIDGE__) return;
   const safeRuntimeSend = (message) => {
@@ -452,8 +475,8 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
   setInterval(()=>{if(!hookReady&&!document.hidden)captureDirectGameState();}, 1000);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!hookReady){try{captureDirectGameState();}catch{}}});
   // Mobile: background tabs do no polling work; a fresh capture runs when the tab is shown again.
-  setInterval(()=>{if(!document.hidden)captureProductionEvents();}, 15000);
-  setInterval(()=>{if(!document.hidden)captureWarehouseCostDetail();}, 10000);
+  globalThis.__scmTimers.loop('prodEventsCapture',15000,()=>{if(!document.hidden)captureProductionEvents();});
+  globalThis.__scmTimers.loop('warehouseCostCapture',10000,()=>{if(!document.hidden)captureWarehouseCostDetail();});
   document.addEventListener('visibilitychange',()=>{if(!document.hidden){try{captureWarehouseCostDetail();}catch{}}});
 
   let seq = 0;
@@ -559,7 +582,11 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
       return;
     }
     if (d.type === 'MARKET_CACHE') {
-      safeRuntimeSend({ type: 'MARKET_CACHE', resource: d.resource, realm: d.realm, data: d.data, receivedAt: d.receivedAt });
+      // Integer resource id and an array of at most 1000 rows; background.js checks every row (quality, prices, size).
+      const rid = Number(d.resource);
+      if (!Number.isInteger(rid) || rid <= 0 || rid >= 100000 || !Array.isArray(d.data)) return;
+      const realm = Number.isInteger(d.realm) && d.realm >= 0 && d.realm < 100 ? d.realm : null;
+      safeRuntimeSend({ type: 'MARKET_CACHE', resource: rid, realm, data: d.data.slice(0, 1000), receivedAt: typeof d.receivedAt === 'string' ? d.receivedAt.slice(0, 40) : null });
       return;
     }
     if (d.type === 'GAME_LOCAL_STORAGE_SNAPSHOT') {
@@ -576,15 +603,27 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
       return;
     }
     if (d.type === 'RESOURCE_CATALOG') {
-      safeRuntimeSend({ type: 'RESOURCE_CATALOG', catalog: d.catalog, receivedAt: d.receivedAt });
+      // Plain object, only the fields background.js reads, at most 16 MB serialized; background.js bounds every entry.
+      const c = d.catalog;
+      if (!c || typeof c !== 'object' || Array.isArray(c)) return;
+      const catalog = { constantsResources: c.constantsResources ?? null, resourceImages: c.resourceImages ?? null, resourceNames: c.resourceNames ?? null };
+      try { if (JSON.stringify(catalog).length > 16 * 1024 * 1024) return; } catch { return; }
+      safeRuntimeSend({ type: 'RESOURCE_CATALOG', catalog, receivedAt: typeof d.receivedAt === 'string' ? d.receivedAt.slice(0, 40) : null });
       return;
     }
     if (d.type === 'RESOURCE_IMAGE_RESULT') {
-      safeRuntimeSend({ type: 'RESOURCE_IMAGE_RESULT', resource: d.resource, dataUrl: d.dataUrl, error: d.error || null });
+      // Integer resource id and a string data URL within the 1 MB image cap only; background.js checks id, ask and image again.
+      const rid = Number(d.resource);
+      if (!Number.isInteger(rid) || rid <= 0 || rid >= 100000) return;
+      if (d.dataUrl != null && (typeof d.dataUrl !== 'string' || d.dataUrl.length > 1398200)) return;
+      safeRuntimeSend({ type: 'RESOURCE_IMAGE_RESULT', resource: rid, dataUrl: d.dataUrl || null, error: d.error ? String(d.error).slice(0, 300) : null });
       return;
     }
     if (d.type === 'JAVASCRIPT_DIAGNOSTIC') {
-      safeRuntimeSend({ type:'JAVASCRIPT_DIAGNOSTIC', requestId:d.requestId||null, diagnostic:d.diagnostic||null, error:d.error||null });
+      // Object or null; background.js bounds and truncates it (2 MB). Over 16 MB serialized it is not forwarded.
+      const diagnostic = d.diagnostic && typeof d.diagnostic === 'object' && !Array.isArray(d.diagnostic) ? d.diagnostic : null;
+      try { if (diagnostic && JSON.stringify(diagnostic).length > 16 * 1024 * 1024) return; } catch { return; }
+      safeRuntimeSend({ type:'JAVASCRIPT_DIAGNOSTIC', requestId:d.requestId ? String(d.requestId).slice(0, 200) : null, diagnostic, error:d.error ? String(d.error).slice(0, 500) : null });
       return;
     }
     if (d.type === 'REDUX_STATE_DIAGNOSTIC_RESULT') {
@@ -735,7 +774,11 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
       }).catch(e => sendResponse({ok:false,error:e?.message||String(e)}));
       return true;
     }
-    if (message?.type !== 'PAGE_API_GET') return;
+    // PAGE_IMAGE_GET (background resource-image cache): same reply path as PAGE_API_GET; the page hook reads a
+    // /static/images/ file same-origin (IMAGE_GET) and answers {ok, status, mime, dataUrl}. Other paths are refused here.
+    const isImage = message?.type === 'PAGE_IMAGE_GET';
+    if (!isImage && message?.type !== 'PAGE_API_GET') return;
+    if (isImage && (typeof message.path !== 'string' || !/^\/static\/images\/[A-Za-z0-9._\/-]+$/.test(message.path) || message.path.split('/').some(s => /^\.+$/.test(s)))) { sendResponse({ ok:false, status:400, error:'Only /static/images/ paths are allowed.' }); return false; }
     // Every path answers: the page-hook's API_RESULT, a failed bridge send, a last-resort timeout (after the
     // background's own race, so it never changes timing; it only frees the entry), or pagehide (the realm switch or a
     // reload unloads the page; background treats pageClosed as a quiet skip). Without this, a page unload left the
@@ -747,7 +790,7 @@ if(!globalThis.__scmTeardown)globalThis.__scmTeardown=(()=>{
     const reply = (result) => { if (settled) return; settled = true; clearTimeout(timer); pending.delete(id); try { sendResponse(result); } catch {} };
     const timer = setTimeout(() => reply({ ok:false, status:0, error:'Sim Companies page API request timed out.' }), hookTimeoutMs + 3000);
     pending.set(id, { resolve: reply });
-    try { globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: 'API_GET', id, path: message.path, timeoutMs: message.timeoutMs }); }
+    try { globalThis.__scmPageBridge.send({ source: 'SIMCO_MANAGER', type: isImage ? 'IMAGE_GET' : 'API_GET', id, path: message.path, timeoutMs: message.timeoutMs }); }
     catch (e) { reply({ ok:false, status:0, error:e?.message || String(e) }); }
     return true;
   });
@@ -1580,7 +1623,7 @@ function scmPageTextNoLayout(){
     document.addEventListener('visibilitychange',()=>{if(!document.hidden&&L.open){request(true);tickAgo();}});
     // the game re-announces its realm on every state update; act only on a real change
     window.addEventListener('scm-game-realm-change',()=>{const r=currentRealm();if(r===L.realm)return;L.realm=r;L.data=null;L.cdata=null;L.seq++;L.cseq++;paint();request(true);});
-    const start=()=>{if(L.started||!isSimCompaniesPage())return;L.started=true;L.realm=currentRealm();paint();request(true);L.agoTimer=setInterval(tickAgo,30000);L.refreshTimer=setInterval(()=>{if(!document.hidden&&L.open)request(true);},15000);};
+    const start=()=>{if(L.started||!isSimCompaniesPage())return;L.started=true;L.realm=currentRealm();paint();request(true);L.agoTimer=setInterval(tickAgo,30000);L.refreshTimer=globalThis.__scmTimers.loop('listingsRefresh',15000,()=>{if(!document.hidden&&L.open)request(true);});};
     return {start,style:lstyle};
   })();
   if(document.readyState!=='loading')Listings.start();else document.addEventListener('DOMContentLoaded',()=>Listings.start(),{once:true});
@@ -2214,7 +2257,7 @@ function scmPageTextNoLayout(){
     // Create the always-available collapsed control synchronously, before the
     // background data request can complete or fail.
     S.collapsed=true;writeCollapsedPreference(true);renderBalance();schedulePosition();load();
-    if(S.refreshTimer)clearInterval(S.refreshTimer);S.refreshTimer=setInterval(()=>{if(!document.hidden)load();},10000);
+    S.refreshTimer?.stop?.();S.refreshTimer=globalThis.__scmTimers.loop('overlayRefresh',10000,()=>{if(!document.hidden)load();});
     if(!S.visibilityHooked){S.visibilityHooked=true;document.addEventListener('visibilitychange',()=>{if(!document.hidden)load();});}
     if(S.recoveryTimer)clearInterval(S.recoveryTimer);
     // Watchdog: if the game's SPA removes the injected card without a route

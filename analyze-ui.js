@@ -41,7 +41,12 @@
   function dataSig(s) {
     const ep = s?.endpointData || {};
     const ledger = Object.keys(ep).filter(k => /\/cashflow\/(?:recent|\d+)\/?$/.test(k)).map(k => ep[k]?.receivedAt || '').join(',');
-    return [S.ctx?.realm, S.days, S.minUnits, s?.lastSync, ledger, (s?.warehouseResources || []).length, (s?.warehouseResources || []).map(l => `${l?.id}:${l?.amount}`).join(','), s?.vwapData?.updatedAt, s?.liveMarketPriceData?.updatedAt, (s?.productionCostHistory || []).length, ep['/api/v3/companies/me/past-finances/']?.receivedAt, ep['/api/v2/companies/me/balance-sheet/']?.receivedAt, Object.keys(s?.ledgerArchive?.rows || {}).length, Object.keys(s?.statementHistory?.['income-statement'] || {}).length, JSON.stringify(s?.ledgerArchive?.spans || [])].join('|');
+    // Inputs the model reads through ctx (prices, calculator, transport, names): game constants, game config, the economy
+    // phase, the game order-book captures, the owned buildings and the SimcoTools product cache.
+    const gameConstants = s?.gameConstants?.at || (s?.gameConstants ? 1 : 0), gameConfig = s?.gameConfig?.at || s?.gameConfig?.updatedAt || (s?.gameConfig ? 1 : 0);
+    const log = Array.isArray(s?.economyStateLog) ? s.economyStateLog : [], economyState = `${log.length}:${log.length ? log[log.length - 1]?.s : s?.authData?.temporals?.economyState}`;
+    const bookSig = Object.keys(ep).filter(k => k.startsWith('/api/v3/market/')).map(k => ep[k]?.receivedAt || '').join(',');
+    return [S.ctx?.realm, S.days, S.minUnits, s?.lastSync, ledger, (s?.warehouseResources || []).length, (s?.warehouseResources || []).map(l => `${l?.id}:${l?.amount}`).join(','), s?.vwapData?.updatedAt, s?.liveMarketPriceData?.updatedAt, (s?.productionCostHistory || []).length, ep['/api/v3/companies/me/past-finances/']?.receivedAt, ep['/api/v2/companies/me/balance-sheet/']?.receivedAt, Object.keys(s?.ledgerArchive?.rows || {}).length, Object.keys(s?.statementHistory?.['income-statement'] || {}).length, JSON.stringify(s?.ledgerArchive?.spans || []), gameConstants, gameConfig, economyState, bookSig, (s?.buildings || []).map(b => b?.id).join(','), s?.liveMarketProductCache ? Object.keys(s.liveMarketProductCache).length : 0, s?.marketOrders?.updatedAt || (s?.marketOrders?.orders || []).length].join('|');
   }
   function compute(force, revisit = false) {
     const s = S.s, ctx = S.ctx || {}, sig = dataSig(s), realm = Number.isInteger(ctx.realm) ? ctx.realm : null;

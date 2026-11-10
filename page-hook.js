@@ -590,6 +590,36 @@
     }
   }
 
+  // IMAGE_GET (background resource-image cache, via content.js PAGE_IMAGE_GET): a plain service-worker fetch of a
+  // game image gets a Cloudflare 403 / "Failed to fetch", so the image is read here, same origin, like the game's own
+  // <img> loads (force-cache: usually served from the browser cache). Only /static/images/ paths, images only, at
+  // most 1 MB. Answers on the API_RESULT reply channel with {id, ok, status, mime, dataUrl} or {id, ok:false, error}.
+  const IMAGE_GET_MAX_BYTES = 1024 * 1024;
+  // Raster types only (no SVG: it can carry script); same list as background.js RESOURCE_IMAGE_MIME_RE.
+  const IMAGE_GET_MIME_RE = /^image\/(?:png|jpeg|webp|gif|avif)$/;
+  function imageGetPathOk(p) {
+    if (typeof p !== 'string' || p.length > 512 || !/^\/static\/images\/[A-Za-z0-9._\/-]+$/.test(p)) return false;
+    return !p.split('/').some(s => /^\.+$/.test(s));
+  }
+  async function emitImageGet(id, path, timeoutMs) {
+    if (!imageGetPathOk(path)) { emit('API_RESULT', { id, ok: false, status: 400, error: 'Only /static/images/ paths are allowed.' }); return; }
+    const controller = new AbortController();
+    const t = Number(timeoutMs);
+    const timer = setTimeout(() => controller.abort(), Number.isFinite(t) && t >= 3000 ? Math.min(t, 30000) : 10000);
+    try {
+      const response = await fetch(path, { method: 'GET', credentials: 'include', cache: 'force-cache', signal: controller.signal });
+      if (!response.ok) { emit('API_RESULT', { id, ok: false, status: response.status, error: `Image HTTP ${response.status}` }); return; }
+      const mime = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+      if (!IMAGE_GET_MIME_RE.test(mime)) { emit('API_RESULT', { id, ok: false, status: response.status, error: `Image type not allowed (${mime || 'no type'})` }); return; }
+      const blob = await response.blob();
+      if (blob.size > IMAGE_GET_MAX_BYTES) { emit('API_RESULT', { id, ok: false, status: response.status, error: 'Image too large.' }); return; }
+      const dataUrl = await new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result || '')); r.onerror = () => reject(new Error('Could not convert image.')); r.readAsDataURL(blob); });
+      emit('API_RESULT', { id, ok: true, status: response.status, mime, dataUrl });
+    } catch (e) {
+      emit('API_RESULT', { id, ok: false, status: 0, error: e?.name === 'AbortError' ? 'Image request timed out.' : (e?.message || String(e)) });
+    } finally { clearTimeout(timer); }
+  }
+
   let lastGameStateFingerprint = '';
   let lastKnownRealm = null;
   let forcedCaptureRealm = null;
@@ -1223,6 +1253,7 @@
       try { sessionStorage.removeItem('SCM_SYNC_REALM'); } catch {}
     }
     if (event.data.type === 'RESOURCE_IMAGE_GET') emitResourceImage(event.data.resource);
+    if (event.data.type === 'IMAGE_GET') emitImageGet(event.data.id, event.data.path, event.data.timeoutMs);
     if (event.data.type === 'GAME_STATE_GET') { emitGameState(); emitGameLocalStorageSnapshot('game-state-request'); }
   });
   emitGameState();

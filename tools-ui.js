@@ -88,7 +88,7 @@
     const rows = ranked.concat(unranked);
     const head = `<p class="tl-note"><b>What this shows:</b> how the price of each product you make or keep in your warehouse has moved. <b>24h</b> = latest trade price compared with the price 24 hours earlier. <b>Day VWAP</b> = yesterday's average traded price compared with the day before. Source: SimcoTools trades, refreshed every hour${updated ? ` (last ${esc(ago(Date.parse(updated)))})` : ''}. Tap a product to see its chart.</p>`;
     const table = rows.length ? `<div class="table-wrap"><table class="tl-table mobile-cards"><thead><tr><th>Product</th><th>Price</th><th>1h</th><th>24h</th><th>3 days</th><th>Day VWAP</th><th>Last trade</th></tr></thead><tbody>${
-      rows.map(r => `<tr><td><a href="#" data-hist="${r.id}:${r.quality}">${esc(r.name)}</a> <small>Q${r.quality}</small></td><td>${money(r.price, r.price < 10 ? 3 : 2)}</td>${chg(r.change['1h'])}${chg(r.change['24h'])}${chg(r.change['3d'])}${chg(r.dayVwapPct)}<td>${esc(ago(r.lastTradeAt))}</td></tr>`).join('')}</tbody></table></div>`
+      rows.map(r => `<tr><td><a href="#" data-hist="${esc(r.id)}:${esc(r.quality)}">${esc(r.name)}</a> <small>Q${esc(r.quality)}</small></td><td>${money(r.price, r.price < 10 ? 3 : 2)}</td>${chg(r.change['1h'])}${chg(r.change['24h'])}${chg(r.change['3d'])}${chg(r.dayVwapPct)}<td>${esc(ago(r.lastTradeAt))}</td></tr>`).join('')}</tbody></table></div>`
       : `<div class="tl-empty">No trend data stored yet. It arrives with the next hourly price refresh — or refresh now.<br><button type="button" id="tlRefreshPrices">Refresh prices now</button></div>`;
     // Manager's own hourly VWAP snapshots for all other products.
     const series = allSeries(), nm2 = new Map([...series.keys()].map(id => [String(id), { name: nameOf(id) }]));
@@ -140,7 +140,7 @@
     const full = currentHistorySeries(), series = C.sliceRange(full, S.range, Date.now()), st = C.rangeStats(series);
     const status = !key ? 'No products found. Run a Sync first.' : S.histLoading.has(key) ? 'Loading price history from SimcoTools…' : h && !h.ok ? `Could not load history: ${h.error}` : h ? `SimcoTools · ${h.daily?.length || 0} daily prices + ${h.closes?.length || 0} recent trades · fetched ${ago(Date.parse(h.fetchedAt))}${h.stale ? ' (offline copy)' : ''}` : '';
     pane.innerHTML = `<p class="tl-note"><b>What this shows:</b> the traded price of one product over time. Long ranges use one price per day (daily close); the last days use individual trades. Pick a range with the buttons.</p>
-      <div class="tl-row"><label>Product <select id="tlProduct" data-calc="hist">${pairs.map(p => `<option value="${p.key}"${p.key === key ? ' selected' : ''}>${esc(nameOf(p.id))} · Q${p.q}</option>`).join('')}</select></label>
+      <div class="tl-row"><label>Product <select id="tlProduct" data-calc="hist">${pairs.map(p => `<option value="${esc(p.key)}"${p.key === key ? ' selected' : ''}>${esc(nameOf(p.id))} · Q${esc(p.q)}</option>`).join('')}</select></label>
       <span class="tl-ranges">${['1D', '1W', '1M', '3M', '1Y', 'MAX'].map(r => `<button type="button" data-range="${r}" class="${r === S.range ? 'active' : ''}">${r}</button>`).join('')}</span>
       <button type="button" id="tlCsv">Export CSV</button> <button type="button" id="tlHistReload">Reload</button></div>
       <p class="tl-note">${esc(status)}</p>

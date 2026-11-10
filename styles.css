@@ -1556,6 +1556,8 @@ h3{font-size:14px;font-weight:600}
 .overview-selling-list{gap:0!important}
 .overview-selling-row{grid-template-columns:24px 24px minmax(0,1fr) 76px 116px!important;gap:8px!important;padding:4px 0!important;border:0!important;border-bottom:1px solid var(--t-border)!important;border-radius:0!important;background:transparent!important;min-height:36px}
 .overview-selling-row:last-child{border-bottom:0!important}
+/* Pin each cell to its own column: a missing or failed icon must not pull the name, Qty and profit one column left. */
+.overview-selling-row>.overview-rank{grid-column:1}.overview-selling-row>.overview-resource-icon{grid-column:2;box-sizing:border-box}.overview-selling-row>.overview-selling-name{grid-column:3}.overview-selling-row>.overview-selling-quantity{grid-column:4}.overview-selling-row>.overview-selling-profit{grid-column:5}
 .overview-rank{font-size:12px!important;color:var(--t-text3)!important;font-weight:500!important;font-family:var(--t-num)}
 .overview-resource-icon{width:24px!important;height:24px!important;border-radius:var(--t-r-sm)!important;background:var(--t-s2)!important;border:1px solid var(--t-border)!important}
 .overview-selling-quantity small,.overview-selling-profit small{font-size:11px!important;text-transform:none!important;letter-spacing:0!important;color:var(--t-text3)!important}
@@ -1763,3 +1765,18 @@ html.scm-mobile table.mobile-cards tr:has(>td[colspan]:only-child){border:0!impo
 .planner-building-hero-image.planner-icon-fallback{font-size:34px;box-sizing:border-box}
 .production-page .owned-building-image.planner-icon-fallback{width:58px;height:50px;font-size:26px}
 @media(max-width:800px){.owned-building-image.planner-icon-fallback{width:58px;height:52px;font-size:26px}.production-page .owned-building-image.planner-icon-fallback{width:54px;height:47px;font-size:24px}}
+/* Settings > Background timers */
+.timers-page>p.muted{margin:0 0 6px;font-size:12px;line-height:1.4}
+.tm-list .tm-row{padding:6px 0 8px;border-bottom:1px solid var(--t-border,#343130)}
+.tm-list .tm-row:last-child{border-bottom:0}
+.tm-list .nf-row{min-height:32px}
+.tm-list .nf-row label span{font-weight:600}
+.tm-list .nf-val{flex-wrap:nowrap}
+.tm-list .tm-unit{min-width:26px}
+.tm-list .tm-desc{margin:2px 0 3px 26px;font-size:12px;line-height:1.4;color:var(--t-text2,#b8b3b0)}
+.tm-list .tm-meta{margin:0 0 0 26px;font-size:11.5px;line-height:1.4;color:var(--t-text3,#8a8380);overflow-wrap:anywhere}
+.tm-list .tm-status{color:var(--t-text2,#b8b3b0)}
+.tm-list .tm-err{margin:3px 0 0 26px;font-size:12px;line-height:1.35;color:#f2c36b;overflow-wrap:anywhere}
+.tm-list .tm-reset{min-height:0;padding:0;border:0;background:none;color:var(--accent,#f5a37a);font:inherit;text-decoration:underline;cursor:pointer}
+.tm-list .tm-row.is-off .tm-desc,.tm-list .tm-row.is-off .tm-meta{opacity:.65}
+.tm-foot{min-height:16px;margin-top:6px;font-size:12px}
