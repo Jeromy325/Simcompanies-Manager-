@@ -57,6 +57,25 @@ async function scmTimersConfig(){
 }
 async function scmTimerEntry(id){const cfg=await scmTimersConfig();return cfg?.[id]||null;}
 async function scmTimerEnabled(id){const e=await scmTimerEntry(id);return e?e.enabled!==false:true;}
+// A job whose Background timers switch is off makes no request; it writes one "not read" line (switchedOff), at most
+// once per 30 min per realm + job (activityRepeatCheck). Returns true when the job must not run.
+const SCM_SWITCHED_OFF_TEXT='Not read: switched off (Background timers)';
+async function scmSwitchedOff(id,job,realm=null,trigger='manager'){
+  if(await scmTimerEnabled(id).catch(()=>true))return false;
+  let n=validRealmNumber(realm);if(n==null)n=await activeRealmNumber().catch(()=>null);
+  if(n!=null)logActivity(n,job,'not-read',{switchedOff:true,timer:id},SCM_SWITCHED_OFF_TEXT,Date.now(),trigger);
+  return true;
+}
+// Fresh install (onInstalled reason 'install'): every timer that contacts a server is written off
+// (SCM_TIMERS_CORE.freshInstall); an update keeps what is stored. Through the timers write lane.
+async function scmApplyFreshInstallTimers(){
+  const C=globalThis.SCM_TIMERS_CORE;if(!C?.freshInstall)return null;
+  const cfg=C.freshInstall();const stored=C.toStored(cfg);delete stored.timers.accountingWalk;
+  scmTimersMemo=C.normalize(stored);
+  scmTimersWriteTail=scmTimersWriteTail.then(()=>chrome.storage.local.set({[C.KEY]:stored,scmTimersMigrations:{liveMarket5:true,orderBook5:true,freshInstallOff:true}})).catch(()=>{});
+  await scmTimersWriteTail;
+  return stored;
+}
 // Alarm info for a timer: null when off; the caller's legacy info while the setting is at its default.
 async function scmTimerAlarmInfo(id,legacy){
   const C=globalThis.SCM_TIMERS_CORE,t=C?.byId?.[id],e=await scmTimerEntry(id);
@@ -794,7 +813,7 @@ function logLaneWait(realm,job,nextAt,details={},startedMs=Date.now(),trigger='m
 // the count). Success / failure lines are never held back. "No game tab is open" uses 30 min (ACTIVITY_REPEAT_NO_TAB_MS):
 // with no game tab the order-book and ticker alarms would otherwise write it every 5 min and fill the 300-line history.
 const ACTIVITY_REPEAT_MS=60000,ACTIVITY_REPEAT_NO_TAB_MS=30*60000,activityRepeatMem=new Map();
-function activityRepeatWindow(err){return /no game tab is open/i.test(String(err||''))?ACTIVITY_REPEAT_NO_TAB_MS:ACTIVITY_REPEAT_MS;}
+function activityRepeatWindow(err){return /no game tab is open|switched off \(Background timers\)/i.test(String(err||''))?ACTIVITY_REPEAT_NO_TAB_MS:ACTIVITY_REPEAT_MS;}
 function activityRepeatCheck(n,event,now=Date.now()){
   if(event.outcome!=='not-read'&&event.outcome!=='waiting')return {log:true,repeats:0};
   // A waiting line's slot time changes each time; the repeat key ignores it.
@@ -828,6 +847,7 @@ async function refreshAbundanceIfStale(realm,trigger='game-buildings'){
   const r=validRealmNumber(realm);if(r==null)return {ok:false};
   const cur=abundanceAutoState.get(r)||{};if(cur.running||Date.now()-(cur.at||0)<ABUNDANCE_AUTO_MIN_GAP_MS)return {ok:true,skipped:true};
   if(currentCaptureSyncSession())return {ok:true,skipped:'sync'};
+  if(await scmSwitchedOff('abundanceOnLoad','abundance-refresh',r,trigger))return {ok:true,skipped:true,switchedOff:true};
   abundanceAutoState.set(r,{running:true,at:Date.now()});
   const saved=[],errors=[],t0=Date.now();
   let bridgeSkip=false;
@@ -909,7 +929,8 @@ chrome.alarms.onAlarm.addListener(a=>{if(a?.name!==GAME_CONSTANTS_ALARM)return;(
 // Only created when missing or its period changed: re-creating it on every service-worker start (delay 1 min)
 // re-armed it each time and, with stale constants, retried the read about every minute.
 // Timer off: the stored constants count as fresh whatever their age, so only completely missing constants are read.
-async function ensureGameConstantsAlarm(){try{await scmEnsureTimerAlarm('gameConstants',{delayInMinutes:1,periodInMinutes:360},'period');}catch{}const e=await scmTimerEntry('gameConstants').catch(()=>null);refreshGameConstants(false,e&&!e.enabled?Infinity:gameConstantsMaxAge(e)).catch(()=>{});}
+// Timer off (2.5.458): no read at all on worker start (a fresh install starts with it off); Sync still reads them.
+async function ensureGameConstantsAlarm(){try{await scmEnsureTimerAlarm('gameConstants',{delayInMinutes:1,periodInMinutes:360},'period');}catch{}const e=await scmTimerEntry('gameConstants').catch(()=>null);if(e&&!e.enabled)return;refreshGameConstants(false,gameConstantsMaxAge(e)).catch(()=>{});}
 ensureGameConstantsAlarm();
 // Data the Manager cannot work without: game constants (scmGameConstants) and resource images (scmResourceImages).
 // Triggers: a finished Sync (afterSync: constants by age as before, backoff ignored since the Sync proved the bridge
@@ -949,12 +970,18 @@ async function fillMissingGameDataOnce(reason,afterSync,onlyMissing){
   const out={ok:true};
   const r=await chrome.storage.local.get({scmGameConstants:null,scmResourceImagesValidatedAt:0});
   const cEntry=await scmTimerEntry('gameConstants').catch(()=>null);
-  if(!r.scmGameConstants)out.constants=await refreshGameConstants(false,GAME_CONSTANTS_PERIOD_MS,{ignoreBackoff:afterSync,afterSync});
+  if(!r.scmGameConstants&&(afterSync||!cEntry||cEntry.enabled))out.constants=await refreshGameConstants(false,GAME_CONSTANTS_PERIOD_MS,{ignoreBackoff:afterSync,afterSync});
   else if(afterSync)out.constants=await refreshGameConstants(false,gameConstantsMaxAge(cEntry),{ignoreBackoff:true,afterSync:true});
   let cached=0;try{cached=Object.keys((await resourceImagesStore())?.cache||{}).length;}catch{}
   const imagesOn=await scmTimerEnabled('resourceImages').catch(()=>true);
   const imagesDue=Date.now()-(Number(r.scmResourceImagesValidatedAt)||0)>RESOURCE_IMAGE_VALIDATE_EVERY_MS;
-  if(cached===0||(!onlyMissing&&imagesOn&&imagesDue)){out.images=true;syncAllResourceImages({forceValidate:false,trigger:reason}).catch(()=>{});}
+  // resourceImages off (2.5.458): no image download at all, also with an empty cache (the dashboard shows a placeholder).
+  // Never during a Sync (after-Sync waits for it to end) and never on dashboard open while other Manager reads run.
+  if(imagesOn&&(cached===0||(!onlyMissing&&imagesDue))){
+    if(coreSyncActive()){out.imagesDeferred='sync';deferUntilSyncEnds('resource-images',()=>{syncAllResourceImages({forceValidate:false,trigger:reason}).catch(()=>{});});}
+    else if(reason==='dashboard-open'&&managerReadsInFlight>0)out.imagesDeferred='other-reads';
+    else{out.images=true;syncAllResourceImages({forceValidate:false,trigger:reason}).catch(()=>{});}
+  }else if(!imagesOn&&(cached===0||(!onlyMissing&&imagesDue)))scmSwitchedOff('resourceImages','resource-images',null,reason).catch(()=>{});
   const c=out.constants;if(!c||!c.skipped||c.reachedTab){gameDataFillAt=Date.now();scmGateStampSet('gameDataFill',gameDataFillAt);}
   let present=Boolean(r.scmGameConstants);if(!present&&out.constants){try{present=Boolean((await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants);}catch{}}
   gameDataPresent=present&&cached>0;
@@ -3637,7 +3664,8 @@ const ACCOUNTING_SYNC_PATHS=[
   '/api/v3/companies/me/past-finances/'
 ];
 const ACCOUNTING_REFRESH_MAX_AGE_MS=5*60*1000;
-const ACCOUNTING_REFRESH_CONCURRENCY=4;
+// One statement at a time (2.5.458), in Sync and in every other refresh; 4 at once was part of a 503 burst.
+const ACCOUNTING_REFRESH_CONCURRENCY=1;
 const ACCOUNTING_WEEK_REFRESH_ALARM_PREFIX='scm-accounting-week-refresh-r';
 // After Sync, walk the game's Accounting page: Day → day buttons 0–6 (the game offers 0–13). Each tap counts
 // only when the game's own /income-statement/day/<n>/ response is captured for this realm. Buttons are found by the
@@ -3793,6 +3821,11 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
   const realm=validRealmNumber(realmArg);
   if(realm==null)return {ok:false,error:'A valid realm is required for Accounting refresh.'};
   if(realmSyncSessions.has(realm))return {ok:false,busy:true,realm,error:`${realmDisplayNumber(realm)||'Realm'} Sync is already running.`};
+  // Dashboard open (reason 'dashboard', not forced): switch accountingOnOpen; when on, an unattended read through the
+  // shared game lane (job 'accounting:<realm>'), at most one statement per slot; the rest wait for the next open.
+  const onOpen=reason==='dashboard'&&!force;
+  if(onOpen){const cur0=await state(realm);if(ACCOUNTING_SYNC_PATHS.some(p=>!accountingEndpointFreshForRealm(cur0,p,realm))&&await scmSwitchedOff('accountingOnOpen','accounting-refresh',realm,reason))return {ok:false,skipped:true,switchedOff:true,realm,error:SCM_SWITCHED_OFF_TEXT};}
+  const laneKey=onOpen?`accounting:${realm}`:null;let laneWait=null,laneLeft=0;
   const tab=await simTab();
   if(!tab?.id){
     // A "not read" line only when some statement was due (fresh statements need no tab).
@@ -3809,8 +3842,10 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
     while(true){
       const i=cursor++; if(i>=pending.length)return;
       const path=pending[i];
+      if(laneWait){laneLeft++;continue;}
       try{
-        const response=await pageGet(path,realm,null,`accounting-refresh:${reason}`);
+        const response=await pageGet(path,realm,null,`accounting-refresh:${reason}`,laneKey?{lane:laneKey}:null);
+        if(response?.laneWait){laneWait=response;laneLeft++;continue;}
         const responseRealm=validRealmNumber(response?.captureRealm);
         // The game tab is in (or just moved to) the other realm: not read (not failed) for this statement, nothing saved.
         if(response?.realmMismatch||(responseRealm!=null&&responseRealm!==realm)){results.push({path,ok:false,skipped:true,realmMismatch:true,status:0,captureRealm:responseRealm,error:response?.error||'Skipped: the game tab is in the other realm.'});continue;}
@@ -3834,6 +3869,7 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
     }
   };
   await Promise.all(Array.from({length:Math.min(ACCOUNTING_REFRESH_CONCURRENCY,pending.length)},()=>worker()));
+  if(laneWait&&!results.length){logLaneWait(realm,'accounting-refresh',laneWait.nextAt,{wanted:pending.length},Date.now(),reason);return {ok:false,skipped:true,laneWait:true,nextAt:Number(laneWait.nextAt)||0,realm,reason,requested:0,waiting:laneLeft,total:paths.length,error:laneWait.error};}
   const freshState=await state(realm);
   const successful=paths.filter(path=>accountingEndpointFreshForRealm(freshState,path,realm,Number.MAX_SAFE_INTEGER)).length;
   // Statements skipped because the game tab switched realm are not failures: no failure/partial entry, the realm
@@ -4386,7 +4422,20 @@ async function gameLaneScheduleAlarm(atMs){
   if(cur&&Number(cur.scheduledTime)>now&&Number(cur.scheduledTime)<=when+1000)return;
   await scmAlarmCreate(C.LANE.ALARM,{when});
 }
+// Manager reads in flight (any pageGet): the image job does not start on dashboard open while this is above 0.
+// During a Sync (2.5.458) every Manager read that is not a lane read goes one at a time (syncReadTail) and at least
+// SYNC_READ_GAP_MS after the previous one that made a request; reads that make no request (blocked) do not wait.
+let managerReadsInFlight=0,syncReadTail=Promise.resolve(),syncReadLastAt=0;const SYNC_READ_GAP_MS=1000;
+function syncReadsSpaced(){return typeof realmSyncSessions!=='undefined'&&realmSyncSessions.size>0;}
 async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticLabel=null, options=null){
+  if(!options?.__inner){
+    const spaced=!(typeof options?.lane==='string'&&options.lane)&&syncReadsSpaced();
+    let release=null;const sent={v:false};
+    if(spaced){const prev=syncReadTail;syncReadTail=new Promise(r=>{release=r;});await prev;}
+    managerReadsInFlight++;
+    try{return await pageGet(path,targetRealm,diagnosticTrace,diagnosticLabel,{...(options||{}),__inner:true,__sent:sent,__gap:spaced?async()=>{const w=syncReadLastAt+SYNC_READ_GAP_MS-Date.now();if(w>0)await new Promise(r=>setTimeout(r,w));}:null});}
+    finally{managerReadsInFlight--;if(spaced){if(sent.v)syncReadLastAt=Date.now();release();}}
+  }
   const customTimeout=Number(options?.timeoutMs);
   const hasCustomTimeout=Number.isFinite(customTimeout)&&customTimeout>0;
   const timeoutMs=hasCustomTimeout?customTimeout:SYNC_PAGE_API_TIMEOUT_MS;
@@ -4443,6 +4492,8 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
       // Shared game lane: an unattended read takes the slot now or makes no request; any other read moves lastAt.
       if(laneKey){const slot=await gameLaneDecide(laneKey);if(!slot.take){traceDiag('pageget-lane-wait',{attempt,reason:slot.reason,nextAt:slot.nextAt});return gameLaneWaitResponse(path,slot);}}
       else await gameLaneNoteUser(diagnosticLabel||'user');
+      if(options?.__gap)await options.__gap();
+      if(options?.__sent)options.__sent.v=true;
       traceDiag('pageget-send',{attempt,tabId:tab.id});
       const r=await Promise.race([
         chrome.tabs.sendMessage(tab.id,{type:'PAGE_API_GET',path,realm:targetRealm,timeoutMs}),
@@ -4471,7 +4522,8 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
       // 403 (bot protection) or 503 (game busy / refusing reads) to any Manager read, unattended or user-initiated
       // (Sync too): the 30-min direct-read block; on a recheck it renews it. 503 also on the buildings list (its
       // exemption is only about that endpoint's own Cloudflare 403).
-      if(!r?.ok&&((answerStatus===403&&!blockExempt)||answerStatus===503)){
+      // 429 (too many requests) also stops the Manager's reads (2.5.458): never retried, the rest of a Sync is skipped.
+      if(!r?.ok&&((answerStatus===403&&!blockExempt)||answerStatus===503||answerStatus===429)){
         recheckSettled=true;
         await noteDirectReadBlocked(path,answerStatus,tr??rr);
         traceDiag('pageget-direct-reads-blocked-now',{attempt,tabId:tab.id,status:answerStatus});
@@ -4768,6 +4820,7 @@ const MARKET_TICKER_MAX_AGE_MS=60*60000;
 async function runMarketTickerRefresh(trigger='alarm'){
   if(coreSyncActive())return {ok:true,skipped:true,reason:'sync'};
   if(!(await scmTimerEnabled('orderBook').catch(()=>true)))return {ok:true,skipped:true,reason:'off'};
+  if(await scmSwitchedOff('marketTicker','market-ticker',null,trigger)){await gameLaneDropWant('ticker:0');await gameLaneDropWant('ticker:1');return {ok:true,skipped:true,reason:'switched-off'};}
   // Every read it wanted and did not make gets a "not read" / "waiting" line (a Sync or day walk of that realm: planned, no line).
   if(await directReadsBlockedNow()){logActivityAnyRealm('market-ticker','not-read',{directReadsBlocked:true},notReadReason({directReadsBlocked:true}));return {ok:true,skipped:true,reason:'direct-reads-blocked'};}
   const tab=await simTab();if(!tab?.id){logActivityAnyRealm('market-ticker','not-read',{},notReadReason('no-game-tab'));return {ok:true,skipped:true,reason:'no-tab'};}
@@ -4797,7 +4850,7 @@ const GAME_LANE_RUNNERS={
   orderBook:async()=>{if(!(await scmTimerEnabled('orderBook').catch(()=>true)))return;await runOrderBookRefreshFiring();},
   ticker:async()=>runMarketTickerRefresh('lane'),
   lostData:async()=>{if(!(await scmTimerEnabled('criticalGuard').catch(()=>true)))return;await runCriticalDataGuard('lane');},
-  gameConstants:async()=>{const e=await scmTimerEntry('gameConstants').catch(()=>null);await refreshGameConstants(false,e&&!e.enabled?Infinity:gameConstantsMaxAge(e));},
+  gameConstants:async()=>{const e=await scmTimerEntry('gameConstants').catch(()=>null);if(e&&!e.enabled)return;await refreshGameConstants(false,gameConstantsMaxAge(e));},
   abundance:async realm=>{if(realm!=null)await refreshAbundanceIfStale(realm,'lane');}
 };
 async function runGameLaneAlarm(){
@@ -5656,6 +5709,9 @@ async function scheduleMarketStage(realm,stage,delayMs=MARKET_STAGE_COOLDOWN_MS,
 }
 async function scheduleMarketCycle(realmArg,reason='scheduled-market-cycle'){
   const n=validRealmNumber(realmArg);if(n==null)return {ok:false,error:'Invalid realm for market cycle.'};
+  // Every automatic start (install, startup, after Sync, cache miss, lost-data check) follows the liveMarket timer;
+  // only the Market Refresh button starts it while that timer is off.
+  if(reason!=='manual-market-refresh'&&await scmSwitchedOff('liveMarket','market-cycle',n,reason))return {ok:true,queued:false,skipped:true,switchedOff:true,reason:'switched-off'};
   const pending={ok:true,queued:false,skipped:true,reason:'market-cycle-already-pending'};
   if(marketCycleScheduling)return pending;
   const run=(async()=>{
@@ -5899,6 +5955,7 @@ async function fetchAndCacheResourceImage(id,{forceValidate=false,batch=null}={}
     // the worker fetch for the rest of the run, so ~150 blocked requests are not repeated.
     if(!batch?.workerError){
       try{
+        if(batch?.pace)await batch.pace();
         const r=await fetch(safeUrl,{cache:'no-store',credentials:'omit'});
         if(!r.ok){const he=new Error(`Image HTTP ${r.status}`);he.status=r.status;throw he;}
         mime=(r.headers.get('content-type')||'image/png').split(';')[0].trim().toLowerCase();
@@ -5911,7 +5968,7 @@ async function fetchAndCacheResourceImage(id,{forceValidate=false,batch=null}={}
     if(!bytes){
       // Through the game tab. No tab / bridge not ready / page closed: the rest of the batch does not wait on it again.
       if(batch?.pageError)throw new Error(`${workerError}; game tab: ${batch.pageError}`);
-      try{const p=await pageImageGet(safeUrl,batch?()=>batch.pageError:null);mime=p.mime;bytes=p.bytes;}
+      try{if(batch?.pace)await batch.pace();const p=await pageImageGet(safeUrl,batch?()=>batch.pageError:null);mime=p.mime;bytes=p.bytes;}
       catch(pe){const t=pe?.message||String(pe);if(batch&&pageBridgeUnavailable(pe))batch.pageError=t;throw new Error(`${workerError}; game tab: ${t}`);}
     }
     const hash=await sha256Bytes(bytes);
@@ -5960,6 +6017,12 @@ function syncAllResourceImages({forceValidate=false,trigger=null}={}){
   return check;
 }
 async function syncAllResourceImagesOnce({forceValidate=false,trigger=null}={}){
+  const RESOURCE_IMAGE_FETCH_GAP_MS=3000,RESOURCE_IMAGE_MAX_FETCHES_PER_RUN=20;
+  // Ids whose image is missing, has no check time, or was checked ttlMs or longer ago.
+  const resourceImagesDue=(ids,cache,meta,ttlMs,now)=>ids.filter(id=>{const sid=String(id);if(!cache?.[sid])return true;const t=Date.parse(String(meta?.[sid]?.validatedAt||''));return !Number.isFinite(t)||now-t>=ttlMs;});
+  // Timer off: no image request (a "not read" line once per 30 min). During a Sync: not started (not a run).
+  if(await scmSwitchedOff('resourceImages','resource-images',null,trigger||'manager'))return {ok:true,skipped:true,reason:'switched-off'};
+  if(coreSyncActive())return {ok:true,skipped:true,reason:'sync'};
   const jobStarted=Date.now(),jobStartedAt=new Date(jobStarted).toISOString();
   const manifest=await resourceImageManifest();
   const ids=Object.keys(manifest?.resources||{}).map(Number).filter(Number.isFinite);
@@ -5970,15 +6033,20 @@ async function syncAllResourceImagesOnce({forceValidate=false,trigger=null}={}){
   if(!base?.key)return {ok:false,skipped:true,reason:'no-realm',error:'No active realm for resource image cache'};
   const s0=await state();const catalog=(base.key&&s0.realmStores?.[base.key]?.resourceCatalog)||s0.resourceCatalog||{};
   const batch={base,catalog,captured:capturedResourceImages(base.key&&s0.realmStores?.[base.key]),constantsImages:await constantsResourceImages(),cache:{},meta:{},workerError:null,pageError:null};
-  const queue=[...ids], workers=Array.from({length:4},async()=>{
-    while(queue.length){
-      const id=queue.shift();
-      const r=await fetchAndCacheResourceImage(id,{forceValidate,batch});
-      if(r.ok){verified++;if(r.changed||!r.cached)updated++;if(r.stale){stale++;if(!firstError)firstError=r.error||null;}}
-      else if(r.unavailable)unavailable++;else{failed++;if(!firstError)firstError=r.error||null;}
-    }
-  });
-  await Promise.all(workers);
+  // 2.5.458: never a burst. Only images missing from the cache or older than the TTL (forced weekly check: older than
+  // RESOURCE_IMAGE_VALIDATE_EVERY_MS) are read, ONE at a time, at least RESOURCE_IMAGE_FETCH_GAP_MS between requests
+  // (batch.pace), at most RESOURCE_IMAGE_MAX_FETCHES_PER_RUN requests per run; the rest wait for the next run. Stops
+  // when a Sync starts. The 403/503 stop of the worker fetch (batch.workerError) is unchanged.
+  const ttl=forceValidate?RESOURCE_IMAGE_VALIDATE_EVERY_MS:RESOURCE_IMAGE_CACHE_TTL_MS,nowMs=Date.now();
+  const due=resourceImagesDue(ids,base.cache,base.meta,ttl,nowMs);verified+=ids.length-due.length;
+  batch.fetches=0;batch.lastFetchAt=0;batch.pace=async()=>{const w=batch.lastFetchAt+RESOURCE_IMAGE_FETCH_GAP_MS-Date.now();if(batch.lastFetchAt&&w>0)await new Promise(r=>setTimeout(r,w));batch.lastFetchAt=Date.now();batch.fetches++;};
+  let left=0;
+  for(let i=0;i<due.length;i++){
+    if(batch.fetches>=RESOURCE_IMAGE_MAX_FETCHES_PER_RUN||coreSyncActive()){left=due.length-i;break;}
+    const r=await fetchAndCacheResourceImage(due[i],{forceValidate:true,batch});
+    if(r.ok){verified++;if(r.changed||!r.cached)updated++;if(r.stale){stale++;if(!firstError)firstError=r.error||null;}}
+    else if(r.unavailable)unavailable++;else{failed++;if(!firstError)firstError=r.error||null;}
+  }
   await saveResourceImages(batch.cache,batch.meta);
   const s=await state(); const key=s.activeRealmKey||identityFromAuth(s.authData); const realm=realmNumberFromKey(key); if(realm!=null){
     await withRealmWriteLock(realm,async()=>{
@@ -5991,7 +6059,7 @@ async function syncAllResourceImagesOnce({forceValidate=false,trigger=null}={}){
   }
   // scmResourceImagesValidatedAt (the weekly validation clock) is stamped only after a clean run: nothing failed and
   // nothing was only kept stale from the cache. With failures it stays as it was, so the next Sync / game tab retries.
-  const clean=failed===0&&stale===0&&verified>0;
+  const clean=failed===0&&stale===0&&verified>0&&left===0;
   if(clean){try{const v=Number((await chrome.storage.local.get({scmResourceImagesValidatedAt:0})).scmResourceImagesValidatedAt)||0;
     if(forceValidate||Date.now()-v>RESOURCE_IMAGE_VALIDATE_EVERY_MS)await rawStorageSet({scmResourceImagesValidatedAt:Date.now()});}catch{}}
   const bad=failed+stale;
@@ -6003,7 +6071,7 @@ async function syncAllResourceImagesOnce({forceValidate=false,trigger=null}={}){
   const event={job:'resource-image-cache-sync',trigger:trigger||(forceValidate?'forced-validation':'startup-or-install'),startedAt:jobStartedAt,finishedAt,durationMs:Date.now()-jobStarted,outcome,requested:ids.length,fetched:updated,refreshed:updated,checked:verified,cached:Math.max(0,verified-updated),stale,error:errorText,details:{resourceCount:ids.length,verified,updated,failed,stale,unavailable,forceValidate,firstError:firstError?capRefreshError(firstError):null,workerError:batch.workerError?capRefreshError(batch.workerError):null,gameTabError:batch.pageError?capRefreshError(batch.pageError):null}};
   if(realm!=null) await recordBackgroundJobEvent(realm,event).catch(()=>{});
   else if(bad&&!tabSkipped) logError('resource-image-cache-sync',errorText);
-  return {ok:true,skipped:tabSkipped||undefined,reason:tabSkipped?'game-tab-not-ready':undefined,resourceCount:ids.length,verified,updated,failed,stale,unavailable,firstError,clean,durationMs:Date.now()-jobStarted};
+  return {ok:true,skipped:tabSkipped||undefined,reason:tabSkipped?'game-tab-not-ready':undefined,resourceCount:ids.length,due:due.length,left,fetches:batch.fetches,verified,updated,failed,stale,unavailable,firstError,clean,durationMs:Date.now()-jobStarted};
 }
 
 function criticalContractRowsFromStore(store){
@@ -6244,7 +6312,9 @@ async function scmInstalledGlobalPatch(){
   for(const key of keys){if(Object.prototype.hasOwnProperty.call(current,key)) globalPatch[key]=current[key];}
   if(Object.keys(globalPatch).length) await storageSet(globalPatch);
 }
-chrome.runtime.onInstalled.addListener(async()=>{
+chrome.runtime.onInstalled.addListener(async(details)=>{
+  // Fresh install: every server-contacting timer starts off, before any alarm or read below looks at the timers.
+  if(details?.reason==='install')await scmLifecycleStep('installed:fresh-timers-off',()=>scmApplyFreshInstallTimers());
   await scmLifecycleStep('installed:global-patch',()=>scmInstalledGlobalPatch());
   await scmLifecycleStep('installed:live-bridge-token',()=>migrateLiveBridgeToken());
   await scmLifecycleStep('installed:realm-migration',()=>ensureRealmStorageMigration());
@@ -6613,7 +6683,7 @@ async function restoreGamePageBounded(pageReturn,label='Return to the starting p
 }
 // How long a walked page gets to show its traffic. Responses are what matter: a burst followed by a quiet gap means
 // the page has loaded; a confirmed page with no traffic at all is given up on sooner than one still talking.
-const SYNC_WALK_QUIET_MS=1200;
+const SYNC_WALK_QUIET_MS=1200,SYNC_WALK_NAV_GAP_MS=1000;
 const SYNC_WALK_NO_TRAFFIC_MS=3000;
 async function waitForWalkTraffic(session,sinceMs,capMs=SYNC_CAPTURE_FALLBACK_MS,{quietMs=SYNC_WALK_QUIET_MS,noTrafficMs=SYNC_WALK_NO_TRAFFIC_MS}={}){
   const started=Date.now(),deadline=started+Math.max(1000,Number(capMs)||SYNC_CAPTURE_FALLBACK_MS);
@@ -7367,7 +7437,13 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     };
     // Visits a page by its link; if the link did not navigate and the route is known, by the game's router. The
     // result is true only if the page was reached. Stops visiting once the player has moved the tab themselves.
-    const visitWalkPage=async(tabId,target,sess)=>{
+    // A walk page is never opened sooner than SYNC_WALK_NAV_GAP_MS after the previous visit settled (2.5.458).
+    let walkSettledAt=0;
+    const visitWalkPage=async(...args)=>{
+      const wait=walkSettledAt+SYNC_WALK_NAV_GAP_MS-Date.now();if(wait>0)await new Promise(r=>setTimeout(r,wait));
+      try{return await visitWalkPageOnce(...args);}finally{walkSettledAt=Date.now();}
+    };
+    const visitWalkPageOnce=async(tabId,target,sess)=>{
       try{
         if(await pageReturn.checkUser(tabId)){trace('walk-page-skipped',{name:target.name,reason:'user-navigated'});return {ok:false,skipped:'user-navigated'};}
         const startedAt=Date.now();
@@ -8012,7 +8088,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       refreshMarketOrders(selected,0,{background:true}).catch(()=>{});fillMissingGameData('after-sync',{afterSync:true}).catch(()=>{});
       // Awaited (bounded) so its failures can reach this run's status; the final status is written again after the tail.
       try{
-        const extra=await withSyncTimeout(refreshExtraGameData(selected,{movedReads:session.movedReads||null,captured:session.abundanceCaptures||null}),15000,'After-Sync reads');
+        const extra=await scmSwitchedOff('afterSyncExtras','extra-game-data',selected,'after-sync')?{ok:true,skipped:true,switchedOff:true}:await withSyncTimeout(refreshExtraGameData(selected,{movedReads:session.movedReads||null,captured:session.abundanceCaptures||null}),15000,'After-Sync reads');
         for(const w of extra?.warnings||[]){const t=safeWalkText(w);if(!endpointWarnings.includes(t))endpointWarnings.push(t);}
       }catch(e){endpointWarnings.push(safeWalkText(e?.message||e));}
       finalStatus=`${finalStatusBase}${syncWarningsSuffix(endpointWarnings)}`;
@@ -9569,7 +9645,9 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
   })().catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   // Dashboard open: read game constants / resource images if they are missing (see fillMissingGameData).
   if(m?.type==='SCM_ENSURE_GAME_DATA'){fillMissingGameData('dashboard-open').then(r=>send({ok:true,...r})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
-  if(m?.type==='GET_RESOURCE_IMAGE'){(async()=>{const rid=validResourceId(m.resource);if(rid==null||!(await knownResourceIds()).has(rid)){send({ok:false,error:'Invalid resource id'});return;}const r=await fetchAndCacheResourceImage(rid,{forceValidate:false}); if(r.ok){send({ok:true,dataUrl:r.dataUrl,cached:r.cached,stale:r.stale||false});return;} const tab=await simTab(); if(!tab?.id){send({ok:false,error:r.error||'Sim Companies tab is not open.'});return;} try{resourceImagePageAsks.set(rid,Date.now());await chrome.tabs.sendMessage(tab.id,{type:'PAGE_RESOURCE_IMAGE',resource:rid}); send({ok:true,queued:true,error:r.error||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})().catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
+  if(m?.type==='GET_RESOURCE_IMAGE'){(async()=>{const rid=validResourceId(m.resource);if(rid==null||!(await knownResourceIds()).has(rid)){send({ok:false,error:'Invalid resource id'});return;}
+    // resourceImages off: the stored image or nothing (placeholder); no download, no game tab ask.
+    if(!(await scmTimerEnabled('resourceImages').catch(()=>true))){let d=null;try{d=(await resourceImagesStore())?.cache?.[String(rid)]||null;}catch{}send(d?{ok:true,dataUrl:d,cached:true,stale:false}:{ok:false,switchedOff:true,placeholder:true,error:SCM_SWITCHED_OFF_TEXT});return;}const r=await fetchAndCacheResourceImage(rid,{forceValidate:false}); if(r.ok){send({ok:true,dataUrl:r.dataUrl,cached:r.cached,stale:r.stale||false});return;} const tab=await simTab(); if(!tab?.id){send({ok:false,error:r.error||'Sim Companies tab is not open.'});return;} try{resourceImagePageAsks.set(rid,Date.now());await chrome.tabs.sendMessage(tab.id,{type:'PAGE_RESOURCE_IMAGE',resource:rid}); send({ok:true,queued:true,error:r.error||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})().catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='MARKET_CACHE'){saveMarketCache(m.resource,m.data,m.receivedAt,m.realm).then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='SYNC_NOW'){syncNow(m.realm,{fullWalk:true}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true}
   if(m?.type==='SET_VIEW_REALM'){

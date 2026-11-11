@@ -41,7 +41,16 @@
     { id: 'dashLiveMarket', label: 'Dashboard market refresh', group: 'Dashboard', kind: 'interval', unit: 'min', default: 5, min: 5, max: 60, hitsServer: true, server: 'SimcoTools',
       description: "While the dashboard Market or Warehouse tab is open, refreshes prices for the realm and the product you look at, within the shared SimcoTools limit (1 request per 5 min). When off, those prices update only when you press Refresh." },
     { id: 'syncMarketCrawl', label: 'Market prices during Sync', group: 'Sync', kind: 'toggle', unit: null, default: null, defaultText: 'on', min: null, max: null, hitsServer: true, server: 'game',
-      description: "After each Sync, opens the game market page of each product you stock or produce, so the game loads its order book and the Manager keeps the exact game price. Adds about 1-3 s per product (max 6 s). When off, only pages you open update prices." }
+      description: "After each Sync, opens the game market page of each product you stock or produce, so the game loads its order book and the Manager keeps the exact game price. Adds about 1-3 s per product (max 6 s). When off, only pages you open update prices." },
+    // 2.5.458 switches (toggle, on for existing installs, off on a fresh install like every hitsServer timer).
+    { id: 'accountingOnOpen', label: 'Accounting re-read when the Manager opens', group: 'Dashboard', kind: 'toggle', unit: null, default: null, defaultText: 'on', min: null, max: null, hitsServer: true, server: 'game',
+      description: 'When the Manager opens and your statements are over 5 min old, re-reads them from the game one at a time in the shared game-request slot (one request every 5 min). When off, statements update from Sync and the Accounting pages you open.' },
+    { id: 'abundanceOnLoad', label: 'Mine abundance read when the game page loads', group: 'Game page', kind: 'toggle', unit: null, default: null, defaultText: 'on', min: null, max: null, hitsServer: true, server: 'game',
+      description: 'When the game page loads your buildings, reads the abundance of each mine, oil rig or quarry whose value is over 1 h old, one per shared game-request slot. When off, abundance updates from Sync and the mine pages you open.' },
+    { id: 'marketTicker', label: 'Game market ticker (about hourly)', group: 'Service worker', kind: 'toggle', unit: null, default: null, defaultText: 'on', min: null, max: null, hitsServer: true, server: 'game',
+      description: "About once an hour reads the game's market ticker (lowest price of each product) in the shared game-request slot, when no game page loaded it in the last hour. When off, the ticker updates only from game pages you open." },
+    { id: 'afterSyncExtras', label: 'After Sync: research, government orders, abundance', group: 'Sync', kind: 'toggle', unit: null, default: null, defaultText: 'on', min: null, max: null, hitsServer: true, server: 'game',
+      description: 'Right after each Sync, reads research, government orders and your tier, and mine abundance. When off, Sync ends without them; they update from the game pages you open.' }
   ];
   const byId = Object.create(null);
   for (const t of TIMERS) { Object.freeze(t); byId[t.id] = t; }
@@ -94,6 +103,9 @@
     }
     return cur;
   }
+  // Fresh install (2.5.458): every timer that contacts a server starts off; the player turns them on one by one.
+  // Timers with no server request keep their defaults.
+  function freshInstall() { const out = defaults(); for (const t of TIMERS) if (t.hitsServer) out[t.id] = { ...out[t.id], enabled: false }; return out; }
   function toStored(config) { return { v: 1, timers: normalize({ v: 1, timers: config || {} }) }; }
   function isDefault(id, entry) {
     const d = defaultEntry(byId[id]); const e = normalizeEntry(id, entry);
@@ -147,6 +159,8 @@
       gameConstants: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Game constants' }),
       abundance: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Abundance' }),
       // Retries of the after-Sync week sales ledger (capped at 3, 5/10/20 min apart; its own alarm asks again).
+      // Dashboard-open Accounting re-read (accountingOnOpen): one statement per slot, same priority as the other accounting job.
+      accounting: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Accounting statement' }),
       accountingWeek: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, label: 'Week sales ledger retry' }),
       other: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Other' })
     })
@@ -212,7 +226,7 @@
     return st;
   }
 
-  root.SCM_TIMERS_CORE = { KEY: 'scmSyncTimers', TIMERS, byId, IDS, UNIT_MS, defaults, normalize, normalizeAt, merge, toStored, isDefault, clamp, intervalMs, intervalMinutes, nextDailyAt, clockOf, timerForAlarm,
+  root.SCM_TIMERS_CORE = { KEY: 'scmSyncTimers', TIMERS, byId, IDS, UNIT_MS, defaults, freshInstall, SWITCHED_OFF_TEXT: 'Not read: switched off (Background timers)', normalize, normalizeAt, merge, toStored, isDefault, clamp, intervalMs, intervalMinutes, nextDailyAt, clockOf, timerForAlarm,
     LANE, laneBase, laneSpec, laneKeyOk, laneState, laneNextSlotAt, laneWinner, laneDecide, laneNote };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.SCM_TIMERS_CORE;
 })(typeof globalThis !== 'undefined' ? globalThis : self);
