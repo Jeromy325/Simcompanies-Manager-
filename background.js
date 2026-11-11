@@ -637,6 +637,20 @@ async function refreshMarketOrders(realm,maxAgeMs=5*60000,opts=null){
   marketOrdersInFlight.set(r,p);
   return p;
 }
+// Company id from the realm's captured GET /api/v3/companies/auth-data/ response (newest 2xx whose realm is r or not stated).
+function capturedCompanyIdForRealm(store,r){
+  let best=null;
+  for(const [u,v] of Object.entries(store?.endpointData||{})){
+    if(!/\/api\/v3\/companies\/auth-data\/?(\?.*)?$/i.test(String(u||'')))continue;
+    if(!(Number(v?.status)>=200&&Number(v?.status)<300)||!v?.data)continue;
+    const ac=v.data?.authCompany;if(!ac)continue;
+    const ar=validRealmNumber(ac.realmId??ac.realm);if(ar!=null&&ar!==r)continue;
+    const cid=Number(ac.companyId??ac.id);if(!Number.isSafeInteger(cid)||cid<=0)continue;
+    const at=Date.parse(v.receivedAt||0)||0;
+    if(!best||at>best.at)best={cid,at};
+  }
+  return best?best.cid:0;
+}
 async function marketOrdersReadOnce(r,cur,background,lane=false){
   const k=`scmMarketOrders:${r}`;
   let gate={},lastAt=0;
@@ -669,7 +683,9 @@ async function marketOrdersReadOnce(r,cur,background,lane=false){
     // The id goes into the request path: only a positive safe integer is used.
     const safeCid=v=>{const n=Number(v);return Number.isSafeInteger(n)&&n>0?n:0;};
     const storeCid=acRealm==null||acRealm===r?safeCid(ac?.companyId??ac?.id):0;
-    const cid=storeCid>0?storeCid:safeCid(cur?.companyId);
+    // The realm's captured auth-data response (endpointData) carries the same company id when the stored authCompany is empty.
+    const capturedCid=storeCid>0?0:capturedCompanyIdForRealm(st,r);
+    const cid=storeCid>0?storeCid:(capturedCid>0?capturedCid:safeCid(cur?.companyId));
     // No company id yet (right after Clear data, before the game's auth-data is captured): no request, a "not read"
     // line, no backoff step; the next card / game-action call reads once the id exists.
     if(!(Number.isSafeInteger(cid)&&cid>0)){logNotRead(r,'market-orders','no-company-id');return {ok:false,skipped:true,reason:'no-company-id'};}
@@ -738,8 +754,9 @@ function scheduleOwnOrdersRefresh(realm,delayMs=800){
   const wait=Math.max(delayMs,(ownOrdersRefreshFiredAt.get(n)||0)+OWN_ORDERS_ACTION_MIN_GAP_MS-Date.now());
   ownOrdersRefreshTimers.set(n,setTimeout(()=>{
     ownOrdersRefreshTimers.delete(n);ownOrdersRefreshFiredAt.set(n,Date.now());
-    refreshMarketOrders(n,0).catch(()=>{}); // through the gate: within 15 s of the last read → one trailing read
-    refreshOutgoingContracts(n,0).catch(()=>{});
+    // Game reads after an action use the shared 5-min game slot (lane), like the card poll. A slot taken = "waiting" line.
+    refreshMarketOrders(n,0,{lane:true}).catch(()=>{});
+    refreshOutgoingContracts(n,0,{lane:true}).catch(()=>{});
   },wait));
 }
 // Buildings that make an abundance resource. The game constants (scmGameConstants, downloaded in the
@@ -8982,7 +8999,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         if(now-(gameOverlayManualRefreshAt.get(realm)||0)<GAME_OVERLAY_MANUAL_REFRESH_GAP_MS){send({ok:true,throttled:true});return;}
         if(coreSyncActive()){send({ok:false,throttled:false,error:'Sync is running.'});return;}
         gameOverlayManualRefreshAt.set(realm,now);
-        const results=await Promise.allSettled([refreshRealmWarehouseForOverlay(realm,0),refreshOutgoingContracts(realm,0),refreshMarketOrders(realm,0)]);
+        const results=await Promise.allSettled([refreshRealmWarehouseForOverlay(realm,0),refreshOutgoingContracts(realm,0,{lane:true}),refreshMarketOrders(realm,0,{lane:true})]);
         const outcomes=results.map(r=>r.status==='fulfilled'?r.value:{ok:false,error:r.reason?.message||String(r.reason)});
         if(outcomes.some(r=>r?.ok))scheduleGameOverlayRefreshNotification(realm,150);
         // One text per cause: under the direct-read block all three reads fail with the same notice.
@@ -9515,7 +9532,10 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       // A building collect is stamped at once (no reply is read); an id that is not a stored building writes nothing.
       if(String(m.method||'').toUpperCase()==='POST'&&collectTakeBuildingIdFromUrl(m.url)!=null){try{noteBuildingTake(m.url,realm);}catch{}}
       if(realm==null){try{const meta=await chrome.storage.local.get({activeRealmKey:null});realm=validRealmNumber(realmNumberFromKey(meta.activeRealmKey)??meta.activeRealmKey);}catch{}}
-      if(realm!=null){scheduleWarehouseRefreshAfterStockMutation(realm,150);scheduleOwnOrdersRefresh(realm);}})();
+      // A collect (POST /api/v2/order/take/<id>/) is followed by the game's own warehouse refresh, which the page hook
+      // captures. The Manager sends no warehouse read for it (game-request rule); other stock actions still read.
+      const isCollect=String(m.method||'').toUpperCase()==='POST'&&/\/api\/v2\/order\/take\/\d+\/?/i.test(String(m.url||''));
+      if(realm!=null){if(!isCollect)scheduleWarehouseRefreshAfterStockMutation(realm,150);scheduleOwnOrdersRefresh(realm);}})();
     send({ok:true});return true}
   if(m?.type==='WAREHOUSE_COST_DETAIL'){saveWarehouseCostDetail(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='REPLAY_EVENT'){
