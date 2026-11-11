@@ -35,12 +35,20 @@ async function scmAlarmCreate(name,info){
 // Background sync timers (Settings): scmSyncTimers, table and rules in timers-core.js. Read once per worker and kept
 // in memory; only SCM_SET_TIMERS writes it (serialized), and Clear Stored Data drops the memo (no storage.onChanged).
 // With nothing stored every alarm keeps the exact info it had before (legacy info passed by each caller).
-let scmTimersMemo=null,scmTimersWriteTail=Promise.resolve();
+// scmTimersMemoGen: bumped by every writer of the memo (fresh install, SCM_SET_TIMERS, Clear data). A storage read that
+// started before such a write must not put its older answer into the memo (fresh install: a startup read of the empty
+// key finishing after scmApplyFreshInstallTimers turned the timers back on and the alarms were created).
+let scmTimersMemo=null,scmTimersWriteTail=Promise.resolve(),scmTimersMemoGen=0;
 async function scmTimersConfig(){
   const C=globalThis.SCM_TIMERS_CORE;if(!C)return null;
   if(scmTimersMemo)return scmTimersMemo;
   try{
-    const got=await chrome.storage.local.get({[C.KEY]:null,scmTimersMigrations:{}});const raw=got[C.KEY];scmTimersMemo=C.normalize(raw);
+    const gen=scmTimersMemoGen;
+    const got=await chrome.storage.local.get({[C.KEY]:null,scmTimersMigrations:{}});
+    // A writer ran during the read: its value wins (the read may be from before it).
+    if(gen!==scmTimersMemoGen)return scmTimersMemo||scmTimersConfig();
+    if(scmTimersMemo)return scmTimersMemo;
+    const raw=got[C.KEY];scmTimersMemo=C.normalize(raw);
     // One-time move (2.5.456): the SimcoTools timer floor went from 60 to 5 min. A stored 60 was the old default and
     // floor, so it becomes the new default 5; a value the player sets later is kept. Written in the timers write lane.
     // One-time move (2.5.457): the game order-book timer floor went from 1 to 5 min (the game's API guide allows one
@@ -71,7 +79,7 @@ async function scmSwitchedOff(id,job,realm=null,trigger='manager'){
 async function scmApplyFreshInstallTimers(){
   const C=globalThis.SCM_TIMERS_CORE;if(!C?.freshInstall)return null;
   const cfg=C.freshInstall();const stored=C.toStored(cfg);delete stored.timers.accountingWalk;
-  scmTimersMemo=C.normalize(stored);
+  scmTimersMemoGen++;scmTimersMemo=C.normalize(stored);
   scmTimersWriteTail=scmTimersWriteTail.then(()=>chrome.storage.local.set({[C.KEY]:stored,scmTimersMigrations:{liveMarket5:true,orderBook5:true,freshInstallOff:true}})).catch(()=>{});
   await scmTimersWriteTail;
   return stored;
@@ -193,7 +201,9 @@ async function scmMobileNetSave(captureId,event){
 async function scmMobileNetLogBackground(event){
  try{const saved=(await chrome.storage.local.get('scmNetworkCaptureV3Status')).scmNetworkCaptureV3Status||{};if(saved.mode!=='mobile-page'||saved.status!=='recording'||!saved.captureId)return;await scmMobileNetSave(saved.captureId,{capturedAt:new Date().toISOString(),realm:null,transport:'extension-background',...event});}catch{}
 }
-function scmMobileNetSafeUrl(raw){try{const u=new URL(String(raw));for(const k of [...u.searchParams.keys()])if(/token|auth|cookie|csrf|session|password|secret|jwt|access|key/i.test(k))u.searchParams.set(k,'[redacted]');return u.origin+u.pathname+u.search;}catch{return String(raw||'').split('?')[0].slice(0,2000);}}
+// A SimcoTools executive search: the URL holds the name the user typed and the answer is a list of people's names.
+function scmIsPrivateSimcoUrl(raw){try{const u=new URL(String(raw));return u.hostname==='api.simcotools.com'&&/\/executives\/?$/i.test(u.pathname);}catch{return /api\.simcotools\.com\/[^?#]*\/executives\/?(?:[?#]|$)/i.test(String(raw||''));}}
+function scmMobileNetSafeUrl(raw){try{const u=new URL(String(raw));const priv=scmIsPrivateSimcoUrl(raw);for(const k of [...u.searchParams.keys()])if(/token|auth|cookie|csrf|session|password|secret|jwt|access|key/i.test(k)||(priv&&/^name$/i.test(k)))u.searchParams.set(k,'[redacted]');return u.origin+u.pathname+u.search;}catch{return String(raw||'').split('?')[0].slice(0,2000);}}
 async function scmMobileNetStart(tabId){
  const tab=await chrome.tabs.get(tabId);if(!tab?.url||!/^https:\/\/(?:www\.)?simcompanies\.com\//i.test(tab.url))throw new Error('Open the Sim Companies game tab before starting mobile network capture.');
  const old=(await chrome.storage.local.get('scmNetworkCaptureV3Status')).scmNetworkCaptureV3Status||{};if(old.status==='recording')throw new Error('A network capture is already recording. Stop it before starting another.');
@@ -950,7 +960,9 @@ chrome.alarms.onAlarm.addListener(a=>{if(a?.name!==GAME_CONSTANTS_ALARM)return;(
 // re-armed it each time and, with stale constants, retried the read about every minute.
 // Timer off: the stored constants count as fresh whatever their age, so only completely missing constants are read.
 // Timer off (2.5.458): no read at all on worker start (a fresh install starts with it off); Sync still reads them.
-async function ensureGameConstantsAlarm(){try{await scmEnsureTimerAlarm('gameConstants',{delayInMinutes:1,periodInMinutes:360},'period');}catch{}const e=await scmTimerEntry('gameConstants').catch(()=>null);if(e&&!e.enabled)return;refreshGameConstants(false,gameConstantsMaxAge(e)).catch(()=>{});}
+async function ensureGameConstantsAlarm(){try{await scmEnsureTimerAlarm('gameConstants',{delayInMinutes:1,periodInMinutes:360},'period');}catch{}const e=await scmTimerEntry('gameConstants').catch(()=>null);
+  // Off: no game read, but the built-in copy (constants.json, no network) still fills missing constants at once.
+  if(e&&!e.enabled){await applyBundledGameConstants().catch(()=>{});return;}refreshGameConstants(false,gameConstantsMaxAge(e)).catch(()=>{});}
 ensureGameConstantsAlarm();
 // Data the Manager cannot work without: game constants (scmGameConstants) and resource images (scmResourceImages).
 // Triggers: a finished Sync (afterSync: constants by age as before, backoff ignored since the Sync proved the bridge
@@ -992,6 +1004,8 @@ async function fillMissingGameDataOnce(reason,afterSync,onlyMissing){
   const cEntry=await scmTimerEntry('gameConstants').catch(()=>null);
   if(!r.scmGameConstants&&(afterSync||!cEntry||cEntry.enabled))out.constants=await refreshGameConstants(false,GAME_CONSTANTS_PERIOD_MS,{ignoreBackoff:afterSync,afterSync});
   else if(afterSync)out.constants=await refreshGameConstants(false,gameConstantsMaxAge(cEntry),{ignoreBackoff:true,afterSync:true});
+  // Timer off and constants missing: no game read, but the built-in copy (no network) still fills them.
+  else if(!r.scmGameConstants&&cEntry&&!cEntry.enabled){try{const b=await applyBundledGameConstants();if(b?.applied)out.constants={ok:true,bundled:true,source:'bundled'};}catch{}}
   let cached=0;try{cached=Object.keys((await resourceImagesStore())?.cache||{}).length;}catch{}
   const imagesOn=await scmTimerEnabled('resourceImages').catch(()=>true);
   const imagesDue=Date.now()-(Number(r.scmResourceImagesValidatedAt)||0)>RESOURCE_IMAGE_VALIDATE_EVERY_MS;
@@ -5005,7 +5019,7 @@ function simcoGateReserve(url){
   const run=simcoGateTail.then(async()=>{
     const g=await simcoGateLoad(),now=Date.now(),next=(Number(g.lastAt)||0)+SIMCOTOOLS_SHARED_GAP_MS;
     if(now<next)return {ok:false,retryAt:next,lastUrl:g.lastUrl||null};
-    simcoGateMem={lastAt:now,lastUrl:String(url||'').slice(0,200),count:(Number(g.count)||0)+1};
+    simcoGateMem={lastAt:now,lastUrl:scmMobileNetSafeUrl(url).slice(0,200),count:(Number(g.count)||0)+1};
     try{if(chrome.storage?.session)await chrome.storage.session.set({[SIMCOTOOLS_GATE_KEY]:simcoGateMem});}catch{}
     return {ok:true,at:now};
   });
@@ -5014,7 +5028,10 @@ function simcoGateReserve(url){
 }
 // opts.noRetry: one attempt only (the public-data jobs: a failed run waits for its next slot instead of retrying).
 async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS, opts=null){
-  const normalizedUrl=String(url);
+  // An executive search keeps the typed name out of every stored copy of the URL (net log, gate, per-URL cooldowns)
+  // and no body preview; the request itself uses the real URL.
+  const privateUrl=scmIsPrivateSimcoUrl(url);
+  const normalizedUrl=privateUrl?scmMobileNetSafeUrl(url):String(url);
   const attempts=opts?.noRetry?1:SIMCOTOOLS_RETRY_DELAYS_MS.length;
   await hydrateSimcoCooldowns();
   const knownCooldown=Number(simcoRateLimitUntilByUrl.get(normalizedUrl))||0;
@@ -5049,7 +5066,7 @@ async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS, opts=null){
       // No cookies or auth sent to SimcoTools (public API; nothing of the browser session goes to a third party).
       const response=await fetch(url,{method:'GET',cache:'no-store',credentials:'omit',headers:{accept:'application/json'},signal:controller.signal});
       const text=await response.text();
-      await scmMobileNetLogBackground({kind:'fetch',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',status:Number(response.status)||0,ok:Boolean(response.ok),durationMs:Date.now()-requestStartedAt,transport:'extension-background',contentType:String(response.headers?.get('content-type')||''),body:text?{truncated:text.length>4000,originalLength:text.length,preview:text.slice(0,4000)}:null});
+      await scmMobileNetLogBackground({kind:'fetch',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',status:Number(response.status)||0,ok:Boolean(response.ok),durationMs:Date.now()-requestStartedAt,transport:'extension-background',contentType:String(response.headers?.get('content-type')||''),body:text?(privateUrl?{truncated:true,originalLength:text.length,preview:'',redacted:true}:{truncated:text.length>4000,originalLength:text.length,preview:text.slice(0,4000)}):null});
       if(response.status===429){
         const until=simcoActivateRateLimitCooldown(response);
         simcoRateLimitUntilByUrl.set(normalizedUrl,until);
@@ -5856,6 +5873,12 @@ async function runScheduledLiveMarketRefresh(reason='scheduled'){
 //                            a stored contest ended after the read; ended over a day ago dropped. Reminders: runContestReminders
 //  scmSimcoSummary:<realm>   {at, rows:[{date,activeCompanies,companiesValue,totalBuildings,bondsSold,phase}]} oldest first, 100 days, daily
 //  scmSimcoBuildingStats:<realm> {at, total, rows:[[id,count,proportion]]}                    count of each building type in the realm, daily
+//  scmSimcoCertKinds:<realm> {at, kinds:[{kind,relevant,resources:[resourceId]}]}           certificate kind catalogue, daily (100 kinds, 200 resources each)
+//  scmSimcoCertHolders:<realm> {at, byKind:{[kind]:{at,total,rows:[[companyId,companyName,resourceKind,certInfo,date]]}}}
+//                            page 1 (newest 100) of a kind that covers a product the user makes or holds; one kind per firing,
+//                            each kind once a day, at most 6 kinds a day / stored. certInfo {amount,datetime}|null, date {w,m,y} raw numbers
+//  scmSimcoExecLookup:<realm> {[nameLower|position]:{at,rows:[{id,name,age,position,employerId,employerName}]}}
+//                            on-demand executive name search (SCM_SIMCO_EXEC_LOOKUP), 20 searches x 20 rows, reused for 24 h
 //  scmSimcoBuildings       {at, byId:{[kind]:{costUnits,buildDuration /*s*/}}}            list once a day, then one building per slot
 //  scmSimcoBuildingsMeta     {listAt, ids:[...], entryAt:{[id]:ms}, missing:{[id]:ms}}       progress of the buildings round
 //  scmSimcoResources         {at, phase, byId}                                                once a day; never written into scmGameConstants
@@ -5886,11 +5909,12 @@ const simcoPricesMemo=new Map();
 // Every write of the keys above goes through this one tail (read-modify-write of the buildings merge included).
 // A run that started before Clear data writes nothing (its answer would bring cleared data back).
 let simcoPublicGen=null;
-function simcoPublicWrite(fn){const gen=simcoPublicGen;const run=simcoPublicWriteTail.then(()=>gen!=null&&gen!==extensionClearGeneration?null:fn());simcoPublicWriteTail=run.catch(()=>{});return run;}
+function simcoPublicWrite(fn,genArg){const gen=genArg!==undefined?genArg:simcoPublicGen;const run=simcoPublicWriteTail.then(()=>gen!=null&&gen!==extensionClearGeneration?null:fn());simcoPublicWriteTail=run.catch(()=>{});return run;}
 const simcoPricesKey=r=>`scmSimcoPrices:${r}`,simcoGovOrdersKey=r=>`scmSimcoGovOrders:${r}`;
 const simcoPhasesKey=r=>`scmSimcoPhases:${r}`,simcoEventsKey=r=>`scmSimcoEvents:${r}`,simcoCompanyKey=r=>`scmSimcoCompany:${r}`;
 const simcoGovHistoryKey=r=>`scmSimcoGovHistory:${r}`,simcoRankingKey=r=>`scmSimcoRanking:${r}`,simcoContestsKey=r=>`scmSimcoContests:${r}`;
 const simcoSummaryKey=r=>`scmSimcoSummary:${r}`,simcoBuildingStatsKey=r=>`scmSimcoBuildingStats:${r}`;
+const simcoCertKindsKey=r=>`scmSimcoCertKinds:${r}`,simcoCertHoldersKey=r=>`scmSimcoCertHolders:${r}`,simcoExecLookupKey=r=>`scmSimcoExecLookup:${r}`;
 async function simcoPublicGet(defaults){try{return await chrome.storage.local.get(defaults);}catch{return {...defaults};}}
 function simcoAgeOk(at,maxAgeMs,now=Date.now()){const t=Number(at);return Number.isFinite(t)&&t>0&&now-t<maxAgeMs;}
 // Stored SimcoTools prices of a realm ({at,rows}) or null. Only this file writes the key, so the memo is set on write.
@@ -5905,7 +5929,9 @@ async function simcoPricesFor(realm){
 // Bounded storage: every stored SimcoTools answer is capped in rows and string length, and a body over 2 MB is
 // never parsed (simcoPublicParse). Only the documented fields are kept.
 const SIMCO_MAX_BODY_CHARS=2*1024*1024;
-const SIMCO_CAP={prices:5000,govOrders:200,govOrderResources:20,buildingIds:500,resources:1000,inputs:50,retailInfo:20,text:80,iso:40,events:100,phaseRanges:30,companyRows:120,rankingRows:11,rankingScan:500,summaryRows:100,buildingStats:200,contests:20,govHistory:300,govHistoryNames:200};
+const SIMCO_CAP={prices:5000,govOrders:200,govOrderResources:20,buildingIds:500,resources:1000,inputs:50,retailInfo:20,text:80,iso:40,events:100,phaseRanges:30,companyRows:120,rankingRows:11,rankingScan:500,summaryRows:100,buildingStats:200,contests:20,govHistory:300,govHistoryNames:200,
+  // certResources 200 (not 50): kind 41 (PRODUCER) lists ~140 resources; a cut list would hide most of the user's products.
+  certKinds:100,certResources:200,certKindsPerDay:6,certHolderRows:100,execLookup:20,execRows:20,productIds:500};
 const SIMCO_RETAIL_FIELDS=['quality','buildingLevelsNeededPerUnitPerHour','modeledProductionCostPerUnit','modeledStoreWages','modeledUnitsSoldAnHour','retailModelingQualityWeight','profitPerBuildingLevel','retailAdjustment','averagePrice','saturation','salesWages'];
 // Control characters become spaces, then trimmed, then capped (every stored SimcoTools string goes through this).
 const simcoText=(v,n=SIMCO_CAP.text)=>String(v??'').replace(/[\u0000-\u001f\u007f]/g,' ').trim().slice(0,n);
@@ -6184,8 +6210,110 @@ function simcoContestsDue(g,realm,ctx,now){
 }
 function simcoSummariesDue(g,realm,ctx,now){return !simcoPassiveFresh(ctx?.summariesPassiveAt,SIMCO_DAILY_MAX_AGE_MS,now)&&simcoDailyStale(g?.[simcoSummaryKey(realm)],now);}
 function simcoBuildingStatsDue(g,realm,ctx,now){return !simcoPassiveFresh(ctx?.buildingStatsPassiveAt,SIMCO_DAILY_MAX_AGE_MS,now)&&simcoDailyStale(g?.[simcoBuildingStatsKey(realm)],now);}
+// --- Certificates (build 3b) ---
+const simcoSmallInt=(v,max)=>{const n=simcoNumOrNull(v);return Number.isSafeInteger(n)&&n>=0&&n<=max?n:null;};
+// GET /certificates -> {certificates_kinds:[{kind, relevant, resources?:[resourceId]}], realm} (page_size is ignored; a
+// catalogue). One entry per kind (first wins), 100 kinds, 200 resources each. null = no list (garbage).
+function simcoCertKindsFromResponse(data){
+  const list=simcoListOf(data,'certificates_kinds','certificatesKinds','kinds','results');if(!list)return null;const out=[],seen=new Set();
+  for(const x of list.slice(0,SIMCO_CAP.rankingScan)){if(out.length>=SIMCO_CAP.certKinds)break;if(!x||typeof x!=='object')continue;
+    const kind=simcoSmallInt(x.kind,9999);if(kind==null||seen.has(kind))continue;seen.add(kind);
+    const res=[...new Set((Array.isArray(x.resources)?x.resources:[]).slice(0,SIMCO_CAP.rankingScan).map(Number).filter(n=>Number.isSafeInteger(n)&&n>0&&n<1e6))].slice(0,SIMCO_CAP.certResources);
+    out.push({kind,relevant:x.relevant===true,resources:res});}
+  return out;
+}
+// certInfo as given ({amount, datetime}) compacted; a string is cut to 80 chars; anything else null.
+function simcoCertInfo(v){
+  if(typeof v==='string'){const s=simcoText(v);return s||null;}
+  if(!v||typeof v!=='object'||Array.isArray(v))return null;
+  const o={amount:simcoNumOrNull(v.amount),datetime:simcoIso(v.datetime)};return o.amount==null&&o.datetime==null?null:o;
+}
+// The certificate date as the raw numbers given ({week?, month, year}); never turned into a calendar date. null = none.
+function simcoCertDate(v){
+  if(!v||typeof v!=='object'||Array.isArray(v))return null;
+  const o={w:simcoSmallInt(v.week??v.w,60),m:simcoSmallInt(v.month??v.m,13),y:simcoSmallInt(v.year??v.y,9999)};
+  return o.w==null&&o.m==null&&o.y==null?null:o;
+}
+// GET /certificates/<kind> -> {certificates:[{id,companyId,companyName,certInfo,date,resourceKind}], metadata:{totalRecords}}.
+// {total, rows:[[companyId,companyName,resourceKind,certInfo,date]]} (100 rows) or null (no list).
+function simcoCertHoldersFromResponse(data){
+  const list=simcoListOf(data,'certificates','results','items','rows');if(!list)return null;const rows=[];
+  for(const x of list.slice(0,SIMCO_CAP.rankingScan)){if(rows.length>=SIMCO_CAP.certHolderRows)break;if(!x||typeof x!=='object')continue;
+    const cid=simcoSafeCompanyId(x.companyId??x.company?.id);if(!cid)continue;const rk=simcoSmallInt(x.resourceKind??x.resource,1e6);
+    rows.push([cid,simcoText(x.companyName??x.company?.name),rk,simcoCertInfo(x.certInfo),simcoCertDate(x.date)]);}
+  const m=data&&typeof data==='object'&&!Array.isArray(data)?data:{};
+  const t=simcoNumOrNull(m.metadata?.totalRecords??m.metadata?.total??m.total);
+  return {total:Number.isSafeInteger(t)&&t>=0?t:rows.length,rows};
+}
+// Resource ids the user makes or holds (storage only): warehouse rows with stock, production plans, running buildings.
+function simcoProductIds(store){
+  const ids=new Set(),add=v=>{if(ids.size>=SIMCO_CAP.productIds)return;const n=Number(v&&typeof v==='object'?(v.kind??v.resourceId??v.id):v);if(Number.isSafeInteger(n)&&n>0&&n<1e6)ids.add(n);};
+  for(const row of Array.isArray(store?.warehouseResources)?store.warehouseResources:[]){if(!row||typeof row!=='object')continue;const q=Number(row.amount??row.quantity);if(Number.isFinite(q)&&q<=0)continue;add(row.kind??row.resourceId??row.id);}
+  for(const p of Object.values(store?.productionPlans&&typeof store.productionPlans==='object'?store.productionPlans:{}))add(p?.productId??p?.resourceId);
+  for(const b of Array.isArray(store?.buildings)?store.buildings:[])add(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId);
+  return [...ids];
+}
+// Kinds whose resource list holds one of the products: relevant kinds first, then catalogue order; at most 6.
+function simcoCertKindsForProducts(kinds,productIds){
+  const want=new Set((Array.isArray(productIds)?productIds:[...(productIds||[])]).map(Number));if(!want.size)return [];
+  const hit=(Array.isArray(kinds)?kinds:[]).filter(k=>k&&Array.isArray(k.resources)&&k.resources.some(r=>want.has(Number(r))));
+  return [...hit.filter(k=>k.relevant===true),...hit.filter(k=>k.relevant!==true)].map(k=>k.kind).slice(0,SIMCO_CAP.certKindsPerDay);
+}
+function simcoCertKindsDue(g,realm,ctx,now){return !simcoPassiveFresh(ctx?.certKindsPassiveAt,SIMCO_DAILY_MAX_AGE_MS,now)&&simcoDailyStale(g?.[simcoCertKindsKey(realm)],now);}
+// The kind to read this firing, or null: a kind of the user's products whose copy is a day old, while fewer than 6 kinds were
+// read in the last 24 h. ctx.certHoldersPassiveAt: hook for a game page that gives the same data (none known yet).
+function simcoCertHoldersDue(g,realm,ctx,now){
+  if(!Array.isArray(ctx?.productIds)||!ctx.productIds.length)return null;
+  if(simcoPassiveFresh(ctx?.certHoldersPassiveAt,SIMCO_DAILY_MAX_AGE_MS,now))return null;
+  const cat=g?.[simcoCertKindsKey(realm)];const want=simcoCertKindsForProducts(cat?.kinds,ctx.productIds);if(!want.length)return null;
+  const by=g?.[simcoCertHoldersKey(realm)]?.byKind;const byKind=by&&typeof by==='object'?by:{};
+  const readToday=Object.values(byKind).filter(v=>simcoAgeOk(v?.at,SIMCO_DAILY_MAX_AGE_MS,now)).length;
+  if(readToday>=SIMCO_CAP.certKindsPerDay)return null;
+  const k=want.find(kind=>simcoDailyStale(byKind[kind],now));return k==null?null:k;
+}
+// The user's own certificates from the game's own page (GET /api/v2/companies/<id>/certificates/ -> {certificates:[{kind,
+// resourceKind,amount,level,date,yearStarted}]}), captured by the page hook. Storage only. {at, items:[{kind,resourceKind}]}
+// from the newest 2xx capture of that company (any company id when companyId is 0), or null when not captured.
+function ownCertificatesFromCapture(endpointData,companyId){
+  const ed=endpointData&&typeof endpointData==='object'?endpointData:{},cid=simcoSafeCompanyId(companyId);let best=null,bestAt=-1;
+  for(const [u,v] of Object.entries(ed)){const m=/\/api\/v2\/companies\/(\d+)\/certificates\/?(\?.*)?$/i.exec(String(u||''));if(!m)continue;
+    if(cid&&Number(m[1])!==cid)continue;const s=Number(v?.status||200);if(!(s>=200&&s<300)||v?.data==null)continue;
+    const at=Date.parse(String(v?.receivedAt||''))||0;if(at>bestAt){bestAt=at;best=v;}}
+  if(!best)return null;const list=simcoListOf(best.data,'certificates','results');if(!list)return null;const items=[],seen=new Set();
+  for(const x of list.slice(0,SIMCO_CAP.rankingScan)){if(!x||typeof x!=='object')continue;const kind=simcoSmallInt(x.kind,9999);if(kind==null)continue;
+    const resourceKind=simcoSmallInt(x.resourceKind??x.resource,1e6);const key=`${kind}:${resourceKind}`;if(seen.has(key))continue;seen.add(key);items.push({kind,resourceKind});}
+  return {at:bestAt>0?bestAt:0,items};
+}
+// --- Executives name lookup (build 3b, on demand) ---
+const SIMCO_EXEC_POSITIONS=new Set(['coo','cfo','cmo','cto','staff']);
+const SIMCO_EXEC_LOOKUP_MAX_AGE_MS=24*3600000;
+// GET /executives?name= -> {executives:[{id,name,age,position,currentEmployer:{id,name}|null}], metadata}. 20 rows or null.
+function simcoExecutivesFromResponse(data){
+  const list=simcoListOf(data,'executives','results','items','rows');if(!list)return null;const out=[],seen=new Set();
+  for(const x of list.slice(0,SIMCO_CAP.rankingScan)){if(out.length>=SIMCO_CAP.execRows)break;if(!x||typeof x!=='object')continue;
+    const id=simcoSafeCompanyId(x.id);if(!id||seen.has(id))continue;seen.add(id);
+    const e=x.currentEmployer&&typeof x.currentEmployer==='object'?x.currentEmployer:null,age=simcoSmallInt(x.age,200);
+    const pos=typeof x.position==='string'?x.position.trim().toLowerCase():'';
+    out.push({id,name:simcoText(x.name),age,position:/^[a-z]{1,12}$/.test(pos)?pos:null,employerId:simcoSafeCompanyId(e?.id)||null,employerName:e?simcoText(e.name)||null:null});}
+  return out;
+}
+// {name, position, key} of a valid search, or {error}. name: a string, trimmed 2-40 chars, no control characters.
+function simcoExecLookupQuery(m){
+  if(typeof m?.name!=='string')return {error:'Type a name (2-40 letters).'};
+  const name=m.name.trim();if(name.length<2||name.length>40||/[\u0000-\u001f\u007f]/.test(name))return {error:'Type a name (2-40 letters).'};
+  const p=m.position==null||m.position===''?'':typeof m.position==='string'?m.position.trim().toLowerCase():null;
+  if(p==null||(p&&!SIMCO_EXEC_POSITIONS.has(p)))return {error:'Unknown position.'};
+  return {name,position:p||null,key:`${name.toLowerCase()}|${p}`};
+}
+// Cache with the entry put in; the 20 newest searches kept.
+function simcoExecLookupCachePut(cache,key,entry){
+  const c=cache&&typeof cache==='object'&&!Array.isArray(cache)?{...cache}:{};delete c[key];
+  const keep=Object.entries(c).filter(([,v])=>v&&typeof v==='object').sort((a,b)=>(Number(b[1].at)||0)-(Number(a[1].at)||0)).slice(0,SIMCO_CAP.execLookup-1);
+  return Object.fromEntries([...keep,[key,entry]]);
+}
 // The one job this firing runs, or null. Priority: prices, gov orders, phases, events, buildings list, resources,
-// company history, ranking, contests, realm summaries, building counts, one building. ctx = {companyId, eventsPassiveAt,
+// company history, ranking, contests, realm summaries, building counts, certificate kinds, certificate holders (one kind of the
+// user's products, ctx.productIds), one building. ctx = {companyId, productIds, eventsPassiveAt,
 // phasePassiveAt, govPassiveAt} (runSimcoPublicData builds it from the realm store); a call without ctx (older callers) never
 // picks the phases / events / company / ranking / contests / summaries / building-stats jobs. Gov orders with ctx: not read
 // while the game's own list is under 1 h old.
@@ -6204,6 +6332,8 @@ function simcoPublicPickJob(g,realm,now=Date.now(),ctx=null){
   if(withCtx&&simcoContestsDue(g,realm,ctx,now))return {job:'contests'};
   if(withCtx&&simcoSummariesDue(g,realm,ctx,now))return {job:'summaries'};
   if(withCtx&&simcoBuildingStatsDue(g,realm,ctx,now))return {job:'building-stats'};
+  if(withCtx&&simcoCertKindsDue(g,realm,ctx,now))return {job:'cert-kinds'};
+  if(withCtx){const kind=simcoCertHoldersDue(g,realm,ctx,now);if(kind!=null)return {job:'cert-holders',kind};}
   const id=simcoNextBuildingId(meta,now);
   return id?{job:'building',id}:null;
 }
@@ -6414,6 +6544,81 @@ async function simcoPublicBuildingStats(realm,t0,trigger){
   simcoPublicLog(realm,job,'success',{rows:s.rows.length},null,t0,trigger);
   return {ok:true,rows:s.rows.length};
 }
+async function simcoPublicCertKinds(realm,t0,trigger){
+  const job='simcotools-cert-kinds',resp=await simcoPublicFetch(`${SIMCO_API}/realms/${realm}/certificates?page_size=100`);
+  if(!resp?.ok)return {ok:false,outcome:simcoPublicMiss(realm,job,resp,t0,trigger)};
+  const p=simcoPublicParse(resp.text);if(p.tooLarge)return simcoPublicTooLarge(realm,job,p,t0,trigger);
+  const kinds=simcoCertKindsFromResponse(p.data);
+  if(!kinds?.length){simcoPublicLog(realm,job,'failure',{status:resp.status},'SimcoTools returned no certificate kinds; the stored list stays',t0,trigger);return {ok:false,outcome:'failure'};}
+  const w=await simcoPublicWrite(async()=>{await rawStorageSet({[simcoCertKindsKey(realm)]:{at:Date.now(),kinds}});return true;});
+  if(!w)return {ok:false,cleared:true};
+  simcoPublicLog(realm,job,'success',{rows:kinds.length},null,t0,trigger);
+  return {ok:true,rows:kinds.length};
+}
+// Page 1 of one kind. 404 = no holders (stored empty, not asked again for a day). Only the 6 newest kinds are kept.
+async function simcoPublicCertHolders(realm,kind,t0,trigger){
+  const job='simcotools-cert-holders',k=simcoSmallInt(kind,9999);
+  if(k==null){simcoPublicLog(realm,job,'failure',{kind:String(kind).slice(0,12)},'Bad certificate kind',t0,trigger);return {ok:false,outcome:'failure'};}
+  const resp=await simcoPublicFetch(`${SIMCO_API}/realms/${realm}/certificates/${String(k)}?page_size=100`);const status=Number(resp?.status)||0;
+  if(!resp?.ok&&status!==404)return {ok:false,outcome:simcoPublicMiss(realm,job,resp,t0,trigger,{kind:k})};
+  const p=resp?.ok?simcoPublicParse(resp.text):null;if(p?.tooLarge)return simcoPublicTooLarge(realm,job,p,t0,trigger,{kind:k});
+  const h=p?simcoCertHoldersFromResponse(p.data):{total:0,rows:[]};
+  if(!h){simcoPublicLog(realm,job,'failure',{kind:k,status},'SimcoTools returned no certificate list; the stored holders stay',t0,trigger);return {ok:false,outcome:'failure'};}
+  const key=simcoCertHoldersKey(realm);
+  const w=await simcoPublicWrite(async()=>{
+    const cur=(await simcoPublicGet({[key]:null}))[key];const prev=cur?.byKind&&typeof cur.byKind==='object'?cur.byKind:{};const now=Date.now();
+    const keep=Object.entries(prev).filter(([kk,v])=>String(kk)!==String(k)&&v&&typeof v==='object').sort((a,b)=>(Number(b[1].at)||0)-(Number(a[1].at)||0)).slice(0,SIMCO_CAP.certKindsPerDay-1);
+    await rawStorageSet({[key]:{at:now,byKind:Object.fromEntries([...keep,[String(k),{at:now,total:h.total,rows:h.rows}]])}});return true;});
+  if(!w)return {ok:false,cleared:true};
+  simcoPublicLog(realm,job,status===404?'skipped':'success',{kind:k,rows:h.rows.length,total:h.total},status===404?`No holders of certificate ${k} on SimcoTools (404)`:null,t0,trigger);
+  return {ok:true,kind:k,rows:h.rows.length};
+}
+// Executive name search (SCM_SIMCO_EXEC_LOOKUP). On demand, ONE request through the shared gate; the same search within
+// 24 h is answered from scmSimcoExecLookup:<realm>. No request during a Sync ({busy}), a 429 cooldown or while the gate is
+// closed ({limited, retryAt}); lookups at least SIMCO_EXEC_LOOKUP_GAP_MS apart (no burst from repeated clicks). A running
+// request (lookup or alarm job) is never interrupted. A lookup started before Clear data writes nothing.
+// Lookups run one at a time (promise tail). The gap slot is reserved (memory at once, then storage.session so a worker
+// restart keeps it) only when a request will be made; a cache hit or a refusal uses no slot. A request simcoFetch did not
+// send (gate / cooldown: skipped) gives the slot back; a sent request keeps it whatever its answer.
+const SIMCO_EXEC_LOOKUP_GAP_MS=30000,SIMCO_EXEC_LOOKUP_GAP_KEY='scmSimcoExecLookupGap';
+let simcoExecLookupLastAt=null,simcoExecLookupTail=Promise.resolve();
+async function simcoExecLookupGapLoad(){
+  if(simcoExecLookupLastAt!=null)return simcoExecLookupLastAt;
+  let v=0;try{if(chrome.storage?.session)v=Number((await chrome.storage.session.get(SIMCO_EXEC_LOOKUP_GAP_KEY))?.[SIMCO_EXEC_LOOKUP_GAP_KEY]?.lastAt)||0;}catch{}
+  if(simcoExecLookupLastAt==null)simcoExecLookupLastAt=v;return simcoExecLookupLastAt;
+}
+async function simcoExecLookupGapSave(at){simcoExecLookupLastAt=at;try{if(chrome.storage?.session)await chrome.storage.session.set({[SIMCO_EXEC_LOOKUP_GAP_KEY]:{lastAt:at}});}catch{}}
+function simcoExecLookup(m){const run=simcoExecLookupTail.then(()=>simcoExecLookupRun(m));simcoExecLookupTail=run.catch(()=>{});return run;}
+async function simcoExecLookupRun(m){
+  const q=simcoExecLookupQuery(m);if(q.error)return {ok:false,error:q.error};
+  const gen=extensionClearGeneration;
+  const realm=validRealmNumber(m?.realm)??await activeRealmNumber();if(realm==null)return {ok:false,error:'Pick a realm first.'};
+  const key=simcoExecLookupKey(realm),now=Date.now();
+  const cache=(await simcoPublicGet({[key]:null}))[key];const hit=cache&&typeof cache==='object'?cache[q.key]:null;
+  if(hit&&Array.isArray(hit.rows)&&simcoAgeOk(hit.at,SIMCO_EXEC_LOOKUP_MAX_AGE_MS,now))return {ok:true,cached:true,realm,at:Number(hit.at),rows:hit.rows};
+  if(coreSyncActive()||realmSyncSessions.size>0)return {ok:false,busy:true};
+  await hydrateSimcoCooldowns();
+  const gateAt=(await simcoGateNextAt())||0,lastAt=await simcoExecLookupGapLoad(),t=Date.now();
+  const waitUntil=Math.max(simcoRateLimitUntil,gateAt,lastAt?lastAt+SIMCO_EXEC_LOOKUP_GAP_MS:0);
+  if(waitUntil>t)return {ok:false,limited:true,retryAt:new Date(waitUntil).toISOString()};
+  simcoExecLookupLastAt=t;await simcoExecLookupGapSave(t);
+  const t0=Date.now(),job='simcotools-exec-lookup';
+  const url=`${SIMCO_API}/realms/${realm}/executives?name=${encodeURIComponent(q.name)}&page_size=${SIMCO_CAP.execRows}${q.position?`&position=${encodeURIComponent(q.position)}`:''}`;
+  const resp=await simcoPublicFetch(url);
+  // Not sent (gate / cooldown): the slot goes back.
+  if(resp?.skipped&&simcoExecLookupLastAt===t)await simcoExecLookupGapSave(lastAt);
+  if(!resp?.ok){const outcome=simcoPublicMiss(realm,job,resp,t0,'manual',{position:q.position});
+    if(outcome==='not-read'||outcome==='rate-limited')return {ok:false,limited:true,retryAt:resp?.retryAt||new Date(Date.now()+SIMCOTOOLS_DEFAULT_RATE_LIMIT_COOLDOWN_MS).toISOString()};
+    return {ok:false,error:resp?.error||`HTTP ${Number(resp?.status)||0} from SimcoTools`};}
+  const p=simcoPublicParse(resp.text);if(p.tooLarge){simcoPublicTooLarge(realm,job,p,t0,'manual');return {ok:false,error:'SimcoTools answer too large'};}
+  const rows=simcoExecutivesFromResponse(p.data);
+  if(!rows){simcoPublicLog(realm,job,'failure',{status:resp.status},'SimcoTools returned no executives list',t0,'manual');return {ok:false,error:'SimcoTools returned no executives list'};}
+  const at=Date.now();
+  const w=await simcoPublicWrite(async()=>{const cur=(await simcoPublicGet({[key]:null}))[key];await rawStorageSet({[key]:simcoExecLookupCachePut(cur,q.key,{at,rows})});return true;},gen);
+  if(!w)return {ok:false,cleared:true};
+  simcoPublicLog(realm,job,'success',{rows:rows.length,position:q.position},rows.length?null:'0 executives found',t0,'manual');
+  return {ok:true,cached:false,realm,at,rows};
+}
 // The SimcoTools company-history line when no company id is known: at most once an hour (no request is made).
 let simcoCompanyNoIdLogAt=0;
 // ctx for simcoPublicPickJob from the realm store (storage only): company id and when the game's pages last gave phases / events.
@@ -6423,7 +6628,8 @@ async function simcoPublicContext(realm,economyLog){
   const captured=capturedCompanyIdForRealm(store,realm);
   const companyId=captured>0?captured:(ar==null||ar===realm?simcoSafeCompanyId(ac?.companyId??ac?.id):0);
   // govPassiveAt: the game's own gov-orders list; rankingPassiveAt: a game ranking page holding the company (both captured only).
-  return {companyId,...simcoPublicPassive(store,realm,economyLog),govPassiveAt:simcoGovPassiveAt(store,realm),rankingPassiveAt:simcoGameRankingPassiveAt(store,realm,companyId)};
+  // productIds: what the user makes or holds (certificate holders job; empty = no holders job).
+  return {companyId,productIds:simcoProductIds(store),...simcoPublicPassive(store,realm,economyLog),govPassiveAt:simcoGovPassiveAt(store,realm),rankingPassiveAt:simcoGameRankingPassiveAt(store,realm,companyId)};
 }
 async function runSimcoPublicData(trigger='alarm'){
   if(simcoPublicRun)return simcoPublicRun;
@@ -6441,11 +6647,11 @@ async function runSimcoPublicData(trigger='alarm'){
     if(await simcoGateNextAt())return {ok:true,skipped:true,reason:'simcotools-gap'};
     const realm=await activeRealmNumber();
     const keys={scmSimcoBuildingsMeta:null,scmSimcoResources:null,scmSimcoResourcesRetry:null};
-    if(realm!=null){for(const k of [simcoPricesKey(realm),simcoGovOrdersKey(realm),simcoPhasesKey(realm),simcoEventsKey(realm),simcoCompanyKey(realm),simcoRankingKey(realm),simcoContestsKey(realm),simcoSummaryKey(realm),simcoBuildingStatsKey(realm)])keys[k]=null;keys[`scmEconomyStateLog:${realm}`]=[];}
+    if(realm!=null){for(const k of [simcoPricesKey(realm),simcoGovOrdersKey(realm),simcoPhasesKey(realm),simcoEventsKey(realm),simcoCompanyKey(realm),simcoRankingKey(realm),simcoContestsKey(realm),simcoSummaryKey(realm),simcoBuildingStatsKey(realm),simcoCertKindsKey(realm),simcoCertHoldersKey(realm)])keys[k]=null;keys[`scmEconomyStateLog:${realm}`]=[];}
     const g=await simcoPublicGet(keys);
     const ctx=realm!=null?await simcoPublicContext(realm,g[`scmEconomyStateLog:${realm}`]):null;
     const due=simcoPublicPickJob(g,realm,Date.now(),ctx);
-    if(ctx&&(!due||['building','ranking','contests','summaries','building-stats'].includes(due.job))&&simcoCompanyDue(g,realm,ctx,Date.now())==='no-id'&&Date.now()-simcoCompanyNoIdLogAt>=3600000){
+    if(ctx&&(!due||['building','ranking','contests','summaries','building-stats','cert-kinds','cert-holders'].includes(due.job))&&simcoCompanyDue(g,realm,ctx,Date.now())==='no-id'&&Date.now()-simcoCompanyNoIdLogAt>=3600000){
       simcoCompanyNoIdLogAt=Date.now();simcoPublicLog(realm,'simcotools-company','not-read',{},'Not read: no company id yet (open the game once)',Date.now(),trigger);}
     if(!due)return {ok:true,skipped:true,reason:'all-fresh'};
     if(coreSyncActive())return {ok:true,skipped:true,reason:'sync'};
@@ -6461,6 +6667,8 @@ async function runSimcoPublicData(trigger='alarm'){
     if(due.job==='contests'){const r=await simcoPublicContests(realm,t0,trigger);if(r?.ok)await runContestReminders(realm).catch(()=>{});return {job:due.job,...r};}
     if(due.job==='summaries')return {job:due.job,...(await simcoPublicSummaries(realm,t0,trigger))};
     if(due.job==='building-stats')return {job:due.job,...(await simcoPublicBuildingStats(realm,t0,trigger))};
+    if(due.job==='cert-kinds')return {job:due.job,...(await simcoPublicCertKinds(realm,t0,trigger))};
+    if(due.job==='cert-holders')return {job:due.job,...(await simcoPublicCertHolders(realm,due.kind,t0,trigger))};
     return {job:due.job,...(await simcoPublicBuilding(realm,due.id,t0,trigger))};
   })().catch(e=>{logError('simcotools-public',e);return {ok:false,error:e?.message||String(e)};}).finally(()=>{simcoPublicRun=null;});
   return simcoPublicRun;
@@ -6677,7 +6885,7 @@ async function fetchAndCacheResourceImage(id,{forceValidate=false,batch=null}={}
     if(!batch?.workerError){
       try{
         if(batch?.pace)await batch.pace();
-        const r=await fetch(safeUrl,{cache:'no-store',credentials:'omit'});
+        const r=await fetch(safeUrl,{cache:'no-store',credentials:'omit'}).finally(()=>{if(batch)batch.lastFetchAt=Date.now();});
         if(!r.ok){const he=new Error(`Image HTTP ${r.status}`);he.status=r.status;throw he;}
         mime=(r.headers.get('content-type')||'image/png').split(';')[0].trim().toLowerCase();
         if(!RESOURCE_IMAGE_MIME_RE.test(mime))throw Object.assign(new Error(`Image type not allowed (${mime}).`),{status:r.status});
@@ -6689,7 +6897,7 @@ async function fetchAndCacheResourceImage(id,{forceValidate=false,batch=null}={}
     if(!bytes){
       // Through the game tab. No tab / bridge not ready / page closed: the rest of the batch does not wait on it again.
       if(batch?.pageError)throw new Error(`${workerError}; game tab: ${batch.pageError}`);
-      try{if(batch?.pace)await batch.pace();const p=await pageImageGet(safeUrl,batch?()=>batch.pageError:null);mime=p.mime;bytes=p.bytes;}
+      try{if(batch?.pace)await batch.pace();const p=await pageImageGet(safeUrl,batch?()=>batch.pageError:null).finally(()=>{if(batch)batch.lastFetchAt=Date.now();});mime=p.mime;bytes=p.bytes;}
       catch(pe){const t=pe?.message||String(pe);if(batch&&pageBridgeUnavailable(pe))batch.pageError=t;throw new Error(`${workerError}; game tab: ${t}`);}
     }
     const hash=await sha256Bytes(bytes);
@@ -6755,7 +6963,7 @@ async function syncAllResourceImagesOnce({forceValidate=false,trigger=null}={}){
   const s0=await state();const catalog=(base.key&&s0.realmStores?.[base.key]?.resourceCatalog)||s0.resourceCatalog||{};
   const batch={base,catalog,captured:capturedResourceImages(base.key&&s0.realmStores?.[base.key]),constantsImages:await constantsResourceImages(),cache:{},meta:{},workerError:null,pageError:null};
   // 2.5.458: never a burst. Only images missing from the cache or older than the TTL (forced weekly check: older than
-  // RESOURCE_IMAGE_VALIDATE_EVERY_MS) are read, ONE at a time, at least RESOURCE_IMAGE_FETCH_GAP_MS between requests
+  // RESOURCE_IMAGE_VALIDATE_EVERY_MS) are read, ONE at a time, at least RESOURCE_IMAGE_FETCH_GAP_MS from the end of one request to the start of the next
   // (batch.pace), at most RESOURCE_IMAGE_MAX_FETCHES_PER_RUN requests per run; the rest wait for the next run. Stops
   // when a Sync starts. The 403/503 stop of the worker fetch (batch.workerError) is unchanged.
   const ttl=forceValidate?RESOURCE_IMAGE_VALIDATE_EVERY_MS:RESOURCE_IMAGE_CACHE_TTL_MS,nowMs=Date.now();
@@ -7871,6 +8079,26 @@ function extraPageVisitNeedsWarning(page,extra){
   const paths=page?.paths||[],reads=extra?.paths||[];
   return !(paths.length>0&&reads.length===paths.length&&reads.every(r=>r.ok&&r.valid&&!r.walkedPath));
 }
+// A Sync that succeeded with failed trace steps (core-sync "partial"): the unique failed step types (max 10) and one
+// plain line naming them, e.g. "Sync finished; some steps failed: building enrichment (HTTP 403)". A step's HTTP
+// status is its own, else the last earlier status of the same step family (building-enrichment-api-failure → 403).
+// Pure (Node test syncPartialSummary.test.js).
+const SYNC_FAILED_STEP_RX=/failed|error|exception/i;
+function syncPartialSummary(trace){
+  const list=Array.isArray(trace)?trace:[];
+  const steps=[],seen=new Set();
+  list.forEach((x,i)=>{
+    const type=String(x?.type||'');if(!SYNC_FAILED_STEP_RX.test(type)||seen.has(type))return;
+    seen.add(type);
+    const family=type.replace(/-(?:failed|failure|error|exception)$/i,'');
+    let status=Number(x?.status||x?.answerStatus)||0;
+    for(let k=i-1;k>=0&&!status;k--){const y=list[k];if(String(y?.type||'').startsWith(`${family}-`))status=Number(y?.status||y?.answerStatus)||0;}
+    steps.push({type,name:family.replace(/[-_]+/g,' ').trim()||type,status});
+  });
+  if(!steps.length)return {failedSteps:[],error:null};
+  const shown=steps.slice(0,3).map(s=>s.status?`${s.name} (HTTP ${s.status})`:s.name).join(', ');
+  return {failedSteps:steps.slice(0,10).map(s=>s.type),error:`Sync finished; some steps failed: ${shown}${steps.length>3?`; +${steps.length-3} more in the diagnostic`:''}`};
+}
 // One readable line per problem for the Sync status; the full list goes in the diagnostic.
 function syncWarningsSuffix(warnings){
   if(!warnings?.length)return '';
@@ -8900,13 +9128,14 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     if(ownsSyncSession && selected!=null){ realmSyncSessions.delete(selected); if(syncCaptureRealm===selected) syncCaptureRealm=null; scmMirrorSyncSessions(); }
     if(ownsSyncSession && selected!=null && !clearedDuringRun){
       const syncFinishedAt=new Date().toISOString();
-      const traceFailed=Array.isArray(syncTrace)&&syncTrace.some(x=>/failed|error|exception/i.test(String(x?.type||'')));
+      const traceFailed=Array.isArray(syncTrace)&&syncTrace.some(x=>SYNC_FAILED_STEP_RX.test(String(x?.type||'')));
+      const partial=syncCoreSucceeded&&traceFailed?syncPartialSummary(syncTrace):null;
       const syncFailError=syncCoreSucceeded?null:([...syncTrace].reverse().find(x=>/sync-exception|sync-failed/i.test(String(x?.type||'')))?.error||null);
       if(!syncCoreSucceeded)syncRetrySkip=syncAutoRetrySkipReason({error:syncFailError,blocked:await directReadsBlockedNow(),backoff:lastGameBackoffAnswer,startedAt});
       // A transient failure (no answer / timeout) that gets the automatic retry below is "retrying", not a failure;
       // the retry run (wasAutoRetry) logs failure if it fails too. A failure the game pushed back on is a failure.
       const coreOutcome=syncCoreSucceeded?(traceFailed?'partial':'success'):(!syncRetrySkip&&!syncAutoRetryRuns.has(selected)&&syncFailureIsTransient(syncFailError)?'retrying':'failure');
-      await recordBackgroundJobEvent(selected,{job:'core-sync',trigger:'manual-or-dashboard',startedAt:new Date(startedAt).toISOString(),finishedAt:syncFinishedAt,durationMs:Date.now()-startedAt,outcome:coreOutcome,requested:targets.length,fetched:0,refreshed:0,checked:targets.length,cached:0,stale:0,error:syncCoreSucceeded?null:([...syncTrace].reverse().find(x=>/sync-exception|sync-failed/i.test(String(x?.type||'')))?.error||null),details:{coreSyncSucceeded:Boolean(syncCoreSucceeded),traceEvents:syncTrace.length,targets:targets.map(t=>t.name)}}).catch(()=>{});
+      await recordBackgroundJobEvent(selected,{job:'core-sync',trigger:'manual-or-dashboard',startedAt:new Date(startedAt).toISOString(),finishedAt:syncFinishedAt,durationMs:Date.now()-startedAt,outcome:coreOutcome,requested:targets.length,fetched:0,refreshed:0,checked:targets.length,cached:0,stale:0,error:syncCoreSucceeded?(partial?.error||null):([...syncTrace].reverse().find(x=>/sync-exception|sync-failed/i.test(String(x?.type||'')))?.error||null),details:{coreSyncSucceeded:Boolean(syncCoreSucceeded),traceEvents:syncTrace.length,targets:targets.map(t=>t.name),...(partial?{failedSteps:partial.failedSteps}:{})}}).catch(()=>{});
     }
     if(syncCoreSucceeded && selected!=null){
       const scheduled=await scheduleMarketCycle(selected,'sync-complete').catch(e=>({ok:false,error:e?.message||String(e)}));
@@ -9588,7 +9817,7 @@ function scmSetTimers(patch,realmHint=null){
     if(changed.length){
       const stored=C.toStored(next);delete stored.timers.accountingWalk;
       // A value saved from here on is the player's own: the one-time liveMarket move (scmTimersConfig) never touches it.
-      await chrome.storage.local.set({[C.KEY]:stored,scmTimersMigrations:{liveMarket5:true,orderBook5:true}});scmTimersMemo=next;
+      await chrome.storage.local.set({[C.KEY]:stored,scmTimersMigrations:{liveMarket5:true,orderBook5:true}});scmTimersMemoGen++;scmTimersMemo=next;
       for(const id of changed){const t=C.byId[id];if(!t.alarmName)continue;
         try{await scmEnsureTimerAlarm(id,scmTimerLegacyInfo(id),'always');}catch(e){errors[id]=e?.message||String(e);}}
       if(changed.some(id=>C.byId[id].group==='Game page'))notifyGameTabsTimersChanged(next).catch(()=>{});
@@ -9618,7 +9847,7 @@ function scmSetTimers(patch,realmHint=null){
   scmTimersWriteTail=run.catch(()=>{});
   return run;
 }
-const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['SCM_GET_TIMERS','SCM_SET_TIMERS','RUN_SELF_TEST','PRUNE_STORAGE','SYNC_NOW','RUN_ACCOUNTING_WALK_NOW','RUN_JAVASCRIPT_DIAGNOSTIC','LIVE_MARKET_REFRESH','CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','GET_COMPANY_AUTH_DATA','GET_ERROR_LOG','GET_LIVE_BRIDGE_TOKEN','SCM_ENSURE_GAME_DATA','REFRESH_ACCOUNTING','REFRESH_ACCOUNTING_WEEK_LEDGER','PRICE_HISTORY','LIVE_MARKET_PRODUCT','FETCH_EXCHANGE_ORDER_BOOK','FETCH_BUILDING_HISTORY','GET_RESOURCE_IMAGE','SET_VIEW_REALM']);
+const SCM_PRIVILEGED_MESSAGE_TYPES=new Set(['SCM_SIMCO_EXEC_LOOKUP','SCM_GET_TIMERS','SCM_SET_TIMERS','RUN_SELF_TEST','PRUNE_STORAGE','SYNC_NOW','RUN_ACCOUNTING_WALK_NOW','RUN_JAVASCRIPT_DIAGNOSTIC','LIVE_MARKET_REFRESH','CLEAR_EXTENSION_DATA','IMPORT_CSV_STATEMENTS','IMPORT_CSV_LEDGER','SCM_NET3_START','SCM_NET3_STOP','SCM_NET3_EXPORT','SCM_MOBILE_NET_START','SCM_MOBILE_NET_STOP','SET_LIVE_BRIDGE','PUSH_LIVE_BRIDGE','SCM_NOTIFY_SETTINGS','SET_ACCOUNTING_WALK_SCHEDULE','SAVE_REALM_FIELD','SAVE_PRODUCTION_PLANNER_STATE','SAVE_SAVED_CONTRACT','SCM_TEST_NOTIFICATION','SCM_TEST_DAILY_SUMMARY','GET_COMPANY_AUTH_DATA','GET_ERROR_LOG','GET_LIVE_BRIDGE_TOKEN','SCM_ENSURE_GAME_DATA','REFRESH_ACCOUNTING','REFRESH_ACCOUNTING_WEEK_LEDGER','PRICE_HISTORY','LIVE_MARKET_PRODUCT','FETCH_EXCHANGE_ORDER_BOOK','FETCH_BUILDING_HISTORY','GET_RESOURCE_IMAGE','SET_VIEW_REALM']);
 // The last eight are sent by extension pages only (dashboard / tools); each starts game or SimcoTools reads or writes settings.
 // GET_STATE from a non-extension-page context (content script) never carries secrets.
 // NOTE (authData): authData is the game's /api/v3/companies/auth-data/ payload (company id/name, user/session
@@ -9641,6 +9870,9 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='RUN_SELF_TEST'){scmRunSelfTest({liveFetch:m.liveFetch!==false}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='GET_ERROR_LOG'){getErrorLog().then(log=>send({ok:true,log,version:BUILD_VERSION,at:new Date().toISOString()})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_CLEAR_ALERT_BADGE'){if(!scmIsExtensionPageSender(sender))return false;scmClearAlertBadge().then(()=>send({ok:true})).catch(()=>send({ok:false}));return true;}
+  // Executive name search (Executives tab): extension pages only; one SimcoTools request per new search.
+  if(m?.type==='SCM_SIMCO_EXEC_LOOKUP'){if(!scmIsExtensionPageSender(sender)){try{send({ok:false,error:'Not allowed from this context.'});}catch{}return false;}
+    simcoExecLookup(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_GET_TIMERS'){scmTimersView().then(v=>send({ok:true,...v})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_SET_TIMERS'){scmSetTimers(m.timers,m.realm).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SET_ACCOUNTING_WALK_SCHEDULE'){(async()=>{const realm=validRealmNumber(m.realm);const patch={enabled:Boolean(m.enabled),offsetMin:accountingWalkOffset(m.offsetMin),attempt:0,retryAt:null};if(realm!=null)patch.realm=realm;await writeAccountingWalkSchedule(patch);const r=await ensureAccountingWalkSchedule('user');return {...r,schedule:await readAccountingWalkSchedule()};})().then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
@@ -9693,7 +9925,9 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const outcomes=results.map(r=>r.status==='fulfilled'?r.value:{ok:false,error:r.reason?.message||String(r.reason)});
         if(outcomes.some(r=>r?.ok))scheduleGameOverlayRefreshNotification(realm,150);
         // One text per cause: under the direct-read block all three reads fail with the same notice.
-        const bad=outcomes.filter(r=>!r?.ok);
+        // A shared-lane wait (laneWait: no request made, the lane's next slot is later) is a planned skip, not a failure;
+        // counting it made the reply "<block notice> Refresh failed." and hid the block note on the card.
+        const bad=outcomes.filter(r=>!r?.ok&&!r?.laneWait);
         const errors=[...new Set(bad.map(r=>r?.error||'Refresh failed.'))];
         const directReadsBlocked=bad.length>0&&bad.every(r=>r?.directReadsBlocked);
         send({ok:errors.length===0,throttled:false,directReadsBlocked,error:directReadsBlocked?(bad[0]?.error||DIRECT_READS_BLOCKED_TEXT):errors.length?errors.join(' '):null});
@@ -10095,7 +10329,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         // storage.session: drop both, so the next read rechecks the block and the gate starts empty.
         directReadRecheckInFlight=false;await directReadBlockSet(null);
         {const run=simcoGateTail.then(async()=>{simcoGateMem=null;try{await chrome.storage.session?.remove(SIMCOTOOLS_GATE_KEY);}catch{}});simcoGateTail=run.catch(()=>{});await run.catch(()=>{});}
-        scmTimersMemo=null; // scmSyncTimers was cleared: every timer is back to its default
+        scmTimersMemoGen++;scmTimersMemo=null; // scmSyncTimers was cleared: every timer is back to its default
         simcoPricesMemo.clear(); // scmSimcoPrices:<n> was cleared
         realmStorageMigrationChecked=false;realmMigrationPromise=null;
         const resetDefaults={...DEFAULTS,selectedRealm:null,activeRealmKey:null,vwapStatus:{message:'Waiting for VWAP sync.'},marketQueueStatus:{message:'Waiting for the logged-in Sim Companies tab.',updatedAt:new Date().toISOString()},resourceImageData:{}};

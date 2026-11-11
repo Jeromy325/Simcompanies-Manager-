@@ -104,7 +104,10 @@
     'simcotools-ranking': 'SimcoTools realm ranking',
     'simcotools-contests': 'SimcoTools contests',
     'simcotools-summaries': 'SimcoTools realm summary',
-    'simcotools-building-stats': 'SimcoTools building counts'
+    'simcotools-building-stats': 'SimcoTools building counts',
+    'simcotools-cert-kinds': 'SimcoTools certificates',
+    'simcotools-cert-holders': 'SimcoTools certificates',
+    'simcotools-exec-lookup': 'SimcoTools executive search'
   };
   // Outcome words in the list (not-read reads as "not read").
   const OUTCOME = { 'not-read': 'not read', waiting: 'waiting' };

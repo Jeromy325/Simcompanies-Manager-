@@ -1843,3 +1843,32 @@ html.scm-mobile table.mobile-cards tr:has(>td[colspan]:only-child){border:0!impo
 .gov-seen{font-size:11px;color:var(--muted,#a29d9b);margin-top:4px}
 .ranking-card .rk-nowk .rk-row{grid-template-columns:72px minmax(0,1fr) auto}.ranking-card .rk-nowk .rk-wk{display:none}
 @media(max-width:650px){.ranking-card .rk-nowk .rk-row{grid-template-columns:56px minmax(0,1fr) auto}}
+/* Build 3b: certificates card (Market) and executive search (Executives) */
+.cert-card{margin-top:var(--s4)}
+.cert-card .cert-row{padding:var(--s2) 0;border-top:1px solid var(--line)}
+.cert-card .cert-top{display:flex;align-items:center;justify-content:space-between;gap:var(--s2);flex-wrap:wrap}
+.cert-card .cert-badge{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}
+.cert-card .cert-yes{color:var(--pos,#7ebf68);border-color:var(--pos,#7ebf68)}
+.cert-card .cert-no,.cert-card .cert-unk{color:var(--muted,#a5a09e)}
+.cert-card .cert-res{display:flex;align-items:center;gap:4px;margin-top:6px;flex-wrap:wrap}
+.cert-card .cert-icon{width:24px;height:24px;flex:none}
+.cert-card .cert-res-text{font-size:12px;color:var(--muted,#a5a09e);min-width:0;overflow-wrap:anywhere;margin-left:4px}
+.cert-card .cert-meta{margin-top:4px;font-size:12px;color:var(--muted,#a5a09e);overflow-wrap:anywhere}
+.cert-card .ch-note{margin-top:8px;font-size:11px}
+.exec-lookup{margin-top:var(--s4)}
+.exec-lookup h3{margin:0 0 4px}
+.exec-lookup p{margin:0 0 var(--s3);font-size:13px}
+.exec-lookup-form{display:flex;flex-wrap:wrap;gap:var(--s3);align-items:flex-end}
+.exec-lookup-form label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted,#a5a09e);min-width:0}
+.exec-lookup-form label:first-child{flex:1 1 180px}
+.exec-lookup-form input,.exec-lookup-form select{min-width:0;width:100%}
+.exec-lookup-form button{flex:none}
+#execLookupResults{margin-top:var(--s3)}
+.exec-lookup-msg{font-size:13px}
+.exec-lookup .el-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;padding:6px 0;border-top:1px solid var(--line);font-size:13px}
+.exec-lookup .el-name{min-width:0;overflow-wrap:anywhere}
+.exec-lookup .el-badge{font-style:normal;font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--pos,#7ebf68)}
+.exec-lookup .el-meta{flex:1 1 100%;font-size:12px;color:var(--muted,#a5a09e);overflow-wrap:anywhere}
+.exec-lookup .el-own{background:rgba(126,191,104,.10);padding-left:6px;padding-right:6px;border-radius:8px}
+.exec-lookup .ch-note{margin-top:8px;font-size:11px}
+@media(max-width:650px){.exec-lookup-form label:first-child{flex-basis:100%}.exec-lookup-form label:nth-child(2){flex:1 1 120px}}

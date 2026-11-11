@@ -1106,7 +1106,118 @@
     return best;
   }
 
+  // --- Build 3b: certificates and executive lookup (pure views over SimcoTools public data) ---
+  function cleanName80(v) { return String(v == null ? '' : v).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 80); }
+  function posId(v) { if (v == null || v === '' || typeof v === 'boolean') return null; const n = Number(v); return Number.isSafeInteger(n) && n > 0 ? n : null; }
+  function idSet(list) { const s = new Set(); for (const v of Array.isArray(list) ? list : []) { const n = posId(v); if (n != null) s.add(n); } return s; }
+  // Kinds whose resources cover at least one of the user's products. relevant=true kinds first, then the SimcoTools order; max 6, no duplicates.
+  function certKindsForProducts(kinds, productIds) {
+    const mine = idSet(productIds);
+    if (!mine.size || !Array.isArray(kinds)) return [];
+    const seen = new Set(), hit = [];
+    for (const k of kinds.slice(0, 100)) {
+      const kind = k && typeof k === 'object' && (typeof k.kind === 'string' || typeof k.kind === 'number') ? String(k.kind).trim() : '';
+      if (!kind || seen.has(kind) || !Array.isArray(k.resources)) continue;
+      if (!k.resources.slice(0, 200).some(r => mine.has(posId(r)))) continue;
+      seen.add(kind); hit.push({ kind, rel: k.relevant === true });
+    }
+    return [...hit.filter(x => x.rel), ...hit.filter(x => !x.rel)].slice(0, 6).map(x => x.kind);
+  }
+  // [{kind, resourceIds (user's own products first), total, youHold: true|false|null, sample:[{companyName}]}]
+  // youHold is null when the list is cut (total > rows shown) and the user is not among the rows shown.
+  function certificateView(kinds, holders, productIds, companyId) {
+    const list = certKindsForProducts(kinds, productIds), mine = idSet(productIds), cid = posId(companyId);
+    const byKind = holders && typeof holders === 'object' && holders.byKind && typeof holders.byKind === 'object' ? holders.byKind : {};
+    const out = [];
+    for (const kind of list) {
+      const def = kinds.find(k => k && typeof k === 'object' && String(k.kind).trim() === kind);
+      const ids = [...new Set((def.resources || []).slice(0, 200).map(posId).filter(x => x != null))];
+      const resourceIds = [...ids.filter(x => mine.has(x)), ...ids.filter(x => !mine.has(x))];
+      const h = Object.prototype.hasOwnProperty.call(byKind, kind) ? byKind[kind] : null;
+      if (!h || typeof h !== 'object') { out.push({ kind, resourceIds, total: null, youHold: null, sample: [] }); continue; }
+      const rows = Array.isArray(h.rows) ? h.rows.slice(0, 100).filter(Array.isArray) : [];
+      const t = Number(h.total);
+      const total = Number.isFinite(t) && t >= 0 ? Math.floor(t) : rows.length;
+      const present = cid != null && rows.some(r => posId(r[0]) === cid);
+      const youHold = present ? true : (total > 100 || total > rows.length ? null : false);
+      const sample = rows.map(r => cleanName80(r[1])).filter(Boolean).slice(0, 5).map(companyName => ({ companyName }));
+      out.push({ kind, resourceIds, total, youHold, sample });
+    }
+    return out;
+  }
+  // The user's own certificates from the captured game page GET /api/v2/companies/<id>/certificates/ -> {certificates:[{kind, resourceKind, ...}]}.
+  // Newest 2xx capture of that company (any company when companyId is falsy). -> {at, items:[{kind, resourceKind}]} | null.
+  function ownCertificatesFromCapture(endpointData, companyId) {
+    const ed = endpointData && typeof endpointData === 'object' ? endpointData : {};
+    const cid = posId(companyId) || 0;
+    let best = null, bestAt = -1;
+    for (const [u, v] of Object.entries(ed)) {
+      const m = /\/api\/v2\/companies\/(\d+)\/certificates\/?(\?.*)?$/i.exec(String(u || ''));
+      if (!m) continue;
+      if (cid && Number(m[1]) !== cid) continue;
+      const s = Number(v?.status || 200);
+      if (!(s >= 200 && s < 300) || v?.data == null) continue;
+      const at = Date.parse(String(v?.receivedAt || '')) || 0;
+      if (at > bestAt) { bestAt = at; best = v; }
+    }
+    if (!best) return null;
+    const d = best.data;
+    const list = Array.isArray(d) ? d : (d && typeof d === 'object' ? ['certificates', 'results'].map(n => Array.isArray(d[n]) ? d[n] : null).find(Boolean) : null);
+    if (!list) return null;
+    const small = (x, max) => { if (x == null || x === '' || typeof x === 'boolean') return null; const n = Number(x); return Number.isSafeInteger(n) && n >= 0 && n <= max ? n : null; };
+    const items = [], seen = new Set();
+    for (const x of list.slice(0, 500)) {
+      if (!x || typeof x !== 'object') continue;
+      const kind = small(x.kind, 9999);
+      if (kind == null) continue;
+      const resourceKind = small(x.resourceKind ?? x.resource, 1e6);
+      const key = `${kind}:${resourceKind}`;
+      if (seen.has(key)) continue;
+      seen.add(key); items.push({ kind, resourceKind });
+    }
+    return { at: bestAt > 0 ? bestAt : 0, items };
+  }
+  // Executive lookup rows -> rows + isOwn (employerId equals the user's company id). Max 20, nameless rows dropped.
+  function executiveLookupView(rows, ownCompanyId) {
+    const cid = posId(ownCompanyId), out = [];
+    for (const r of Array.isArray(rows) ? rows.slice(0, 20) : []) {
+      if (!r || typeof r !== 'object') continue;
+      const name = cleanName80(r.name);
+      if (!name) continue;
+      const emp = posId(r.employerId), age = Number(r.age);
+      out.push({ id: posId(r.id), name, age: r.age == null || r.age === '' || !Number.isFinite(age) ? null : age,
+        position: r.position == null ? null : (cleanName80(r.position) || null), employerId: emp,
+        employerName: r.employerName == null ? null : (cleanName80(r.employerName) || null), isOwn: cid != null && emp === cid });
+    }
+    return out;
+  }
+  // Resource ids the user produces (building rows: running batches; building history rows) or holds in the warehouse. Sorted, unique.
+  function productIdsFromStore(store) {
+    const s = store && typeof store === 'object' ? store : {};
+    const ids = new Set();
+    const add = v => { const o = v && typeof v === 'object' ? (v.kind ?? v.resourceId ?? v.productId ?? v.id) : v; const n = posId(o); if (n != null) ids.add(n); };
+    const ep = s.endpointData && typeof s.endpointData === 'object' ? s.endpointData : {};
+    let blds = Array.isArray(s.buildings) ? s.buildings : [];
+    if (!blds.length) for (const [u, e] of Object.entries(ep)) {
+      if (!/\/api\/v2\/companies\/(?:me|\d+)\/buildings\/?$/i.test(u) || !e || Number(e.status) >= 300) continue;
+      const d = e.data, l = Array.isArray(d) ? d : (['buildings', 'data', 'items', 'results'].map(k => Array.isArray(d?.[k]) ? d[k] : null).find(Boolean) || []);
+      if (l.length) { blds = l; break; }
+    }
+    for (const b of blds) {
+      const busy = b && b.busy;
+      if (busy && typeof busy === 'object') { add(busy.resource); for (const r of Array.isArray(busy.resources) ? busy.resources : []) add(r); }
+      for (const r of Array.isArray(b?.production) ? b.production : []) add(r);
+    }
+    for (const [u, e] of Object.entries(ep)) {
+      if (/^\/api\/v2\/companies\/buildings\/\d+\/history\/?$/.test(u) && e && Array.isArray(e.data) && !(Number(e.status) >= 300)) for (const r of e.data) add(r?.resource ?? r?.kind);
+    }
+    const wh = Array.isArray(s.warehouseResources) && s.warehouseResources.length ? s.warehouseResources : (Array.isArray(s.gameState?.region?.warehouseResources) ? s.gameState.region.warehouseResources : []);
+    for (const r of wh) { const q = Number(r?.amount ?? r?.quantity ?? r?.qty); if (r && (!Number.isFinite(q) || q > 0)) add(r.kind ?? r.resource ?? r.resourceId ?? r.productId); }
+    return [...ids].sort((a, b) => a - b);
+  }
+
   const api = {
+    certKindsForProducts, certificateView, ownCertificatesFromCapture, executiveLookupView, productIdsFromStore,
     gameRankingRows, pickGameRanking,
     rankingWindow, realmSummaryTrend, buildingRealmCount, govOrderPatterns, contestsView,
     buildingConst, mergeGovOrders,

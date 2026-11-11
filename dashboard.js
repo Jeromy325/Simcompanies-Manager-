@@ -208,7 +208,7 @@ async function get(attempt=0){
   // Perf: all remaining independent keys are read in ONE storage call (each call deserializes large blobs).
   const rn=activeRealm!=null?Number(activeRealm):null;
   const extraRealm=validRealmNumber(activeRealm!=null?rn:(s.selectedRealm!=null?Number(s.selectedRealm):null));
-  const defaults={scmGameConstants:null,scmGameConfig:null,[`scmMarketOrders:${extraRealm}`]:null,[`scmSimcoPrices:${extraRealm}`]:null,scmSimcoBuildings:null,[`scmSimcoGovOrders:${extraRealm}`]:null,[`scmSimcoEvents:${extraRealm}`]:null,[`scmSimcoPhases:${extraRealm}`]:null,[`scmSimcoCompany:${extraRealm}`]:null,[`scmSimcoRanking:${extraRealm}`]:null,[`scmSimcoSummary:${extraRealm}`]:null,[`scmSimcoBuildingStats:${extraRealm}`]:null,[`scmSimcoContests:${extraRealm}`]:null,[`scmSimcoGovHistory:${extraRealm}`]:null};
+  const defaults={scmGameConstants:null,scmGameConfig:null,[`scmMarketOrders:${extraRealm}`]:null,[`scmSimcoPrices:${extraRealm}`]:null,scmSimcoBuildings:null,[`scmSimcoGovOrders:${extraRealm}`]:null,[`scmSimcoEvents:${extraRealm}`]:null,[`scmSimcoPhases:${extraRealm}`]:null,[`scmSimcoCompany:${extraRealm}`]:null,[`scmSimcoRanking:${extraRealm}`]:null,[`scmSimcoSummary:${extraRealm}`]:null,[`scmSimcoBuildingStats:${extraRealm}`]:null,[`scmSimcoContests:${extraRealm}`]:null,[`scmSimcoGovHistory:${extraRealm}`]:null,[`scmSimcoCertKinds:${extraRealm}`]:null,[`scmSimcoCertHolders:${extraRealm}`]:null,[`scmSimcoExecLookup:${extraRealm}`]:null};
   if(rn!=null){defaults[`scmRealmStore:${rn}`]=null;defaults[`scmRealmDiagnostic:${rn}`]=null;defaults[`scmProductionPlannerState:${rn}`]=null;defaults[`scmGameOverlaySnapshot:${rn}`]=null;}
   if(extraRealm!=null){defaults[`scmBackgroundJobs:${extraRealm}`]=null;defaults[`scmProductionCostHistory:${extraRealm}`]=[];defaults[`scmStatementHistory:${extraRealm}`]=null;defaults[`scmLedgerArchive:${extraRealm}`]=null;defaults[`scmEconomyStateLog:${extraRealm}`]=[];}
   const physical=await chrome.storage.local.get(defaults);
@@ -236,7 +236,7 @@ async function get(attempt=0){
     const la=physical[`scmLedgerArchive:${r}`];result.ledgerArchive=la&&typeof la==='object'?la:null;
     const el=physical[`scmEconomyStateLog:${r}`];result.economyStateLog=Array.isArray(el)?el:[];
   }}catch{}
-  try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);result.gameConstants=physical.scmGameConstants||null;result.marketOrders=physical[`scmMarketOrders:${r}`]||null;result.simcoPrices=physical[`scmSimcoPrices:${r}`]||null;result.simcoBuildings=physical.scmSimcoBuildings||null;result.simcoGovOrders=physical[`scmSimcoGovOrders:${r}`]||null;result.simcoEvents=scmSimcoAtIso(physical[`scmSimcoEvents:${r}`]);result.simcoPhases=scmSimcoAtIso(physical[`scmSimcoPhases:${r}`]);result.simcoCompany=scmSimcoAtIso(physical[`scmSimcoCompany:${r}`]);result.simcoRanking=physical[`scmSimcoRanking:${r}`]||null;result.simcoSummary=physical[`scmSimcoSummary:${r}`]||null;result.simcoBuildingStats=physical[`scmSimcoBuildingStats:${r}`]||null;result.simcoContests=physical[`scmSimcoContests:${r}`]||null;result.simcoGovHistory=physical[`scmSimcoGovHistory:${r}`]||null;}catch{}
+  try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);result.gameConstants=physical.scmGameConstants||null;result.marketOrders=physical[`scmMarketOrders:${r}`]||null;result.simcoPrices=physical[`scmSimcoPrices:${r}`]||null;result.simcoBuildings=physical.scmSimcoBuildings||null;result.simcoGovOrders=physical[`scmSimcoGovOrders:${r}`]||null;result.simcoEvents=scmSimcoAtIso(physical[`scmSimcoEvents:${r}`]);result.simcoPhases=scmSimcoAtIso(physical[`scmSimcoPhases:${r}`]);result.simcoCompany=scmSimcoAtIso(physical[`scmSimcoCompany:${r}`]);result.simcoRanking=physical[`scmSimcoRanking:${r}`]||null;result.simcoSummary=physical[`scmSimcoSummary:${r}`]||null;result.simcoBuildingStats=physical[`scmSimcoBuildingStats:${r}`]||null;result.simcoContests=physical[`scmSimcoContests:${r}`]||null;result.simcoGovHistory=physical[`scmSimcoGovHistory:${r}`]||null;result.simcoCertKinds=physical[`scmSimcoCertKinds:${r}`]||null;result.simcoCertHolders=physical[`scmSimcoCertHolders:${r}`]||null;result.simcoExecLookup=physical[`scmSimcoExecLookup:${r}`]||null;}catch{}
   try{result.gameConfig=physical.scmGameConfig||null;}catch{}
   commitDashboardState(result);
   return result;
@@ -2742,6 +2742,104 @@ function plannerWage(ctx,lab){
 }
 // The player's OWN executives roster. endpointData also holds rosters of other companies viewed in the game
 // (no skills/salary/trainings), so never pick "any" roster; with no own id or no own roster return null.
+// ---- Build 3b: certificates card (Market tab) and executive name search (Executives tab) ----
+// Every SimcoTools string goes through escapeHtml. The card reads stored data only; the search sends one message per click.
+const SCM_CERT_NAMES={29:'KING_MIDAS',36:'ELON_AWARD',37:'EDUCATOR',38:'LOAN_SHARK',39:'RETAILER',40:'MAD_SCIENTIST',41:'PRODUCER',42:'SIMICHELINE_STAR',52:'CASH_COW'};
+function scmCertToken(v){return String(v==null?'':v).trim().toUpperCase().replace(/[\s-]+/g,'_');}
+function scmCertLabel(kind){
+  const raw=String(kind==null?'':kind).trim();
+  const tok=/^\d+$/.test(raw)?(SCM_CERT_NAMES[Number(raw)]||''):scmCertToken(raw);
+  if(!tok)return raw||'Certificate';
+  const t=tok.toLowerCase().replace(/_/g,' ');return t.charAt(0).toUpperCase()+t.slice(1);
+}
+function scmOwnCompanyId(s){
+  let co=null;try{co=plannerCompanyAuthData(s);}catch{}
+  const v=co?.companyId??co?.id??scmSimcoData(s,'simcoRanking')?.companyId;
+  const n=Number(v);return Number.isFinite(n)&&n>0?n:null;
+}
+// The game's own certificates list (/api/v2/companies/<id>/certificates/, captured when the player opens it), read by
+// SCM_TOOLS_CORE.ownCertificatesFromCapture. {at, has(kind, resourceIds, productIds)} or null when not captured.
+// A captured list answers exactly. Resource kinds 39/40/41 count as held only for a resource the user makes or holds.
+function scmGameOwnCerts(s,cid){
+  const C=globalThis.SCM_TOOLS_CORE;if(!C?.ownCertificatesFromCapture)return null;
+  const own=C.ownCertificatesFromCapture(s?.endpointData,cid);if(!own)return null;
+  const num0=k=>{const raw=String(k==null?'':k).trim();if(/^\d+$/.test(raw))return Number(raw);const t=scmCertToken(raw);const e=Object.entries(SCM_CERT_NAMES).find(([,n])=>n===t);return e?Number(e[0]):null;};
+  return {at:own.at||null,has:(kind,resourceIds,productIds)=>{
+    const k=num0(kind);if(k==null)return false;
+    const items=own.items.filter(i=>i.kind===k);if(!items.length)return false;
+    const ids=new Set((resourceIds||[]).map(Number)),mine=new Set((productIds||[]).map(Number));
+    if(![39,40,41].includes(k)||!ids.size)return true;
+    return items.some(i=>i.resourceKind!=null&&ids.has(i.resourceKind)&&mine.has(i.resourceKind));
+  }};
+}
+function renderCertificatesCard(s,now){try{return scmCertificatesCardHtml(s,now);}catch(e){console.debug('certificates card failed',e);return '';}}
+function scmCertificatesCardHtml(s,now){
+  now=now??Date.now();
+  const C=globalThis.SCM_TOOLS_CORE,kinds=scmSimcoData(s,'simcoCertKinds'),holders=scmSimcoData(s,'simcoCertHolders');
+  if(!C?.certificateView||!kinds||!Array.isArray(kinds.kinds)||!kinds.kinds.length)return '';
+  const realm=marketRealmFromState(s);
+  const store=scmStoreWithRealm(s?.realmStores?.[`realm:${realm}`]||s||{},realm);
+  let pids=[];try{pids=C.productIdsFromStore(store)||[];}catch{}
+  if(!pids.length)return '';
+  const cid=scmOwnCompanyId(s),view=C.certificateView(kinds.kinds,holders,pids,cid);
+  if(!view.length)return '';
+  const game=scmGameOwnCerts(s,cid);
+  const rows=view.map(v=>{
+    let you=v.youHold,fromGame=false;
+    if(game){you=game.has(v.kind,v.resourceIds,pids);fromGame=true;}
+    const certBadge=you===true?'<span class="cert-badge cert-yes">You hold this</span>':you===false?'<span class="cert-badge cert-no">Not held</span>':v.total!=null?'<span class="cert-badge cert-unk" title="Your company is not in the first 100 holders SimcoTools returned. Open your certificates page in the game to check.">Not among the first 100 shown</span>':'';
+    const names=v.resourceIds.slice(0,3).map(id=>resourceName({_id:id,kind:id},s));
+    const more=v.resourceIds.length-names.length;
+    const certIcons=v.resourceIds.slice(0,8).map(id=>plannerImage(plannerResourceImage(id,s),resourceName({_id:id,kind:id},s),'cert-icon',''));
+    const certRes=v.resourceIds.length?`<div class="cert-res">${certIcons.join('')}<span class="cert-res-text">${escapeHtml(names.join(', '))}${more>0?` +${num(more)} more`:''}</span></div>`:'';
+    const cnt=v.total==null?'Holder list not loaded yet':`${num(v.total)} holder${v.total===1?'':'s'}`;
+    const certSmp=v.sample.length?` · e.g. ${v.sample.map(x=>escapeHtml(x.companyName)).join(', ')}`:'';
+    return `<div class="cert-row"><div class="cert-top"><strong>${escapeHtml(scmCertLabel(v.kind))}</strong>${certBadge}</div>${certRes}<div class="cert-meta">${escapeHtml(cnt)}${certSmp}${fromGame?' · you: from the game page':(you===null&&v.total!=null?' · Open your certificates page in the game to check':'')}</div></div>`;
+  }).join('');
+  const at=Math.max(Number(holders?.at)||0,Number(kinds.at)||0)||kinds.at;
+  return `<div class="overview-section cert-card" id="certificatesCard"><div class="overview-section-head"><div><h3>Certificates for your products</h3><span>Realm certificates that cover what you make or hold</span></div></div>${rows}<div class="ch-note muted">${escapeHtml(scmPublicNote(at,now))}</div></div>`;
+}
+function renderCertificatesHost(s){const h=$('#certificatesHost');if(h)scmSetHTML(h,renderCertificatesCard(s));}
+const SCM_EXEC_POS={coo:'COO',cfo:'CFO',cmo:'CMO',cto:'CTO',staff:'Staff'};
+const __scmExecLookup={busy:false,msg:'',rows:null,at:null,cached:false,query:'',cid:null};
+function scmExecLookupHtml(st){
+  const C=globalThis.SCM_TOOLS_CORE;
+  if(st.busy)return '<div class="exec-lookup-msg muted">Searching…</div>';
+  if(st.msg)return `<div class="exec-lookup-msg">${escapeHtml(st.msg)}</div>`;
+  if(!Array.isArray(st.rows))return '';
+  const v=C?.executiveLookupView?C.executiveLookupView(st.rows,st.cid):[];
+  if(!v.length)return `<div class="exec-lookup-msg muted">No executives found for “${escapeHtml(st.query)}”.</div>`;
+  const list=v.map(r=>{
+    const pos=r.position?(SCM_EXEC_POS[String(r.position).toLowerCase()]||r.position):'';
+    const meta=[r.age!=null?`${num(r.age)} y/o`:'',pos,r.employerName?`Works at ${r.employerName}`:'Employer not shown'].filter(Boolean);
+    return `<div class="el-row${r.isOwn?' el-own':''}"><strong class="el-name" title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</strong>${r.isOwn?'<em class="el-badge">yours</em>':''}<span class="el-meta">${meta.map(x=>escapeHtml(x)).join(' · ')}</span></div>`;
+  }).join('');
+  return `<div class="el-list">${list}</div><div class="ch-note muted">${escapeHtml(scmPublicNote(st.at,Date.now()))}${st.cached?' · saved result':''}</div>`;
+}
+function renderExecLookup(s){
+  const el=$('#execLookupResults');if(!el)return;
+  if(s)__scmExecLookup.cid=scmOwnCompanyId(s);
+  scmSetHTML(el,scmExecLookupHtml(__scmExecLookup));
+  const go=$('#execLookupGo');if(go)go.disabled=__scmExecLookup.busy;
+}
+document.addEventListener('submit',async e=>{
+  if(e.target?.id!=='execLookupForm')return;
+  e.preventDefault();
+  const st=__scmExecLookup,name=String($('#execLookupName')?.value||'').trim(),pos=String($('#execLookupPos')?.value||'');
+  if(st.busy)return;
+  st.rows=null;st.query=name;
+  if(name.length<2||name.length>40){st.msg='Type 2 to 40 characters of the name.';renderExecLookup(window.__scmState);return;}
+  st.msg='';st.busy=true;renderExecLookup(window.__scmState);
+  const msg={type:'SCM_SIMCO_EXEC_LOOKUP',name};if(Object.prototype.hasOwnProperty.call(SCM_EXEC_POS,pos))msg.position=pos;
+  try{
+    const r=await chrome.runtime.sendMessage(msg);
+    if(r&&r.ok){st.rows=Array.isArray(r.rows)?r.rows:[];st.at=r.at??Date.now();st.cached=!!r.cached;}
+    else if(r&&r.limited){const t=Number(r.retryAt);st.msg=Number.isFinite(t)&&t>0?`Try again at ${new Date(t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}.`:'Try again in a few minutes.';}
+    else if(r&&r.busy)st.msg='Not available during Sync.';
+    else st.msg=`Search failed${r&&r.error?`: ${String(r.error).slice(0,80)}`:'.'}`;
+  }catch{st.msg='Search failed. Try again later.';}
+  st.busy=false;renderExecLookup(window.__scmState);
+});
 function ownExecutivesKey(s){
   const ac=s?.authData?.authCompany,id=Number(ac?.companyId??ac?.id);
   if(!(id>0))return null;
@@ -3814,9 +3912,9 @@ function render(s){
      :'Waiting for latest financial response';
 } if($('#accountingOverview'))renderAccountingOverview($('#accountingOverview'),accountingDisplay,accountingPeriodView==='current'?accountingComparisonBase(a):null,a.history,acctDailySeries); if($('#accountingHistory')){if(scmSetHTML($('#accountingHistory'),accountingHistoryTable(a.history,(viewStore||s)?.accountingDayWalkStatus||null)))scmApplyCollapse($('#accountingHistory'));renderAccountingWalkSchedule(s);} if($('#accountingBalanceSummary'))scmSetHTML($('#accountingBalanceSummary'),`<div class="overview-stat-grid accounting-balance-summary"><div class="overview-stat-card"><span>Cash</span><strong>${money(a.cash)}</strong></div><div class="overview-stat-card"><span>Accounts Receivable</span><strong>${money(a.accountsReceivable)}</strong></div><div class="overview-stat-card"><span>Inventory</span><strong>${money(a.inventory)}</strong></div><div class="overview-stat-card"><span>Current Assets</span><strong>${money(a.currentAssets)}</strong></div><div class="overview-stat-card"><span>Accounts Payable</span><strong>${money(a.accountsPayable)}</strong></div><div class="overview-stat-card"><span>Bonds Payable</span><strong>${money(a.bondsPayable)}</strong></div><div class="overview-stat-card"><span>Current Liabilities</span><strong>${money(a.currentLiabilities)}</strong></div><div class="overview-stat-card"><span>Total Assets</span><strong>${money(a.assets)}</strong></div><div class="overview-stat-card"><span>Total Liabilities</span><strong>${money(a.liabilities)}</strong></div></div>`); if($('#accountingCashflowSummary'))scmSetHTML($('#accountingCashflowSummary'),accountingCashflowSummary(a.source?.cf)); if($('#accountingIncomeStatement'))scmSetHTML($('#accountingIncomeStatement'),accountingIncomeStatement(a.source?.income)); if($('#balanceDetails'))scmSetHTML($('#balanceDetails'),buildBalanceSections(a.source?.bs)); if($('#accountingRatios'))scmSetHTML($('#accountingRatios'),accountingFinancialRatios(a.source?.income,a.source?.bs)); }
  if(activeTab==='warehouse'){ renderWarehouseMarketTimestamp(s); try{renderWarehouseRunOut(s);}catch(e){console.error('Run-out render failed',e);} const inventoryRowsEl=$('#inventoryRows'); if(inventoryRowsEl) inventoryRowsEl.innerHTML=rows.length?rows.map(r=>{const priceRef=scmMarketPrice(s,r._id,r._quality,'exact'),marketPrice=priceRef?.price??null;const margin=marketPrice!=null&&r._unitCost>0?(marketPrice-r._unitCost)/r._unitCost*100:null;const ri=resourceInfo(r,s);const imgs=ri.imageCandidates||[];const localImage=s.resourceImageCache?.[String(r._id)]||s.resourceImageData?.[String(r._id)]||null;if(!localImage) requestResourceImage(r._id);const srcs=scmImgSrcs(r._id,localImage?[localImage,...imgs]:imgs);const img=srcs.length?`<img class="resource-icon" src="${escapeHtml(scmSafeImgSrc(srcs[0]))}" data-candidates="${escapeHtml(scmCandidatesJson(srcs))}" data-idx="0" data-rid="${Number(r._id)||0}" alt="" loading="lazy" data-scm-fallback="1">`:'';const activeCost=activeProductionCostCells(s,r);return `<tr data-warehouse-key="${Number(r._id)}:${Number(r._quality)}"><td><div class="product-cell">${img}<span><strong>${escapeHtml(resourceName(r,s))}</strong><small>#${escapeHtml(r._id)}</small></span></div>${warehouseHeadCost(r)}</td><td>${num(r._qty)}</td><td>${escapeHtml(r._quality??'—')}</td><td>${r._unitCost==null?'—':money(r._unitCost)}</td><td>${activeCost.costHtml}</td><td>${activeCost.diffHtml}</td><td data-cell="prod-cost-history">${productionCostHistoryCell(s,r)}</td><td><span class="cell-stack">${marketPrice==null?'—':money(marketPrice)}<small class="market-source">${escapeHtml(scmMarketSourceText(priceRef))}</small></span></td><td class="${margin==null?'':margin>=0?'positive':'negative'}">${margin==null?'—':margin.toFixed(1)+'%'}</td></tr>`}).join(''):'<tr><td colspan="9">No warehouse data captured.</td></tr>'; }
- if(activeTab==='market'){ renderLiveMarketProduct(s); renderMarketHistory(s); } if(activeTab==='production') renderBuildingPlanner(s,{background:true}); // same-HTML repaints are skipped
+ if(activeTab==='market'){ renderLiveMarketProduct(s); renderMarketHistory(s); try{renderCertificatesHost(s);}catch(e){console.error('Certificates render failed',e);} } if(activeTab==='production') renderBuildingPlanner(s,{background:true}); // same-HTML repaints are skipped
  renderVwapDiagnostics(s);
- if(activeTab==='executives'){try{renderBoardRoom(s);}catch(e){console.error('Executives tab render failed',e);}} if(activeTab==='tools'){try{globalThis.SCM_TOOLS_UI?.render(s,catalogEntries(s));}catch(e){console.error('Tools tab render failed',e);}} if(activeTab==='analyze'){try{globalThis.SCM_ANALYZE_UI?.render(s,analyzeContext(s));}catch(e){console.error('Analyze tab render failed',e);}} if(activeTab==='contracts') { populateContractProducts(s); renderContracts(s); } if(activeTab==='settings'){ renderDiagnostics(s); }
+ if(activeTab==='executives'){try{renderBoardRoom(s);}catch(e){console.error('Executives tab render failed',e);}try{renderExecLookup(s);}catch(e){console.error('Executive search render failed',e);}} if(activeTab==='tools'){try{globalThis.SCM_TOOLS_UI?.render(s,catalogEntries(s));}catch(e){console.error('Tools tab render failed',e);}} if(activeTab==='analyze'){try{globalThis.SCM_ANALYZE_UI?.render(s,analyzeContext(s));}catch(e){console.error('Analyze tab render failed',e);}} if(activeTab==='contracts') { populateContractProducts(s); renderContracts(s); } if(activeTab==='settings'){ renderDiagnostics(s); }
   requestAnimationFrame(()=>{ if(Math.abs(window.scrollX-__scrollX)>0 || Math.abs(window.scrollY-__scrollY)>0) window.scrollTo(__scrollX,__scrollY); });
 }
 function deepCompanyName(v, seen=new Set()){
@@ -4372,11 +4470,13 @@ function dashboardChangeAffectsTab(changes,tab){
   if(tab==='contracts'&&keys.size===0)return false;
   if(tab==='overview')return ['authData','companyData','warehouseResources','contracts','savedContracts','contractEvents','vwapData','history','sellingHistory','buildings','accountingLastComputed','accountingLastComputedIncome','accountingCapture','accountingSnapshots','accountingWeekLedgerStatus','accountingWeekSalesSummary','accountingWeekRevision','syncStatus','syncError','lastSync','fullSyncJob','fullSyncProgress'].some(has);
   if(tab==='warehouse')return ['warehouseResources','vwapData','vwapStatus','liveMarketData','liveMarketPriceData','history','contracts','savedContracts','contractEvents','warehouseCostDetails'].some(has);
+  if(tab==='market'&&[...keys].some(k=>/^scmSimco(CertKinds|CertHolders):\d+$/.test(k)))return true;
   if(tab==='market')return ['vwapData','vwapStatus','liveMarketData','liveMarketPriceData','history','warehouseResources','warehouseCostDetails'].some(has);
   if((tab==='production'||tab==='overview')&&[...keys].some(k=>/^scmSimco(Events|Phases|Company):\d+$/.test(k)))return true;
   if(tab==='overview'&&[...keys].some(k=>/^scmSimco(Ranking|Summary):\d+$/.test(k)))return true;
   if(tab==='production'&&[...keys].some(k=>/^scmSimco(Contests|BuildingStats):\d+$/.test(k)))return true;
   if(tab==='contracts'&&[...keys].some(k=>/^scmSimcoGovHistory:\d+$/.test(k)))return true;
+  if(tab==='executives'&&[...keys].some(k=>/^scmSimcoExecLookup:\d+$/.test(k)))return true;
   if(tab==='production')return ['buildings','warehouseResources','productionRateSnapshots','productionPlans','productionRunHours','vwapData','vwapStatus','liveMarketData','liveMarketPriceData'].some(has);
   if(tab==='contracts')return ['contracts','savedContracts','contractEvents','endpointData','warehouseResources','liveMarketPriceData','liveMarketProductCache'].some(has);
   if(tab==='tools')return ['warehouseResources','vwapData','liveMarketPriceData','history'].some(has);
@@ -4488,7 +4588,7 @@ function scmProductionSignature(store,opts){
   }
   parts.push('endpoints',epParts.sort().join(';'));
   const sd=f=>typeof scmSimcoData==='function'?scmSimcoData(store,f):(store?.[f]||null);
-  parts.push('simco',String(sd('simcoEvents')?.at??''),String(sd('simcoPhases')?.at??''),String(sd('simcoCompany')?.at??''),String(sd('simcoRanking')?.at??''),String(sd('simcoSummary')?.at??''),String(sd('simcoBuildingStats')?.at??''),String(sd('simcoContests')?.at??''),String(sd('simcoGovHistory')?.at??''));
+  parts.push('simco',String(sd('simcoEvents')?.at??''),String(sd('simcoPhases')?.at??''),String(sd('simcoCompany')?.at??''),String(sd('simcoRanking')?.at??''),String(sd('simcoSummary')?.at??''),String(sd('simcoBuildingStats')?.at??''),String(sd('simcoContests')?.at??''),String(sd('simcoGovHistory')?.at??''),String(sd('simcoCertKinds')?.at??''),String(sd('simcoCertHolders')?.at??''));
   parts.push('company',String(store?.authData?.authCompany?.productionModifier??''),String(store?.authData?.temporals?.economyState??''));
   parts.push('runs',(Array.isArray(store?.buildings)?store.buildings:[]).map(b=>`${b?.id??''}:${b?.busy?.started??''}:${b?.busy?.category??''}`).sort().join(';'));
   const snaps=store?.productionRateSnapshots&&typeof store.productionRateSnapshots==='object'?store.productionRateSnapshots:{};
@@ -4892,8 +4992,8 @@ scmOnStorageChanged((changes, area)=>{
   if((changes.realmStores||physicalRealmKeys.length>0||Object.keys(changes||{}).some(k=>/^scmRealmDiagnostic:\d+$/.test(k)))&&__scmState)queuePhysicalRealmStateRefresh(previousStateForPhysicalChange,changes);
   // Game constants / images arrive from the worker (SCM_ENSURE_GAME_DATA, daily refresh): map them onto the view state
   // and re-render whatever tab is open, so notes like "Game constants not loaded yet" clear without a reload.
-  const simcoKeys=Object.keys(changes||{}).filter(k=>k==='scmSimcoBuildings'||/^scmSimco(Prices|GovOrders|Events|Phases|Company|Ranking|Summary|BuildingStats|Contests|GovHistory):\d+$/.test(k));
-  if(simcoKeys.length&&__scmState){for(const k of simcoKeys){const v=changes[k].newValue??null;if(k==='scmSimcoBuildings'){__scmState.simcoBuildings=v;continue;}const m=k.match(/^scmSimco(Prices|GovOrders|Events|Phases|Company|Ranking|Summary|BuildingStats|Contests|GovHistory):(\d+)$/);if(m&&Number(m[2])===Number(__scmState.viewRealm))__scmState['simco'+m[1]]=/^(Events|Phases|Company)$/.test(m[1])?scmSimcoAtIso(v):v;}}
+  const simcoKeys=Object.keys(changes||{}).filter(k=>k==='scmSimcoBuildings'||/^scmSimco(Prices|GovOrders|Events|Phases|Company|Ranking|Summary|BuildingStats|Contests|GovHistory|CertKinds|CertHolders|ExecLookup):\d+$/.test(k));
+  if(simcoKeys.length&&__scmState){for(const k of simcoKeys){const v=changes[k].newValue??null;if(k==='scmSimcoBuildings'){__scmState.simcoBuildings=v;continue;}const m=k.match(/^scmSimco(Prices|GovOrders|Events|Phases|Company|Ranking|Summary|BuildingStats|Contests|GovHistory|CertKinds|CertHolders|ExecLookup):(\d+)$/);if(m&&Number(m[2])===Number(__scmState.viewRealm))__scmState['simco'+m[1]]=/^(Events|Phases|Company)$/.test(m[1])?scmSimcoAtIso(v):v;}}
   const gameDataChanged=simcoKeys.length>0||Boolean(changes.scmGameConstants||changes.scmGameConfig||changes.scmResourceImages);
   if(gameDataChanged&&__scmState){
     if(changes.scmGameConstants)__scmState.gameConstants=changes.scmGameConstants.newValue||null;
