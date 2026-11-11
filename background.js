@@ -310,13 +310,13 @@ const SIMCOTOOLS_DEFAULT_RATE_LIMIT_COOLDOWN_MS=5*60*1000;
 const SIMCOTOOLS_MAX_RATE_LIMIT_COOLDOWN_MS=30*60*1000;
 const SIMCOTOOLS_MAX_CONCURRENT_REQUESTS=1;
 const SIMCOTOOLS_PAIR_RATE_LIMIT_COOLDOWN_MS=5*60*1000;
-const SIMCOTOOLS_MIN_REQUEST_SPACING_MS=1200;
-// SimcoTools allows 1 request per 5 min (user-confirmed). ONE gate for every api.simcotools.com call (simcoFetch is the
+const SIMCOTOOLS_MIN_REQUEST_SPACING_MS=500;
+// SimcoTools published limit: 2 requests per second, burst 25 (api docs). ONE gate for every api.simcotools.com call (simcoFetch is the
 // only caller of fetch for that host): the time of the last request lives in storage.session (scmSimcoToolsGate), so a
 // worker restart does not reset it. A call inside the gap is SKIPPED (never queued): it returns
 // {ok:false,status:429,rateLimited:true,limited:true,skipped:true,retryAt}; each caller keeps its stored data and its
 // next scheduled run tries again. No retries (a retry would be a second request inside the gap).
-const SIMCOTOOLS_SHARED_GAP_MS=5*60*1000;
+const SIMCOTOOLS_SHARED_GAP_MS=500;
 const SIMCOTOOLS_GATE_KEY='scmSimcoToolsGate';
 let simcoGateMem=null,simcoGateTail=Promise.resolve();
 let simcoLastRequestAt=0;
@@ -5425,6 +5425,23 @@ function simcoTrendFromSummary(root){
   if(!closes.length&&!day)return null;
   return {at:Number.isFinite(t)?t:null,closes,day:day?{date:day.date||null,vwap:n(day.vwap),close:n(day.close),volume:n(day.volume),vwapChangePct:pct(day.previousVWAPPercentageChange),closeChangePct:pct(day.previousClosePercentageChange)}:null};
 }
+// One SimcoTools request for many products: GET /v1/realms/{realm}/market/followed?resources=<id>q<quality>,...
+// (40 pairs per request). Returns Map "id:q" -> the same snapshot shape as fetchSimcoMarketSnapshot.
+async function fetchSimcoFollowedSnapshots(realm,pairs){
+  const snaps=new Map();
+  const list=(Array.isArray(pairs)?pairs:[]).map(p=>({id:Number(p.resourceId),q:Number(p.quality)})).filter(p=>Number.isSafeInteger(p.id)&&p.id>0&&Number.isSafeInteger(p.q)&&p.q>=0);
+  for(let i=0;i<list.length;i+=40){
+    const chunk=list.slice(i,i+40);
+    const url=`https://api.simcotools.com/v1/realms/${realm}/market/followed?resources=${chunk.map(p=>`${p.id}q${p.q}`).join(',')}`;
+    const resp=await simcoFetch(url,20000);
+    if(resp?.limited)return {ok:false,error:'Waiting for the SimcoTools limit',status:429,rateLimited:true,limited:true,retryAt:resp.retryAt||null,snaps};
+    if(!resp?.ok)return {ok:false,error:`HTTP ${resp?.status||0} from SimcoTools`,status:resp?.status||0,rateLimited:Boolean(resp?.rateLimited),retryAt:resp?.retryAt||null,snaps};
+    const data=parseSimcoResponse(resp.text);
+    const rows=Array.isArray(data?.summaries)?data.summaries:[];
+    for(const s of rows){const rid=Number(s?.resourceId),q=Number(s?.quality);if(Number.isFinite(rid)&&Number.isFinite(q))snaps.set(vwapPairKey(rid,q),normalizeSimcoMarketSnapshot(s,rid,q));}
+  }
+  return {ok:true,snaps};
+}
 async function fetchSimcoMarketSnapshot(realm,resourceId,quality){
   const url=`https://api.simcotools.com/v1/realms/${realm}/market/resources/${resourceId}/${quality}`;
   const resp=await simcoFetch(url,12000);
@@ -5622,6 +5639,10 @@ async function runLiveMarketRefreshUnlocked(realmArg=null){
   const pairAge=p=>{const t=Date.parse(String(existingPriceByKey.get(vwapPairKey(p.resourceId,p.quality))?.fetchedAt||''));return Number.isFinite(t)?t:0;};
   pairs.sort((a,b)=>pairAge(a)-pairAge(b));
   let networkAttempts=0,queued=0;
+  // One batched SimcoTools request for every pair that needs a new price (the per-pair requests are gone).
+  const batchNeeded=pairs.filter(p=>{const row=existingPriceByKey.get(vwapPairKey(p.resourceId,p.quality));const at=Date.parse(String(row?.fetchedAt||''));return !(row&&!row.stale&&validPositiveMarketNumber(row.price)!=null&&Number.isFinite(at)&&Date.now()-at<15*60*1000);});
+  let batchSnaps=null,batchError=null;
+  if(batchNeeded.length){const b=await fetchSimcoFollowedSnapshots(realm,batchNeeded);if(b.ok)batchSnaps=b.snaps;else{batchSnaps=new Map();batchError=b;}}
   const worker=async()=>{while(true){const i=index++;if(i>=pairs.length)return;const pair=pairs[i],pairKey=vwapPairKey(pair.resourceId,pair.quality);
     if(realmSyncSessions.size>0){failures.push({resourceId:Number(pair.resourceId),quality:Number(pair.quality),error:'Deferred because core Sync started',deferredByCoreSync:true});continue;}
     const cachedRow=existingPriceByKey.get(pairKey);const cachedAt=Date.parse(String(cachedRow?.fetchedAt||''));
@@ -5633,9 +5654,8 @@ async function runLiveMarketRefreshUnlocked(realmArg=null){
       const until=Math.max(cooldownUntil,endpointCooldown,simcoRateLimitUntil);
       failures.push({resourceId:Number(pair.resourceId),quality:Number(pair.quality),status:429,rateLimited:true,retryAt:new Date(until).toISOString(),error:'Skipped during shared rate-limit cooldown'});continue;
     }
-    if(networkAttempts>=1){queued++;continue;}
-    networkAttempts++;
-    try{const snap=await fetchSimcoMarketSnapshot(realm,pair.resourceId,pair.quality);const price=validPositiveMarketNumber(snap?.price);if(price==null)throw new Error('No valid current price returned');delete pairCooldowns[pairKey];delete endpointCooldowns[endpoint];out.push({resourceId:Number(pair.resourceId),quality:Number(pair.quality),price,lastTrade:snap.lastTrade||null,trend:snap.trend||null,fetchedAt:new Date().toISOString(),stale:false});}
+    if(!batchSnaps){if(networkAttempts>=1){queued++;continue;}networkAttempts++;}
+    try{const snap=batchSnaps?batchSnaps.get(pairKey):await fetchSimcoMarketSnapshot(realm,pair.resourceId,pair.quality);if(batchSnaps&&!snap&&batchError)throw Object.assign(new Error(batchError.error||'SimcoTools batch failed'),{status:batchError.status,rateLimited:batchError.rateLimited,limited:batchError.limited,retryAt:batchError.retryAt});const price=validPositiveMarketNumber(snap?.price);if(price==null)throw new Error('No valid current price returned');delete pairCooldowns[pairKey];delete endpointCooldowns[endpoint];out.push({resourceId:Number(pair.resourceId),quality:Number(pair.quality),price,lastTrade:snap.lastTrade||null,trend:snap.trend||null,fetchedAt:new Date().toISOString(),stale:false});}
     catch(e){const failure={resourceId:Number(pair.resourceId),quality:Number(pair.quality),error:e?.message||String(e)};if(e?.limited){failure.status=429;failure.rateLimited=true;failure.limited=true;failure.retryAt=e?.retryAt||null;}else if(Number(e?.status)===429||e?.rateLimited){const parsed=Date.parse(String(e?.retryAt||''));const until=Number.isFinite(parsed)&&parsed>Date.now()?parsed:Date.now()+SIMCOTOOLS_PAIR_RATE_LIMIT_COOLDOWN_MS;pairCooldowns[pairKey]=until;endpointCooldowns[endpoint]=until;simcoRateLimitUntilByUrl.set(endpoint,until);failure.status=429;failure.rateLimited=true;failure.retryAt=new Date(until).toISOString();await persistSimcoCooldowns();}failures.push(failure);}
   }};
   await worker();
@@ -5704,8 +5724,8 @@ const MARKET_STAGE_ALARM_PREFIX='scm-market-stage-r';
 // Resource-image downloads continue independently and provide natural API quiet time.
 const POST_SYNC_MARKET_COOLDOWN_MS=1000;
 // Chained stages (after Sync / Refresh) each make one SimcoTools request, so they are spaced by the shared gap.
-const MARKET_STAGE_COOLDOWN_MS=SIMCOTOOLS_SHARED_GAP_MS+5000;
-const MARKET_STAGE_REALM_COOLDOWN_MS=SIMCOTOOLS_SHARED_GAP_MS+5000;
+const MARKET_STAGE_COOLDOWN_MS=5*60*1000+5000;
+const MARKET_STAGE_REALM_COOLDOWN_MS=5*60*1000+5000;
 let liveMarketRefreshAlarmRun=null;
 let marketStageRun=null;
 function marketStageAlarmName(realm,stage){const n=validRealmNumber(realm);return n==null?null:`${MARKET_STAGE_ALARM_PREFIX}${n}-${stage}`;}

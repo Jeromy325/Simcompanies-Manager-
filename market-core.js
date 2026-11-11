@@ -39,7 +39,8 @@
     const bat = ts(ep?.receivedAt);
     // Game market ticker (/api/v3/market-ticker/<realm>/): lowest Q0 ask, no quality field -> exact Q0 requests only.
     // Used only when no order book for this product is as new as the ticker (equal time: book wins); same realm only.
-    if (want === 0 && mode === 'exact') {
+    // Game reads are used only when a caller asks (opts.gameBook); the Manager's prices come from SimcoTools.
+    if (opts.gameBook === true && want === 0 && mode === 'exact') {
       const tk = store?.endpointData?.[`/api/v3/market-ticker/${realm}/`];
       const tat = ts(tk?.receivedAt);
       if (Array.isArray(tk?.data) && tat != null && now - tat < bookMax && realmOk(tk.captureRealm, realm) && !(bat != null && Array.isArray(ep?.data) && bat >= tat)) {
@@ -47,7 +48,7 @@
         if (it) return make(Number(it.price), 0, want, 'ticker', tat, now, false);
       }
     }
-    if (Array.isArray(ep?.data) && bat != null && now - bat < bookMax) {
+    if (opts.gameBook === true && Array.isArray(ep?.data) && bat != null && now - bat < bookMax) {
       const ok = ep.data.filter(r => n(r?.price) > 0 && n(r?.quality) != null && eligible(mode, want, Number(r.quality))
         && !(own && r?.id != null && own.has(String(r.id))) && !(cid != null && sellerOf(r) === cid));
       if (ok.length) { const b = ok.reduce((a, c) => (Number(c.price) < Number(a.price) ? c : a)); return make(Number(b.price), Number(b.quality), want, 'exchange', bat, now, false); }
