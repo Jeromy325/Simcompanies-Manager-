@@ -97,7 +97,10 @@
     'simcotools-prices': 'SimcoTools prices',
     'simcotools-gov-orders': 'SimcoTools government orders',
     'simcotools-buildings': 'SimcoTools building data',
-    'simcotools-resources': 'SimcoTools resource data'
+    'simcotools-resources': 'SimcoTools resource data',
+    'simcotools-phases': 'SimcoTools economic phases',
+    'simcotools-events': 'SimcoTools production events',
+    'simcotools-company': 'SimcoTools company history'
   };
   // Outcome words in the list (not-read reads as "not read").
   const OUTCOME = { 'not-read': 'not read', waiting: 'waiting' };

@@ -131,8 +131,8 @@
   }
   const approxBytes = v => { try { return v === undefined ? 0 : JSON.stringify(v).length; } catch { return 0; } };
   // Storage the Manager no longer writes or reads; scmPruneStorage removes what older versions left behind.
-  const OBSOLETE_KEYS = ['marketSyncCycleStartedAt', 'marketSyncCycleReason', 'marketSyncCycleFinishedAt', 'scmRealmDiagnosticSchema', 'scmProductionEventMonitor:0', 'scmProductionEventMonitor:1', 'frozenNetworkPlan'];
-  const OBSOLETE_REALM_FIELDS = ['activeRealmIdentity', 'vwapLegacyDiscarded', 'realmIsolationNote', 'productionEventMonitor', 'buildingAlarms'];
+  const OBSOLETE_KEYS = ['marketSyncCycleStartedAt', 'marketSyncCycleReason', 'marketSyncCycleFinishedAt', 'scmRealmDiagnosticSchema', 'scmProductionEventMonitor:0', 'scmProductionEventMonitor:1', 'frozenNetworkPlan', 'productionEvents'];
+  const OBSOLETE_REALM_FIELDS = ['activeRealmIdentity', 'vwapLegacyDiscarded', 'realmIsolationNote', 'productionEventMonitor', 'buildingAlarms', 'productionEvents'];
   // Realm store without the obsolete fields; removed = number of fields dropped.
   function withoutObsoleteRealmFields(store) {
     if (!isObj(store)) return same(store);

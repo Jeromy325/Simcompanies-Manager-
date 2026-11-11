@@ -29,22 +29,56 @@
     return roundCurrencyUp(value * (1 - clampDiscount(discount) / 100));
   };
 
+  // SimcoTools events -> the same row shape the game's production-modifiers endpoint gives.
+  const EVENTS_PASSIVE_FRESH_MS = 6 * 3600 * 1000;
+  const EVENTS_SIMCO_FRESH_MS = 24 * 3600 * 1000;
+  // ms number or ISO string -> ms (NaN when missing/unparsable). Stored scmSimco* `at` is ms.
+  const toMs = v => typeof v === 'number' ? (Number.isFinite(v) ? v : NaN) : (typeof v === 'string' && v ? Date.parse(v) : NaN);
+  function simcoEventsToModifierRows(events) {
+    const out = [];
+    for (const e of Array.isArray(events) ? events : []) {
+      const kind = Number(e?.resource), mod = e?.speedModifier == null || e?.speedModifier === '' ? NaN : Number(e.speedModifier);
+      if (!Number.isFinite(kind) || kind <= 0 || !Number.isFinite(mod)) continue;
+      const since = e?.since == null ? '' : String(e.since), until = e?.until == null ? '' : String(e.until);
+      if (since && !Number.isFinite(Date.parse(since))) continue;
+      if (until && !Number.isFinite(Date.parse(until))) continue;
+      out.push({ kind, since, until, speedModifier: mod });
+    }
+    return out;
+  }
+  function lastMondayUtc(now = Date.now()) {
+    const d = new Date(Number(now)), day = d.getUTCDay();
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - ((day + 6) % 7) * 86400000;
+  }
+  // Passive game capture first; SimcoTools only when the capture is not fresh. Never merged.
+  function resolveModifierRows({ passive, simco, now } = {}) {
+    const nowMs = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+    const pRows = Array.isArray(passive?.rows) ? passive.rows : null;
+    const pAt = toMs(passive?.at);
+    if (pRows && Number.isFinite(pAt) && pAt > 0 && nowMs - pAt <= EVENTS_PASSIVE_FRESH_MS && pAt >= lastMondayUtc(nowMs)) return { rows: pRows, source: 'game', fresh: true };
+    const sEvents = Array.isArray(simco?.events) ? simco.events : null;
+    const sAt = toMs(simco?.at);
+    if (sEvents && Number.isFinite(sAt) && nowMs - sAt <= EVENTS_SIMCO_FRESH_MS) return { rows: simcoEventsToModifierRows(sEvents), source: 'simcotools', fresh: true };
+    if (pRows) return { rows: pRows, source: 'game-stale', fresh: false };
+    return { rows: [], source: 'none', fresh: false };
+  }
+
   // Game resource modifiers are keyed by resource `kind` and have explicit
   // active windows. Do not derive them from the extension's event-monitor UI.
   function activeResourceProductionModifier(rows, resourceId, now = Date.now()) {
     const id = Number(resourceId);
     if (!Number.isFinite(id) || id <= 0) return 0;
-    let total = 0;
+    // The game takes the FIRST row for the resource whose window contains now (since and until inclusive).
     for (const row of Array.isArray(rows) ? rows : []) {
       if (Number(row?.kind) !== id) continue;
       const since = Date.parse(String(row?.since || ''));
       const until = Date.parse(String(row?.until || ''));
       if (Number.isFinite(since) && now < since) continue;
-      if (Number.isFinite(until) && now >= until) continue;
+      if (Number.isFinite(until) && now > until) continue;
       const modifier = Number(row?.speedModifier);
-      if (Number.isFinite(modifier)) total += modifier;
+      return Number.isFinite(modifier) ? modifier : 0;
     }
-    return Math.max(-99, Math.min(99, total));
+    return 0;
   }
 
   function productionPlanLedger(specs, recipeByProduct, hours){
@@ -608,7 +642,7 @@
         Object.assign(out, { ratePerHour: rate, outputPerRun: rate * run.durationSec / 3600, source: 'run-snapshot', sourceLabel: 'run history (stored)', locked: true, eventPct: eventAtStart });
       } else {
         const T = toolsCore(ctx), log = ctx?.economyLog;
-        const startedPhase = T?.economyStateAt && Array.isArray(log) && log.length ? (T.economyStateAt(log, new Date(run.startedMs).toISOString())?.state ?? null) : null;
+        const startedPhase = T?.economyStateAt && Array.isArray(log) && (log.length || ctx?.simcoRanges?.length) ? ((ctx?.simcoRanges && T.economyStateAtWithRanges ? T.economyStateAtWithRanges(log, ctx.simcoRanges, new Date(run.startedMs).toISOString()) : T.economyStateAt(log, new Date(run.startedMs).toISOString()))?.state ?? null) : null;
         const f = formulaRatePerLevel(ctx, { productId: run.productId, product: run.product, buildingId: id, eventAtMs: run.startedMs, phase: startedPhase });
         if (f) Object.assign(out, { ratePerHour: f.perLevel * level, outputPerRun: f.perLevel * level * run.durationSec / 3600, source: 'game-formula', sourceLabel: 'game formula estimate', locked: false, eventPct: f.eventPct, abundancePct: f.abundancePct, phase: f.phase });
         else Object.assign(out, { sourceLabel: 'rate unknown', eventPct: eventAtStart });
@@ -904,13 +938,13 @@ function stockAfterDemand({ warehouse = [], productionRows = [], demandRows = []
       const m = url.match(/^\/api\/v2\/companies\/buildings\/(\d+)\/history\/?$/);
       if (m && okStatus(e) && sameRealm(e) && Array.isArray(e?.data)) historyByBuilding[m[1]] = e.data;
     }
-    let modifierRows = [], newest = -Infinity;
+    let modifierRows = [], newest = -Infinity, passiveFound = false, passiveAt = 0;
     for (const [url, e] of Object.entries(ep)) {
       const m = url.match(/^\/api\/v2\/production-modifiers\/(\d+)\/?$/);
       if (!m || Number(e?.status) !== 200 || !Array.isArray(e?.data?.resourceProductionModifiers)) continue;
       if (realm != null && Number(m[1]) !== realm) continue;
       const at = Date.parse(String(e.receivedAt || '')) || 0;
-      if (at >= newest) { newest = at; modifierRows = e.data.resourceProductionModifiers; }
+      if (at >= newest) { newest = at; modifierRows = e.data.resourceProductionModifiers; passiveFound = true; passiveAt = at; }
     }
     let auth = s.authData?.authCompany && typeof s.authData.authCompany === 'object' ? s.authData.authCompany : null;
     let temporals = s.authData?.temporals || null;
@@ -923,7 +957,21 @@ function stockAfterDemand({ warehouse = [], productionRows = [], demandRows = []
     const mod = Number(auth?.productionModifier);
     const log = Array.isArray(opts.economyLog) ? opts.economyLog : (Array.isArray(s.economyStateLog) ? s.economyStateLog : []);
     const authPhase = finiteNum(temporals?.economyState);
-    const phase = authPhase != null ? authPhase : (log.length ? finiteNum(log[log.length - 1]?.s) : null);
+    let phase = authPhase != null ? authPhase : (log.length ? finiteNum(log[log.length - 1]?.s) : null);
+    const nowMs = Number.isFinite(Number(opts.now)) ? Number(opts.now) : Date.now();
+    let modifierSource = null, economyPhase = null, simcoRanges = null;
+    if (opts.simcoEvents || opts.simcoPhases) {
+      const R = resolveModifierRows({ passive: passiveFound ? { rows: modifierRows, at: passiveAt || null } : null, simco: opts.simcoEvents ? { events: opts.simcoEvents.events, at: opts.simcoEvents.at } : null, now: nowMs });
+      modifierRows = R.rows; modifierSource = R.source;
+      simcoRanges = Array.isArray(opts.simcoPhases?.ranges) ? opts.simcoPhases.ranges : null;
+      const T = toolsCore({ tools: opts.tools });
+      if (T?.economyPhaseNow) {
+        const foundAuth = Object.entries(ep).find(([url, e]) => /\/api\/v3\/companies\/auth-data\/?$/i.test(url) && Number(e?.status) === 200 && sameRealm(e));
+        const authAt = opts.authAt ?? s.authData?.receivedAt ?? s.authData?.capturedAt ?? foundAuth?.[1]?.receivedAt ?? null;
+        economyPhase = T.economyPhaseNow({ log, authState: authPhase, authAt, simcoRanges, simcoAt: opts.simcoPhases?.at, now: nowMs });
+        if (phase == null && economyPhase?.state != null && economyPhase.source === 'simcotools') phase = economyPhase.state;
+      }
+    }
     const abundanceByBuilding = {};
     for (const [url, e] of Object.entries(ep)) {
       const m = url.match(/^\/api\/v2\/companies\/buildings\/(\d+)\/abundance\/?$/);
@@ -933,7 +981,7 @@ function stockAfterDemand({ warehouse = [], productionRows = [], demandRows = []
       now: opts.now ?? Date.now(), realm, buildings, historyByBuilding, snapshots: s.productionRateSnapshots || {},
       modifierRows, companyModifier: Number.isFinite(mod) ? Math.max(-99, Math.min(99, mod)) : 0,
       recreationBonus: recreationBonus(buildings), constants: opts.constants || s.gameConstants || null,
-      economyState: phase, economyLog: log, abundanceByBuilding, normalRates: opts.normalRates || null, tools: opts.tools || null
+      economyState: phase, economyLog: log, ...(modifierSource ? { modifierSource, economyPhase, simcoRanges } : {}), abundanceByBuilding, normalRates: opts.normalRates || null, tools: opts.tools || null
     };
   }
   const api = Object.freeze({
@@ -943,6 +991,11 @@ function stockAfterDemand({ warehouse = [], productionRows = [], demandRows = []
     normalizeName,
     discountedUnitPrice,
     activeResourceProductionModifier,
+    simcoEventsToModifierRows,
+    resolveModifierRows,
+    lastMondayUtc,
+    EVENTS_PASSIVE_FRESH_MS,
+    EVENTS_SIMCO_FRESH_MS,
     productionSurplusByKey,
     productionBalance,
     balanceSupplyDemandContracts,

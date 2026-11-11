@@ -1789,3 +1789,30 @@ html.scm-mobile table.mobile-cards tr:has(>td[colspan]:only-child){border:0!impo
 .scm-off-note[hidden]{display:none}
 .scm-off-note .tm-reset{min-height:0;padding:0;border:0;background:none;color:var(--accent,#f5a37a);font:inherit;text-decoration:underline;cursor:pointer}
 .owned-building-abundance.ab-none{overflow-wrap:anywhere}
+
+/* SimcoTools context: production strip + company history card */
+.production-strip{display:flex;flex-direction:column;gap:6px;padding:0 0 10px;min-width:0}
+.production-strip .ps-row{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+.ps-chip{display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:4px 10px;border:1px solid var(--line);border-radius:999px;background:var(--surface-2,#181716);color:var(--text,#eee);font-size:12px;font-weight:600;line-height:1.3;overflow-wrap:anywhere}
+.ps-chip b{font-weight:700}
+.ps-phase-boom{border-color:rgba(126,191,104,.5)}
+.ps-phase-recession{border-color:rgba(230,117,100,.5)}
+.ps-past{font-weight:500;font-size:11px;color:var(--text-2,#b8b3b0)}
+.ps-event.ps-pos b{color:var(--pos,#7ebf68)}
+.ps-event.ps-neg b{color:var(--neg,#e67564)}
+.ps-note{font-size:11px;line-height:1.35}
+.company-history-card .overview-section-head{align-items:center;flex-wrap:wrap}
+.company-history-card .ch-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px}
+.company-history-card .ch-card{min-height:0;padding:10px 12px!important;border:1px solid var(--line)!important;border-radius:10px!important;gap:2px}
+.company-history-card .ch-card strong{font-size:18px}
+.company-history-card .ch-chg{font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.company-history-card .ch-chg.acct-good{color:var(--pos,#7ebf68)}
+.company-history-card .ch-chg.acct-bad{color:var(--neg,#e67564)}
+.company-history-card .ch-chg.acct-flat{color:var(--muted,#a5a09e)}
+.company-history-card .ch-spark{height:36px;margin-top:6px;cursor:default}
+.company-history-card .acct-chart-empty{margin-top:6px;font-size:11px}
+.company-history-card .ch-note{margin-top:8px;font-size:11px}
+.company-history-card .ch-card small.ch-chg.acct-good{color:var(--pos,#7ebf68)!important}
+.company-history-card .ch-card small.ch-chg.acct-bad{color:var(--neg,#e67564)!important}
+@media(max-width:980px){.company-history-card .ch-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:650px){.production-strip{padding:0 0 8px}.company-history-card .ch-card strong{font-size:16px}}

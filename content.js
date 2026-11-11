@@ -318,61 +318,6 @@ if(!globalThis.__scmTimers)globalThis.__scmTimers=(()=>{
     return n;
   };
   let lastWarehouseCostDetailFingerprint = '';
-  let lastProductionEventFingerprint = '';
-
-  const parseEventExpiry = (untilText) => {
-    const text=String(untilText||'').trim();
-    const now=Date.now();
-    let m=text.match(/(\d+)\s*d(?:ays?)?\s*(\d+)\s*h(?:ours?)?/i);
-    if(m)return now+(Number(m[1])*86400+Number(m[2])*3600)*1000;
-    m=text.match(/(\d+)\s*h(?:ours?)?/i);
-    if(m)return now+Number(m[1])*3600000;
-    m=text.match(/(\d+)\s*m(?:in(?:utes?)?)?/i);
-    if(m)return now+Number(m[1])*60000;
-    m=text.match(/(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
-    if(m){const yy=Number(m[3]);const year=yy<100?2000+yy:yy;const d=new Date(year,Number(m[1])-1,Number(m[2]),23,59,59,999);if(Number.isFinite(d.getTime()))return d.getTime();}
-    return null;
-  };
-
-  const captureProductionEvents = () => {
-    try {
-      let realm=directKnownRealm;
-      const rm=String(location.pathname||'').match(/(?:\/rc\/|\/realm\/)(\d+)/i);
-      if(rm)realm=Number(rm[1]);
-      if(!Number.isFinite(realm))return;
-      const events=[];
-      for(const tr of document.querySelectorAll('tr')){
-        const text=String(tr.textContent||'').replace(/\s+/g,' ').trim();
-        const m=text.match(/([+-])\s*(\d+(?:\.\d+)?)%/);
-        if(!m)continue;
-        const cells=[...tr.querySelectorAll('th,td')].map(c=>String(c.textContent||'').replace(/\s+/g,' ').trim()).filter(Boolean);
-        const resourceCell=cells[0]||'';
-        const modifier=(m[1]==='-'?-1:1)*Number(m[2]);
-        const resourceName=resourceCell.replace(/\s+(?:Q\d+|\d+\s*⭐).*$/,'').trim();
-        if(!resourceName)continue;
-        const untilText=cells.find(c=>/(?:\d+\s*d|\d+\s*h|\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}|until)/i.test(c))||'';
-        events.push({resourceName,modifier,untilText,expiresAt:parseEventExpiry(untilText)});
-      }
-      const body=String(document.body?.innerText||'').replace(/\s+/g,' ').trim();
-      const am=body.match(/production speed temporarily (increased|decreased) by (\d+(?:\.\d+)?)% until ([^.]+?)(?:\.|$)/i);
-      if(am){
-        const contextual=body.match(/([A-Za-z][A-Za-z0-9 &'\-]{2,60})\s+Q\d{1,2}\b.{0,140}?production speed temporarily/i);
-        const headings=[...document.querySelectorAll('h1,h2,h3,[class*=title],[class*=name]')].map(x=>String(x.textContent||'').replace(/\s+/g,' ').trim()).filter(x=>/[A-Za-z]/.test(x)&&x.length>=3&&x.length<100);
-        const usableHeadings=headings.filter(x=>!/(?:manager|production balance|show ticker|hide ticker|deficit|surplus|warehouse|vwap)/i.test(x));
-        const heading=(contextual?.[1]||usableHeadings.find(x=>/\bQ\d{1,2}\b/i.test(x))||'');
-        const resourceName=(heading||'').replace(/\s+Q\d+.*$/i,'').trim();
-        if(resourceName)events.push({resourceName,modifier:(am[1].toLowerCase()==='decreased'?-1:1)*Number(am[2]),untilText:am[3].trim(),expiresAt:parseEventExpiry(am[3])});
-      }
-      const unique=new Map();
-      for(const e of events){if(e.expiresAt!=null&&e.expiresAt<=Date.now())continue;unique.set(`${e.resourceName}|${e.modifier}|${e.untilText}`,e);}
-      const list=[...unique.values()];
-      if(!list.length && !/\bEVENTS\b/i.test(body))return;
-      const fp=JSON.stringify({realm,list});
-      if(fp===lastProductionEventFingerprint)return;
-      lastProductionEventFingerprint=fp;
-      safeRuntimeSend({type:'PRODUCTION_EVENTS',realm,events:list,capturedAt:new Date().toISOString()});
-    } catch {}
-  };
 
   const captureWarehouseCostDetail = () => {
     try {
@@ -465,7 +410,6 @@ if(!globalThis.__scmTimers)globalThis.__scmTimers=(()=>{
     } catch {}
   };
   captureDirectGameState();
-  captureProductionEvents();
   scheduleWarehouseCostDetailCapture();
   setTimeout(captureDirectGameState, 1000);
   setTimeout(captureDirectGameState, 3000);
@@ -475,7 +419,6 @@ if(!globalThis.__scmTimers)globalThis.__scmTimers=(()=>{
   setInterval(()=>{if(!hookReady&&!document.hidden)captureDirectGameState();}, 1000);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!hookReady){try{captureDirectGameState();}catch{}}});
   // Mobile: background tabs do no polling work; a fresh capture runs when the tab is shown again.
-  globalThis.__scmTimers.loop('prodEventsCapture',15000,()=>{if(!document.hidden)captureProductionEvents();});
   globalThis.__scmTimers.loop('warehouseCostCapture',10000,()=>{if(!document.hidden)captureWarehouseCostDetail();});
   document.addEventListener('visibilitychange',()=>{if(!document.hidden){try{captureWarehouseCostDetail();}catch{}}});
 
@@ -708,11 +651,6 @@ if(!globalThis.__scmTimers)globalThis.__scmTimers=(()=>{
       return true;
     }
     // REFRESH_GAME_OVERLAY is handled inside the overlay IIFE below, where load() is in scope.
-    if (message?.type === 'CAPTURE_PRODUCTION_EVENTS') {
-      captureProductionEvents();
-      sendResponse({ok:true});
-      return false;
-    }
     if (message?.type === 'SET_SYNC_REALM') {
       const forced = Number(message.realm);
       directCaptureRealm = forced === 0 || forced === 1 ? forced : null;

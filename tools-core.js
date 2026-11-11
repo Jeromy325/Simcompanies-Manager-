@@ -409,6 +409,45 @@
     return null;
   }
   const ECONOMY_NAMES = { 0: 'recession', 1: 'normal', 2: 'boom' };
+  // Phase from the SimcoTools phase ranges ({phase:'normal'|'boom'|'recession', start, end}); game state wins when it has one.
+  const toMs = v => typeof v === 'number' ? (Number.isFinite(v) ? v : NaN) : (typeof v === 'string' && v ? Date.parse(v) : NaN);
+  const PHASE_STATE_BY_NAME = { recession: 0, normal: 1, boom: 2 };
+  const PHASE_PASSIVE_FRESH_MS = 15 * 60 * 1000;
+  const PHASE_SIMCO_FRESH_MS = 3 * 60 * 60 * 1000;
+  function simcoRangeAt(ranges, nowMs) {
+    for (const r of Array.isArray(ranges) ? ranges : []) {
+      const st = PHASE_STATE_BY_NAME[String(r && r.phase)], s = toMs(r && r.start), e = toMs(r && r.end);
+      if (st == null || !Number.isFinite(s) || !Number.isFinite(e)) continue;
+      if (s <= nowMs && nowMs < e) return { state: st, startedAt: new Date(s).toISOString(), endsAt: new Date(e).toISOString() };
+    }
+    return null;
+  }
+  function economyStateAtWithRanges(log, ranges, at) {
+    const g = economyStateAt(log, at);
+    if (g) return g;
+    const t = toMs(at);
+    if (!Number.isFinite(t)) return null;
+    const r = simcoRangeAt(ranges, t);
+    return r ? { state: r.state, assumed: false, source: 'simcotools' } : null;
+  }
+  function economyPhaseNow({ log, authState, authAt, simcoRanges, simcoAt, now } = {}) {
+    const nowMs = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+    const list = Array.isArray(log) ? log : [], last = list.length ? list[list.length - 1] : null;
+    const lastState = last && last.s != null && last.s !== '' && Number.isFinite(Number(last.s)) ? Number(last.s) : null;
+    const aState = authState != null && authState !== '' && Number.isFinite(Number(authState)) ? Number(authState) : null;
+    const pState = aState != null ? aState : lastState;
+    const pAt = [toMs(authAt), toMs(last && (last.l || last.f))].find(x => Number.isFinite(x) && x > 0) ?? null;
+    const range = simcoRangeAt(simcoRanges, nowMs);
+    const out = (state, source, r, mismatch) => ({ state, name: state == null ? null : economyName(state), source, startedAt: r ? r.startedAt : null, endsAt: r ? r.endsAt : null, endsScheduled: !!(r && r.endsAt), mismatch: !!mismatch });
+    if (pState != null && pAt != null && nowMs - pAt <= PHASE_PASSIVE_FRESH_MS) {
+      const same = range && range.state === pState ? range : null;
+      return out(pState, 'game', same, !!range && range.state !== pState);
+    }
+    const sAt = toMs(simcoAt);
+    if (range && Number.isFinite(sAt) && nowMs - sAt <= PHASE_SIMCO_FRESH_MS) return out(range.state, 'simcotools', range, false);
+    if (pState != null) return out(pState, 'game-stale', null, false);
+    return out(null, null, null, false);
+  }
   function economyName(state) { return ECONOMY_NAMES[Number(state)] || (Number.isFinite(Number(state)) ? `phase ${Number(state)}` : 'unknown'); }
   // Workers cost per PRODUCED unit of a warehouse lot. A lot can also hold bought units (cost.market) that
   // carry no workers cost; dividing by the whole amount understates labour. Produced units are estimated
@@ -911,9 +950,28 @@
     return { source: null, rows: [], amountsMissing: false };
   }
 
+  // Company history (SimcoTools rows, oldest first, missing = null) -> chart series for one field.
+  function companyHistorySeries(rows, field, rangeDays, now) {
+    const nowMs = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+    const days = Number(rangeDays), cutoff = Number.isFinite(days) && days > 0 ? nowMs - days * 86400000 : -Infinity;
+    const points = [];
+    for (const r of Array.isArray(rows) ? rows : []) {
+      if (!r || r[field] == null || r[field] === '' || typeof r[field] === 'boolean') continue;
+      const v = Number(r[field]), tm = toMs(r.date);
+      if (!Number.isFinite(v) || !Number.isFinite(tm) || tm < cutoff) continue;
+      points.push({ t: tm, v });
+    }
+    points.sort((a, b) => a.t - b.t);
+    const better = field === 'rank' || field === 'evaRank' ? 'down' : 'up';
+    const latest = points.length ? points[points.length - 1].v : null;
+    if (points.length < 2) return { points, latest, change: null, changePct: null, trend: null, better };
+    const first = points[0].v, change = latest - first;
+    return { points, latest, change, changePct: first !== 0 ? change / Math.abs(first) * 100 : null, trend: change > 0 ? 'up' : change < 0 ? 'down' : 'flat', better };
+  }
+
   const api = {
     buildingConst, mergeGovOrders,
-    gameFinancialStatements, economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, phaseProfits, adminIncreasePerLevel, upgradePaybackFull, sellPriceAdvice, contractVerdict, effectiveAdminOverhead, executiveSkill, academyActiveSize, executiveRoster, dailyBaseLabour, executiveAdminWhatIf, executiveRoi, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
+    gameFinancialStatements, economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, phaseProfits, adminIncreasePerLevel, upgradePaybackFull, sellPriceAdvice, contractVerdict, effectiveAdminOverhead, executiveSkill, academyActiveSize, executiveRoster, dailyBaseLabour, executiveAdminWhatIf, executiveRoi, batchPhaseFromRate, economyStateAt, economyStateAtWithRanges, economyPhaseNow, PHASE_PASSIVE_FRESH_MS, PHASE_SIMCO_FRESH_MS, companyHistorySeries, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, roi, loan, allocate, profitPerHour, buildingProfit,
     cleanSeries, seriesForResource, rangeStats, sliceRange, moversTable,
     seriesToCsv, appendObservations, moversFromTrend,
