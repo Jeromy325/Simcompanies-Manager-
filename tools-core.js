@@ -969,7 +969,146 @@
     return { points, latest, change, changePct: first !== 0 ? change / Math.abs(first) * 100 : null, trend: change > 0 ? 'up' : change < 0 ? 'down' : 'flat', better };
   }
 
+  // Ranking rows -> own row plus up to `span` rows above and below, by rank. null when own id is absent.
+  function rankingWindow(rows, companyId, span = 5) {
+    if (!Array.isArray(rows) || companyId == null) return null;
+    const sp = Number.isFinite(Number(span)) && Number(span) >= 0 ? Math.floor(Number(span)) : 5;
+    const seen = new Set(), list = [];
+    for (const r of rows) {
+      if (!r || r.companyId == null || r.rank == null || r.rank === '' || !Number.isFinite(Number(r.rank))) continue;
+      const k = String(r.companyId);
+      if (seen.has(k)) continue;
+      seen.add(k); list.push(r);
+    }
+    list.sort((a, b) => Number(a.rank) - Number(b.rank));
+    const i = list.findIndex(r => String(r.companyId) === String(companyId));
+    if (i < 0) return null;
+    return { own: list[i], above: list.slice(Math.max(0, i - sp), i), below: list.slice(i + 1, i + 1 + sp) };
+  }
+
+  // Realm summary rows (date + numeric fields) -> chart series for one field. Same maths as companyHistorySeries.
+  function realmSummaryTrend(rows, field, rangeDays, now) {
+    const s = companyHistorySeries(rows, field, rangeDays, now);
+    return { points: s.points, latest: s.latest, change: s.change, changePct: s.changePct };
+  }
+
+  // Stored building stats {total, rows:[[id,count,proportion]]} -> how many of one building type exist in the realm.
+  function buildingRealmCount(stats, id) {
+    if (!stats || !Array.isArray(stats.rows) || id == null) return null;
+    for (const r of stats.rows) {
+      const rid = Array.isArray(r) ? r[0] : r && r.id, count = Array.isArray(r) ? r[1] : r && r.count, prop = Array.isArray(r) ? r[2] : r && r.proportion;
+      if (rid == null || String(rid) !== String(id)) continue;
+      if (count == null || count === '' || !Number.isFinite(Number(count))) return null;
+      const c = Number(count), total = Number(stats.total);
+      let pct = Number.isFinite(total) && total > 0 ? c / total * 100 : (prop != null && prop !== '' && Number.isFinite(Number(prop)) ? Number(prop) * 100 : null);
+      if (pct != null) pct = Math.round(pct * 1e6) / 1e6;
+      return { count: c, proportionPct: pct };
+    }
+    return null;
+  }
+
+  // Government-order history -> how often each project returns. history = {orders:[...]} or an array.
+  function govOrderPatterns(history, now) {
+    const list = Array.isArray(history) ? history : history && Array.isArray(history.orders) ? history.orders : [];
+    const nowMs = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+    const groups = new Map(), seen = new Set();
+    for (const od of list) {
+      if (!od || typeof od !== 'object') continue;
+      const name = typeof od.projectName === 'string' ? od.projectName.trim() : '';
+      if (!name) continue;
+      if (od.id != null) { if (seen.has(String(od.id))) continue; seen.add(String(od.id)); }
+      let g = groups.get(name);
+      if (!g) groups.set(name, g = { projectName: name, count: 0, times: [], res: new Map() });
+      g.count++;
+      const tm = toMs(od.created);
+      if (Number.isFinite(tm)) g.times.push(tm);
+      for (const x of Array.isArray(od.res) ? od.res : []) {
+        if (!Array.isArray(x) || x[0] == null) continue;
+        const k = x[0] + '|' + (x[1] == null ? '' : x[1]);
+        const e = g.res.get(k) || { resourceId: x[0], quality: x[1] == null ? null : x[1], n: 0 };
+        e.n++; g.res.set(k, e);
+      }
+    }
+    const out = [];
+    for (const g of groups.values()) {
+      g.times.sort((a, b) => a - b);
+      const gaps = [];
+      for (let i = 1; i < g.times.length; i++) gaps.push((g.times[i] - g.times[i - 1]) / 86400000);
+      gaps.sort((a, b) => a - b);
+      const m = gaps.length, median = m === 0 ? null : m % 2 ? gaps[(m - 1) / 2] : (gaps[m / 2 - 1] + gaps[m / 2]) / 2;
+      const last = g.times.length ? g.times[g.times.length - 1] : null;
+      out.push({
+        projectName: g.projectName, count: g.count, lastCreated: last,
+        daysSinceLast: last == null ? null : Math.max(0, (nowMs - last) / 86400000),
+        medianGapDays: g.count < 2 ? null : median,
+        topResources: [...g.res.values()].sort((a, b) => b.n - a.n || Number(a.resourceId) - Number(b.resourceId)).slice(0, 5)
+      });
+    }
+    out.sort((a, b) => b.count - a.count || a.projectName.localeCompare(b.projectName));
+    return out.slice(0, 30);
+  }
+
+  // Contests -> running (ends soonest first) and upcoming (starts soonest first); ended ones are dropped.
+  function contestsView(contests, now) {
+    const nowMs = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+    const running = [], upcoming = [];
+    for (const c of Array.isArray(contests) ? contests : []) {
+      if (!c || typeof c !== 'object') continue;
+      const s = toMs(c.start), e = toMs(c.end);
+      if (!Number.isFinite(s) && !Number.isFinite(e)) continue;
+      if (Number.isFinite(e) && e <= nowMs) continue;
+      const item = { ...c, startMs: Number.isFinite(s) ? s : null, endMs: Number.isFinite(e) ? e : null };
+      if (Number.isFinite(s) && s > nowMs) upcoming.push({ ...item, startsInMs: s - nowMs, endsInMs: item.endMs == null ? null : e - nowMs });
+      else running.push({ ...item, startsInMs: null, endsInMs: item.endMs == null ? null : e - nowMs });
+    }
+    running.sort((a, b) => (a.endsInMs ?? Infinity) - (b.endsInMs ?? Infinity));
+    upcoming.sort((a, b) => a.startsInMs - b.startsInMs);
+    return { running, upcoming };
+  }
+
+  // The game's ranking page (/api/v4/encyclopedia/ranking/<realm>/<page>/): plain list of {id, company, rank (0-based), value}.
+  // Output rows use the scmSimcoRanking shape (rank 1-based); fields the game does not give are null. eva: rows are EVA ranks.
+  function gameRankingRows(data, opts = {}) {
+    const eva = !!(opts && opts.eva);
+    const list = Array.isArray(data) ? data : data && typeof data === 'object' ? ['ranking', 'companies', 'results'].map(k => data[k]).find(Array.isArray) : null;
+    if (!list) return [];
+    const out = [], seen = new Set();
+    for (const x of list.slice(0, 2000)) {
+      if (!x || typeof x !== 'object') continue;
+      const idn = Number(x.id ?? x.companyId);
+      if (!Number.isSafeInteger(idn) || idn <= 0 || seen.has(idn)) continue;
+      seen.add(idn);
+      const r0 = x.rank == null || x.rank === '' || typeof x.rank === 'boolean' ? NaN : Number(x.rank);
+      const rank = Number.isSafeInteger(r0) && r0 >= 0 ? r0 + 1 : null;
+      const nm = String(typeof x.company === 'string' ? x.company : x.companyName ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 80);
+      const val = x.value == null || x.value === '' || typeof x.value === 'boolean' ? NaN : Number(x.value);
+      out.push({ companyId: idn, companyName: nm || null, rank: eva ? null : rank, rankDiff: null, evaRank: eva ? rank : null, companyValue: eva || !Number.isFinite(val) ? null : val, workers: null });
+    }
+    return out;
+  }
+
+  // Newest captured game ranking page (2xx) of the realm that holds the company -> {rows, companyId, at, total:null} | null.
+  function pickGameRanking(endpointData, realm, companyId, now) {
+    const cid = Number(companyId), r = Number(realm);
+    if (!endpointData || typeof endpointData !== 'object' || !Number.isSafeInteger(cid) || cid <= 0 || !Number.isInteger(r)) return null;
+    let best = null;
+    for (const [u, v] of Object.entries(endpointData)) {
+      const m = String(u).match(/^\/api\/v4\/encyclopedia\/ranking\/(\d+)\/\d+\/$/);
+      if (!m || Number(m[1]) !== r || !v || typeof v !== 'object') continue;
+      const st = Number(v.status ?? 200);
+      if (!(st >= 200 && st < 300)) continue;
+      const at = toMs(v.receivedAt);
+      if (!Number.isFinite(at) || (best && at <= best.at)) continue;
+      const rows = gameRankingRows(v.data);
+      if (!rows.some(x => x.companyId === cid)) continue;
+      best = { rows, companyId: cid, at, total: null };
+    }
+    return best;
+  }
+
   const api = {
+    gameRankingRows, pickGameRanking,
+    rankingWindow, realmSummaryTrend, buildingRealmCount, govOrderPatterns, contestsView,
     buildingConst, mergeGovOrders,
     gameFinancialStatements, economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, phaseProfits, adminIncreasePerLevel, upgradePaybackFull, sellPriceAdvice, contractVerdict, effectiveAdminOverhead, executiveSkill, academyActiveSize, executiveRoster, dailyBaseLabour, executiveAdminWhatIf, executiveRoi, batchPhaseFromRate, economyStateAt, economyStateAtWithRanges, economyPhaseNow, PHASE_PASSIVE_FRESH_MS, PHASE_SIMCO_FRESH_MS, companyHistorySeries, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, roi, loan, allocate, profitPerHour, buildingProfit,

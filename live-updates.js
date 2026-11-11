@@ -100,7 +100,11 @@
     'simcotools-resources': 'SimcoTools resource data',
     'simcotools-phases': 'SimcoTools economic phases',
     'simcotools-events': 'SimcoTools production events',
-    'simcotools-company': 'SimcoTools company history'
+    'simcotools-company': 'SimcoTools company history',
+    'simcotools-ranking': 'SimcoTools realm ranking',
+    'simcotools-contests': 'SimcoTools contests',
+    'simcotools-summaries': 'SimcoTools realm summary',
+    'simcotools-building-stats': 'SimcoTools building counts'
   };
   // Outcome words in the list (not-read reads as "not read").
   const OUTCOME = { 'not-read': 'not read', waiting: 'waiting' };

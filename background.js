@@ -2089,7 +2089,15 @@ setTimeout(()=>{seedProductionCostHistoryOnce().catch(()=>{});},4000);
 // game's own busy.started + busy.duration; one alarm per running batch, named scm-prodfin:<realm>:<buildingId>:<finishMs>.
 // Whether the phone shows them depends on the browser's support for extension notifications.
 const NOTIFY_SETTINGS_KEY='scmNotifySettings';
-const NOTIFY_DEFAULTS={productionFinished:true,sales:true,priceTargets:[],bigMove:true,bigMovePct:5,incomingContracts:true,dailySummary:true,dailySummaryTime:'08:00',costChange:true,costChangePct:3,idle:true,idleHours:1,undercut:true,unprofitable:true,jobTrouble:true,economyChange:true};
+const NOTIFY_DEFAULTS={productionFinished:true,sales:true,priceTargets:[],bigMove:true,bigMovePct:5,incomingContracts:true,dailySummary:true,dailySummaryTime:'08:00',costChange:true,costChangePct:3,idle:true,idleHours:1,undercut:true,unprofitable:true,jobTrouble:true,economyChange:true,contestReminder:true,contestLeadHours:24};
+// A Settings save: contestLeadHours an integer 1..336 (not a number = 24), contestReminder a boolean.
+function sanitizeNotifySet(set){
+  const out={...(set&&typeof set==='object'&&!Array.isArray(set)?set:{})};
+  if('contestLeadHours' in out){const v=out.contestLeadHours,h=(typeof v==='number'||(typeof v==='string'&&v.trim()!==''))?Number(v):NaN;
+    out.contestLeadHours=Number.isFinite(h)?Math.min(336,Math.max(1,Math.round(h))):24;}
+  if('contestReminder' in out){const v=out.contestReminder;out.contestReminder=v===true||v==='true'||v===1||v==='1'||v==='on';}
+  return out;
+}
 async function notifySettings(){const v=(await chrome.storage.local.get({[NOTIFY_SETTINGS_KEY]:null}))[NOTIFY_SETTINGS_KEY];return {...NOTIFY_DEFAULTS,...(v&&typeof v==='object'?v:{})};}
 // Notification state (dedupe/re-arm) in its own key, written through one serial queue.
 const NOTIFY_STATE_KEY='scmNotifyState';let notifyStateQueue=Promise.resolve();
@@ -5839,7 +5847,16 @@ async function runScheduledLiveMarketRefresh(reason='scheduled'){
 //                            only while the game's production-modifiers capture is over 6 h old or older than Monday 00:00Z; every 3 h
 //  scmSimcoCompany:<realm>   {at, companyId, notTracked?, rows:[{date,rank,evaRank,value,buildingsValue,patentsValue,workers,bondsSold}]}
 //                            oldest first, daily history; once a day or when the company id changes (404 = notTracked, rows [])
-//  scmSimcoBuildings         {at, byId:{[kind]:{costUnits,buildDuration /*s*/}}}            list once a day, then one building per slot
+//  scmSimcoGovHistory:<realm> {at, names:{[resourceId]:name}, orders:[{id,projectName,daysToFulfill,created,res:[[resourceId,quality]]}]}
+//                            every order read by the gov-orders job (no extra request), newest 300 first, deduped by id, old ones kept
+//  scmSimcoRanking:<realm>   {at, date, companyId, rank, partial?, total?, rows:[{companyId,companyName,rank,rankDiff,evaRank,companyValue,workers}]}
+//                            own row + 5 above + 5 below, once a day; the page comes from the rank (company history / partial);
+//                            no rank: own row only (partial) and the page next firing. pageMissAt / lookup: page did not hold the own row
+//  scmSimcoContests:<realm>  {at, contests:[{id,name,resourceId,resourceName,buildingId,buildingName,start,end}]} once a day or when
+//                            a stored contest ended after the read; ended over a day ago dropped. Reminders: runContestReminders
+//  scmSimcoSummary:<realm>   {at, rows:[{date,activeCompanies,companiesValue,totalBuildings,bondsSold,phase}]} oldest first, 100 days, daily
+//  scmSimcoBuildingStats:<realm> {at, total, rows:[[id,count,proportion]]}                    count of each building type in the realm, daily
+//  scmSimcoBuildings       {at, byId:{[kind]:{costUnits,buildDuration /*s*/}}}            list once a day, then one building per slot
 //  scmSimcoBuildingsMeta     {listAt, ids:[...], entryAt:{[id]:ms}, missing:{[id]:ms}}       progress of the buildings round
 //  scmSimcoResources         {at, phase, byId}                                                once a day; never written into scmGameConstants
 //  scmSimcoResourcesRetry    {until, fails}                                                   after a non-200: 1 h doubling to 24 h
@@ -5858,6 +5875,11 @@ const SIMCO_RESOURCES_MAX_AGE_MS=24*3600000,SIMCO_RESOURCES_RETRY_MIN_MS=3600000
 const SIMCO_PHASE_PASSIVE_FRESH_MS=15*60000,SIMCO_PHASES_MAX_AGE_MS=3600000,SIMCO_PHASES_FRESH_PASSIVE_MAX_AGE_MS=6*3600000,SIMCO_PHASES_ENDED_MIN_AGE_MS=10*60000;
 const SIMCO_EVENTS_PASSIVE_MAX_AGE_MS=6*3600000,SIMCO_EVENTS_MAX_AGE_MS=3*3600000;
 const SIMCO_COMPANY_MAX_AGE_MS=24*3600000;
+// Gov orders: the game's own list captured under 1 h ago = no SimcoTools read (passive capture first).
+const SIMCO_GOV_ORDERS_PASSIVE_FRESH_MS=60*60000;
+// Ranking, contests, realm summaries, building counts: once a day. A passive source (a game page that loads the same
+// data) can set ctx.<job>PassiveAt later; while that is under a day old the job is not due.
+const SIMCO_DAILY_MAX_AGE_MS=24*3600000,SIMCO_SUMMARY_DAYS=100;
 const SIMCO_API='https://api.simcotools.com/v1';
 let simcoPublicWriteTail=Promise.resolve(),simcoPublicRun=null;
 const simcoPricesMemo=new Map();
@@ -5867,6 +5889,8 @@ let simcoPublicGen=null;
 function simcoPublicWrite(fn){const gen=simcoPublicGen;const run=simcoPublicWriteTail.then(()=>gen!=null&&gen!==extensionClearGeneration?null:fn());simcoPublicWriteTail=run.catch(()=>{});return run;}
 const simcoPricesKey=r=>`scmSimcoPrices:${r}`,simcoGovOrdersKey=r=>`scmSimcoGovOrders:${r}`;
 const simcoPhasesKey=r=>`scmSimcoPhases:${r}`,simcoEventsKey=r=>`scmSimcoEvents:${r}`,simcoCompanyKey=r=>`scmSimcoCompany:${r}`;
+const simcoGovHistoryKey=r=>`scmSimcoGovHistory:${r}`,simcoRankingKey=r=>`scmSimcoRanking:${r}`,simcoContestsKey=r=>`scmSimcoContests:${r}`;
+const simcoSummaryKey=r=>`scmSimcoSummary:${r}`,simcoBuildingStatsKey=r=>`scmSimcoBuildingStats:${r}`;
 async function simcoPublicGet(defaults){try{return await chrome.storage.local.get(defaults);}catch{return {...defaults};}}
 function simcoAgeOk(at,maxAgeMs,now=Date.now()){const t=Number(at);return Number.isFinite(t)&&t>0&&now-t<maxAgeMs;}
 // Stored SimcoTools prices of a realm ({at,rows}) or null. Only this file writes the key, so the memo is set on write.
@@ -5881,9 +5905,10 @@ async function simcoPricesFor(realm){
 // Bounded storage: every stored SimcoTools answer is capped in rows and string length, and a body over 2 MB is
 // never parsed (simcoPublicParse). Only the documented fields are kept.
 const SIMCO_MAX_BODY_CHARS=2*1024*1024;
-const SIMCO_CAP={prices:5000,govOrders:200,govOrderResources:20,buildingIds:500,resources:1000,inputs:50,retailInfo:20,text:80,iso:40,events:100,phaseRanges:30,companyRows:120};
+const SIMCO_CAP={prices:5000,govOrders:200,govOrderResources:20,buildingIds:500,resources:1000,inputs:50,retailInfo:20,text:80,iso:40,events:100,phaseRanges:30,companyRows:120,rankingRows:11,rankingScan:500,summaryRows:100,buildingStats:200,contests:20,govHistory:300,govHistoryNames:200};
 const SIMCO_RETAIL_FIELDS=['quality','buildingLevelsNeededPerUnitPerHour','modeledProductionCostPerUnit','modeledStoreWages','modeledUnitsSoldAnHour','retailModelingQualityWeight','profitPerBuildingLevel','retailAdjustment','averagePrice','saturation','salesWages'];
-const simcoText=(v,n=SIMCO_CAP.text)=>String(v??'').slice(0,n);
+// Control characters become spaces, then trimmed, then capped (every stored SimcoTools string goes through this).
+const simcoText=(v,n=SIMCO_CAP.text)=>String(v??'').replace(/[\u0000-\u001f\u007f]/g,' ').trim().slice(0,n);
 const simcoNum=v=>{const n=Number(v);return Number.isFinite(n)?n:null;};
 // {data} or {tooLarge:true} (no JSON.parse of a body over 2 MB).
 function simcoPublicParse(text){const s=String(text??'');if(s.length>SIMCO_MAX_BODY_CHARS)return {tooLarge:true,length:s.length};return {data:parseSimcoResponse(s)};}
@@ -5972,6 +5997,114 @@ function simcoCompanyRowsFromResponse(data){
   rows.sort((a,b)=>Date.parse(b.date)-Date.parse(a.date));
   return rows.slice(0,SIMCO_CAP.companyRows).reverse();
 }
+// The list of an answer: the answer itself or its first array field of the given names; null = no list (garbage).
+function simcoListOf(data,...names){if(Array.isArray(data))return data;if(!data||typeof data!=='object')return null;for(const n of names)if(Array.isArray(data[n]))return data[n];return null;}
+const simcoUtcDay=ms=>new Date(ms).toISOString().slice(0,10);
+// Ids that go into storage keys / notification ids: finite numbers, or short word strings.
+const simcoSafeId=v=>typeof v==='number'?(Number.isSafeInteger(v)?v:null):typeof v==='string'&&/^[\w-]{1,40}$/.test(v)?v:null;
+const simcoCount=v=>{const n=simcoNumOrNull(v);return n!=null&&n>=0?n:null;};
+function simcoRankingRow(x){
+  if(!x||typeof x!=='object')return null;const c=x.company&&typeof x.company==='object'?x.company:null;
+  const companyId=simcoSafeCompanyId(x.companyId??c?.id??x.id);if(!companyId)return null;
+  const rank=simcoNumOrNull(x.rank);
+  return {companyId,companyName:simcoText(x.companyName??c?.name??x.name),rank:Number.isSafeInteger(rank)&&rank>0?rank:null,rankDiff:simcoNumOrNull(x.rankDiff),
+    evaRank:simcoNumOrNull(x.evaRank),companyValue:simcoNumOrNull(x.companyValue??x.value),workers:simcoNumOrNull(x.workers)};
+}
+// GET /ranking -> {ranking|companies|results:[{companyId,companyName,rank,rankDiff,evaRank,companyValue,workers}], metadata}.
+// {date, rows (own row + 5 above + 5 below, by rank), total, found} or null (no list). found=false: own row not in the answer.
+function simcoRankingFromResponse(data,companyId){
+  const list=simcoListOf(data,'ranking','companies','results','items','rows');if(!list)return null;
+  const cid=simcoSafeCompanyId(companyId),all=[],seen=new Set();
+  for(const x of list.slice(0,SIMCO_CAP.rankingScan)){const r=simcoRankingRow(x);if(r&&!seen.has(r.companyId)){seen.add(r.companyId);all.push(r);}}
+  all.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
+  const i=cid?all.findIndex(r=>r.companyId===cid):-1,span=Math.floor((SIMCO_CAP.rankingRows-1)/2);
+  const rows=i<0?[]:all.slice(Math.max(0,i-span),i+span+1);
+  const m=data&&typeof data==='object'&&!Array.isArray(data)?data:{};
+  const t=simcoNumOrNull(m.metadata?.totalRecords??m.metadata?.totalCount??m.metadata?.total??m.metadata?.count??m.total??m.count);
+  const d=simcoIso(m.date??m.metadata?.date??list[0]?.date);
+  return {date:d?d.slice(0,10):null,rows,total:Number.isSafeInteger(t)&&t>=0?t:null,found:i>=0};
+}
+// The game's own ranking page (GET /api/v4/encyclopedia/ranking/<realm>/<page>/, 400 rows a page, page = floor(rank/400)):
+// a plain list of {id, company, realmId, logo, rank (0-based: shown as rank+1), year, value}. Rows in the scmSimcoRanking row
+// shape (rank 1-based); fields the game does not give are null. eva=true for /eva-ranking/ (value = EVA, rank = EVA rank).
+function gameRankingRows(data,opts={}){
+  const list=Array.isArray(data)?data:simcoListOf(data,'ranking','companies','results');if(!list)return [];const out=[],seen=new Set();
+  for(const x of list.slice(0,SIMCO_CAP.rankingScan)){if(!x||typeof x!=='object')continue;const companyId=simcoSafeCompanyId(x.id??x.companyId);if(!companyId||seen.has(companyId))continue;
+    const r0=simcoNumOrNull(x.rank),rank=Number.isSafeInteger(r0)&&r0>=0?r0+1:null;seen.add(companyId);
+    out.push({companyId,companyName:simcoText(typeof x.company==='string'?x.company:x.companyName),rank:opts.eva?null:rank,rankDiff:null,
+      evaRank:opts.eva?rank:null,companyValue:opts.eva?null:simcoNumOrNull(x.value),workers:null});}
+  return out;
+}
+// Newest captured game ranking page of the realm (status 2xx) that holds the company: its time, else 0. Storage only.
+// Cheap (runs every 5-min firing): only keys under the realm's ranking prefix are looked at, newest first, and the scan stops
+// at the first page that holds the company (no normalising of the rows).
+function simcoGameRankingPassiveAt(store,realm,companyId){
+  const r=validRealmNumber(realm),cid=simcoSafeCompanyId(companyId);if(r==null||!cid)return 0;
+  const ed=store?.endpointData&&typeof store.endpointData==='object'?store.endpointData:{},pre=`/api/v4/encyclopedia/ranking/${r}/`,cands=[];
+  for(const u of Object.keys(ed)){if(!u.startsWith(pre)||!/^\d+\/?(\?.*)?$/.test(u.slice(pre.length)))continue;const v=ed[u];
+    const s=Number(v?.status||200);if(!(s>=200&&s<300))continue;const at=Date.parse(String(v?.receivedAt||''))||0;if(at>0)cands.push([at,v]);}
+  cands.sort((a,b)=>b[0]-a[0]);
+  for(const [at,v] of cands){const d=v?.data,list=Array.isArray(d)?d:simcoListOf(d,'ranking','companies','results');
+    if(list&&list.slice(0,SIMCO_CAP.rankingScan).some(x=>x&&typeof x==='object'&&simcoSafeCompanyId(x.id??x.companyId)===cid))return at;}
+  return 0;
+}
+const SIMCO_SUMMARY_FIELDS=['activeCompanies','companiesValue','totalBuildings','bondsSold'];
+// GET /summaries -> {summaries:[{date,activeCompanies,companiesValue,totalBuildings,bondsSold,phase}]}; oldest first, one per date,
+// the newest 100. null = no list.
+function simcoSummariesFromResponse(data){
+  const list=simcoListOf(data,'summaries','results','items','rows');if(!list)return null;const byDate=new Map();
+  for(const x of list.slice(0,SIMCO_CAP.rankingScan)){if(!x||typeof x!=='object')continue;const date=simcoIso(x.date);if(!date)continue;
+    const row={date};for(const k of SIMCO_SUMMARY_FIELDS)row[k]=simcoNumOrNull(x[k]);
+    const ph=x.phase;row.phase=typeof ph==='number'?simcoNum(ph):typeof ph==='string'?simcoText(ph,20):null;byDate.set(date,row);}
+  return [...byDate.values()].sort((a,b)=>Date.parse(a.date)-Date.parse(b.date)).slice(-SIMCO_CAP.summaryRows);
+}
+// GET /stats/buildings -> {buildings:[{id,name,count,proportion}], totalBuildings}; names are not kept (the game's buildings have them).
+function simcoBuildingStatsFromResponse(data){
+  const list=simcoListOf(data,'buildings','stats','results','items');if(!list)return null;const rows=[],seen=new Set();
+  for(const x of list){if(rows.length>=SIMCO_CAP.buildingStats)break;if(!x||typeof x!=='object')continue;
+    const id=String(x.id??x.kind??'').trim();if(!/^[0-9A-Za-z]{1,12}$/.test(id)||seen.has(id))continue;
+    const count=simcoCount(x.count);if(count==null)continue;seen.add(id);rows.push([id,count,simcoCount(x.proportion)]);}
+  const m=data&&typeof data==='object'&&!Array.isArray(data)?data:{};
+  return {total:simcoCount(m.totalBuildings??m.total??m.metadata?.totalBuildings),rows};
+}
+// GET /contests -> {contests:[{id,name,resource{id,name}|resourceId,resourceName,building{id,name}|buildingId,buildingName,start,end}]};
+// only contests that end after now - 1 day, at most 20. null = no list.
+function simcoContestsFromResponse(data,now=Date.now()){
+  const list=simcoListOf(data,'contests','results','items');if(!list)return null;const out=[],seen=new Set();
+  for(const x of list.slice(0,SIMCO_CAP.rankingScan)){if(out.length>=SIMCO_CAP.contests)break;if(!x||typeof x!=='object')continue;
+    const id=simcoSafeId(x.id);if(id==null||seen.has(String(id)))continue;
+    const start=simcoIso(x.start??x.startDate??x.start_date),end=simcoIso(x.end??x.endDate??x.end_date);if(!start||!end)continue;
+    if(!(Date.parse(end)>now-86400000))continue;
+    const res=x.resource&&typeof x.resource==='object'?x.resource:null,b=x.building&&typeof x.building==='object'?x.building:null;
+    const rid=simcoNumOrNull(x.resourceId??res?.id??(typeof x.resource==='number'?x.resource:null));
+    const bid=x.buildingId??b?.id??(typeof x.building==='string'||typeof x.building==='number'?x.building:null);
+    seen.add(String(id));
+    out.push({id,name:simcoText(x.name),resourceId:Number.isSafeInteger(rid)&&rid>0?rid:null,resourceName:simcoText(x.resourceName??res?.name),
+      buildingId:bid==null||!/^[0-9A-Za-z]{1,12}$/.test(String(bid))?null:String(bid),buildingName:simcoText(x.buildingName??b?.name),start,end});}
+  return out;
+}
+// One gov-history order from a parsed SimcoTools order ({resources:[{resourceId,quality}]}) or a stored one ({res:[[id,q]]}).
+function simcoGovHistoryOrder(o){
+  if(!o||typeof o!=='object')return null;const id=simcoSafeId(o.id);if(id==null)return null;
+  const src=Array.isArray(o.res)?o.res.map(r=>Array.isArray(r)?{resourceId:r[0],quality:r[1]}:null):Array.isArray(o.resources)?o.resources:[];
+  const res=[];for(const r of src.slice(0,SIMCO_CAP.govOrderResources)){const rid=Number(r?.resourceId),q=simcoNumOrNull(r?.quality);
+    if(Number.isSafeInteger(rid)&&rid>0)res.push([rid,Number.isInteger(q)&&q>=0?q:null]);}
+  const d=simcoNumOrNull(o.daysToFulfill);
+  return {id,projectName:simcoText(o.projectName),daysToFulfill:d,created:simcoText(o.created,SIMCO_CAP.iso),res};
+}
+// Stored history + every order just read: deduped by id (the new copy wins), newest 300 by created, older stored ones kept.
+// names: resource names of the kept orders (new names first), at most 200.
+function simcoGovHistoryMerge(prev,allOrders){
+  const byId=new Map();
+  for(const o of Array.isArray(prev?.orders)?prev.orders:[]){const n=simcoGovHistoryOrder(o);if(n&&!byId.has(String(n.id)))byId.set(String(n.id),n);}
+  for(const o of Array.isArray(allOrders)?allOrders:[]){const n=simcoGovHistoryOrder(o);if(n)byId.set(String(n.id),n);}
+  const orders=[...byId.values()].sort((a,b)=>(Date.parse(b.created)||0)-(Date.parse(a.created)||0)).slice(0,SIMCO_CAP.govHistory);
+  const used=new Set();for(const o of orders)for(const r of o.res)used.add(String(r[0]));
+  const names={};let n=0;const add=(id,name)=>{const k=String(id),s=simcoText(name).trim();if(n>=SIMCO_CAP.govHistoryNames||!s||!used.has(k)||names[k]!=null)return;names[k]=s;n++;};
+  for(const o of Array.isArray(allOrders)?allOrders:[])for(const r of Array.isArray(o?.resources)?o.resources:[])add(r?.resourceId,r?.resourceName);
+  const pn=prev?.names&&typeof prev.names==='object'?prev.names:{};for(const k of Object.keys(pn))add(k,pn[k]);
+  return {names,orders};
+}
 // Most recent Monday 00:00 UTC at or before now (the game's production events start the week).
 function simcoLastMondayUtc(now=Date.now()){const d=new Date(now);return Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()-((d.getUTCDay()+6)%7));}
 // When the game's own pages last gave the data (storage only): the realm's production-modifiers capture (status 200) and the
@@ -6013,13 +6146,53 @@ function simcoCompanyDue(g,realm,ctx,now){
   if(!cid)return cur&&simcoAgeOk(cur.at,SIMCO_COMPANY_MAX_AGE_MS-SIMCO_PUBLIC_DUE_SLACK_MS,now)?null:'no-id';
   return 'due';
 }
+// The game's own gov-orders list of the realm (status 2xx, data present): when it was captured (storage only).
+function simcoGovPassiveAt(store,realm){
+  const r=validRealmNumber(realm);if(r==null)return 0;const e=store?.endpointData?.[`/api/v3/government-orders/${r}/`];
+  const s=Number(e?.status||200);if(!e||e.data==null||!(s>=200&&s<300))return 0;return Date.parse(String(e.receivedAt||''))||0;
+}
+const simcoPassiveFresh=(at,maxAgeMs,now)=>{const p=Number(at)||0;return p>0&&p<=now+60000&&now-p<maxAgeMs;};
+function simcoGovOrdersDue(g,realm,ctx,now){
+  if(ctx&&simcoPassiveFresh(ctx.govPassiveAt,SIMCO_GOV_ORDERS_PASSIVE_FRESH_MS,now))return false;
+  return !simcoAgeOk(g?.[simcoGovOrdersKey(realm)]?.at,SIMCO_GOV_ORDERS_MAX_AGE_MS-SIMCO_PUBLIC_DUE_SLACK_MS,now);
+}
+const simcoDailyStale=(v,now)=>!simcoAgeOk(v?.at,SIMCO_DAILY_MAX_AGE_MS-SIMCO_PUBLIC_DUE_SLACK_MS,now);
+// Rank from the newest company-history row of the same company, or null.
+function simcoHistoryRank(g,realm,cid){
+  const h=g?.[simcoCompanyKey(realm)];if(!h||Number(h.companyId)!==cid||!Array.isArray(h.rows)||!h.rows.length)return null;
+  const r=Number(h.rows[h.rows.length-1]?.rank);return Number.isSafeInteger(r)&&r>0?r:null;
+}
+// null (not due) or {mode:'page',rank} (the 100-row page holding the rank) or {mode:'own'} (own row only, partial).
+function simcoRankingDue(g,realm,ctx,now){
+  const cid=simcoSafeCompanyId(ctx?.companyId);if(!cid)return null;
+  if(simcoPassiveFresh(ctx?.rankingPassiveAt,SIMCO_DAILY_MAX_AGE_MS,now))return null;
+  const cur=g?.[simcoRankingKey(realm)],same=Boolean(cur&&typeof cur==='object'&&Number(cur.companyId)===cid);
+  const fresh=same&&!simcoDailyStale(cur,now);
+  if(fresh&&!cur.partial)return null;
+  // A partial copy after the page did not hold the own row: no more tries until the copy is a day old.
+  if(fresh&&cur.partial&&Number(cur.pageMissAt)>0)return null;
+  if(same&&cur.lookup)return {mode:'own'};
+  const pr=fresh&&cur.partial?Number(cur.rank):NaN;
+  const rank=Number.isSafeInteger(pr)&&pr>0?pr:simcoHistoryRank(g,realm,cid);
+  return rank?{mode:'page',rank}:{mode:'own'};
+}
+function simcoContestsDue(g,realm,ctx,now){
+  if(simcoPassiveFresh(ctx?.contestsPassiveAt,SIMCO_DAILY_MAX_AGE_MS,now))return false;
+  const cur=g?.[simcoContestsKey(realm)];if(simcoDailyStale(cur,now))return true;
+  // A stored contest ended after the copy was read: read again (once; the new copy is newer than that end).
+  const at=Number(cur.at);return (Array.isArray(cur.contests)?cur.contests:[]).some(c=>{const e=Date.parse(String(c?.end||''));return Number.isFinite(e)&&e>at&&e<=now;});
+}
+function simcoSummariesDue(g,realm,ctx,now){return !simcoPassiveFresh(ctx?.summariesPassiveAt,SIMCO_DAILY_MAX_AGE_MS,now)&&simcoDailyStale(g?.[simcoSummaryKey(realm)],now);}
+function simcoBuildingStatsDue(g,realm,ctx,now){return !simcoPassiveFresh(ctx?.buildingStatsPassiveAt,SIMCO_DAILY_MAX_AGE_MS,now)&&simcoDailyStale(g?.[simcoBuildingStatsKey(realm)],now);}
 // The one job this firing runs, or null. Priority: prices, gov orders, phases, events, buildings list, resources,
-// company history, one building. ctx = {companyId, eventsPassiveAt, phasePassiveAt} (runSimcoPublicData builds it from the
-// realm store); a call without ctx (older callers) never picks the phases / events / company jobs.
+// company history, ranking, contests, realm summaries, building counts, one building. ctx = {companyId, eventsPassiveAt,
+// phasePassiveAt, govPassiveAt} (runSimcoPublicData builds it from the realm store); a call without ctx (older callers) never
+// picks the phases / events / company / ranking / contests / summaries / building-stats jobs. Gov orders with ctx: not read
+// while the game's own list is under 1 h old.
 function simcoPublicPickJob(g,realm,now=Date.now(),ctx=null){
   const slack=SIMCO_PUBLIC_DUE_SLACK_MS,withCtx=realm!=null&&ctx!=null&&typeof ctx==='object';
   if(realm!=null&&!simcoAgeOk(g?.[simcoPricesKey(realm)]?.at,SIMCO_PRICES_MAX_AGE_MS-slack,now))return {job:'prices'};
-  if(realm!=null&&!simcoAgeOk(g?.[simcoGovOrdersKey(realm)]?.at,SIMCO_GOV_ORDERS_MAX_AGE_MS-slack,now))return {job:'gov-orders'};
+  if(realm!=null&&simcoGovOrdersDue(g,realm,withCtx?ctx:null,now))return {job:'gov-orders'};
   if(withCtx&&simcoPhasesDue(g,realm,ctx,now))return {job:'phases'};
   if(withCtx&&simcoEventsDue(g,realm,ctx,now))return {job:'events'};
   const meta=g?.scmSimcoBuildingsMeta||{};
@@ -6027,6 +6200,10 @@ function simcoPublicPickJob(g,realm,now=Date.now(),ctx=null){
   if(realm!=null&&!(Number(g?.scmSimcoResourcesRetry?.until)>now)&&!simcoAgeOk(g?.scmSimcoResources?.at,SIMCO_RESOURCES_MAX_AGE_MS-slack,now))return {job:'resources'};
   // No company id yet: not picked (the lower jobs go on); runSimcoPublicData logs a 'not-read' line for it.
   if(withCtx&&simcoCompanyDue(g,realm,ctx,now)==='due')return {job:'company',companyId:simcoSafeCompanyId(ctx.companyId)};
+  if(withCtx){const rk=simcoRankingDue(g,realm,ctx,now);if(rk)return {job:'ranking',companyId:simcoSafeCompanyId(ctx.companyId),...rk};}
+  if(withCtx&&simcoContestsDue(g,realm,ctx,now))return {job:'contests'};
+  if(withCtx&&simcoSummariesDue(g,realm,ctx,now))return {job:'summaries'};
+  if(withCtx&&simcoBuildingStatsDue(g,realm,ctx,now))return {job:'building-stats'};
   const id=simcoNextBuildingId(meta,now);
   return id?{job:'building',id}:null;
 }
@@ -6057,14 +6234,19 @@ async function simcoPublicGovOrders(realm,t0,trigger){
   const resp=await simcoPublicFetch(base);
   if(!resp?.ok)return {ok:false,outcome:simcoPublicMiss(realm,job,resp,t0,trigger)};
   const p=simcoPublicParse(resp.text);if(p.tooLarge)return simcoPublicTooLarge(realm,job,p,t0,trigger);
+  // No orders list in the answer (garbage): nothing written, the stored orders and history stay.
+  if(!Array.isArray(p.data?.orders)){simcoPublicLog(realm,job,'failure',{status:resp.status},'SimcoTools returned no orders list; the stored orders stay',t0,trigger);return {ok:false,outcome:'failure'};}
   const all=simcoGovOrdersFromResponse(p.data);
   // Only orders still open (created + daysToFulfill days > now). Between two rounds that can be none: stored as an
   // empty list, never as expired orders (the dashboard then uses the game's data or hides the panel).
   const orders=simcoCurrentGovOrders(all);
-  const value={at:Date.now(),orders};
-  await simcoPublicWrite(()=>rawStorageSet({[simcoGovOrdersKey(realm)]:value}));
-  simcoPublicLog(realm,job,'success',{rows:orders.length,read:all.length},orders.length?null:'0 current orders',t0,trigger);
-  return {ok:true,orders:orders.length};
+  const now=Date.now(),value={at:now,orders};
+  // Every order read (expired ones too) goes into the history in the same write: no extra request.
+  const hist=await simcoPublicWrite(async()=>{
+    const hk=simcoGovHistoryKey(realm),prev=(await simcoPublicGet({[hk]:null}))[hk];
+    const h={at:now,...simcoGovHistoryMerge(prev,all)};await rawStorageSet({[simcoGovOrdersKey(realm)]:value,[hk]:h});return h;});
+  simcoPublicLog(realm,job,'success',{rows:orders.length,read:all.length,history:hist?.orders?.length??null},orders.length?null:'0 current orders',t0,trigger);
+  return {ok:true,orders:orders.length,history:hist?.orders?.length??0};
 }
 async function simcoPublicBuildingsList(realm,t0,trigger){
   const job='simcotools-buildings',resp=await simcoPublicFetch(`${SIMCO_API}/realms/0/buildings?disable_pagination=true`);
@@ -6165,6 +6347,73 @@ async function simcoPublicCompany(realm,companyId,t0,trigger){
   simcoPublicLog(realm,job,'success',{rows:rows.length,companyId:cid},rows.length?null:'0 history rows',t0,trigger);
   return {ok:true,rows:rows.length};
 }
+// Ranking: ONE request. plan {mode:'page',rank}: the 100-row page holding the rank (page = ceil(rank/100), 1-based);
+// {mode:'own'}: the company's own row only (stored partial; the page comes next firing). Own row not on the page: no second
+// page this firing; the next firing asks for the own row once (lookup), then nothing more until the copy is a day old.
+async function simcoPublicRanking(realm,companyId,t0,trigger,plan=null){
+  const job='simcotools-ranking',cid=simcoSafeCompanyId(companyId),key=simcoRankingKey(realm);
+  if(!cid){simcoPublicLog(realm,job,'not-read',{},'Not read: no company id yet (open the game once)',t0,trigger);return {ok:false,outcome:'not-read'};}
+  const rank=Number(plan?.rank),page=plan?.mode==='page'&&Number.isSafeInteger(rank)&&rank>0?Math.ceil(rank/100):0,step=page?'page':'own';
+  const url=page?`${SIMCO_API}/realms/${realm}/ranking?sort=rank&page_size=100&page=${page}`:`${SIMCO_API}/realms/${realm}/ranking?companies=${String(Number(cid))}&page_size=1`;
+  const resp=await simcoPublicFetch(url);const status=Number(resp?.status)||0;
+  if(!resp?.ok&&status!==404)return {ok:false,outcome:simcoPublicMiss(realm,job,resp,t0,trigger,{step,companyId:cid})};
+  const p=resp?.ok?simcoPublicParse(resp.text):null;if(p?.tooLarge)return simcoPublicTooLarge(realm,job,p,t0,trigger,{step,companyId:cid});
+  const r=p?simcoRankingFromResponse(p.data,cid):{date:null,rows:[],total:null,found:false};
+  if(!r){simcoPublicLog(realm,job,'failure',{step,status,companyId:cid},'SimcoTools returned no ranking; the stored ranking stays',t0,trigger);return {ok:false,outcome:'failure'};}
+  const now=Date.now(),date=r.date||simcoUtcDay(now);
+  const kind=await simcoPublicWrite(async()=>{
+    const cur=(await simcoPublicGet({[key]:null}))[key];const same=Boolean(cur&&typeof cur==='object'&&Number(cur.companyId)===cid);
+    const missAt=same&&Number(cur.pageMissAt)>0&&now-Number(cur.pageMissAt)<SIMCO_DAILY_MAX_AGE_MS?Number(cur.pageMissAt):0;
+    let value,kind;
+    if(r.found){const own=r.rows.find(x=>x.companyId===cid);
+      value=page?{at:now,date,companyId:cid,rank:own.rank,rows:r.rows}:{at:now,date,companyId:cid,rank:own.rank,partial:true,rows:[own]};
+      if(r.total!=null)value.total=r.total;if(!page&&(missAt||own.rank==null))value.pageMissAt=missAt||now;kind=page?'full':'partial';}
+    else if(page){
+      const freshPartial=same&&cur.partial&&simcoAgeOk(cur.at,SIMCO_DAILY_MAX_AGE_MS,now);
+      if(freshPartial)value={...cur,pageMissAt:now};
+      else{value={...(same?cur:{companyId:cid,rank:null,rows:[]}),at:same?Number(cur.at)||0:0,lookup:true,pageMissAt:now};}
+      kind='page-miss';}
+    else{value={at:now,date,companyId:cid,rank:null,partial:true,rows:[],pageMissAt:now};kind='not-listed';}
+    await rawStorageSet({[key]:value});return kind;
+  });
+  if(!kind)return {ok:false,cleared:true};
+  if(kind==='full'||kind==='partial')simcoPublicLog(realm,job,'success',{step,rows:kind==='full'?r.rows.length:1,companyId:cid,partial:kind==='partial'},null,t0,trigger);
+  else simcoPublicLog(realm,job,'skipped',{step,status,companyId:cid},kind==='page-miss'?'Own company not on the ranking page; the own row is asked for next':'Company is not in the SimcoTools ranking; skipped for a day',t0,trigger);
+  return {ok:true,kind};
+}
+async function simcoPublicContests(realm,t0,trigger){
+  const job='simcotools-contests',resp=await simcoPublicFetch(`${SIMCO_API}/realms/${realm}/contests?sort=-start_date&page_size=20`);
+  if(!resp?.ok)return {ok:false,outcome:simcoPublicMiss(realm,job,resp,t0,trigger)};
+  const p=simcoPublicParse(resp.text);if(p.tooLarge)return simcoPublicTooLarge(realm,job,p,t0,trigger);
+  const contests=simcoContestsFromResponse(p.data,Date.now());
+  // No list (garbage): stored contests stay. An empty list is a real answer (no contest now).
+  if(!contests){simcoPublicLog(realm,job,'failure',{status:resp.status},'SimcoTools returned no contests list; the stored contests stay',t0,trigger);return {ok:false,outcome:'failure'};}
+  const w=await simcoPublicWrite(async()=>{await rawStorageSet({[simcoContestsKey(realm)]:{at:Date.now(),contests}});return true;});
+  if(!w)return {ok:false,cleared:true};
+  simcoPublicLog(realm,job,'success',{rows:contests.length},contests.length?null:'0 contests',t0,trigger);
+  return {ok:true,contests:contests.length};
+}
+async function simcoPublicSummaries(realm,t0,trigger){
+  const since=simcoUtcDay(Date.now()-SIMCO_SUMMARY_DAYS*86400000);
+  const job='simcotools-summaries',resp=await simcoPublicFetch(`${SIMCO_API}/realms/${realm}/summaries?since_date=${since}&page_size=100&sort=date`);
+  if(!resp?.ok)return {ok:false,outcome:simcoPublicMiss(realm,job,resp,t0,trigger)};
+  const p=simcoPublicParse(resp.text);if(p.tooLarge)return simcoPublicTooLarge(realm,job,p,t0,trigger);
+  const rows=simcoSummariesFromResponse(p.data);
+  if(!rows?.length){simcoPublicLog(realm,job,'failure',{status:resp.status},'SimcoTools returned no usable realm summaries; the stored summaries stay',t0,trigger);return {ok:false,outcome:'failure'};}
+  await simcoPublicWrite(()=>rawStorageSet({[simcoSummaryKey(realm)]:{at:Date.now(),rows}}));
+  simcoPublicLog(realm,job,'success',{rows:rows.length},null,t0,trigger);
+  return {ok:true,rows:rows.length};
+}
+async function simcoPublicBuildingStats(realm,t0,trigger){
+  const job='simcotools-building-stats',resp=await simcoPublicFetch(`${SIMCO_API}/realms/${realm}/stats/buildings?page_size=100&sort=-count`);
+  if(!resp?.ok)return {ok:false,outcome:simcoPublicMiss(realm,job,resp,t0,trigger)};
+  const p=simcoPublicParse(resp.text);if(p.tooLarge)return simcoPublicTooLarge(realm,job,p,t0,trigger);
+  const s=simcoBuildingStatsFromResponse(p.data);
+  if(!s?.rows.length){simcoPublicLog(realm,job,'failure',{status:resp.status},'SimcoTools returned no usable building counts; the stored counts stay',t0,trigger);return {ok:false,outcome:'failure'};}
+  await simcoPublicWrite(()=>rawStorageSet({[simcoBuildingStatsKey(realm)]:{at:Date.now(),total:s.total,rows:s.rows}}));
+  simcoPublicLog(realm,job,'success',{rows:s.rows.length},null,t0,trigger);
+  return {ok:true,rows:s.rows.length};
+}
 // The SimcoTools company-history line when no company id is known: at most once an hour (no request is made).
 let simcoCompanyNoIdLogAt=0;
 // ctx for simcoPublicPickJob from the realm store (storage only): company id and when the game's pages last gave phases / events.
@@ -6173,7 +6422,8 @@ async function simcoPublicContext(realm,economyLog){
   const ac=store?.authData?.authCompany;const ar=validRealmNumber(ac?.realmId??ac?.realm??store?.authData?.realmId??store?.authData?.realm);
   const captured=capturedCompanyIdForRealm(store,realm);
   const companyId=captured>0?captured:(ar==null||ar===realm?simcoSafeCompanyId(ac?.companyId??ac?.id):0);
-  return {companyId,...simcoPublicPassive(store,realm,economyLog)};
+  // govPassiveAt: the game's own gov-orders list; rankingPassiveAt: a game ranking page holding the company (both captured only).
+  return {companyId,...simcoPublicPassive(store,realm,economyLog),govPassiveAt:simcoGovPassiveAt(store,realm),rankingPassiveAt:simcoGameRankingPassiveAt(store,realm,companyId)};
 }
 async function runSimcoPublicData(trigger='alarm'){
   if(simcoPublicRun)return simcoPublicRun;
@@ -6191,11 +6441,11 @@ async function runSimcoPublicData(trigger='alarm'){
     if(await simcoGateNextAt())return {ok:true,skipped:true,reason:'simcotools-gap'};
     const realm=await activeRealmNumber();
     const keys={scmSimcoBuildingsMeta:null,scmSimcoResources:null,scmSimcoResourcesRetry:null};
-    if(realm!=null){for(const k of [simcoPricesKey(realm),simcoGovOrdersKey(realm),simcoPhasesKey(realm),simcoEventsKey(realm),simcoCompanyKey(realm)])keys[k]=null;keys[`scmEconomyStateLog:${realm}`]=[];}
+    if(realm!=null){for(const k of [simcoPricesKey(realm),simcoGovOrdersKey(realm),simcoPhasesKey(realm),simcoEventsKey(realm),simcoCompanyKey(realm),simcoRankingKey(realm),simcoContestsKey(realm),simcoSummaryKey(realm),simcoBuildingStatsKey(realm)])keys[k]=null;keys[`scmEconomyStateLog:${realm}`]=[];}
     const g=await simcoPublicGet(keys);
     const ctx=realm!=null?await simcoPublicContext(realm,g[`scmEconomyStateLog:${realm}`]):null;
     const due=simcoPublicPickJob(g,realm,Date.now(),ctx);
-    if(ctx&&(!due||due.job==='building')&&simcoCompanyDue(g,realm,ctx,Date.now())==='no-id'&&Date.now()-simcoCompanyNoIdLogAt>=3600000){
+    if(ctx&&(!due||['building','ranking','contests','summaries','building-stats'].includes(due.job))&&simcoCompanyDue(g,realm,ctx,Date.now())==='no-id'&&Date.now()-simcoCompanyNoIdLogAt>=3600000){
       simcoCompanyNoIdLogAt=Date.now();simcoPublicLog(realm,'simcotools-company','not-read',{},'Not read: no company id yet (open the game once)',Date.now(),trigger);}
     if(!due)return {ok:true,skipped:true,reason:'all-fresh'};
     if(coreSyncActive())return {ok:true,skipped:true,reason:'sync'};
@@ -6207,6 +6457,10 @@ async function runSimcoPublicData(trigger='alarm'){
     if(due.job==='company')return {job:due.job,...(await simcoPublicCompany(realm,due.companyId,t0,trigger))};
     if(due.job==='buildings-list')return {job:due.job,...(await simcoPublicBuildingsList(realm,t0,trigger))};
     if(due.job==='resources')return {job:due.job,...(await simcoPublicResources(realm,t0,trigger))};
+    if(due.job==='ranking')return {job:due.job,...(await simcoPublicRanking(realm,due.companyId,t0,trigger,due))};
+    if(due.job==='contests'){const r=await simcoPublicContests(realm,t0,trigger);if(r?.ok)await runContestReminders(realm).catch(()=>{});return {job:due.job,...r};}
+    if(due.job==='summaries')return {job:due.job,...(await simcoPublicSummaries(realm,t0,trigger))};
+    if(due.job==='building-stats')return {job:due.job,...(await simcoPublicBuildingStats(realm,t0,trigger))};
     return {job:due.job,...(await simcoPublicBuilding(realm,due.id,t0,trigger))};
   })().catch(e=>{logError('simcotools-public',e);return {ok:false,error:e?.message||String(e)};}).finally(()=>{simcoPublicRun=null;});
   return simcoPublicRun;
@@ -6225,7 +6479,32 @@ async function ensureSimcoPublicAlarm(){
     return {ok:true,created:true,when};
   }catch(e){return {ok:false,error:e?.message||String(e)};}
 }
-chrome.alarms.onAlarm.addListener(a=>{if(a?.name!==SIMCO_PUBLIC_ALARM)return;runSimcoPublicData('alarm').catch(()=>{});});
+// Contest reminders: from stored contests only (no request), every firing, before the Sync / timer / 429 / gate checks, so
+// they work with the SimcoTools timer off. Uses SCM_NOTIFY_CORE.contestReminders when that build has it.
+async function runContestReminders(realm){
+  const n=validRealmNumber(realm);if(n==null)return {ok:false,reason:'realm'};
+  const N=globalThis.SCM_NOTIFY_CORE;if(typeof N?.contestReminders!=='function')return {ok:true,skipped:true,reason:'no-core'};
+  const cfg=await notifySettings();if(!cfg.contestReminder)return {ok:true,skipped:true,reason:'switched-off'};
+  const key=simcoContestsKey(n),cur=(await simcoPublicGet({[key]:null}))[key];
+  const contests=Array.isArray(cur?.contests)?cur.contests:[];
+  const lead=Number(cfg.contestLeadHours),leadHours=Number.isFinite(lead)&&lead>0?Math.min(lead,336):24;
+  let fired=0;
+  await updateNotifyState(async state=>{
+    const sk=`contests:${n}`,prev=state[sk]&&typeof state[sk]==='object'?state[sk]:{};
+    if(!contests.length&&!Object.keys(prev).length)return null;
+    const r=N.contestReminders({contests,state:{...prev},now:Date.now(),leadHours,realm:n});
+    // State pruned to the stored contests (keys '<id>:start' / '<id>:end').
+    const ids=new Set(contests.map(c=>String(c?.id))),next={};
+    for(const [k,v] of Object.entries(r?.state&&typeof r.state==='object'?r.state:{})){const i=k.lastIndexOf(':');if(i>0&&ids.has(k.slice(0,i)))next[k]=v;}
+    const fire=Array.isArray(r?.fire)?r.fire:[];
+    for(const f of fire){await scmNotify(`contest-${n}-${String(f?.id??'').replace(/[^\w:-]/g,'').slice(0,60)}`,String(f?.title||''),String(f?.message||''));fired++;}
+    if(!fire.length&&JSON.stringify(next)===JSON.stringify(prev))return null;
+    state[sk]=next;return state;
+  });
+  return {ok:true,fired};
+}
+async function runContestRemindersAll(){for(const r of [0,1])await runContestReminders(r).catch(e=>logError('contest-reminders',e));}
+chrome.alarms.onAlarm.addListener(a=>{if(a?.name!==SIMCO_PUBLIC_ALARM)return;runContestRemindersAll().catch(()=>{});runSimcoPublicData('alarm').catch(()=>{});});
 ensureSimcoPublicAlarm();
 // Market ticker: the active game read is not needed while the SimcoTools prices are fresh and every product in them
 // already has its image (from a captured ticker or the constants). Returns why, or null when the read is needed.
@@ -10002,7 +10281,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   }
   if(m?.type==='SCM_TEST_DAILY_SUMMARY'){fireDailySummary().then(()=>send({ok:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SCM_TEST_NOTIFICATION'){scmNotify(`test-${Date.now()}`,'Sim Companies Manager','Test notification — if you can read this, alerts work on this phone.').then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
-  if(m?.type==='SCM_NOTIFY_SETTINGS'){(async()=>{try{if(m.set&&typeof m.set==='object'){const cur=await notifySettings();await rawStorageSet({[NOTIFY_SETTINGS_KEY]:{...cur,...m.set}});await scheduleDailySummary();for(const n of [0,1]){const st=(await chrome.storage.local.get({[`scmRealmStore:${n}`]:null}))[`scmRealmStore:${n}`];if(st)await scheduleProductionFinishAlarms(n,st.buildings);}}const prodfin=(await chrome.alarms.getAll()).filter(x=>String(x.name).startsWith('scm-prodfin:'));const nameStores={};for(const a of prodfin){const r=String(a.name).split(':')[1];if(!(r in nameStores))nameStores[r]=(await chrome.storage.local.get({[`scmRealmStore:${r}`]:null}))[`scmRealmStore:${r}`]||{};}
+  if(m?.type==='SCM_NOTIFY_SETTINGS'){(async()=>{try{if(m.set&&typeof m.set==='object'){const cur=await notifySettings();await rawStorageSet({[NOTIFY_SETTINGS_KEY]:{...cur,...sanitizeNotifySet(m.set)}});await scheduleDailySummary();for(const n of [0,1]){const st=(await chrome.storage.local.get({[`scmRealmStore:${n}`]:null}))[`scmRealmStore:${n}`];if(st)await scheduleProductionFinishAlarms(n,st.buildings);}}const prodfin=(await chrome.alarms.getAll()).filter(x=>String(x.name).startsWith('scm-prodfin:'));const nameStores={};for(const a of prodfin){const r=String(a.name).split(':')[1];if(!(r in nameStores))nameStores[r]=(await chrome.storage.local.get({[`scmRealmStore:${r}`]:null}))[`scmRealmStore:${r}`]||{};}
 // Building names for the Alerts "Next" line, so the dashboard can show it before its own state has loaded.
 const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(Array.isArray(nameStores[r]?.buildings)?nameStores[r].buildings:[]).find(y=>String(y?.id)===bid);return {name:x.name,when:x.scheduledTime,buildingName:b?.name?String(b.name):null};});const daily=await chrome.alarms.get('scm-daily-summary');send({ok:true,settings:await notifySettings(),available:!!chrome.notifications?.create,alarms,dailyAt:daily?.scheduledTime||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;}
   if(m?.type==='FETCH_EXCHANGE_ORDER_BOOK'){if(m.manual!==undefined&&typeof m.manual!=='boolean'){send({ok:false,error:'Invalid request.'});return true;}fetchExchangeOrderBookForRealm(m.realm,m.resourceId,m.manual===true,m.manual===true?null:{onView:true}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}

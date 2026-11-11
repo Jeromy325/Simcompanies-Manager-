@@ -297,7 +297,39 @@
     lines.push(R(realm));
     return { title: `Economy: ${name(from)} → ${name(to)}`, message: lines.join('\n') };
   }
-  const api = { economyChanged, newSales, money, total, cheapestListing, batchFinishedMessage, priceTargetHits, bigMoves, newIncomingContracts, dailySummary, nextDailyTime, costChanged, followUp, undercut, unprofitable, jobTrouble };
+  // Contest start/end reminders. Pure: state is {[id+':start'|id+':end']: firedAtMs}; returns the next state.
+  function contestReminders({ contests, state, now = Date.now(), leadHours = 24, realm = 1 } = {}) {
+    const nowMs = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+    const lead = Number.isFinite(Number(leadHours)) && Number(leadHours) > 0 ? Number(leadHours) : 24;
+    const prev = state && typeof state === 'object' ? state : {};
+    const ms = v => typeof v === 'number' ? (Number.isFinite(v) ? v : NaN) : (typeof v === 'string' && v ? Date.parse(v) : NaN);
+    const clean = v => String(v == null ? '' : v).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 80);
+    const next = {}, fire = [];
+    for (const c of Array.isArray(contests) ? contests : []) {
+      if (!c || typeof c !== 'object' || c.id == null || c.id === '') continue;
+      const id = String(c.id), ks = id + ':start', ke = id + ':end';
+      if (prev[ks] != null) next[ks] = prev[ks];
+      if (prev[ke] != null) next[ke] = prev[ke];
+      const s = ms(c.start), e = ms(c.end);
+      if (Number.isFinite(e) && nowMs >= e) continue;
+      const label = clean(c.name) || clean(c.resourceName) || clean(c.buildingName) || 'Contest';
+      const what = [clean(c.resourceName), clean(c.buildingName)].filter(Boolean).join(', ');
+      const hours = `${Math.round(lead * 100) / 100} h`;
+      if (Number.isFinite(s) && next[ks] == null) {
+        if (nowMs >= s) next[ks] = nowMs; // first seen already running: no start reminder
+        else if (s - nowMs <= lead * 3600e3) {
+          next[ks] = nowMs;
+          fire.push({ id: `contest-${realm}-${id}-start`, title: `Contest starting soon: ${label}`, message: `It starts within ${hours}${what ? ` (${what})` : ''}.\n${R(realm)}` });
+        }
+      }
+      if (Number.isFinite(e) && next[ke] == null && e - nowMs <= lead * 3600e3) {
+        next[ke] = nowMs;
+        fire.push({ id: `contest-${realm}-${id}-end`, title: `Contest ending soon: ${label}`, message: `It ends within ${hours}${what ? ` (${what})` : ''}.\n${R(realm)}` });
+      }
+    }
+    return { fire, state: next };
+  }
+  const api = { contestReminders, economyChanged, newSales, money, total, cheapestListing, batchFinishedMessage, priceTargetHits, bigMoves, newIncomingContracts, dailySummary, nextDailyTime, costChanged, followUp, undercut, unprofitable, jobTrouble };
   root.SCM_NOTIFY_CORE = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
