@@ -792,9 +792,10 @@ html.scm-mobile .warehouse-table.mobile-cards .market-source{font-size:10px}
 .lu-dot.on::after{content:"";position:absolute;inset:0;border-radius:50%;background:#6ab451;opacity:.55;animation:luPulse 2s ease-out infinite;pointer-events:none}
 @keyframes luPulse{0%{opacity:.55;transform:scale(1)}70%,100%{opacity:0;transform:scale(2.2)}}
 .lu-bad{color:#ea8c7d}
+.lu-warn{color:#e2b257}
 .lu-list{margin:4px 0 0;padding:6px 10px 6px 26px;border:1px solid #343130;border-radius:10px;font-size:11.5px;line-height:1.5;max-height:260px;overflow:auto}
 .lu-list span{opacity:.65;font-variant-numeric:tabular-nums}
-.lu-list .lu-failure{color:#ea8c7d}.lu-list .lu-skipped{opacity:.7}
+.lu-list .lu-failure{color:#ea8c7d}.lu-list .lu-skipped{opacity:.7}.lu-list li.lu-not-read{color:#e2b257}.lu-list li.lu-waiting{opacity:.6}
 .live-updates.lu-flash .lu-bar{animation:luFlash 1.6s ease-out}
 @keyframes luFlash{0%{background:#29481f}100%{background:#161515}}
 .scm-toast{position:fixed;left:50%;bottom:18px;transform:translate(-50%,40px);opacity:0;background:#29481f;color:#f1f8ee;border:1px solid #4c8539;border-radius:10px;padding:10px 14px;font-size:13px;z-index:9999;transition:transform .25s,opacity .25s;max-width:calc(100vw - 32px);pointer-events:none}

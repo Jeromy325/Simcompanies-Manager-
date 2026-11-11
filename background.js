@@ -115,6 +115,16 @@ const SYNC_AUTO_RETRY_DELAY_MS=60000;
 const syncAutoRetryRuns=new Set();
 // No answer from the game (HTTP 0), a timeout, or the page bridge not ready yet: worth the one automatic retry.
 function syncFailureIsTransient(error){return /\(HTTP 0\)|HTTP 0\b|timed out|time-?out|bridge is not (?:ready|connected)|message channel closed/i.test(String(error||''));}
+// The game pushed back (HTTP 401 / 403 / 429 / 503 named in the failure, such an answer to a Manager read during this
+// run, or the direct-read block on): a retry a minute later would only hit it again, so none is scheduled.
+// Returns the plain-English reason, or null when the retry may run.
+function syncAutoRetrySkipReason({error=null,blocked=false,backoff=null,startedAt=0}={}){
+  const m=String(error||'').match(/HTTP (401|403|429|503)\b/);
+  if(m)return `the Sync failure includes HTTP ${m[1]}`;
+  if(backoff&&Number(backoff.at)>=(Number(startedAt)||0)&&Number(backoff.status))return `the game answered HTTP ${Number(backoff.status)} during this Sync`;
+  if(blocked)return "the Manager's own game reads are paused (30-min direct-read block)";
+  return null;
+}
 let extensionClearGeneration=0; // bumped by Clear Stored Data; work started before it must not write afterwards
 class SyncCancelledByClear extends Error{constructor(){super('Stored data was cleared; Sync stopped.');}}
 const realmWriteQueues=new Map();
@@ -420,7 +430,7 @@ const GAME_CONSTANTS_ALARM='scm-game-constants';
 // backoff is kept in storage.session (scmGameConstantsRetry) so a restarted service worker keeps it; it is cleared
 // on success and when the browser restarts or the extension is reloaded/updated. No game tab, a page bridge that is
 // not ready yet (fresh install / worker start before the tab's content script runs) or a page that unloaded mid-read:
-// quiet skip (nothing logged, backoff not touched). After a finished Sync (opts.ignoreBackoff) the backoff is ignored:
+// a "not read" line (backoff not touched); a lane slot taken: a "waiting" line. After a finished Sync (opts.ignoreBackoff) the backoff is ignored:
 // the Sync just proved the bridge works. A real failure is always logged: under the active realm, else the selected
 // realm, else the extension error log (scmErrorLog).
 const GAME_CONSTANTS_PERIOD_MS=6*3600000,GAME_CONSTANTS_RETRY_MIN_MS=15*60000,GAME_CONSTANTS_RETRY_KEY='scmGameConstantsRetry';
@@ -455,12 +465,13 @@ async function gameConstantsResultSource(r){
 }
 // The game tab cannot be asked right now (no content script / page hook yet, or the page unloaded): not a failed read.
 function pageBridgeUnavailable(e){return Boolean(e?.pageClosed||e?.bridgeNotReady||e?.noGameTab)||/page bridge is not (?:ready|connected)|Open Sim Companies and log in/i.test(String(e?.message||e||''));}
-// Activity line when the active realm is not known yet (fresh install): the selected realm, else the error log.
+// Activity line when the active realm is not known yet (fresh install): the selected realm, else the error log
+// (failure, partial and not-read lines; a waiting line is planned pace and goes nowhere without a realm).
 async function logActivityAnyRealm(job,outcome,details={},error=null){
   let r=await activeRealmNumber();
   if(r==null){try{r=validRealmNumber((await chrome.storage.local.get({selectedRealm:null})).selectedRealm);}catch{}}
   if(r!=null)return logActivity(r,job,outcome,details,error);
-  if(outcome==='failure'||outcome==='partial')logError(job,error||outcome);
+  if(outcome==='failure'||outcome==='partial'||outcome==='not-read')logError(job,error||outcome);
 }
 // Built-in copy of the game constants: constants.json in the extension package, same shape as scmGameConstants
 // ({core,buildings,resources,at,source,bundle}; `at` = the date of the game bundle it was taken from). Under the game's
@@ -496,7 +507,7 @@ function gameConstantsBlockedResult(cur,extra={}){
   const ok=Boolean(globalThis.SCM_TOOLS_CORE.gameConstantsOk(cur)),bundled=cur?.source==='bundled';
   return {ok,skipped:true,directReadsBlocked:true,kept:true,source:ok?(bundled?'bundled':'game'):null,bundle:bundled?(cur.bundle||null):null,
     message:bundled?bundledGameConstantsText(cur):ok?'Game constants from the last read of the game (direct reads are blocked now).':'Game constants missing: direct reads are blocked and the built-in copy could not be loaded.',
-    error:DIRECT_READS_BLOCKED_TEXT,...extra};
+    error:(typeof directReadBlockMem==='object'&&Number(directReadBlockMem?.status)===503?DIRECT_READS_BUSY_TEXT:DIRECT_READS_BLOCKED_TEXT),...extra};
 }
 async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,opts={}){
   // Missing constants are filled from the built-in copy first, whatever happens with the API read below.
@@ -507,12 +518,12 @@ async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,
     if(!force&&cur&&Date.now()-Date.parse(cur.at||0)<Math.max(GAME_CONSTANTS_PERIOD_MS,Number(maxAgeMs)||0))return {ok:true,cached:true,source:cur.source==='bundled'?'bundled':'game',...(cur.source==='bundled'?{message:bundledGameConstantsText(cur)}:{})};
     // While the game blocks direct reads the API is not tried at all (the block's own recheck runs through pageGet
     // when its pause ends); the built-in or last live copy stays. The API path below stays for when the block is lifted.
-    if(await directReadsBlockedNow())return gameConstantsBlockedResult(cur);
+    if(await directReadsBlockedNow()){logActivityAnyRealm('game-constants','not-read',{directReadsBlocked:true},notReadReason({directReadsBlocked:true}));return gameConstantsBlockedResult(cur);}
     // A real backoff / missing tab only matters for the API read: the built-in copy already covers missing constants.
-    if(cur?.source==='bundled'&&!(await simTab())?.id)return {ok:true,skipped:true,source:'bundled',bundle:cur.bundle||null,message:bundledGameConstantsText(cur),error:'No Sim Companies tab open.'};
+    if(cur?.source==='bundled'&&!(await simTab())?.id){logActivityAnyRealm('game-constants','not-read',{},notReadReason('no-game-tab'));return {ok:true,skipped:true,source:'bundled',bundle:cur.bundle||null,message:bundledGameConstantsText(cur),error:'No Sim Companies tab open.'};}
     const retry=await gameConstantsRetryGet();
     if(!force&&!opts?.ignoreBackoff&&retry&&Number(retry.nextAt)>Date.now())return {ok:false,backoff:true,error:retry.error||null,nextAt:retry.nextAt};
-    if(!(await simTab())?.id)return {ok:false,skipped:true,error:'No Sim Companies tab open.'};
+    if(!(await simTab())?.id){logActivityAnyRealm('game-constants','not-read',{},notReadReason('no-game-tab'));return {ok:false,skipped:true,error:'No Sim Companies tab open.'};}
   }catch(e){return {ok:false,error:String(e?.message||e)};}
   // Unattended (alarm, worker start, a game page or the dashboard asking for missing data): the three reads go through
   // the shared game lane (job 'gameConstants'), one per free slot; the parts already read wait in storage.session
@@ -525,8 +536,8 @@ async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,
     const get=async p=>{
       if(lane&&partialFresh(p))return partial[p].data;
       const x=await pageGet(p,null,null,'game-constants',{timeoutMs:GAME_CONSTANTS_READ_TIMEOUT_MS,attempts:1,...(lane?{lane:'gameConstants'}:{})});
-      if(x?.laneWait){const e=new Error(GAME_LANE_WAIT_TEXT);e.laneWait=true;throw e;}
-      if(!x?.ok)throw new Error(`${p} ${x?.error||`HTTP ${x?.status||0}`}`);if(!x.data||typeof x.data!=='object')throw new Error(`${p} not JSON`);
+      if(x?.laneWait){const e=new Error(GAME_LANE_WAIT_TEXT);e.laneWait=true;e.nextAt=Number(x.nextAt)||0;throw e;}
+      if(!x?.ok){const fe=new Error(`${p} ${x?.error||`HTTP ${x?.status||0}`}`);if(x?.recheckFailed)fe.recheckFailed=true;throw fe;}if(!x.data||typeof x.data!=='object')throw new Error(`${p} not JSON`);
       if(lane){partial={...partial,[p]:{data:x.data,at:Date.now()}};try{await chrome.storage.session.set({[GAME_CONSTANTS_PARTIAL_KEY]:partial});}catch{}}
       return x.data;};
     // One at a time: the first failure stops the rest.
@@ -539,13 +550,14 @@ async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,
     logActivityAnyRealm('game-constants','success',{});
     return {ok:true};
   }catch(e){
-    // Not this job's lane slot yet: a quiet skip (parts read so far wait for the next slot).
-    if(e?.laneWait)return {ok:true,skipped:true,laneWait:true,reason:'lane',parts:Object.keys(partial).length};
+    // Not this job's lane slot yet: a "waiting" line (parts read so far wait for the next slot).
+    if(e?.laneWait){logActivityAnyRealm('game-constants','waiting',{laneWait:true,nextAt:Number(e.nextAt)||0,parts:Object.keys(partial).length},laneWaitText(e.nextAt));return {ok:true,skipped:true,laneWait:true,reason:'lane',parts:Object.keys(partial).length};}
     const error=capRefreshError(e?.message||e);
-    if(pageBridgeUnavailable(e))return {ok:false,skipped:true,reason:'bridge-not-ready',reachedTab:!(e?.bridgeNotReady||e?.noGameTab)&&!/page bridge is not (?:ready|connected)|Open Sim Companies and log in/i.test(error),error};
+    // No game tab / page bridge not ready / page unloaded: a "not read" line, no backoff step.
+    if(pageBridgeUnavailable(e)){logActivityAnyRealm('game-constants','not-read',{},notReadReason(e));return {ok:false,skipped:true,reason:'bridge-not-ready',reachedTab:!(e?.bridgeNotReady||e?.noGameTab)&&!/page bridge is not (?:ready|connected)|Open Sim Companies and log in/i.test(error),error};}
     // The game does not load /api/v2/constants/* on its own pages (2026-11-10 bundle), so there is no capture to use:
     // the stored constants stay, and the next read is the block's recheck.
-    if(isDirectReadsBlockedError(error)){let cur=null;try{cur=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;}catch{}return gameConstantsBlockedResult(cur);}
+    if(isDirectReadsBlockedError(error)){logActivityAnyRealm('game-constants','not-read',{directReadsBlocked:true},notReadReason({directReadsBlocked:true,recheckFailed:Boolean(e?.recheckFailed)}));let cur=null;try{cur=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;}catch{}return gameConstantsBlockedResult(cur);}
     try{const prev=await gameConstantsRetryGet();const failures=Math.min(30,(Number(prev?.failures)||0)+1);
       const waitMs=Math.min(GAME_CONSTANTS_PERIOD_MS,GAME_CONSTANTS_RETRY_MIN_MS*2**(failures-1));
       await gameConstantsRetrySet({failures,nextAt:Date.now()+waitMs,error,at:new Date().toISOString()});}catch{}
@@ -565,9 +577,9 @@ const ownListingsRefreshError=new Map(); // realm → {error,at} of the last fai
 // after a failed read the next waits 15 s, 30 s, then 60 s (cleared on success). A card / game-action call inside
 // the gap or backoff gets ONE coalesced trailing read at its end (never dropped); a background call (Sync tail,
 // undercut check, opts.background) just uses the stored scmMarketOrders. Gap/backoff state is kept in storage.session
-// (scmMarketOrdersGate:<realm>, memory fallback) so a restarted service worker keeps it. Quiet skip (no request, no
-// Activity entry, no backoff step): no game tab, the tab is in the other realm, or (background calls only) the game
-// tab is not the active tab in its window.
+// (scmMarketOrdersGate:<realm>, memory fallback) so a restarted service worker keeps it. A "not read" line (no
+// request, no failure, no backoff step): no game tab, the tab is in the other realm, or (background calls only) the
+// game tab is not the active tab in its window. A lane slot taken: a "waiting" line.
 const MARKET_ORDERS_GAP_MS=15000,MARKET_ORDERS_BACKOFF_MS=[15000,30000,60000],MARKET_ORDERS_GATE_KEY='scmMarketOrdersGate:';
 const marketOrdersGateMem=new Map(),marketOrdersInFlight=new Map(),marketOrdersTrailing=new Map(),marketOrdersNetStart=new Map();
 async function marketOrdersGateGet(r){const key=MARKET_ORDERS_GATE_KEY+r;try{if(chrome.storage?.session){const v=(await chrome.storage.session.get(key))?.[key];return v&&typeof v==='object'?v:null;}}catch{}return marketOrdersGateMem.get(r)||null;}
@@ -626,11 +638,11 @@ async function marketOrdersReadOnce(r,cur,background,lane=false){
     if(waitUntil>now){
       const res=backoffAt>now?{ok:false,backoff:true,skipped:true,reason:'backoff',error:gate.error||null,nextAt:backoffAt}:{ok:true,throttled:true,skipped:true,reason:'gap',nextAt:waitUntil};
       if(background||lane)return res;
-      const skip=await marketOrdersTabSkip(r,false);if(skip)return {ok:false,skipped:true,reason:skip};
+      const skip=await marketOrdersTabSkip(r,false);if(skip){logNotRead(r,'market-orders',otherRealmReason(skip,r));return {ok:false,skipped:true,reason:skip};}
       scheduleMarketOrdersTrailing(r,waitUntil);
       return {...res,trailingAt:waitUntil};
     }
-    const skip=await marketOrdersTabSkip(r,background);if(skip)return {ok:false,skipped:true,reason:skip};
+    const skip=await marketOrdersTabSkip(r,background);if(skip){logNotRead(r,'market-orders',otherRealmReason(skip,r));return {ok:false,skipped:true,reason:skip};}
     // Company id of THIS realm: the realm store's authCompany when its realm is r (or not stated), else the id kept
     // in the small orders key from an earlier read. An authCompany that says another realm is never used.
     const st=await notifyRealmStore(r),ac=st?.authData?.authCompany;
@@ -639,19 +651,19 @@ async function marketOrdersReadOnce(r,cur,background,lane=false){
     const safeCid=v=>{const n=Number(v);return Number.isSafeInteger(n)&&n>0?n:0;};
     const storeCid=acRealm==null||acRealm===r?safeCid(ac?.companyId??ac?.id):0;
     const cid=storeCid>0?storeCid:safeCid(cur?.companyId);
-    // No company id yet (right after Clear data, before the game's auth-data is captured): quiet skip, no request,
-    // no Activity entry, no backoff step; the next card / game-action call reads once the id exists.
-    if(!(Number.isSafeInteger(cid)&&cid>0))return {ok:false,skipped:true,reason:'no-company-id'};
+    // No company id yet (right after Clear data, before the game's auth-data is captured): no request, a "not read"
+    // line, no backoff step; the next card / game-action call reads once the id exists.
+    if(!(Number.isSafeInteger(cid)&&cid>0)){logNotRead(r,'market-orders','no-company-id');return {ok:false,skipped:true,reason:'no-company-id'};}
     if(cleared())return cancelled;
-    // Not this job's lane slot: quiet skip before the gate is stamped (no request, no write).
-    if(lane){const pk=await gameLaneDecide(`marketOrders:${r}`,{peek:true});if(!pk.take)return {ok:false,skipped:true,laneWait:true,reason:'lane',nextAt:pk.nextAt};}
+    // Not this job's lane slot: a "waiting" line before the gate is stamped (no request, no storage write but the line).
+    if(lane){const pk=await gameLaneDecide(`marketOrders:${r}`,{peek:true});if(!pk.take){logLaneWait(r,'market-orders',pk.nextAt);return {ok:false,skipped:true,laneWait:true,reason:'lane',nextAt:pk.nextAt};}}
     lastAt=Date.now();marketOrdersNetStart.set(r,lastAt);await marketOrdersGateSet(r,{...gate,lastAt});
     const x=await pageGet(`/api/v2/companies/${cid}/market-orders/`,r,null,'own-listings-card',{timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS,attempts:1,...(lane?{lane:`marketOrders:${r}`}:{})});
-    if(x?.laneWait)return {ok:false,skipped:true,laneWait:true,reason:'lane',nextAt:x.nextAt};
-    // The tab moved to the other realm meanwhile: quiet skip (the gap still counts, no backoff step, no log).
-    if(x?.realmMismatch)return {ok:false,skipped:true,reason:'other-realm'};
-    // The game blocks direct reads: an info note on the card (directReadsBlocked), no backoff step, no failure line.
-    if(x?.directReadsBlocked){if(cleared())return cancelled;const error=x.error||DIRECT_READS_BLOCKED_TEXT;ownListingsRefreshError.set(r,{error,at:new Date().toISOString(),directReadsBlocked:true});notifyGameCardsKeyChanged(k);return {ok:false,skipped:true,directReadsBlocked:true,error};}
+    if(x?.laneWait){logLaneWait(r,'market-orders',x.nextAt);return {ok:false,skipped:true,laneWait:true,reason:'lane',nextAt:x.nextAt};}
+    // The tab moved to the other realm meanwhile: a "not read" line (the gap still counts, no backoff step).
+    if(x?.realmMismatch){logNotRead(r,'market-orders',x);return {ok:false,skipped:true,reason:'other-realm'};}
+    // The game blocks direct reads: an info note on the card (directReadsBlocked) and a "not read" line, no backoff step.
+    if(x?.directReadsBlocked){if(cleared())return cancelled;logNotRead(r,'market-orders',x,{directReadsBlocked:true,...(x.recheckFailed?{recheckFailed:true}:{})});const error=x.error||DIRECT_READS_BLOCKED_TEXT;ownListingsRefreshError.set(r,{error,at:new Date().toISOString(),directReadsBlocked:true});notifyGameCardsKeyChanged(k);return {ok:false,skipped:true,directReadsBlocked:true,error};}
     if(!x?.ok||x.data==null)return await fail(x?.error||`HTTP ${x?.status||0}`);
     if(!Array.isArray(x.data)&&!(x.data&&typeof x.data==='object'&&['data','items','results','orders','marketOrders'].some(f=>Array.isArray(x.data[f]))))return await fail('not a list');
     const orders=helperArray(x.data,['data','items','results','orders','marketOrders']);
@@ -661,10 +673,10 @@ async function marketOrdersReadOnce(r,cur,background,lane=false){
     logActivity(r,'market-orders','success',{rows:orders.length});
     return {ok:true};
   }catch(e){
-    // The game page unloaded mid-read (realm switch, reload): quiet skip like other-realm (the gap counts, no backoff, no log).
-    if(pageMessageChannelClosed(e))return {ok:false,skipped:true,reason:'page-closed'};
-    // No game tab / page bridge not ready or not connected: no request was made. Same quiet skip (no backoff, no log).
-    if(pageBridgeUnavailable(e))return {ok:false,skipped:true,reason:'bridge-not-ready'};
+    // The game page unloaded mid-read (realm switch, reload): a "not read" line like other-realm (the gap counts, no backoff).
+    if(pageMessageChannelClosed(e)){if(!cleared())logNotRead(r,'market-orders','page-closed');return {ok:false,skipped:true,reason:'page-closed'};}
+    // No game tab / page bridge not ready or not connected: no request was made. A "not read" line (no backoff).
+    if(pageBridgeUnavailable(e)){if(!cleared())logNotRead(r,'market-orders',e);return {ok:false,skipped:true,reason:'bridge-not-ready'};}
     return await fail(String(e?.message||e));
   }
 }
@@ -681,14 +693,21 @@ async function refreshOutgoingContracts(realm,minGapMs=OUTGOING_CONTRACTS_REFRES
   outgoingContractsRefreshAt.set(r,now);
   try{
     const x=await pageGet('/api/v3/contracts-outgoing/me/',r,null,'outgoing-contracts-card',{timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS,attempts:1,...(lane?{lane}:{})});
-    if(x?.laneWait){if(outgoingContractsRefreshAt.get(r)===now)outgoingContractsRefreshAt.set(r,prevAt);return {ok:false,skipped:true,laneWait:true,nextAt:x.nextAt};}
-    if(x?.directReadsBlocked)return {ok:false,skipped:true,directReadsBlocked:true,error:x.error||DIRECT_READS_BLOCKED_TEXT};
-    if(!x?.ok||x.data==null)return {ok:false,error:x?.error||`HTTP ${x?.status||0}`};
+    if(x?.laneWait){if(outgoingContractsRefreshAt.get(r)===now)outgoingContractsRefreshAt.set(r,prevAt);logLaneWait(r,'outgoing-contracts',x.nextAt);return {ok:false,skipped:true,laneWait:true,nextAt:x.nextAt};}
+    if(x?.directReadsBlocked){logNotRead(r,'outgoing-contracts',x,{directReadsBlocked:true,...(x.recheckFailed?{recheckFailed:true}:{})});return {ok:false,skipped:true,directReadsBlocked:true,error:x.error||DIRECT_READS_BLOCKED_TEXT};}
+    // Other realm / realm not shown yet: a "not read" line; a real failed read: a failure line.
+    if(!x?.ok&&(x?.realmMismatch||x?.realmUnknown)){logNotRead(r,'outgoing-contracts',x);return {ok:false,error:x.error};}
+    if(!x?.ok||x.data==null){const error=capRefreshError(x?.error||`HTTP ${x?.status||0}`);logActivity(r,'outgoing-contracts','failure',{},error);return {ok:false,error:x?.error||`HTTP ${x?.status||0}`};}
     // A 2xx whose body is not data (the game's HTML app shell for an unknown address) is never stored.
-    if(endpointResponseRejected('/api/v3/contracts-outgoing/me/',x))return {ok:false,error:'The game answered with a page instead of data.'};
+    if(endpointResponseRejected('/api/v3/contracts-outgoing/me/',x)){logActivity(r,'outgoing-contracts','failure',{},'The game answered with a page instead of data.');return {ok:false,error:'The game answered with a page instead of data.'};}
     await rawStorageSet({[`scmOutgoingContracts:${r}`]:{data:x.data,at:new Date().toISOString()}});notifyGameCardsKeyChanged(`scmOutgoingContracts:${r}`);
     return {ok:true};
-  }catch(e){return {ok:false,error:String(e?.message||e)};}
+  }catch(e){
+    // No game tab / page bridge not ready / page unloaded: a "not read" line; anything else is a failure line.
+    if(pageBridgeUnavailable(e)||pageMessageChannelClosed(e))logNotRead(r,'outgoing-contracts',e);
+    else logActivity(r,'outgoing-contracts','failure',{},capRefreshError(e?.message||e));
+    return {ok:false,error:String(e?.message||e)};
+  }
 }
 // After the game confirms an action (list or cancel on the exchange, send or cancel a contract, …) both cards'
 // sources are read again ~0.8 s later; a burst of actions collapses into one read.
@@ -738,6 +757,55 @@ function logActivity(realm,job,outcome,details={},error=null,startedMs=Date.now(
   const n=validRealmNumber(realm);if(n==null)return Promise.resolve();
   return recordBackgroundJobEvent(n,{job,trigger,outcome,startedAt:new Date(startedMs).toISOString(),finishedAt:new Date().toISOString(),durationMs:Date.now()-startedMs,details,error}).catch(()=>{});
 }
+// "not read" lines: the Manager wanted game data but could not get it (no game tab, page bridge not ready, page
+// unloaded mid-read, tab in the other realm or its realm not shown yet, the game blocks direct reads, no company id
+// yet). Not a failure: no backoff step, the data stays not fresh, the next cycle tries again. "waiting" lines: held for
+// the shared 5-min game-request slot (planned pace). Plain-English reason for a pageGet answer, an Error or a reason code.
+function notReadReason(v){
+  if(v==null)return 'Not read: the game page did not answer';
+  const code=typeof v==='string'?v:String(v?.reason||'');
+  const msg=typeof v==='string'?'':String(v?.error??v?.message??'');
+  if(/^Not read: /.test(msg))return msg;
+  if(v?.directReadsBlocked||isDirectReadsBlockedError(msg)||code==='direct-reads-blocked'){
+    const busy=Number(v?.answerStatus)===503||Number(v?.status)===503||msg.includes(DIRECT_READS_BUSY_TEXT)||(Number(v?.status)!==403&&typeof directReadBlockMem==='object'&&Number(directReadBlockMem?.status)===503);
+    if(busy)return v?.recheckFailed?'Not read: the game still answers 503 (recheck); Manager reads paused':'Not read: the game answered 503; Manager reads paused for 30 min';
+    return v?.recheckFailed?'Not read: the game still blocks direct reads (recheck)':'Not read: the game blocks direct reads';
+  }
+  if(v?.realmMismatch||code==='other-realm'){const m=msg.match(/The game tab is in (.+?), not (.+?)\.?$/);return m?`Not read: the game tab is in ${m[1]}, not ${m[2]}`:'Not read: the game tab is in the other realm';}
+  if(v?.realmUnknown||code==='realm-unknown')return 'Not read: the game tab has not shown its realm yet';
+  if(code==='no-company-id')return 'Not read: no company id yet (open the game once)';
+  if(code==='game-tab-not-active')return 'Not read: the game tab is not the active tab';
+  if(v?.pageClosed||code==='page-closed'||(typeof v!=='string'&&pageMessageChannelClosed(v))||/reloaded or closed|message channel closed|message port closed|Receiving end does not exist/i.test(msg))return 'Not read: the game page was reloaded or closed during the read';
+  if(v?.noGameTab||code==='no-game-tab'||/Open Sim Companies and log in|No Sim Companies tab/i.test(msg))return 'Not read: no game tab is open';
+  if(/page bridge is not connected/i.test(msg))return 'Not read: the game page was not connected (extension just restarted)';
+  if(v?.bridgeNotReady||code==='bridge-not-ready'||/page bridge is not ready/i.test(msg))return 'Not read: the game page was not ready (page loading or extension just restarted)';
+  return `Not read: ${msg||code||'the game page did not answer'}`.slice(0,200);
+}
+// True when a read made no request for one of the not-read reasons above (not a real failure).
+function isNotReadAnswer(v){return Boolean(v&&(v.directReadsBlocked||v.realmMismatch||v.realmUnknown||v.pageClosed||v.bridgeNotReady||v.noGameTab))||isDirectReadsBlockedError(v)||pageBridgeUnavailable(v)||(v instanceof Error&&pageMessageChannelClosed(v));}
+function laneWaitClock(ms){const d=new Date(Number(ms)||0);return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;}
+function laneWaitText(nextAt){return Number(nextAt)>0?`Waiting for the 5-min game slot (next at ${laneWaitClock(nextAt)})`:'Waiting for the 5-min game slot';}
+// 'other-realm' from a local realm check (two realms: the tab is in the one that is not `realm`).
+function otherRealmReason(code,realm){const n=validRealmNumber(realm);return code==='other-realm'&&n!=null?{reason:code,realmMismatch:true,error:`The game tab is in ${realmDisplayNumber(n===0?1:0)}, not ${realmDisplayNumber(n)}.`}:code;}
+function logNotRead(realm,job,v,details={},startedMs=Date.now(),trigger='manager'){return logActivity(realm,job,'not-read',details,notReadReason(v),startedMs,trigger);}
+function logLaneWait(realm,job,nextAt,details={},startedMs=Date.now(),trigger='manager'){return logActivity(realm,job,'waiting',{...details,laneWait:true,...(Number(nextAt)>0?{nextAt:Number(nextAt)}:{})},laneWaitText(nextAt),startedMs,trigger);}
+// Anti-spam for not-read / waiting lines only: the same realm + job + outcome + error at most once per 60 s; the next
+// line written for it carries details.repeats (how many were held back since). Memory only (a worker restart may lose
+// the count). Success / failure lines are never held back. "No game tab is open" uses 30 min (ACTIVITY_REPEAT_NO_TAB_MS):
+// with no game tab the order-book and ticker alarms would otherwise write it every 5 min and fill the 300-line history.
+const ACTIVITY_REPEAT_MS=60000,ACTIVITY_REPEAT_NO_TAB_MS=30*60000,activityRepeatMem=new Map();
+function activityRepeatWindow(err){return /no game tab is open/i.test(String(err||''))?ACTIVITY_REPEAT_NO_TAB_MS:ACTIVITY_REPEAT_MS;}
+function activityRepeatCheck(n,event,now=Date.now()){
+  if(event.outcome!=='not-read'&&event.outcome!=='waiting')return {log:true,repeats:0};
+  // A waiting line's slot time changes each time; the repeat key ignores it.
+  const err=String(event.error||'').replace(/ \(next at \d\d:\d\d\)$/,'');
+  const k=`${n}|${event.job}|${event.outcome}|${err}`,cur=activityRepeatMem.get(k);
+  const windowMs=activityRepeatWindow(err);
+  if(cur&&now-cur.at<windowMs){cur.held++;return {log:false};}
+  activityRepeatMem.set(k,{at:now,held:0,windowMs});
+  if(activityRepeatMem.size>200){for(const [kk,vv] of activityRepeatMem)if(now-vv.at>=(Number(vv.windowMs)||ACTIVITY_REPEAT_MS)&&kk!==k)activityRepeatMem.delete(kk);}
+  return {log:true,repeats:cur?cur.held:0};
+}
 async function activeRealmNumber(){try{const r=await chrome.storage.local.get({activeRealmKey:null});return validRealmNumber(realmNumberFromKey(r.activeRealmKey));}catch{return null;}}
 // "Game data saved" lines in the monitor: one per kind of data, at most once a minute each.
 const GAME_CAPTURE_FAMILIES=[[/\/companies\/me\/buildings\/?$/,'Buildings'],[/\/resources\/\d+\/?$/,'Warehouse'],[/\/contracts-(?:incoming|outgoing)/,'Contracts'],[/\/abundance\/?$/,'Abundance'],[/\/cashflow\/recent/,'Cash flow (sales)'],[/\/market\/\d+\/\d+\/?$/,'Exchange order book'],[/\/buildings\/\d+\/history/,'Building history'],[/\/government-orders/,'Government orders'],[/\/(?:balance-sheet|income-statement|cashflow-statement|past-finances)/,'Accounting'],[/\/executives\/?$/,'Executives']];
@@ -771,12 +839,15 @@ async function refreshAbundanceIfStale(realm,trigger='game-buildings'){
     // No game tab / page bridge not ready or not connected, the game blocks direct reads, or the shared game lane slot
     // is taken: no request was made, and the rest would meet the same, so the loop stops there. Those buildings are
     // not failures (notRead) and stay stale for the next run. Unattended: one lane read (job 'abundance:<realm>') per slot.
-    let notRead=0;
-    for(let i=0;i<ids.length;i++){const id=ids[i];const p=`/api/v2/companies/buildings/${id}/abundance/`;try{const x=await readFollowingMoves(p,r,{captured:st?.endpointData||null,lane:`abundance:${r}`});if(x?.laneWait||x?.directReadsBlocked){notRead=ids.length-i;break;}if(x?.ok){await saveData(p,x.data,x.status,'GET',r);saved.push(id);}else errors.push(`#${id}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){if(pageBridgeUnavailable(e)){notRead=ids.length-i;break;}errors.push(`#${id}: ${e?.message||e}`);}}
-    // Nothing read and no real failure: a quiet skip (no Activity line), and the 5 min gap does not count.
-    if(notRead&&!saved.length&&!errors.length){bridgeSkip=true;return {ok:true,skipped:true,bridgeUnavailable:true,saved,wanted:ids.length,notRead};}
+    let notRead=0,why=null;
+    for(let i=0;i<ids.length;i++){const id=ids[i];const p=`/api/v2/companies/buildings/${id}/abundance/`;try{const x=await readFollowingMoves(p,r,{captured:st?.endpointData||null,lane:`abundance:${r}`});if(x?.laneWait||x?.directReadsBlocked){notRead+=ids.length-i;why=x;break;}if(x?.realmMismatch||x?.realmUnknown){notRead++;why=why||x;continue;}if(x?.ok){await saveData(p,x.data,x.status,'GET',r);saved.push(id);}else errors.push(`#${id}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){if(pageBridgeUnavailable(e)){notRead+=ids.length-i;why=e;break;}errors.push(`#${id}: ${e?.message||e}`);}}
+    // Nothing read and no real failure: a "waiting" (lane slot) or "not read" line, and the 5 min gap does not count.
+    if(notRead&&!saved.length&&!errors.length){bridgeSkip=true;
+      if(why?.laneWait)logLaneWait(r,'abundance-refresh',why.nextAt,{wanted:ids.length},t0,trigger);
+      else logNotRead(r,'abundance-refresh',why,{wanted:ids.length,notRead,...(why?.directReadsBlocked?{directReadsBlocked:true}:{})},t0,trigger);
+      return {ok:true,skipped:true,bridgeUnavailable:true,saved,wanted:ids.length,notRead};}
     const tried=ids.length-notRead;
-    logActivity(r,'abundance-refresh',saved.length===tried?'success':saved.length?'partial':'failure',{rows:saved.length,wanted:ids.length,...(notRead?{notRead}:{}),sources:info.sources.join(', ')},errors.join(' · ')||null,t0,trigger);
+    logActivity(r,'abundance-refresh',saved.length===tried?'success':saved.length?'partial':'failure',{rows:saved.length,wanted:ids.length,...(notRead?{notRead,notReadReason:why?.laneWait?laneWaitText(why.nextAt):notReadReason(why)}:{}),sources:info.sources.join(', ')},errors.join(' · ')||null,t0,trigger);
     return {ok:true,saved,wanted:ids.length,...(notRead?{notRead}:{})};
   }finally{abundanceAutoState.set(r,{running:false,at:bridgeSkip?(cur.at||0):Date.now()});}
 }
@@ -791,9 +862,10 @@ async function readFollowingMoves(path,realm,{movedReads=null,captured=null,lane
   const x=await pageGet(from,realm,null,null,lane?{lane}:null);
   if(x?.ok&&endpointDataIsValid(path,x.data))return {ok:true,data:x.data,status:x.status,walkedPath:from!==path?from:null};
   const status=Number(x?.status)||0,failed={ok:false,status,error:x?.error||`HTTP ${status}`};
-  // No request (lane slot taken) or the game blocks direct reads: no move to look for, the caller skips quietly.
-  if(x?.laneWait)return {...failed,laneWait:true};
-  if(x?.directReadsBlocked)return {...failed,directReadsBlocked:true};
+  // No request (lane slot taken) or the game blocks direct reads: no move to look for; the caller logs a waiting / not-read line.
+  if(x?.laneWait)return {...failed,laneWait:true,nextAt:Number(x.nextAt)||0};
+  if(x?.directReadsBlocked)return {...failed,directReadsBlocked:true,...(x.recheckFailed?{recheckFailed:true}:{})};
+  if(x?.realmMismatch||x?.realmUnknown)return {...failed,...(x.realmMismatch?{realmMismatch:true}:{realmUnknown:true})};
   if(!endpointFailureSuggestsMove(x,path))return failed;
   const pool={};
   for(const [k,v] of Object.entries(captured||{})){const b=String(k).replace(/^https?:\/\/[^/]+/,'');if(b===path||!/\/buildings\/\d+\/abundance\//.test(b)||b.replace(/^\/api\/v\d+/,'')===path.replace(/^\/api\/v\d+/,''))pool[k]=v;}
@@ -802,7 +874,7 @@ async function readFollowingMoves(path,realm,{movedReads=null,captured=null,lane
   const to=found?String(found).replace(/^https?:\/\/[^/]+/,''):null;
   if(!to||extraReadPath(path,{[path]:to})===path||to===from)return failed;
   const y=await pageGet(to,realm,null,null,lane?{lane}:null);
-  if(y?.laneWait)return {...failed,laneWait:true};
+  if(y?.laneWait)return {...failed,laneWait:true,nextAt:Number(y.nextAt)||0};
   return y?.ok&&endpointDataIsValid(path,y.data)?{ok:true,data:y.data,status:y.status,walkedPath:to}:failed;
 }
 // Logged-in extras through the game tab after Sync: research, government orders + your tier, and the
@@ -822,12 +894,12 @@ async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
   const pool={...ep,...(captured||{})};
   // No game tab / page bridge not ready or not connected, or the game blocks direct reads: no request was made and the
   // rest would meet the same, so the loop stops; those reads are not failures (notRead), and nothing read with no real
-  // failure logs no Activity line.
-  let notRead=0;
-  for(let i=0;i<paths.length;i++){const p=paths[i];try{const x=await readFollowingMoves(p,r,{movedReads,captured:pool});if(x?.directReadsBlocked){notRead=paths.length-i;break;}if(x.ok&&x.walkedPath)warnings.push(`${p} moved to ${x.walkedPath}`);if(!x.ok){const ab=/\/abundance\/$/.test(p);if(x.suspected)warnings.push(`${p} (HTTP ${x.status}) may have moved to ${x.suspected}; not adopted`);else if(ab)warnings.push(`${p} failed (HTTP ${x.status}); kept the stored record`);}if(x.ok){await saveData(p,x.data,x.status,'GET',r);out.push(p);}else errs.push(`${p.replace('/api/','')}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){if(pageBridgeUnavailable(e)){notRead=paths.length-i;break;}errs.push(`${p.replace('/api/','')}: ${e?.message||e}`);if(/\/abundance\/$/.test(p))warnings.push(`${p} not read: ${e?.message||e}`);}}
-  if(notRead&&!out.length&&!errs.length)return {ok:true,skipped:true,bridgeUnavailable:true,saved:out,warnings,notRead};
+  // failure logs a "not read" line with the reason.
+  let notRead=0,why=null;
+  for(let i=0;i<paths.length;i++){const p=paths[i];try{const x=await readFollowingMoves(p,r,{movedReads,captured:pool});if(x?.directReadsBlocked){notRead+=paths.length-i;why=x;break;}if(x?.realmMismatch||x?.realmUnknown){notRead++;why=why||x;continue;}if(x.ok&&x.walkedPath)warnings.push(`${p} moved to ${x.walkedPath}`);if(!x.ok){const ab=/\/abundance\/$/.test(p);if(x.suspected)warnings.push(`${p} (HTTP ${x.status}) may have moved to ${x.suspected}; not adopted`);else if(ab)warnings.push(`${p} failed (HTTP ${x.status}); kept the stored record`);}if(x.ok){await saveData(p,x.data,x.status,'GET',r);out.push(p);}else errs.push(`${p.replace('/api/','')}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){if(pageBridgeUnavailable(e)){notRead+=paths.length-i;why=e;break;}errs.push(`${p.replace('/api/','')}: ${e?.message||e}`);if(/\/abundance\/$/.test(p))warnings.push(`${p} not read: ${e?.message||e}`);}}
+  if(notRead&&!out.length&&!errs.length){logNotRead(r,'extra-game-data',why,{wanted:paths.length,notRead,...(why?.directReadsBlocked?{directReadsBlocked:true}:{})},t0,'after-sync');return {ok:true,skipped:true,bridgeUnavailable:true,saved:out,warnings,notRead};}
   const abN=paths.filter(p=>/abundance/.test(p)).length,abOk=out.filter(p=>/abundance/.test(p)).length;
-  logActivity(r,'extra-game-data',errs.length?(out.length?'partial':'failure'):'success',{rows:out.length,wanted:paths.length,abundance:`${abOk}/${abN}`,...(notRead?{notRead}:{})},errs.slice(0,4).join(' · ')||null,t0,'after-sync');
+  logActivity(r,'extra-game-data',errs.length?(out.length?'partial':'failure'):'success',{rows:out.length,wanted:paths.length,abundance:`${abOk}/${abN}`,...(notRead?{notRead,notReadReason:notReadReason(why)}:{})},errs.slice(0,4).join(' · ')||null,t0,'after-sync');
   return {ok:true,saved:out,warnings,...(notRead?{notRead}:{})};
 }
 // Sync timers (gameConstants): off = no alarm and no read on worker start (Sync still reads them); a slower
@@ -1608,8 +1680,8 @@ function rebuildAccountingWeekSales(store, weekStartMs){
   return mergeAccountingWeekSales({...store,accountingWeekSales:{}},sources,boundary);
 }
 // A ledger read skipped by the direct-read block: thrown (callers such as Sync keep their error path) but tagged, so
-// the deferred week refresh treats it as a quiet skip.
-function accountingDirectReadsBlockedError(r){const e=new Error(r?.error||DIRECT_READS_BLOCKED_TEXT);e.directReadsBlocked=true;return e;}
+// the deferred week refresh treats it as a "not read" (not a failure).
+function accountingDirectReadsBlockedError(r){const e=new Error(r?.error||DIRECT_READS_BLOCKED_TEXT);e.directReadsBlocked=true;if(r?.recheckFailed)e.recheckFailed=true;return e;}
 // opts.lane: an unattended retry (the deferred week refresh after a failed run): every read goes through the shared
 // game lane, one per slot; a read refused by the lane throws a laneWait-tagged error (no request went out), and a
 // week / ledger page stored by an earlier slot of the same refresh (under 30 min old) is reused instead of read again,
@@ -1748,17 +1820,24 @@ const BACKGROUND_JOB_HISTORY_LIMIT=300;
 async function recordBackgroundJobEvent(realm,event={}){
   const n=validRealmNumber(realm);if(n==null)return {ok:false,error:'Invalid realm for background job history.'};
   const key=realmKeyFromRealm(n);if(!key)return {ok:false,error:'Invalid realm for background job history.'};
-  // While the game blocks direct reads, the one 'direct-reads-blocked' line says it; reads skipped by the block add none.
-  if(String(event?.job||'')!=='direct-reads-blocked'&&(isDirectReadsBlockedError(event?.error)||isDirectReadsBlockedError(event?.details?.error))&&directReadBlockMem)return {ok:true,suppressed:'direct-reads-blocked'};
-  // A read that waited for the shared game lane made no request: never a line in the monitor.
-  if(event?.laneWait||event?.details?.laneWait||isGameLaneWait(event?.error)||isGameLaneWait(event?.details?.error))return {ok:true,suppressed:'game-lane-wait'};
-  // Not suppressed (block state not read back yet after a worker restart, or the block's own line): a block is a skip, never a failure.
-  // The stored line carries details.directReadsBlocked so the monitor can tell it from a failure without reading the text.
-  if(event?.directReadsBlocked||event?.details?.directReadsBlocked||isDirectReadsBlockedError(event?.error)||isDirectReadsBlockedError(event?.details?.error)){
-    const details=event.details&&typeof event.details==='object'?event.details:{};
-    event={...event,outcome:event.outcome==='failure'||event.outcome==null?'skipped':event.outcome,details:{...details,directReadsBlocked:true}};
+  const details0=event?.details&&typeof event.details==='object'?event.details:{};
+  // A read that waited for the shared game lane made no request: a "waiting" line (planned pace, not a problem).
+  if(event?.laneWait||details0.laneWait||isGameLaneWait(event?.error)||isGameLaneWait(details0.error)){
+    const nextAt=Number(details0.nextAt??event?.nextAt)||0;
+    event={...event,outcome:'waiting',error:/^Waiting for the 5-min game slot/.test(String(event?.error||''))?event.error:laneWaitText(nextAt),details:{...details0,laneWait:true}};
+  // A read the game's direct-read block stopped (the block's own 'direct-reads-blocked' line aside): a "not read"
+  // line, never a failure. details.directReadsBlocked lets the monitor tell it apart without reading the text.
+  }else if(String(event?.job||'')!=='direct-reads-blocked'&&(event?.directReadsBlocked||details0.directReadsBlocked||isDirectReadsBlockedError(event?.error)||isDirectReadsBlockedError(details0.error))){
+    const toNotRead=event.outcome==='failure'||event.outcome==='skipped'||event.outcome==null||event.outcome==='not-read';
+    event={...event,outcome:toNotRead?'not-read':event.outcome,error:toNotRead&&(!event.error||isDirectReadsBlockedError(event.error))?notReadReason({directReadsBlocked:true,recheckFailed:Boolean(details0.recheckFailed||event.recheckFailed)}):event.error,details:{...details0,directReadsBlocked:true}};
+  }else if(event?.directReadsBlocked||details0.directReadsBlocked||isDirectReadsBlockedError(event?.error)||isDirectReadsBlockedError(details0.error)){
+    event={...event,outcome:event.outcome==='failure'||event.outcome==null?'skipped':event.outcome,details:{...details0,directReadsBlocked:true}};
   }
-  const normalized={id:`${Date.now()}-${Math.random().toString(36).slice(2,8)}`,realm:n,job:String(event.job||'unknown'),trigger:String(event.trigger||'unknown'),startedAt:event.startedAt||new Date().toISOString(),finishedAt:event.finishedAt||new Date().toISOString(),durationMs:Math.max(0,Number(event.durationMs)||0),outcome:['success','partial','failure','skipped','running','retrying','rate-limited','deferred-core-sync'].includes(event.outcome)?event.outcome:'failure',requested:Number.isFinite(Number(event.requested))?Number(event.requested):null,fetched:Number.isFinite(Number(event.fetched))?Number(event.fetched):null,refreshed:Number.isFinite(Number(event.refreshed))?Number(event.refreshed):null,checked:Number.isFinite(Number(event.checked))?Number(event.checked):null,failed:Number.isFinite(Number(event.failed))?Number(event.failed):null,cached:Number.isFinite(Number(event.cached))?Number(event.cached):null,stale:Number.isFinite(Number(event.stale))?Number(event.stale):null,error:event.error?String(event.error).slice(0,400):null,details:event.details&&typeof event.details==='object'?event.details:{}};
+  // not-read / waiting: identical lines at most once per 60 s, "no game tab" once per 30 min (activityRepeatCheck); the next one carries details.repeats.
+  {const rep=activityRepeatCheck(n,{job:String(event.job||'unknown'),outcome:event.outcome,error:event.error?String(event.error).slice(0,400):''});
+    if(!rep.log)return {ok:true,suppressed:'repeat'};
+    if(rep.repeats>0)event={...event,details:{...(event.details&&typeof event.details==='object'?event.details:{}),repeats:rep.repeats}};}
+  const normalized={id:`${Date.now()}-${Math.random().toString(36).slice(2,8)}`,realm:n,job:String(event.job||'unknown'),trigger:String(event.trigger||'unknown'),startedAt:event.startedAt||new Date().toISOString(),finishedAt:event.finishedAt||new Date().toISOString(),durationMs:Math.max(0,Number(event.durationMs)||0),outcome:['success','partial','failure','skipped','not-read','waiting','running','retrying','rate-limited','deferred-core-sync'].includes(event.outcome)?event.outcome:'failure',requested:Number.isFinite(Number(event.requested))?Number(event.requested):null,fetched:Number.isFinite(Number(event.fetched))?Number(event.fetched):null,refreshed:Number.isFinite(Number(event.refreshed))?Number(event.refreshed):null,checked:Number.isFinite(Number(event.checked))?Number(event.checked):null,failed:Number.isFinite(Number(event.failed))?Number(event.failed):null,cached:Number.isFinite(Number(event.cached))?Number(event.cached):null,stale:Number.isFinite(Number(event.stale))?Number(event.stale):null,error:event.error?String(event.error).slice(0,400):null,details:event.details&&typeof event.details==='object'?event.details:{}};
   // Job history lives in its own small key so appending an entry does not rewrite the whole realm store under the
   // realm write lock. Entries for one realm are appended through a serial queue so none are lost.
   const histKey=backgroundJobHistoryKey(n);
@@ -1767,7 +1846,8 @@ async function recordBackgroundJobEvent(realm,event={}){
     let history=Array.isArray(raw)?raw.slice():null;
     if(!history){const legacy=(await chrome.storage.local.get({[realmStorageKey(n)]:null}))[realmStorageKey(n)];history=Array.isArray(legacy?.backgroundJobHistory)?legacy.backgroundJobHistory.slice():[];}
     history.push(normalized);
-    notifyJobTrouble(n,normalized).catch(()=>{});
+    // not-read / waiting lines neither count toward nor reset the 'keeps failing' alert streak.
+    if(normalized.outcome!=='not-read'&&normalized.outcome!=='waiting')notifyJobTrouble(n,normalized).catch(()=>{});
     await rawStorageSet({[histKey]:history.slice(-BACKGROUND_JOB_HISTORY_LIMIT)});
     return {ok:true,event:normalized};
   });
@@ -1842,12 +1922,12 @@ async function catchUpLedgerArchive(realm,reason='daily-walk'){
   while(cursor&&oldest>plan.stopAt&&!seen.has(cursor)&&pages<LEDGER_CATCHUP_MAX_PAGES){
     seen.add(cursor);pages++;
     const path=`/api/v2/companies/me/cashflow/${cursor}/`;
-    // No game tab / bridge not ready, or the game blocks direct reads: no page was read, a quiet skip (not a failure);
-    // the archive stays where it is and the next walk carries on. A real HTTP error stays a failure.
+    // No game tab / bridge not ready, or the game blocks direct reads: no page was read, a "not read" line (not a
+    // failure); the archive stays where it is and the next walk carries on. A real HTTP error stays a failure.
     let res;
     try{res=await pageGet(path,n,null,`ledger-catchup:${reason}`);}
-    catch(e){if(pageBridgeUnavailable(e))return {ok:true,skipped:true,bridgeUnavailable:true,pages:pages-1,caughtUp:false,error:e?.message||String(e)};throw e;}
-    if(res?.directReadsBlocked)return {ok:true,skipped:true,directReadsBlocked:true,pages:pages-1,caughtUp:false,error:res.error||DIRECT_READS_BLOCKED_TEXT};
+    catch(e){if(pageBridgeUnavailable(e)){logNotRead(n,'ledger-catchup',e,{pages:pages-1},Date.now(),reason);return {ok:true,skipped:true,bridgeUnavailable:true,pages:pages-1,caughtUp:false,error:e?.message||String(e)};}throw e;}
+    if(res?.directReadsBlocked){logNotRead(n,'ledger-catchup',res,{pages:pages-1,directReadsBlocked:true,...(res.recheckFailed?{recheckFailed:true}:{})},Date.now(),reason);return {ok:true,skipped:true,directReadsBlocked:true,pages:pages-1,caughtUp:false,error:res.error||DIRECT_READS_BLOCKED_TEXT};}
     if(!res?.ok)return {ok:false,pages,error:`Ledger page ${cursor} failed (HTTP ${res?.status||0}).`};
     await saveData(path,res.data,res.status,'GET',n);
     cursor=null;
@@ -2168,8 +2248,8 @@ async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000){
   const companyId=Number(store.authData?.authCompany?.companyId||store.authData?.authCompany?.id);
   // Nothing to refresh yet (auth-data not captured): a skip, not a failure in the background-jobs count.
   if(!Number.isFinite(companyId)||companyId<=0)return {ok:false,notReady:true,error:'Realm company ID unavailable.'};
-  // The game tab is in the other realm (or mid-switch, before its auth-data made it the active session): a quiet
-  // skip, not a partial refresh. The overlay of the realm just left can still ask for its warehouse for a moment.
+  // The game tab is in the other realm (or mid-switch, before its auth-data made it the active session): a "not
+  // read" line, not a partial refresh. The overlay of the realm just left can still ask for its warehouse for a moment.
   const activeKey=s.activeRealmKey;
   const otherRealmSkip=()=>{const live=realmDisplayNumber(realmNumberFromKey(s.activeRealmKey));return {ok:false,skipped:true,otherRealm:true,stale:true,error:`Skipped: the game tab is in ${live||'another realm'}, not ${realmDisplayNumber(n)||'this realm'}.`};};
   if(activeKey!==key)return otherRealmSkip();
@@ -2180,7 +2260,7 @@ async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000){
     const requestDurationMs=Date.now()-requestStartedAt;
     if(r?.laneWait)return {ok:false,skipped:true,laneWait:true,reason:r.reason,nextAt:r.nextAt,error:r.error,requestDurationMs};
     if(r?.realmMismatch){s=await state(n);return {...otherRealmSkip(),requestDurationMs};}
-    if(r?.directReadsBlocked)return {ok:false,skipped:true,directReadsBlocked:true,error:r.error||DIRECT_READS_BLOCKED_TEXT,status:r.status||403,requestDurationMs};
+    if(r?.directReadsBlocked)return {ok:false,skipped:true,directReadsBlocked:true,...(r.recheckFailed?{recheckFailed:true}:{}),error:r.error||DIRECT_READS_BLOCKED_TEXT,status:r.status||403,requestDurationMs};
     if(!r?.ok)return {ok:false,error:r?.error||`HTTP ${r?.status||0}`,status:r?.status||0,requestDurationMs};
     const rows=normalizeWarehouse(r.data);
     if(!looksLikeWarehouseRows(rows))return {ok:false,error:'Current game warehouse response was not recognizable.',status:r.status,requestDurationMs};
@@ -2215,9 +2295,9 @@ async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000){
       return {ok:true,rows:merged.length,refreshed:true,status:r.status,requestDurationMs,storageCommitDurationMs,totalDurationMs:Date.now()-totalStartedAt,receivedAt:next.warehouseCapture.receivedAt};
     });
   }catch(e){
-    // The game page unloaded mid-read (realm switch, reload): quiet skip, nothing saved, no backoff.
+    // The game page unloaded mid-read (realm switch, reload): "not read", nothing saved, no backoff.
     if(pageMessageChannelClosed(e))return {ok:false,skipped:true,pageClosed:true,error:'Skipped: the game page reloaded or closed during the read; nothing saved.',totalDurationMs:Date.now()-totalStartedAt};
-    // No game tab / page bridge not ready or not connected: no request was made. Quiet skip, no backoff.
+    // No game tab / page bridge not ready or not connected: no request was made. "Not read", no backoff.
     if(pageBridgeUnavailable(e))return {ok:false,skipped:true,bridgeUnavailable:true,error:e?.message||String(e),totalDurationMs:Date.now()-totalStartedAt};
     return {ok:false,error:e?.message||String(e),totalDurationMs:Date.now()-totalStartedAt};
   }
@@ -2252,20 +2332,22 @@ async function ensureRealmAuthData(realmArg){
   }
   // No auth-data captured yet: one direct read in the shared game lane (job 'authData:<realm>', priority 1 like the
   // warehouse, at most every 15 min). Callers are unattended (the game-page card rebuild, the dashboard planner's
-  // modifier check). Slot taken, direct reads blocked, or no game tab: a quiet skip (skipped, no error); the card keeps
-  // its waiting state and asks again on its next refresh, and the game's own pages capture auth-data for free.
+  // modifier check). Slot taken: a "waiting" line; direct reads blocked or no game tab: a "not read" line (skipped,
+  // no error); the card keeps its waiting state and asks again on its next refresh, and the game's own pages capture
+  // auth-data for free. A real failed read: a failure line.
   try{
     const r=await pageGet('/api/v3/companies/auth-data/',realm,null,'auth-data-fallback',{lane:`authData:${realm}`});
-    if(r?.laneWait)return {ok:false,skipped:true,laneWait:true,realm,nextAt:r.nextAt||null};
-    if(r?.directReadsBlocked)return {ok:false,skipped:true,directReadsBlocked:true,realm};
-    if(!r?.ok) return {ok:false,realm,error:r?.error||`HTTP ${r?.status||0}`};
-    if(endpointResponseRejected('/api/v3/companies/auth-data/',r))return {ok:false,realm,error:'The game answered with a page instead of data.'};
+    if(r?.laneWait){logLaneWait(realm,'auth-data-read',r.nextAt);return {ok:false,skipped:true,laneWait:true,realm,nextAt:r.nextAt||null};}
+    if(r?.directReadsBlocked){logNotRead(realm,'auth-data-read',r,{directReadsBlocked:true,...(r.recheckFailed?{recheckFailed:true}:{})});return {ok:false,skipped:true,directReadsBlocked:true,realm};}
+    if(!r?.ok){logActivity(realm,'auth-data-read','failure',{},capRefreshError(r?.error||`HTTP ${r?.status||0}`));return {ok:false,realm,error:r?.error||`HTTP ${r?.status||0}`};}
+    if(endpointResponseRejected('/api/v3/companies/auth-data/',r)){logActivity(realm,'auth-data-read','failure',{},'The game answered with a page instead of data.');return {ok:false,realm,error:'The game answered with a page instead of data.'};}
     await saveData('/api/v3/companies/auth-data/',r.data,r.status||200,'GET',realm);
     s=await state(realm);
     store={...(s.realmStores?.[key]||{})};
     return {ok:true,realm,authData:store.authData||r.data};
   }catch(e){
-    if(pageBridgeUnavailable(e))return {ok:false,skipped:true,bridgeUnavailable:true,realm};
+    if(pageBridgeUnavailable(e)){logNotRead(realm,'auth-data-read',e);return {ok:false,skipped:true,bridgeUnavailable:true,realm};}
+    logActivity(realm,'auth-data-read','failure',{},capRefreshError(e?.message||e));
     return {ok:false,realm,error:e?.message||String(e)};
   }
 }
@@ -3694,12 +3776,29 @@ function accountingEndpointFreshForRealm(s,path,realm,maxAge=ACCOUNTING_REFRESH_
   const received=Date.parse(item.receivedAt||'');
   return Number.isFinite(received)&&Date.now()-received<maxAge;
 }
+// The Accounting refresh line from the per-statement results: read = answered and saved; not read = no request answered
+// (other realm, realm not shown yet, reads blocked, no tab / bridge not ready / page unloaded); the rest failed.
+// Pure (no storage), for the monitor text: "3 read · 4 not read: the game page was not ready".
+function accountingRefreshLine(results,wanted,failedCount){
+  const list=Array.isArray(results)?results:[];
+  const read=list.filter(r=>r?.ok).length;
+  const nr=list.filter(r=>!r?.ok&&(r?.realmMismatch||r?.realmUnknown||r?.directReadsBlocked||r?.bridgeUnavailable));
+  const reasons=[...new Set(nr.map(r=>notReadReason(r).replace(/^Not read: /,'')))];
+  const notReadText=nr.length?`${nr.length} not read: ${reasons.slice(0,2).join('; ')}`:'';
+  const details={read,wanted:Number(wanted)||list.length,...(nr.length?{notRead:nr.length}:{}),...(nr.some(r=>r.directReadsBlocked)?{directReadsBlocked:true}:{})};
+  if(!nr.length||failedCount)return {outcome:failedCount?'failure':'success',notRead:nr.length,notReadText,details,error:null};
+  return {outcome:'not-read',notRead:nr.length,notReadText,details,error:`${read} read · ${notReadText}`};
+}
 async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manual'}={}){
   const realm=validRealmNumber(realmArg);
   if(realm==null)return {ok:false,error:'A valid realm is required for Accounting refresh.'};
   if(realmSyncSessions.has(realm))return {ok:false,busy:true,realm,error:`${realmDisplayNumber(realm)||'Realm'} Sync is already running.`};
   const tab=await simTab();
-  if(!tab?.id)return {ok:false,realm,error:'Open Sim Companies in a browser tab before refreshing Accounting.'};
+  if(!tab?.id){
+    // A "not read" line only when some statement was due (fresh statements need no tab).
+    try{const cur=await state(realm);const due=force?ACCOUNTING_SYNC_PATHS.length:ACCOUNTING_SYNC_PATHS.filter(p=>!accountingEndpointFreshForRealm(cur,p,realm)).length;if(due)logNotRead(realm,'accounting-refresh','no-game-tab',{rows:0,wanted:due,notRead:due},Date.now(),reason);}catch{}
+    return {ok:false,realm,error:'Open Sim Companies in a browser tab before refreshing Accounting.'};
+  }
   const current=await state(realm);
   const paths=ACCOUNTING_SYNC_PATHS.slice();
   const pending=force?paths:paths.filter(path=>!accountingEndpointFreshForRealm(current,path,realm));
@@ -3713,13 +3812,13 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
       try{
         const response=await pageGet(path,realm,null,`accounting-refresh:${reason}`);
         const responseRealm=validRealmNumber(response?.captureRealm);
-        // The game tab is in (or just moved to) the other realm: a quiet skip for this statement, nothing saved.
+        // The game tab is in (or just moved to) the other realm: not read (not failed) for this statement, nothing saved.
         if(response?.realmMismatch||(responseRealm!=null&&responseRealm!==realm)){results.push({path,ok:false,skipped:true,realmMismatch:true,status:0,captureRealm:responseRealm,error:response?.error||'Skipped: the game tab is in the other realm.'});continue;}
         // The game page has just loaded and has not seen its own auth-data yet (slow server, right after Clear data or a
-        // reload): it cannot say which realm the answer is for, so nothing is saved. A quiet skip like the other realm;
+        // reload): it cannot say which realm the answer is for, so nothing is saved. Not read, like the other realm;
         // the statement is still not fresh, so the next refresh reads it again.
         if(response?.realmUnknown){results.push({path,ok:false,skipped:true,realmUnknown:true,status:0,captureRealm:null,error:response.error||'Skipped: the game tab has not shown which realm it is in yet.'});continue;}
-        // The game blocks the Manager's own reads: a quiet skip (no request was made during the pause); the statements
+        // The game blocks the Manager's own reads: not read (no request was made during the pause); the statements
         // come from the Accounting page Sync walks or the player opens.
         if(response?.directReadsBlocked){results.push({path,ok:false,skipped:true,directReadsBlocked:true,status:Number(response.status)||403,captureRealm:null,error:response.error||DIRECT_READS_BLOCKED_TEXT});continue;}
         const ok=Boolean(response?.ok)&&responseRealm===realm;
@@ -3727,9 +3826,9 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
         results.push({path,ok,status:Number(response?.status)||0,captureRealm:responseRealm,error:ok?null:(response?.error||'Accounting response realm mismatch.')});
       }catch(e){
         // No game tab, or its bridge is not ready / not connected yet (e.g. right after the extension restarted),
-        // or the page unloaded: no request was answered, so a quiet skip like realmUnknown; still not fresh, so the
+        // or the page unloaded: no request was answered, so not read like realmUnknown; still not fresh, so the
         // next refresh reads it again.
-        if(pageBridgeUnavailable(e)){results.push({path,ok:false,skipped:true,bridgeUnavailable:true,status:0,captureRealm:null,error:e?.message||String(e)});continue;}
+        if(pageBridgeUnavailable(e)){results.push({path,ok:false,skipped:true,bridgeUnavailable:true,...(e?.pageClosed?{pageClosed:true}:{}),...(e?.noGameTab?{noGameTab:true}:{}),status:0,captureRealm:null,error:e?.message||String(e)});continue;}
         results.push({path,ok:false,status:0,captureRealm:null,error:e?.message||String(e)});
       }
     }
@@ -3746,14 +3845,18 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
   // Keep the Executives readout from the last Sync on the header line this refresh overwrites.
   const executivesSummary=freshState.realmStores?.[realmKeyFromRealm(realm)]?.executivesSyncSummary||'';
   const status=(successful===paths.length?`${realmDisplayNumber(realm)||'Realm'} Accounting captured · ${successful}/${paths.length} APIs`:`${realmDisplayNumber(realm)||'Realm'} Accounting partial · ${successful}/${paths.length} APIs`)+executivesSummary;
+  // One monitor line for every refresh that wanted statements: "3 read · 4 not read: <reason>" (not-read, not
+  // failed, when nothing really failed), real failures still partial / failure.
+  const line=accountingRefreshLine(results,pending.length,failed.length);
+  if(failed.length===0&&line.outcome==='not-read')logActivity(realm,'accounting-refresh','not-read',line.details,line.error,Date.now(),reason);
   if(skippedOtherRealm.length&&!failed.length)return {ok:false,skipped:true,realmMismatch:skippedOtherRealm.some(r=>r.realmMismatch),realmUnknown:skippedOtherRealm.every(r=>r.realmUnknown),realm,reason,requested:pending.length,successful,total:paths.length,failed,skippedOtherRealm:skippedOtherRealm.length,results,error:skippedOtherRealm[0].error};
-  // Blocked reads only (no real failure): no failure entry, the load status from the last Sync stays.
-  if(blockedReads.length&&!failed.length&&!results.some(r=>r.ok))return {ok:false,skipped:true,directReadsBlocked:true,realm,reason,requested:pending.length,successful,total:paths.length,failed,results,error:DIRECT_READS_BLOCKED_TEXT};
+  // Blocked reads only (no real failure): the not-read line above, no failure, the load status from the last Sync stays.
+  if(blockedReads.length&&!failed.length&&!results.some(r=>r.ok))return {ok:false,skipped:true,directReadsBlocked:true,realm,reason,requested:pending.length,successful,total:paths.length,failed,results,error:blockedReads[0]?.error||DIRECT_READS_BLOCKED_TEXT};
   // Game tab not reachable (no request answered) and no real failure: no failure/partial entry, the load status from
   // the last Sync stays, the skipped statements stay not fresh so the next refresh retries them.
   if(bridgeSkipped.length&&!failed.length)return {ok:false,skipped:true,bridgeUnavailable:true,realm,reason,requested:pending.length,successful,total:paths.length,failed,bridgeSkipped:bridgeSkipped.length,results,error:bridgeSkipped[0].error};
   await setRealmLoadStatus(realm,status,successful===paths.length?null:`${failed.length} Accounting API request(s) failed.`);
-  logActivity(realm,'accounting-refresh',failed.length?(successful?'partial':'failure'):'success',{rows:successful,wanted:pending.length},failed.length?`${failed.length} of ${pending.length} statements failed`:null,Date.now(),reason);
+  if(line.outcome!=='not-read')logActivity(realm,'accounting-refresh',failed.length?(successful?'partial':'failure'):'success',{rows:successful,wanted:pending.length,...line.details},failed.length?`${failed.length} of ${pending.length} statements failed${line.notRead?` · ${line.notReadText}`:''}`:null,Date.now(),reason);
   return {ok:successful>0,realm,reason,requested:pending.length,successful,total:paths.length,failed,results,status};
 }
 
@@ -4152,17 +4255,25 @@ async function verifyDurableEndpointWrite(realm,path,startedAtMs,expectedData=nu
 const PAGE_GET_BACKGROUND_GRACE_MS=2000;
 // The game tab unloaded (realm switch, reload, closed) while a message to it was open: Chrome rejects with "message
 // channel closed before a response was received" (or the content script answered pageClosed from pagehide). Not a
-// failed request: callers treat a pageClosed error as a quiet skip; their next cycle reads again.
+// failed request: callers log a pageClosed error as "not read" (no failure); their next cycle reads again.
 function pageMessageChannelClosed(e){return Boolean(e?.pageClosed)||/message channel closed|message port closed|Receiving end does not exist|Extension context invalidated|No tab with id/i.test(String(e?.message||e||''));}
 // Since 2026-11-10 the game signs its own API requests (bot protection); a plain read the Manager makes through the
 // game tab gets HTTP 403. The Manager does not imitate that signature. After the first 403 it stops direct reads for
 // 30 min (storage.session scmDirectReadsBlocked, survives a worker restart), logs one line, and then lets one read
-// through to recheck: another 403 renews the pause quietly, so does a recheck with no answer (timeout, status 0,
+// through to recheck: another 403 renews the pause (the caller logs a "not read ... (recheck)" line), so does a recheck with no answer (timeout, status 0,
 // closed page); a success clears it. Only one recheck is out at a time. Data keeps coming from the game's own
 // responses (pages the player opens, and the pages Sync walks). Code paths stay, so reads work again if the game drops it.
 const DIRECT_READ_BLOCK_KEY='scmDirectReadsBlocked';
 const DIRECT_READ_BLOCK_MS=30*60*1000;
-const DIRECT_READS_BLOCKED_TEXT='The game now blocks direct reads; data updates from game pages you open and from Sync.';
+// DIRECT_READS_BUSY_TEXT: HTTP 503 to a Manager read (the game busy or refusing reads while its own page loads still
+// work) sets the same 30-min pause as a 403, worded for the status. isDirectReadsBlockedError matches both texts.
+const DIRECT_READS_BLOCKED_TEXT='The game now blocks direct reads; data updates from game pages you open and from Sync.',DIRECT_READS_BUSY_TEXT="The game answered 503 (busy or refusing reads); the Manager's own reads pause for 30 min. Data still updates from game pages you open.";
+function directReadsBlockedText(status){return Number(status)===503?DIRECT_READS_BUSY_TEXT:DIRECT_READS_BLOCKED_TEXT;}
+function currentDirectReadsBlockedText(){return directReadsBlockedText(directReadBlockMem?.status);}
+// Last 401 / 403 / 429 / 503 answer to any Manager read ({status,at,path}); Sync reads it to skip its automatic retry.
+let lastGameBackoffAnswer=null;
+const GAME_BACKOFF_STATUSES=new Set([401,403,429,503]);
+function noteGameBackoffAnswer(path,status){const st=Number(status)||0;if(GAME_BACKOFF_STATUSES.has(st))lastGameBackoffAnswer={status:st,at:Date.now(),path:String(path||'').slice(0,200)};}
 // The buildings list has its own Cloudflare 403 (see Warehouse in Sync): it is not evidence of the new block.
 const DIRECT_READ_BLOCK_EXEMPT_RX=/\/api\/v2\/companies\/me\/buildings\/?(?:\?.*)?$/i;
 let directReadBlockMem,directReadRecheckInFlight=false,directReadBlockTail=Promise.resolve();
@@ -4186,9 +4297,10 @@ async function directReadsBlockedNow(){
   return Boolean(directReadRecheckInFlight);
 }
 function directReadsBlockedResponse(path,extra={}){
-  return {ok:false,status:403,skipped:true,directReadsBlocked:true,error:DIRECT_READS_BLOCKED_TEXT,path:String(path||''),...extra};
+  const st=Number(directReadBlockMem?.status)===503?503:403;
+  return {ok:false,status:st,skipped:true,directReadsBlocked:true,error:directReadsBlockedText(st),path:String(path||''),...extra};
 }
-function isDirectReadsBlockedError(v){return String(v?.error??v?.message??v??'').includes(DIRECT_READS_BLOCKED_TEXT);}
+function isDirectReadsBlockedError(v){const t=String(v?.error??v?.message??v??'');return t.includes(DIRECT_READS_BLOCKED_TEXT)||t.includes(DIRECT_READS_BUSY_TEXT);}
 // The one Activity line goes to the realm of the read (else the active / selected realm); logged:true once it is
 // written, so a block first seen before any realm is known gets its line at the next recheck.
 async function directReadBlockLogRealm(realm){
@@ -4203,8 +4315,11 @@ async function noteDirectReadBlocked(path,status=403,realm=null){
   const lr=next.logged?null:await directReadBlockLogRealm(realm);
   if(lr!=null){next.logged=true;next.logRealm=lr;}
   await directReadBlockSet(next);
-  if(lr!=null){try{await logActivity(lr,'direct-reads-blocked','skipped',{path:next.path,status:next.status,pauseMinutes:DIRECT_READ_BLOCK_MS/60000,directReadsBlocked:true},DIRECT_READS_BLOCKED_TEXT);}catch{}}
-  else if(!prev)logError('direct-reads-blocked',DIRECT_READS_BLOCKED_TEXT);
+  // One line per block, and one more when the status changes (a 403 pause renewed by a 503, or the other way).
+  const statusChanged=Boolean(prev&&prev.logged&&Number(prev.status)!==next.status&&(next.status===503||Number(prev.status)===503));
+  const logTo=lr!=null?lr:(statusChanged?validRealmNumber(next.logRealm):null);
+  if(logTo!=null){try{await logActivity(logTo,'direct-reads-blocked','skipped',{path:next.path,status:next.status,pauseMinutes:DIRECT_READ_BLOCK_MS/60000,directReadsBlocked:true},directReadsBlockedText(next.status));}catch{}}
+  else if(!prev)logError('direct-reads-blocked',directReadsBlockedText(next.status));
   return next;
 }
 async function clearDirectReadBlock(path,realm=null){
@@ -4213,7 +4328,8 @@ async function clearDirectReadBlock(path,realm=null){
   try{const lr=validRealmNumber(prev?.logRealm)??await directReadBlockLogRealm(realm);if(lr!=null)await logActivity(lr,'direct-reads-blocked','success',{path:String(path||'').slice(0,200),recovered:true},null);}catch{}
 }
 // The recheck got no answer from the game (timeout, status 0 or 5xx, closed page, bridge not ready): nothing shows
-// the block has gone, so the pause is renewed for the same 30 min, quietly (no Activity line). Renewed only if the
+// the block has gone, so the pause is renewed for the same 30 min (no 'direct-reads-blocked' line; the caller's read
+// logs "Not read: the game still blocks direct reads (recheck)" from recheckFailed). Renewed only if the
 // block is still the one the recheck started from (Clear All or a newer 403 may have replaced it meanwhile).
 async function renewDirectReadBlockAfterFailedRecheck(block,reason){
   if(!block||directReadBlockMem!==block)return null;
@@ -4337,7 +4453,7 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
       if(r?.pageClosed){const closedError=new Error(r.error||'The game page was reloaded or closed before the API answered.');closedError.pageClosed=true;throw closedError;}
       // Unattended read answered 401 / 429 / an HTML page (captcha): stop the lane via the direct-read block.
       if(laneKey&&!blockExempt&&gameLaneStopAnswer(r)){
-        recheckSettled=true;const rr0=validRealmNumber(r?.captureRealm);
+        recheckSettled=true;const rr0=validRealmNumber(r?.captureRealm);noteGameBackoffAnswer(path,r?.status);
         await noteDirectReadBlocked(path,Number(r?.status)||0,validRealmNumber(targetRealm)??rr0);
         traceDiag('pageget-lane-stopped',{attempt,tabId:tab.id,status:Number(r?.status)||0});
         return directReadsBlockedResponse(path,{captureRealm:rr0,firstBlock:true,laneStopped:true,answerStatus:Number(r?.status)||0});
@@ -4350,11 +4466,16 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
       if(!blockExempt&&r?.ok)directReadProven=true;
       if(r?.ok&&tr!=null&&rr==null&&/\/me\//.test(String(path))&&!/\/api\/v3\/companies\/auth-data\//.test(String(path))){traceDiag('pageget-realm-unknown',{attempt,tabId:tab.id,targetRealm:tr});return {ok:false,status:0,error:'The game tab has not shown which realm it is in yet.',realmUnknown:true};}
       if(r?.ok&&tr!=null&&rr!=null&&rr!==tr&&!/\/api\/v3\/companies\/auth-data\//.test(String(path))){traceDiag('pageget-realm-mismatch',{attempt,tabId:tab.id,targetRealm:tr,tabRealm:rr});return {ok:false,status:0,error:`The game tab is in ${realmDisplayNumber(rr)||'the other realm'}, not ${realmDisplayNumber(tr)||'the requested realm'}.`,captureRealm:rr,realmMismatch:true};}
-      if(!blockExempt&&Number(r?.status)===403&&!r?.ok){
+      const answerStatus=Number(r?.status)||0;
+      if(!r?.ok)noteGameBackoffAnswer(path,answerStatus);
+      // 403 (bot protection) or 503 (game busy / refusing reads) to any Manager read, unattended or user-initiated
+      // (Sync too): the 30-min direct-read block; on a recheck it renews it. 503 also on the buildings list (its
+      // exemption is only about that endpoint's own Cloudflare 403).
+      if(!r?.ok&&((answerStatus===403&&!blockExempt)||answerStatus===503)){
         recheckSettled=true;
-        await noteDirectReadBlocked(path,403,tr??rr);
-        traceDiag('pageget-direct-reads-blocked-now',{attempt,tabId:tab.id});
-        return directReadsBlockedResponse(path,{captureRealm:rr,firstBlock:true});
+        await noteDirectReadBlocked(path,answerStatus,tr??rr);
+        traceDiag('pageget-direct-reads-blocked-now',{attempt,tabId:tab.id,status:answerStatus});
+        return directReadsBlockedResponse(path,{captureRealm:rr,firstBlock:!recheck,answerStatus,...(recheck?{recheckFailed:true}:{})});
       }
       if(recheck&&!recheckSettled&&!r?.ok)return await recheckFailed(r?.error||`HTTP ${Number(r?.status)||0}`);
       return r||{ok:false,status:0,error:'No response from Sim Companies page.'};
@@ -4496,21 +4617,33 @@ async function fetchExchangeOrderBookForRealm(realm,resourceId,manual=false,opts
   const lane=typeof opts?.lane==='string'&&opts.lane?opts.lane:null;
   try{response=await pageGet(path,target,null,null,lane?{lane}:null);}
   catch(e){
-    // No game tab / page bridge not ready or not connected / page unloaded: no request was answered. A quiet skip
-    // (bridgeUnavailable: no failure entry, no backoff step); the 5 min gap does not count unless the page unloaded
+    // No game tab / page bridge not ready or not connected / page unloaded: no request was answered. Not read
+    // (bridgeUnavailable: the caller logs a not-read line, no backoff step); the 5 min gap does not count unless the page unloaded
     // mid-read (a request may have gone out then).
-    if(pageBridgeUnavailable(e)){if(!e?.pageClosed)orderBookFetchAt.set(k,last);return {ok:false,skipped:true,bridgeUnavailable:true,status:0,error:e?.message||String(e)};}
+    if(pageBridgeUnavailable(e)){if(!e?.pageClosed)orderBookFetchAt.set(k,last);return {ok:false,skipped:true,bridgeUnavailable:true,...(e?.pageClosed?{pageClosed:true}:{}),...(e?.noGameTab?{noGameTab:true}:{}),status:0,error:e?.message||String(e)};}
     throw e;
   }
   // Not this job's lane slot: no request went out, so the 5 min gap of this product does not count.
   if(response?.laneWait){orderBookFetchAt.set(k,last);return {ok:false,skipped:true,laneWait:true,status:0,reason:response.reason,nextAt:response.nextAt,error:response.error};}
   const responseRealm=validRealmNumber(response?.captureRealm);
-  // The game tab is in (or just moved to) the other realm: a quiet skip, nothing saved. realmMismatch is passed on
+  // The game tab is in (or just moved to) the other realm: not read, nothing saved. realmMismatch is passed on
   // so the order-book alarm logs no failure and takes no backoff step; the 5 min gap for this product still counts.
   if(response?.realmMismatch||(responseRealm!=null&&responseRealm!==target))return {ok:false,skipped:true,realmMismatch:true,reason:'other-realm',error:'Order book came from the wrong realm.'};
-  if(!response?.ok||!hasUsableMarketRows(response.data)){orderBookFetchAt.set(k,last);return {ok:false,status:response?.status||0,directReadsBlocked:Boolean(response?.directReadsBlocked),skipped:Boolean(response?.directReadsBlocked),error:response?.error||'No usable order book returned (is the game tab open?).'};}
+  if(!response?.ok||!hasUsableMarketRows(response.data)){orderBookFetchAt.set(k,last);return {ok:false,status:response?.status||0,directReadsBlocked:Boolean(response?.directReadsBlocked),skipped:Boolean(response?.directReadsBlocked),...(response?.recheckFailed?{recheckFailed:true}:{}),error:response?.error||'No usable order book returned (is the game tab open?).'};}
   await saveData(path,response.data,response.status,'GET',target);
   return {ok:true,rows:Array.isArray(response.data)?response.data.length:null};
+}
+// Monitor line for an order-book read a game-page card asked for (sell page, incoming contract): waiting (lane slot),
+// not read (no tab / bridge / other realm / reads blocked), or a failed request (a 2xx without rows is an empty book).
+// A success or a throttled call (no read wanted) adds no line, as before.
+function logOrderBookSideRead(realm,resourceId,x,trigger){
+  if(!x||x.ok||x.throttled)return;
+  if(x.laneWait)return logLaneWait(realm,'order-book-refresh',x.nextAt,{resourceId},Date.now(),trigger);
+  if(x.realmMismatch)return logNotRead(realm,'order-book-refresh',otherRealmReason('other-realm',realm),{resourceId},Date.now(),trigger);
+  if(x.directReadsBlocked)return logNotRead(realm,'order-book-refresh',x,{resourceId,directReadsBlocked:true,...(x.recheckFailed?{recheckFailed:true}:{})},Date.now(),trigger);
+  if(x.bridgeUnavailable)return logNotRead(realm,'order-book-refresh',x,{resourceId},Date.now(),trigger);
+  const status=Number(x.status)||0;if(status>=200&&status<300)return;
+  return logActivity(realm,'order-book-refresh','failure',{resourceId,status},x.error||null,Date.now(),trigger);
 }
 function hasUsableMarketRows(data){
   if(Array.isArray(data)) return data.some(o=>o&&typeof o==='object' && Number.isFinite(Number(o.price ?? o.unitPrice ?? o.amountPrice)) && Number(o.price ?? o.unitPrice ?? o.amountPrice)>0 && Number.isFinite(Number(o.quality ?? o.q)));
@@ -4586,16 +4719,19 @@ async function runOrderBookRefreshFiring(){
     const saved=(await chrome.storage.local.get({[ORDER_BOOK_REFRESH_STATE_KEY]:null}))[ORDER_BOOK_REFRESH_STATE_KEY]||{};
     const now=Date.now();
     if(Number(saved.backoffUntil)>now)return {ok:true,skipped:true};
-    // While the game blocks the Manager's own reads, order books come from game pages (and Sync's market crawl): skip quietly.
-    if(await directReadsBlockedNow())return {ok:true,skipped:true,reason:'direct-reads-blocked'};
-    const tab=await simTab();if(!tab?.id)return {ok:true,skipped:true};
+    // While the game blocks the Manager's own reads, order books come from game pages (and Sync's market crawl): a
+    // "not read" line (realm of the line: active, else selected realm, else the error log).
+    if(await directReadsBlockedNow()){logActivityAnyRealm('order-book-refresh','not-read',{directReadsBlocked:true},notReadReason({directReadsBlocked:true}));return {ok:true,skipped:true,reason:'direct-reads-blocked'};}
+    const tab=await simTab();if(!tab?.id){logActivityAnyRealm('order-book-refresh','not-read',{},notReadReason('no-game-tab'));return {ok:true,skipped:true};}
     const bridge=await withSyncTimeout(chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),3000,'Order book refresh bridge check').catch(()=>null);
     const realm=bridge?.ready&&(bridge.realm===0||bridge.realm===1)?bridge.realm:null;
-    if(realm==null||syncSessionForRealm(realm)||accountingDayWalkRunning.has(realm))return {ok:true,skipped:true};
+    // Bridge not ready, or the tab has not shown its realm yet: a "not read" line. A Sync / day walk of that realm: planned, no line.
+    if(realm==null){logActivityAnyRealm('order-book-refresh','not-read',{},notReadReason(bridge?.ready?'realm-unknown':'bridge-not-ready'));return {ok:true,skipped:true};}
+    if(syncSessionForRealm(realm)||accountingDayWalkRunning.has(realm))return {ok:true,skipped:true};
     // Shared game lane: not this job's turn (5 min since the last game request not over, or a job before it is
-    // waiting): a quiet skip before any product attempt is stamped; the lane alarm runs it again when the slot opens.
+    // waiting): a "waiting" line before any product attempt is stamped; the lane alarm runs it again when the slot opens.
     const peek=await gameLaneDecide('orderBook',{peek:true});
-    if(!peek.take)return {ok:true,skipped:true,laneWait:true,reason:peek.reason,nextAt:peek.nextAt};
+    if(!peek.take){logLaneWait(realm,'order-book-refresh',peek.nextAt,{},now,'alarm');return {ok:true,skipped:true,laneWait:true,reason:peek.reason,nextAt:peek.nextAt};}
     const store=await notifyRealmStore(realm);
     const attempts=Object.fromEntries(Object.entries(saved.attempts||{}).filter(([,at])=>now-Number(at)<ORDER_BOOK_REFRESH_ATTEMPT_KEEP_MS));
     let networkRows=[];
@@ -4608,13 +4744,13 @@ async function runOrderBookRefreshFiring(){
     try{result=await fetchExchangeOrderBookForRealm(realm,resourceId,false,{lane:'orderBook'});}catch(e){result={ok:false,status:0,error:e?.message||String(e)};}
     const status=Number(result?.status)||0;
     // The lane slot went to another job between the peek and the read: no request, the product's attempt is undone.
-    if(result?.laneWait){delete attempts[`${realm}:${resourceId}`];if(clearGen===extensionClearGeneration)await rawStorageSet({[ORDER_BOOK_REFRESH_STATE_KEY]:{backoffUntil:0,attempts}});return {...result,realm,resourceId,skipped:true};}
-    // The game tab switched realm during the read: quiet skip (no failure entry, no backoff, nothing saved).
-    if(result?.realmMismatch)return {...result,realm,resourceId};
-    // The game blocked this read (pageGet logged the block once): quiet skip, no back-off, no failure line.
-    if(result?.directReadsBlocked)return {...result,realm,resourceId,skipped:true};
-    // No game tab / bridge not ready: no request was answered, so no failure line and no back-off.
-    if(result?.bridgeUnavailable)return {...result,realm,resourceId,skipped:true};
+    if(result?.laneWait){delete attempts[`${realm}:${resourceId}`];if(clearGen===extensionClearGeneration)await rawStorageSet({[ORDER_BOOK_REFRESH_STATE_KEY]:{backoffUntil:0,attempts}});logLaneWait(realm,'order-book-refresh',result.nextAt,{resourceId},now,'alarm');return {...result,realm,resourceId,skipped:true};}
+    // The game tab switched realm during the read: a "not read" line (no failure, no backoff, nothing saved).
+    if(result?.realmMismatch){logNotRead(realm,'order-book-refresh',otherRealmReason('other-realm',realm),{resourceId},now,'alarm');return {...result,realm,resourceId};}
+    // The game blocked this read (pageGet logged the block once): a "not read" line, no back-off.
+    if(result?.directReadsBlocked){logNotRead(realm,'order-book-refresh',result,{resourceId,directReadsBlocked:true,...(result.recheckFailed?{recheckFailed:true}:{})},now,'alarm');return {...result,realm,resourceId,skipped:true};}
+    // No game tab / bridge not ready: no request was answered: a "not read" line, no back-off.
+    if(result?.bridgeUnavailable){logNotRead(realm,'order-book-refresh',result,{resourceId},now,'alarm');return {...result,realm,resourceId,skipped:true};}
     // A 2xx without usable rows is an empty book, not a failed request.
     if(!result?.ok&&!(status>=200&&status<300)){
       const backoffMs=status===429?ORDER_BOOK_REFRESH_429_BACKOFF_MS:ORDER_BOOK_REFRESH_FAILURE_BACKOFF_MS;
@@ -4632,18 +4768,23 @@ const MARKET_TICKER_MAX_AGE_MS=60*60000;
 async function runMarketTickerRefresh(trigger='alarm'){
   if(coreSyncActive())return {ok:true,skipped:true,reason:'sync'};
   if(!(await scmTimerEnabled('orderBook').catch(()=>true)))return {ok:true,skipped:true,reason:'off'};
-  if(await directReadsBlockedNow())return {ok:true,skipped:true,reason:'direct-reads-blocked'};
-  const tab=await simTab();if(!tab?.id)return {ok:true,skipped:true,reason:'no-tab'};
+  // Every read it wanted and did not make gets a "not read" / "waiting" line (a Sync or day walk of that realm: planned, no line).
+  if(await directReadsBlockedNow()){logActivityAnyRealm('market-ticker','not-read',{directReadsBlocked:true},notReadReason({directReadsBlocked:true}));return {ok:true,skipped:true,reason:'direct-reads-blocked'};}
+  const tab=await simTab();if(!tab?.id){logActivityAnyRealm('market-ticker','not-read',{},notReadReason('no-game-tab'));return {ok:true,skipped:true,reason:'no-tab'};}
   const bridge=await withSyncTimeout(chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),3000,'Market ticker bridge check').catch(()=>null);
   const realm=bridge?.ready&&(bridge.realm===0||bridge.realm===1)?bridge.realm:null;
-  if(realm==null||syncSessionForRealm(realm)||accountingDayWalkRunning.has(realm))return {ok:true,skipped:true,reason:'no-realm'};
+  if(realm==null){logActivityAnyRealm('market-ticker','not-read',{},notReadReason(bridge?.ready?'realm-unknown':'bridge-not-ready'));return {ok:true,skipped:true,reason:'no-realm'};}
+  if(syncSessionForRealm(realm)||accountingDayWalkRunning.has(realm))return {ok:true,skipped:true,reason:'no-realm'};
   const path=`/api/v3/market-ticker/${realm}/`,t0=Date.now();
   const store=await notifyRealmStore(realm);const at=Date.parse(String(store?.endpointData?.[path]?.receivedAt||''));
   if(Number.isFinite(at)&&Date.now()-at<MARKET_TICKER_MAX_AGE_MS){await gameLaneDropWant(`ticker:${realm}`);return {ok:true,cached:true,realm};}
   let r;
   try{r=await pageGet(path,realm,null,'market-ticker',{lane:`ticker:${realm}`,timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS});}
-  catch(e){if(pageBridgeUnavailable(e))return {ok:true,skipped:true,bridgeUnavailable:true,realm};r={ok:false,status:0,error:e?.message||String(e)};}
-  if(r?.laneWait||r?.directReadsBlocked||r?.realmMismatch||r?.realmUnknown)return {ok:true,skipped:true,laneWait:Boolean(r?.laneWait),directReadsBlocked:Boolean(r?.directReadsBlocked),realm};
+  catch(e){if(pageBridgeUnavailable(e)){logNotRead(realm,'market-ticker',e,{},t0,trigger);return {ok:true,skipped:true,bridgeUnavailable:true,realm};}r={ok:false,status:0,error:e?.message||String(e)};}
+  if(r?.laneWait||r?.directReadsBlocked||r?.realmMismatch||r?.realmUnknown){
+    if(r.laneWait)logLaneWait(realm,'market-ticker',r.nextAt,{},t0,trigger);
+    else logNotRead(realm,'market-ticker',r,r.directReadsBlocked?{directReadsBlocked:true,...(r.recheckFailed?{recheckFailed:true}:{})}:{},t0,trigger);
+    return {ok:true,skipped:true,laneWait:Boolean(r?.laneWait),directReadsBlocked:Boolean(r?.directReadsBlocked),realm};}
   if(!r?.ok||!r.data||typeof r.data!=='object'||endpointResponseRejected(path,r)){logActivity(realm,'market-ticker','failure',{status:Number(r?.status)||0},r?.error||`HTTP ${Number(r?.status)||0}`,t0,trigger);return {ok:false,realm,status:Number(r?.status)||0,error:r?.error||null};}
   await saveData(path,r.data,r.status,'GET',realm);
   logActivity(realm,'market-ticker','success',{rows:Array.isArray(r.data)?r.data.length:null},null,t0,trigger);
@@ -5498,8 +5639,13 @@ const MARKET_STAGE_REALM_COOLDOWN_MS=SIMCOTOOLS_SHARED_GAP_MS+5000;
 let liveMarketRefreshAlarmRun=null;
 let marketStageRun=null;
 function marketStageAlarmName(realm,stage){const n=validRealmNumber(realm);return n==null?null:`${MARKET_STAGE_ALARM_PREFIX}${n}-${stage}`;}
+// A stage that fired during a core Sync is parked in syncDeferredWork (key market:<realm>:<stage>) without an alarm;
+// it counts as pending too, or every price ask during Sync queues another stage that is deferred again (a ~2 s loop).
+function hasDeferredMarketStage(){for(const k of syncDeferredWork.keys())if(String(k).startsWith('market:'))return true;return false;}
+// Set synchronously by scheduleMarketCycle so concurrent callers do not each queue a cycle.
+let marketCycleScheduling=null;
 async function hasPendingMarketStageAlarm(){
-  if(marketStageRun)return true;
+  if(marketStageRun||hasDeferredMarketStage())return true;
   try{const all=await chrome.alarms.getAll();return all.some(a=>/^scm-market-stage-r[01]-(?:vwap|prices)$/.test(String(a?.name||'')));}catch{return Boolean(marketStageRun);}
 }
 async function scheduleMarketStage(realm,stage,delayMs=MARKET_STAGE_COOLDOWN_MS,reason='scheduled'){
@@ -5510,10 +5656,16 @@ async function scheduleMarketStage(realm,stage,delayMs=MARKET_STAGE_COOLDOWN_MS,
 }
 async function scheduleMarketCycle(realmArg,reason='scheduled-market-cycle'){
   const n=validRealmNumber(realmArg);if(n==null)return {ok:false,error:'Invalid realm for market cycle.'};
-  if(await hasPendingMarketStageAlarm())return {ok:true,queued:false,skipped:true,reason:'market-cycle-already-pending'};
-  const other=n===0?1:0;
-  try{await chrome.storage.local.set({marketSyncCycleQueue:[n,other]});}catch{}
-  return scheduleMarketStage(n,'vwap',POST_SYNC_MARKET_COOLDOWN_MS,reason);
+  const pending={ok:true,queued:false,skipped:true,reason:'market-cycle-already-pending'};
+  if(marketCycleScheduling)return pending;
+  const run=(async()=>{
+    if(await hasPendingMarketStageAlarm())return pending;
+    const other=n===0?1:0;
+    try{await chrome.storage.local.set({marketSyncCycleQueue:[n,other]});}catch{}
+    return scheduleMarketStage(n,'vwap',POST_SYNC_MARKET_COOLDOWN_MS,reason);
+  })();
+  marketCycleScheduling=run;
+  try{return await run;}finally{if(marketCycleScheduling===run)marketCycleScheduling=null;}
 }
 async function runMarketStage(realm,stage,reason='alarm'){
   const n=validRealmNumber(realm);if(n==null)return {ok:false,error:'Invalid realm for market stage.'};
@@ -5569,7 +5721,7 @@ async function runScheduledLiveMarketRefresh(reason='scheduled'){
   if(liveMarketRefreshAlarmRun)return liveMarketRefreshAlarmRun;
   liveMarketRefreshAlarmRun=(async()=>{
     await ensureRealmStorageMigration();
-    if(await hasPendingMarketStageAlarm())return {ok:true,skipped:true,reason:'market-stage-already-scheduled'};
+    if(marketCycleScheduling||await hasPendingMarketStageAlarm())return {ok:true,skipped:true,reason:'market-stage-already-scheduled'};
     const s=await state();
     const selected=validRealmNumber(s.activeRealmKey?.replace(/^realm:/,'')??s.selectedRealm??s.authData?.authCompany?.realmId);
     const first=selected??0,other=first===0?1:0;
@@ -5892,12 +6044,16 @@ async function refreshContractsScheduled(reason='critical-data-guard',realmArg=n
   for(const path of realmContractPaths(realm)){
     const k=`${realm}|${path}`;if(Date.now()-(lostDataReadAt.get(k)||0)<30*60000)continue;
     try{const r=await pageGet(path,realm,null,'lost-data-check',{lane});
-      if(r?.laneWait){results.push({path,ok:false,skipped:true,laneWait:true,status:0});break;}
-      if(r?.directReadsBlocked){results.push({path,ok:false,skipped:true,directReadsBlocked:true,status:Number(r?.status)||403});break;}
+      if(r?.laneWait){results.push({path,ok:false,skipped:true,laneWait:true,status:0});logLaneWait(realm,'lost-data-check',r.nextAt,{},Date.now(),reason);break;}
+      if(r?.directReadsBlocked){results.push({path,ok:false,skipped:true,directReadsBlocked:true,status:Number(r?.status)||403});logNotRead(realm,'lost-data-check',r,{directReadsBlocked:true,...(r.recheckFailed?{recheckFailed:true}:{})},Date.now(),reason);break;}
       lostDataReadAt.set(k,Date.now());
+      // Other realm / realm not shown yet: a "not read" line (flow unchanged: stamped, the next path goes on).
+      if(!r?.ok&&(r?.realmMismatch||r?.realmUnknown)){results.push({path,ok:false,skipped:true,status:0});logNotRead(realm,'lost-data-check',r,{},Date.now(),reason);continue;}
       const ok=!!r?.ok&&!endpointResponseRejected(path,r); results.push({path,ok,status:Number(r?.status)||0}); if(ok)await saveData(path,r.data,r.status,'GET',realm);}
-    catch(e){if(pageBridgeUnavailable(e)){results.push({path,ok:false,skipped:true,bridgeUnavailable:true,status:0});break;}results.push({path,ok:false,status:0,error:e?.message||String(e)});}
+    catch(e){if(pageBridgeUnavailable(e)){results.push({path,ok:false,skipped:true,bridgeUnavailable:true,status:0});logNotRead(realm,'lost-data-check',e,{},Date.now(),reason);break;}results.push({path,ok:false,status:0,error:e?.message||String(e)});}
   }
+  // Real failed reads (not the waiting / not-read ones above): one failure line.
+  {const bad=results.filter(x=>!x.ok&&!x.skipped);if(bad.length)logActivity(realm,'lost-data-check','failure',{rows:results.filter(x=>x.ok).length,wanted:results.length},bad.map(x=>`${x.path.replace('/api/','')}: ${x.error||'HTTP '+x.status}`).slice(0,3).join(' · '),Date.now(),reason);}
   const s=await state(realm); const key=realmKeyFromRealm(realm); const count=criticalContractRowsFromStore(s.realmStores?.[key]||{}).length;
   return {ok:results.every(x=>x.ok)&&count>0,realm,reason,results,count};
 }
@@ -6857,11 +7013,12 @@ async function runDeferredAccountingWeekRefresh(realm,reason='scheduled',opts=nu
     }catch(e){
       const error=e?.message||String(e);
       // Not this job's lane slot: no request went out; status stays scheduled, the alarm asks again (no attempt).
-      if(e?.laneWait){await setAccountingWeekLedgerStatus(n,'scheduled',null,{reason,waiting:'game-lane'});return {ok:false,skipped:true,laneWait:true,nextAt:e.nextAt||0,realm:n};}
+      if(e?.laneWait){await setAccountingWeekLedgerStatus(n,'scheduled',null,{reason,waiting:'game-lane'});logLaneWait(n,'accounting-week-ledger',e.nextAt,{},started,reason);return {ok:false,skipped:true,laneWait:true,nextAt:e.nextAt||0,realm:n};}
       // No game tab / bridge not ready or not connected, or the game blocks direct reads: no request was answered.
-      // A quiet skip (no failed status, no error text). The alarm path counts it as one of its capped attempts, so it
-      // never loops; the next Sync starts again.
+      // A "not read" line (no failed status, no error text in the status). The alarm path counts it as one of its
+      // capped attempts, so it never loops; the next Sync starts again.
       if(pageBridgeUnavailable(e)||e?.directReadsBlocked||isDirectReadsBlockedError(e)){
+        logNotRead(n,'accounting-week-ledger',e,e?.directReadsBlocked||isDirectReadsBlockedError(e)?{directReadsBlocked:true,...(e?.recheckFailed?{recheckFailed:true}:{})}:{},started,reason);
         await setAccountingWeekLedgerStatus(n,'scheduled',null,{reason,skipped:e?.directReadsBlocked||isDirectReadsBlockedError(e)?'direct-reads-blocked':'bridge-unavailable',durationMs:Date.now()-started});
         return {ok:false,skipped:true,realm:n,bridgeUnavailable:pageBridgeUnavailable(e),directReadsBlocked:Boolean(e?.directReadsBlocked||isDirectReadsBlockedError(e)),error};
       }
@@ -6993,6 +7150,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
   let ownsSyncSession=false;
   let selected=null;
   let syncCoreSucceeded=false;
+  let syncRetrySkip=null;
   let pageReturn=null;
   const targets=[
     {name:'Warehouse',labels:['Warehouse','Headquarters','HQ'],hrefHints:['/headquarters/warehouse/'],route:'/headquarters/warehouse/',waitFor:'warehouse'},
@@ -7104,7 +7262,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       ??authBoundary?.data?.realmId
       ??authBoundary?.data?.realm
       ??authBoundary?.captureRealm);
-    if(!authBoundary?.ok) throw new Error(authBoundary?.directReadsBlocked?`Could not verify the game session for ${realmDisplayNumber(selected)||'selected realm'}: the game page did not load its session data within ${Math.round(SYNC_AUTH_RELOAD_WAIT_MS/1000)} s after a reload. ${DIRECT_READS_BLOCKED_TEXT}`:`Could not verify the game session for ${realmDisplayNumber(selected)||'selected realm'} before sync (HTTP ${authBoundary?.status||0}).`);
+    if(!authBoundary?.ok) throw new Error(authBoundary?.directReadsBlocked?`Could not verify the game session for ${realmDisplayNumber(selected)||'selected realm'}: the game page did not load its session data within ${Math.round(SYNC_AUTH_RELOAD_WAIT_MS/1000)} s after a reload. ${currentDirectReadsBlockedText()}`:`Could not verify the game session for ${realmDisplayNumber(selected)||'selected realm'} before sync (HTTP ${authBoundary?.status||0}).`);
     trace('auth-boundary-source',{source:authBoundary.fromPageCapture?'game-capture':'direct-read',ageMs:authBoundary.ageMs??null});
     if(authRealm!==selected) throw new Error(`Game session is still ${realmDisplayNumber(authRealm)||'an unknown realm'}; selected sync target is ${realmDisplayNumber(selected)||'the selected realm'}. Switch the game first, then Sync again.`);
     trace('auth-verified',{realm:selected,captureRealm:validRealmNumber(authBoundary.captureRealm),status:Number(authBoundary.status)||0});
@@ -7778,7 +7936,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     const successful=successfulAfterDurability;
     const failed=failedAfterDurability;
     const executivesSummary=executivesSyncSuffix(results.find(result=>result.name==='Executives'));
-    if(session.directReadsBlocked||await directReadsBlockedNow())session.warnings.unshift(DIRECT_READS_BLOCKED_TEXT);
+    if(session.directReadsBlocked||await directReadsBlockedNow())session.warnings.unshift(directReadsBlockedText((await directReadBlockGet())?.status));
     const endpointWarnings=[...new Set((session.warnings||[]).map(w=>safeWalkText(w)))];
     if(endpointWarnings.length)trace('endpoint-warnings',{count:endpointWarnings.length,warnings:endpointWarnings});
     const finalStatusBase=`${realmDisplayNumber(selected)||'Realm'} Sync ${requiredOk?'complete':'finished with errors'} · ${successful}/${targets.length} targets captured${accountingSuffix}${executivesSummary}`;
@@ -7829,6 +7987,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     if(requiredOk) await persistCriticalDataBaseline(selected,'sync-complete').catch(()=>{});
     trace('sync-core-persisted',{realm:selected,finalStatus,finishedAt});
     syncCoreSucceeded=requiredOk;
+    if(!requiredOk)trace('sync-failed',{error:finalSyncError});
     if(requiredOk && results.some(r=>r.name==='Accounting'&&r.ok&&r.accountingWeekLedger?.deferred)){
       await setAccountingWeekLedgerStatus(selected,'scheduled',null,{reason:'core-sync',scheduledAt:new Date().toISOString()}).catch(()=>{});
       const ledgerSchedule=await scheduleAccountingWeekRefresh(selected,1500).catch(e=>({ok:false,error:e?.message||String(e),realm:selected}));
@@ -7925,7 +8084,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
   }catch(e){
     const error=e?.message||String(e);
     // A transient failure that the automatic retry will run again is not an error-log entry; the retry's own failure is.
-    if(!(syncFailureIsTransient(error)&&validRealmNumber(selected)!=null&&!syncAutoRetryRuns.has(selected)&&!(e instanceof SyncCancelledByClear)))logError('sync',e);
+    if(!(syncFailureIsTransient(error)&&!syncAutoRetrySkipReason({error,backoff:lastGameBackoffAnswer,startedAt})&&validRealmNumber(selected)!=null&&!syncAutoRetryRuns.has(selected)&&!(e instanceof SyncCancelledByClear)))logError('sync',e);
     // Nothing of this run may reach storage after a clear, not even its failure status.
     if(e instanceof SyncCancelledByClear)return {ok:false,cancelled:true,error,realm:selected};
     syncTrace.push({at:Date.now(),type:'sync-exception',error});
@@ -7959,9 +8118,10 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const syncFinishedAt=new Date().toISOString();
       const traceFailed=Array.isArray(syncTrace)&&syncTrace.some(x=>/failed|error|exception/i.test(String(x?.type||'')));
       const syncFailError=syncCoreSucceeded?null:([...syncTrace].reverse().find(x=>/sync-exception|sync-failed/i.test(String(x?.type||'')))?.error||null);
+      if(!syncCoreSucceeded)syncRetrySkip=syncAutoRetrySkipReason({error:syncFailError,blocked:await directReadsBlockedNow(),backoff:lastGameBackoffAnswer,startedAt});
       // A transient failure (no answer / timeout) that gets the automatic retry below is "retrying", not a failure;
-      // the retry run (wasAutoRetry) logs failure if it fails too.
-      const coreOutcome=syncCoreSucceeded?(traceFailed?'partial':'success'):(!syncAutoRetryRuns.has(selected)&&syncFailureIsTransient(syncFailError)?'retrying':'failure');
+      // the retry run (wasAutoRetry) logs failure if it fails too. A failure the game pushed back on is a failure.
+      const coreOutcome=syncCoreSucceeded?(traceFailed?'partial':'success'):(!syncRetrySkip&&!syncAutoRetryRuns.has(selected)&&syncFailureIsTransient(syncFailError)?'retrying':'failure');
       await recordBackgroundJobEvent(selected,{job:'core-sync',trigger:'manual-or-dashboard',startedAt:new Date(startedAt).toISOString(),finishedAt:syncFinishedAt,durationMs:Date.now()-startedAt,outcome:coreOutcome,requested:targets.length,fetched:0,refreshed:0,checked:targets.length,cached:0,stale:0,error:syncCoreSucceeded?null:([...syncTrace].reverse().find(x=>/sync-exception|sync-failed/i.test(String(x?.type||'')))?.error||null),details:{coreSyncSucceeded:Boolean(syncCoreSucceeded),traceEvents:syncTrace.length,targets:targets.map(t=>t.name)}}).catch(()=>{});
     }
     if(syncCoreSucceeded && selected!=null){
@@ -7970,7 +8130,9 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     }
     if(ownsSyncSession && selected!=null){
       const wasAutoRetry=syncAutoRetryRuns.delete(selected);
-      if(!syncCoreSucceeded && !wasAutoRetry && !clearedDuringRun){
+      if(!syncCoreSucceeded && !wasAutoRetry && !clearedDuringRun && syncRetrySkip){
+        logActivity(selected,'sync-auto-retry-skipped','skipped',{reason:syncRetrySkip,...(lastGameBackoffAnswer&&lastGameBackoffAnswer.at>=startedAt?{status:lastGameBackoffAnswer.status,path:lastGameBackoffAnswer.path}:{})},`No automatic retry: ${syncRetrySkip}.`,Date.now(),'sync-failed');
+      }else if(!syncCoreSucceeded && !wasAutoRetry && !clearedDuringRun){
         await scmAlarmCreate(`${SYNC_AUTO_RETRY_ALARM_PREFIX}${selected}`,{when:Date.now()+SYNC_AUTO_RETRY_DELAY_MS}).catch(()=>{});
         logActivity(selected,'sync-auto-retry-scheduled','success',{delayMs:SYNC_AUTO_RETRY_DELAY_MS},null,Date.now(),'sync-failed');
       }
@@ -8262,6 +8424,11 @@ function scheduleWarehouseRefreshAfterStockMutation(realm,delayMs=300){
 // A stock mutation and an overlay repaint often request the same warehouse snapshot.
 // Share one authoritative fetch per realm so these triggers do not race or duplicate requests.
 const warehouseOverlayRefreshRuns=new Map();
+function warehouseNotReadReason(result){
+  if(result?.notReady)return notReadReason('no-company-id');
+  if(result?.otherRealm)return `Not read: ${String(result.error||'the game tab is in the other realm').replace(/^Skipped: /,'').replace(/(?:; nothing saved)?[.]?$/,'')}`;
+  return notReadReason(result);
+}
 async function refreshRealmWarehouseForOverlay(realm,maxAgeMs=15000){
   const n=validRealmNumber(realm);if(n==null)return {ok:false,error:'Invalid realm.'};
   const existing=warehouseOverlayRefreshRuns.get(n);if(existing)return existing;
@@ -8271,7 +8438,12 @@ async function refreshRealmWarehouseForOverlay(realm,maxAgeMs=15000){
   const run=refreshRealmWarehouseForOverlayUnlocked(n,maxAgeMs).then(async result=>{
     noteWarehouseOverlayRefreshResult(n,maxAgeMs,result);
     const finishedAt=new Date().toISOString();
-    if(!result?.laneWait)await recordBackgroundJobEvent(n,{job:'warehouse-refresh',trigger:maxAgeMs===0?'stock-mutation-or-forced':'overlay-refresh',startedAt,finishedAt,durationMs:Date.now()-startedMs,outcome:result?.ok?(result?.cached?'skipped':'success'):(result?.notReady||result?.otherRealm||result?.pageClosed||result?.directReadsBlocked||result?.bridgeUnavailable?'skipped':(result?.stale||result?.incomplete?'partial':'failure')),requested:1,fetched:result?.refreshed?1:0,refreshed:result?.refreshed?1:0,checked:1,cached:result?.cached?1:0,error:result?.error||null,details:{rows:result?.rows??null,requestDurationMs:result?.requestDurationMs??null,storageCommitDurationMs:result?.storageCommitDurationMs??null,totalDurationMs:result?.totalDurationMs??null}}).catch(()=>{});
+    // Lane slot taken: a "waiting" line. No company id yet / other realm / page unloaded / reads blocked / no tab or
+    // bridge: a "not read" line with the reason (no backoff step, see noteWarehouseOverlayRefreshResult).
+    const notRead=!result?.ok&&!result?.laneWait&&Boolean(result?.notReady||result?.otherRealm||result?.pageClosed||result?.directReadsBlocked||result?.bridgeUnavailable);
+    const outcome=result?.ok?(result?.cached?'skipped':'success'):result?.laneWait?'waiting':notRead?'not-read':(result?.stale||result?.incomplete?'partial':'failure');
+    const error=result?.laneWait?laneWaitText(result.nextAt):notRead?warehouseNotReadReason(result):(result?.error||null);
+    await recordBackgroundJobEvent(n,{job:'warehouse-refresh',trigger:maxAgeMs===0?'stock-mutation-or-forced':'overlay-refresh',startedAt,finishedAt,durationMs:Date.now()-startedMs,outcome,requested:1,fetched:result?.refreshed?1:0,refreshed:result?.refreshed?1:0,checked:1,cached:result?.cached?1:0,error,details:{rows:result?.rows??null,requestDurationMs:result?.requestDurationMs??null,storageCommitDurationMs:result?.storageCommitDurationMs??null,totalDurationMs:result?.totalDurationMs??null,...(result?.laneWait?{laneWait:true,nextAt:Number(result.nextAt)||0}:{}),...(result?.directReadsBlocked?{directReadsBlocked:true,...(result.recheckFailed?{recheckFailed:true}:{})}:{})}}).catch(()=>{});
     return {...result,jobStartedAt:startedAt,jobFinishedAt:finishedAt,jobDurationMs:Date.now()-startedMs};
   }).finally(()=>{if(warehouseOverlayRefreshRuns.get(n)===run)warehouseOverlayRefreshRuns.delete(n);});
   warehouseOverlayRefreshRuns.set(n,run);return run;
@@ -8741,7 +8913,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const bad=outcomes.filter(r=>!r?.ok);
         const errors=[...new Set(bad.map(r=>r?.error||'Refresh failed.'))];
         const directReadsBlocked=bad.length>0&&bad.every(r=>r?.directReadsBlocked);
-        send({ok:errors.length===0,throttled:false,directReadsBlocked,error:directReadsBlocked?DIRECT_READS_BLOCKED_TEXT:errors.length?errors.join(' '):null});
+        send({ok:errors.length===0,throttled:false,directReadsBlocked,error:directReadsBlocked?(bad[0]?.error||DIRECT_READS_BLOCKED_TEXT):errors.length?errors.join(' '):null});
       }catch(e){send({ok:false,throttled:false,error:e?.message||String(e)});}
     })();return true;
   }
@@ -8906,7 +9078,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         const path=`/api/v3/market/${realm}/${id}/`,ep=store.endpointData?.[path],at=Date.parse(String(ep?.receivedAt||''));
         const haveBook=Array.isArray(ep?.data)&&Number.isFinite(at)&&Date.now()-at<6*3600e3;
         let refreshing=false;
-        if(!haveBook||Date.now()-at>15*60e3){refreshing=true;fetchExchangeOrderBookForRealm(realm,id).catch(()=>{});}
+        if(!haveBook||Date.now()-at>15*60e3){refreshing=true;fetchExchangeOrderBookForRealm(realm,id).then(x=>logOrderBookSideRead(realm,id,x,'sell-page')).catch(()=>{});}
         const mo=(await chrome.storage.local.get({[`scmMarketOrders:${realm}`]:null}))[`scmMarketOrders:${realm}`];
         const own=Array.isArray(mo?.orders)?mo.orders:[];
         const lots=(Array.isArray(store.warehouseResources)?store.warehouseResources:[]).filter(l=>Number(l?.kind)===id&&Number(l?.quality)===q);
@@ -8947,7 +9119,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
           try{
             const ep=store.endpointData?.[`/api/v3/market/${realm}/${c.kind}/`],at=Date.parse(String(ep?.receivedAt||''));
             const book=Array.isArray(ep?.data)&&Number.isFinite(at)&&Date.now()-at<6*3600e3?ep.data:null;
-            if((!book||Date.now()-at>15*60e3)&&asked<1&&c.kind>0){asked++;fetchExchangeOrderBookForRealm(realm,c.kind,false,{lane:'contractBook'}).catch(()=>{});}
+            if((!book||Date.now()-at>15*60e3)&&asked<1&&c.kind>0){asked++;const kind=c.kind;fetchExchangeOrderBookForRealm(realm,kind,false,{lane:'contractBook'}).then(x=>logOrderBookSideRead(realm,kind,x,'contract-card')).catch(()=>{});}
             c.exchangePrice=c.marketPrice;
             // A game price: the order book ('exchange') or the game's market ticker ('ticker', lowest Q0 ask), each with its own capture time.
             c.exchangeAt=c.marketPriceSource==='exchange'?ep.receivedAt:c.marketPriceSource==='ticker'?(store.endpointData?.[`/api/v3/market-ticker/${realm}/`]?.receivedAt||null):null;

@@ -7,6 +7,19 @@
  * display setting scmMonitorGameMode (bar / mini / hidden) and the one-time scmMonitorHideMigrated flag. */
 (function () {
   'use strict';
+  // Bar counts for the last hour (pure, also loaded by the Node tests): failed = failure or partial lines; not read =
+  // not-read lines, plus older failure lines a direct-read block stopped (details.directReadsBlocked). Waiting and
+  // skipped lines are not counted. t(job) = its time in ms.
+  function barCounts(list, now, t) {
+    let fails = 0, notRead = 0;
+    for (const j of Array.isArray(list) ? list : []) {
+      if (!j || now - t(j) >= 3600e3) continue;
+      if (j.outcome === 'not-read' || ((j.outcome === 'failure' || j.outcome === 'partial') && j.details?.directReadsBlocked)) notRead++;
+      else if (j.outcome === 'failure' || j.outcome === 'partial') fails++;
+    }
+    return { fails, notRead };
+  }
+  if (typeof module !== 'undefined' && module.exports) module.exports = { barCounts };
   if (!globalThis.chrome?.storage?.local) return;
   const GAME = typeof location !== 'undefined' && /(^|\.)simcompanies\.com$/i.test(location.hostname);
   if (GAME && (window.top !== window || document.getElementById('scmMonitor'))) return;
@@ -72,8 +85,20 @@
     'accounting-refresh': 'Accounting statements refreshed',
     'alert-sent': 'Alert sent',
     'game-data-saved': 'Saved from the game',
-    'direct-reads-blocked': 'Game blocks direct reads'
+    'direct-reads-blocked': 'Game blocks direct reads',
+    'outgoing-contracts': 'Your outgoing contracts checked',
+    'auth-data-read': 'Company data (auth-data) read',
+    'order-book-refresh': 'Exchange order book refreshed',
+    'market-ticker': 'Market ticker (lowest prices) read',
+    'ledger-catchup': 'Sales ledger catch-up',
+    'lost-data-check': 'Lost-data check (contracts)',
+    'sync-auto-retry-scheduled': 'Sync automatic retry scheduled',
+    'sync-auto-retry-skipped': 'Sync automatic retry not scheduled'
   };
+  // Outcome words in the list (not-read reads as "not read").
+  const OUTCOME = { 'not-read': 'not read', waiting: 'waiting' };
+  const outcomeText = j => OUTCOME[j.outcome] || String(j.outcome || '');
+  const repeats = j => { const n = Number(j.details?.repeats) || 0; return n > 0 ? ` ×${n}` : ''; };
   // Extra detail per line (what, alert title, counts).
   const detail = j => { const d = j.details || {}; const out = [];
     if (d.what) out.push(d.what); if (d.title) out.push(d.title);
@@ -82,8 +107,9 @@
     if (d.sources && /missing|unreadable/.test(d.sources)) out.push(d.sources);
     return out.length ? ' · ' + out.map(esc).join(' · ') : ''; };
   // One-line legend shown above the job list.
-  const LEGEND = 'Warehouse = last time the Manager re-read your warehouse from the game · last game action = last collect/buy/sell/contract it reacted to · prices = last SimcoTools price download (VWAP + current prices, about every 10 min). Green dot = warehouse refreshed in the last 15 min. "skipped" = nothing needed (data still fresh), not an error.';
-  const label = j => LABEL[`${j.job}|${j.trigger}`] || LABEL[j.job] || String(j.job || 'job').replace(/-/g, ' ');
+  const LEGEND = 'Warehouse = last time the Manager re-read your warehouse from the game · last game action = last collect/buy/sell/contract it reacted to · prices = last SimcoTools price download (VWAP + current prices, about every 10 min). Green dot = warehouse refreshed in the last 15 min. "skipped" = nothing needed (data still fresh). "not read" = the Manager wanted game data but could not get it (reason shown). "waiting" = held for the 5-min game request slot.';
+  // The direct-read pause after a 503 is not a bot-protection block: its own label (details.status).
+  const label = j => (j.job === 'direct-reads-blocked' && Number(j.details?.status) === 503 && j.details?.directReadsBlocked ? 'Game answered 503: Manager reads paused' : null) || LABEL[`${j.job}|${j.trigger}`] || LABEL[j.job] || String(j.job || 'job').replace(/-/g, ' ');
   let realm = null, jobs = [], lastSeenId = null, toastTimer = 0, open = false, lastPollSig = '';
   try { open = GAME && localStorage.getItem('scmMonitorOpen') === '1'; } catch {}
 
@@ -112,8 +138,9 @@
     const wh = lastOf(j => j.job === 'warehouse-refresh' && j.outcome === 'success');
     const action = lastOf(j => j.job === 'warehouse-refresh' && j.trigger === 'stock-mutation-or-forced' && j.outcome === 'success');
     const price = lastOf(j => /^market-(?:current-price|vwap)-stage$/.test(j.job) && j.outcome === 'success');
-    // A read stopped by the game's direct-read block (details.directReadsBlocked) is never a failure.
-    const fails = jobs.filter(j => j.outcome === 'failure' && !j.details?.directReadsBlocked && Date.now() - t(j) < 3600e3).length;
+    // Last hour: failed = failure or partial lines; not read = not-read lines (a read the game's direct-read block
+    // stopped is one of these, never a failure). Waiting lines (planned pace) are not counted.
+    const { fails, notRead } = barCounts(jobs, Date.now(), t);
     // The block is on while its newest line is the block (not the recovery) and no Manager read has succeeded since.
     const blockLine = lastOf(j => j.job === 'direct-reads-blocked');
     const blocked = blockLine && blockLine.details?.directReadsBlocked && !jobs.some(j => t(j) > t(blockLine) && j.outcome === 'success' && /^(?:warehouse-refresh|market-orders|accounting-refresh|order-book-refresh)$/.test(j.job)) ? (blockLine.error || 'The game now blocks direct reads; data updates from game pages you open and from Sync.') : '';
@@ -123,10 +150,11 @@
       action ? `last game action <b>${esc(ago(t(action)))}</b>` : null,
       price ? `prices <b>${esc(ago(t(price)))}</b>` : null,
       blocked ? `<span class="lu-info" role="note">${esc(blocked)}</span>` : null,
-      fails ? `<span class="lu-bad">${fails} failed in the last hour</span>` : null
+      fails || notRead ? [fails ? `<span class="lu-bad">${fails} failed</span>` : null, notRead ? `<span class="lu-warn">${notRead} not read</span>` : null].filter(Boolean).join(' · ') + ' in the last hour' : null
     ].filter(Boolean);
     ui.dot.classList.toggle('on', fresh);
-    if (GAME) { const mini = document.querySelector('#scmMonitor .scm-monitor-mini'); if (mini) { mini.querySelector('.lu-dot').classList.toggle('on', fresh); mini.querySelector('b').textContent = fails ? String(fails) : ''; mini.classList.toggle('has-bad', !!fails); } }
+    const badge = fails + notRead;
+    if (GAME) { const mini = document.querySelector('#scmMonitor .scm-monitor-mini'); if (mini) { mini.querySelector('.lu-dot').classList.toggle('on', fresh); mini.querySelector('b').textContent = badge ? String(badge) : ''; mini.classList.toggle('has-bad', !!badge); } }
     setHtml(ui.text, `${GAME ? "" : "Background updates · "}${parts.join(' · ')}`);
     ui.bar.setAttribute('aria-expanded', String(open));
     ui.more.textContent = open ? '▲' : '▼';
@@ -137,7 +165,7 @@
       if (key !== lastListKey) {
         lastListKey = key;
         if (ui.count) ui.count.textContent = `${last.length} activities (newest first)`;
-        ui.list.innerHTML = last.map(j => `<li class="lu-${esc(j.outcome)}"><span>${esc(new Date(t(j)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }))}</span> ${esc(label(j))}${detail(j)}${j.outcome !== 'success' ? ` · <b>${esc(j.outcome)}</b>${j.error ? ': ' + esc(j.error) : ''}` : ''}</li>`).join('') || '<li>No background activity recorded yet for this realm.</li>';
+        ui.list.innerHTML = last.map(j => `<li class="lu-${esc(j.outcome)}"><span>${esc(new Date(t(j)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }))}</span> ${esc(label(j))}${detail(j)}${j.outcome !== 'success' ? ` · <b>${esc(outcomeText(j))}</b>${j.error ? ': ' + esc(j.error) : ''}` : ''}${esc(repeats(j))}</li>`).join('') || '<li>No background activity recorded yet for this realm.</li>';
       }
     }
   }
