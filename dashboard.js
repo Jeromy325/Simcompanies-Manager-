@@ -1330,6 +1330,13 @@ function marketNewestStamp(bookAt,toolsAt,bookSource='Game market'){
 let __marketRefreshNote='';let __marketRefreshBusy=false;
 function setMarketRefreshNote(text){__marketRefreshNote=String(text||'');const el=$('#marketRefreshNote');if(el)el.textContent=__marketRefreshNote;}
 const MARKET_BLOCKED_NOTE='The game now blocks direct reads; data updates from game pages you open and from Sync.';
+const MARKET_BUSY_NOTE="The game answered 503 (busy or refusing reads); the Manager's own reads pause for 30 min. Data still updates from game pages you open.";
+// 403 or 503 wording for a blocked read: the background's own text when it is a notice, else the block status kept in session storage (read only).
+async function scmBlockedNoteText(errText){
+  const t=String(errText||'');if(scmIsBlockNotice(t))return t;
+  try{const r=await chrome.storage.session.get('scmDirectReadsBlocked');if(Number(r?.scmDirectReadsBlocked?.status)===503)return MARKET_BUSY_NOTE;}catch{}
+  return /503/.test(t)?MARKET_BUSY_NOTE:MARKET_BLOCKED_NOTE;
+}
 const __marketBookAsked=new Map();
 // Ask the background for the product's game order book. manual=true is the Refresh press (30 s gap there), otherwise automatic (5 min gap).
 async function requestMarketOrderBook(realm,id,manual){
@@ -1362,7 +1369,7 @@ async function marketManualRefresh(btn){
     if(epoch!==__realmViewEpoch)return;
     let text;
     if(!haveProduct)text='Select a warehouse resource first.';
-    else if(book?.directReadsBlocked)text=MARKET_BLOCKED_NOTE;
+    else if(book?.directReadsBlocked)text=await scmBlockedNoteText(book.error);
     else if(book?.ok&&!book.throttled)text=`Game price updated ${marketClock(Date.now())}`;
     else if(book?.ok){const at=marketBookStamp(window.__scmState,realm,id)||Number(book.lastAt)||0;text=at?`Game price is from ${marketClock(at)}`:'Game price is up to date.';}
     else if(book?.realmMismatch||book?.skipped)text='Game price not updated: open the game tab on this realm.';
@@ -1699,22 +1706,43 @@ scmOnStorageChanged((ch,area)=>{if(area==='local'&&ch.scmAccountingWalkSchedule)
 let __timersCfg=null,__timersStatus={},__timersErrors={},__timersMsg='',__timersLoading=null;
 function scmTimersCore(){return globalThis.SCM_TIMERS_CORE||null;}
 function scmTimersRealm(){const s=window.__scmState||{};const v=s.viewRealm??s.selectedRealm;return v==null||v===''?null:validRealmNumber(v);}
+// A timer the dashboard depends on counts as switched off only when it is in the saved list and disabled (an id this build does not know is never "off").
+function scmTimerOff(id){const e=__timersCfg&&__timersCfg[id];return !!e&&e.enabled===false;}
+const SCM_OFF_LINK='<button type="button" class="tm-reset" data-open-timers>Open settings</button>';
+function scmOffNoteHtml(label){return `${escapeHtml(label)}: off in Background timers · ${SCM_OFF_LINK}`;}
+// Market price source: the game order book is off, or none of the other price sources is on.
+function scmMarketSourceOff(){return scmTimerOff('orderBook')||(scmTimerOff('dashLiveMarket')&&scmTimerOff('liveMarket')&&(__timersCfg.marketTicker===undefined||scmTimerOff('marketTicker')));}
+let __offSig='';
+function scmUpdateOffNotes(){
+  const set=(sel,on,label)=>{const el=document.querySelector(sel);if(!el)return;if(on){const h=scmOffNoteHtml(label);if(el.__scmOff!==h){el.innerHTML=h;el.__scmOff=h;}el.hidden=false;}else{el.hidden=true;el.__scmOff=null;el.textContent='';}};
+  set('#marketOffNote',scmMarketSourceOff(),'Market prices');
+  set('#accountingOffNote',scmTimerOff('accountingOnOpen'),'Accounting update on open');
+  const sig=[scmTimerOff('abundanceOnLoad')?1:0].join('');
+  if(sig!==__offSig){const first=__offSig==='';__offSig=sig;if(!first){try{scheduleDashboardRender();}catch{}}}
+}
+document.addEventListener('click',e=>{
+  const b=e.target?.closest?.('[data-open-timers]');if(!b)return;
+  scmCollapseWrite('settings:timers',false);
+  document.querySelector('.tab[data-tab="settings"]')?.click();
+  const open=()=>{const c=document.querySelector('#timersCard');if(!c)return;scmSetCollapsed(c,false);c.scrollIntoView({block:'start'});};
+  open();setTimeout(open,300);
+});
 function scmTimersApply(r){
   const C=scmTimersCore();if(!C||!r||!r.ok||!r.timers)return false;
-  __timersCfg=C.merge(r.timers,{});__timersStatus=r.status&&typeof r.status==='object'?r.status:{};return true;
+  __timersCfg=C.merge(r.timers,{});__timersStatus=r.status&&typeof r.status==='object'?r.status:{};scmUpdateOffNotes();return true;
 }
 // Reads the saved timer settings. Falls back to the built-in defaults when the service worker does not answer.
 async function scmLoadTimers(){
   if(__timersLoading)return __timersLoading;
   __timersLoading=(async()=>{
     let ok=false;try{ok=scmTimersApply(await chrome.runtime.sendMessage({type:'SCM_GET_TIMERS'}));}catch{}
-    if(!ok&&!__timersCfg&&scmTimersCore())__timersCfg=scmTimersCore().defaults();
+    if(!ok&&!__timersCfg&&scmTimersCore()){__timersCfg=scmTimersCore().defaults();scmUpdateOffNotes();}
     return __timersCfg;
   })().finally(()=>{__timersLoading=null;});
   return __timersLoading;
 }
 // The block notice from the background (game blocks direct reads) is information, not a failure: no "failed" wording.
-function scmIsBlockNotice(t){return /blocks direct reads/i.test(String(t||''));}
+function scmIsBlockNotice(t){return /blocks direct reads|Manager's own reads pause/i.test(String(t||''));}
 function scmSyncProblemText(err,fallback){const m=String(err||fallback||'');return scmIsBlockNotice(m)?m:`Sync failed: ${m}`;}
 function timersClock(ms){const d=new Date(Number(ms));if(!Number.isFinite(d.getTime()))return null;const same=new Date().toDateString()===d.toDateString();const t=d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});return same?t:`${d.toLocaleDateString(undefined,{weekday:'short'})} ${t}`;}
 function timersAgo(ms){const d=Date.now()-Number(ms);if(!Number.isFinite(d))return null;if(d<60000)return 'just now';if(d<3600000)return `${Math.round(d/60000)} min ago`;if(d<86400000)return `${Math.round(d/3600000)} h ago`;return `${Math.round(d/86400000)} d ago`;}
@@ -3008,7 +3036,7 @@ function renderBuildingPlanner(s,options={}){
       // Abundance (game's /api/v2/companies/buildings/<id>/abundance/) for mines, oil rigs and quarries.
       const TC=globalThis.SCM_TOOLS_CORE,cardResId=Number(cardRecipe?.id);
       const cardAb=cardResId>0&&TC?.isAbundanceResource?.(cardResId)?plannerAbundancePct(s,b.raw?.id??b.id,cardResId):undefined;
-      const abundanceLine=cardAb===undefined?'':cardAb==null?'<span class="owned-building-io owned-building-abundance ab-none"><b>Abundance:</b> not captured</span>':`<span class="owned-building-io owned-building-abundance ab-${TC.abundanceTone(cardAb)}"><b>Abundance:</b> <em>${num(+cardAb.toFixed(2))}%</em></span>`;
+      const abundanceLine=cardAb===undefined?'':cardAb==null?`<span class="owned-building-io owned-building-abundance ab-none"><b>Abundance:</b> not captured${scmTimerOff('abundanceOnLoad')?' · off in Background timers':''}</span>`:`<span class="owned-building-io owned-building-abundance ab-${TC.abundanceTone(cardAb)}"><b>Abundance:</b> <em>${num(+cardAb.toFixed(2))}%</em></span>`;
       return `<button type="button" class="owned-building-card ${String(b.id)===String(building.id)?'active':''}" data-building-id="${escapeHtml(String(b.id))}"><div class="owned-building-image-wrap">${b.testKind?`<span class="owned-building-image planner-icon-fallback">${plannerBuildingIcon(b.category)}</span>`:plannerImage(img,b.name,'owned-building-image',plannerBuildingIcon(b.category))}<span class="owned-building-level">Level ${b.level}${Number(planningLevels[String(b.id)])!==Number(b.level)?` · Plan ${Number(planningLevels[String(b.id)])}`:''}</span></div><strong>${escapeHtml(b.name)}</strong>${testBadge}<span class="owned-building-io owned-building-output"><b>Output:</b> ${escapeHtml(outputLabel)}</span><span class="owned-building-io owned-building-inputs"><b>Inputs:</b> ${escapeHtml(inputLabel)}</span>${constructionLine}${abundanceLine}</button>`;
     }).join('');
 
