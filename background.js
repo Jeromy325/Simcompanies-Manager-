@@ -926,7 +926,11 @@ async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
   // Also every building that makes an abundance resource (mines, oil rigs, quarries: constants producedAt),
   // even when its abundance was never captured or the record was lost.
   for(const id of await abundanceBuildingIds(st))ab.add(id);
-  const paths=['/api/v3/players/research/',`/api/v3/government-orders/${r}/`,'/api/v3/government-orders/tier/',...[...ab].map(id=>`/api/v2/companies/buildings/${id}/abundance/`)];
+  // The gov-orders LIST read is left out while the SimcoTools copy is under 1 h old and the game's own list was captured
+  // within 24 h (the Sync walk's page visit still loads it); the tier read always stays.
+  // A failed check never blocks the reads (async wrapper: any error means "read it").
+  const govListSkipped=await (async()=>govOrdersListCoveredBySimco(r,ep))().catch(()=>false);
+  const paths=['/api/v3/players/research/',...(govListSkipped?[]:[`/api/v3/government-orders/${r}/`]),'/api/v3/government-orders/tier/',...[...ab].map(id=>`/api/v2/companies/buildings/${id}/abundance/`)];
   const out=[],errs=[],warnings=[],t0=Date.now();
   const pool={...ep,...(captured||{})};
   // No game tab / page bridge not ready or not connected, or the game blocks direct reads: no request was made and the
@@ -936,7 +940,7 @@ async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
   for(let i=0;i<paths.length;i++){const p=paths[i];try{const x=await readFollowingMoves(p,r,{movedReads,captured:pool});if(x?.directReadsBlocked){notRead+=paths.length-i;why=x;break;}if(x?.realmMismatch||x?.realmUnknown){notRead++;why=why||x;continue;}if(x.ok&&x.walkedPath)warnings.push(`${p} moved to ${x.walkedPath}`);if(!x.ok){const ab=/\/abundance\/$/.test(p);if(x.suspected)warnings.push(`${p} (HTTP ${x.status}) may have moved to ${x.suspected}; not adopted`);else if(ab)warnings.push(`${p} failed (HTTP ${x.status}); kept the stored record`);}if(x.ok){await saveData(p,x.data,x.status,'GET',r);out.push(p);}else errs.push(`${p.replace('/api/','')}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){if(pageBridgeUnavailable(e)){notRead+=paths.length-i;why=e;break;}errs.push(`${p.replace('/api/','')}: ${e?.message||e}`);if(/\/abundance\/$/.test(p))warnings.push(`${p} not read: ${e?.message||e}`);}}
   if(notRead&&!out.length&&!errs.length){logNotRead(r,'extra-game-data',why,{wanted:paths.length,notRead,...(why?.directReadsBlocked?{directReadsBlocked:true}:{})},t0,'after-sync');return {ok:true,skipped:true,bridgeUnavailable:true,saved:out,warnings,notRead};}
   const abN=paths.filter(p=>/abundance/.test(p)).length,abOk=out.filter(p=>/abundance/.test(p)).length;
-  logActivity(r,'extra-game-data',errs.length?(out.length?'partial':'failure'):'success',{rows:out.length,wanted:paths.length,abundance:`${abOk}/${abN}`,...(notRead?{notRead,notReadReason:notReadReason(why)}:{})},errs.slice(0,4).join(' · ')||null,t0,'after-sync');
+  logActivity(r,'extra-game-data',errs.length?(out.length?'partial':'failure'):'success',{rows:out.length,wanted:paths.length,abundance:`${abOk}/${abN}`,...(govListSkipped?{govOrdersList:'not read: SimcoTools copy under 1 h and game capture under 24 h'}:{}),...(notRead?{notRead,notReadReason:notReadReason(why)}:{})},errs.slice(0,4).join(' · ')||null,t0,'after-sync');
   return {ok:true,saved:out,warnings,...(notRead?{notRead}:{})};
 }
 // Sync timers (gameConstants): off = no alarm and no read on worker start (Sync still reads them); a slower
@@ -1573,11 +1577,14 @@ function vwapRowsForRealm(store,realm){
 // Your own listings, so market price does not compare you with yourself. Storage read only.
 async function marketOwnOpts(store,realm){
   const companyId=store?.authData?.authCompany?.companyId??store?.authData?.authCompany?.id??null;
+  // simcoPrices: the stored SimcoTools prices (scmSimcoPrices:<realm>), marketPrice()'s last fallback; undefined when none.
+  // A failed lookup never blocks the caller (async wrapper: any error becomes null).
+  const simcoPrices=(await (async()=>simcoPricesFor(realm))().catch(()=>null))||undefined;
   try{
     const k=`scmMarketOrders:${realm}`;
     const mo=(await chrome.storage.local.get({[k]:null}))[k];
-    return {companyId,ownIds:(Array.isArray(mo?.orders)?mo.orders:[]).map(o=>o?.id).filter(v=>v!=null)};
-  }catch{return {companyId};}
+    return {companyId,ownIds:(Array.isArray(mo?.orders)?mo.orders:[]).map(o=>o?.id).filter(v=>v!=null),simcoPrices};
+  }catch{return {companyId,simcoPrices};}
 }
 function mergeSellingHistory(store){
   const current={...(store?.sellingHistory||{})};
@@ -4834,6 +4841,7 @@ async function runOrderBookRefreshFiring(){
 // products ({kind, price, is_up, realmId}). Read at most once an hour, only when no capture of it (the game's own pages
 // load it; passive captures are free) is under 1 h old; saved through saveData into endpointData like a capture.
 const MARKET_TICKER_MAX_AGE_MS=60*60000;
+const marketTickerSimcoSkipLogAt=new Map();
 async function runMarketTickerRefresh(trigger='alarm'){
   if(coreSyncActive())return {ok:true,skipped:true,reason:'sync'};
   if(!(await scmTimerEnabled('orderBook').catch(()=>true)))return {ok:true,skipped:true,reason:'off'};
@@ -4848,6 +4856,13 @@ async function runMarketTickerRefresh(trigger='alarm'){
   const path=`/api/v3/market-ticker/${realm}/`,t0=Date.now();
   const store=await notifyRealmStore(realm);const at=Date.parse(String(store?.endpointData?.[path]?.receivedAt||''));
   if(Number.isFinite(at)&&Date.now()-at<MARKET_TICKER_MAX_AGE_MS){await gameLaneDropWant(`ticker:${realm}`);return {ok:true,cached:true,realm};}
+  // Fresh SimcoTools prices and every product image known: no game read (passive captures still save it). One line per hour.
+  const covered=await marketTickerCoveredBySimco(realm,store).catch(()=>null);
+  if(covered){
+    await gameLaneDropWant(`ticker:${realm}`);
+    if(Date.now()-(marketTickerSimcoSkipLogAt.get(realm)||0)>=MARKET_TICKER_MAX_AGE_MS){marketTickerSimcoSkipLogAt.set(realm,Date.now());logActivity(realm,'market-ticker','skipped',{cached:true,source:'SimcoTools prices',...covered},'Not read: SimcoTools prices are fresh and every product image is known',t0,trigger);}
+    return {ok:true,cached:true,simco:true,realm};
+  }
   let r;
   try{r=await pageGet(path,realm,null,'market-ticker',{lane:`ticker:${realm}`,timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS});}
   catch(e){if(pageBridgeUnavailable(e)){logNotRead(realm,'market-ticker',e,{},t0,trigger);return {ok:true,skipped:true,bridgeUnavailable:true,realm};}r={ok:false,status:0,error:e?.message||String(e)};}
@@ -5021,22 +5036,25 @@ function simcoGateReserve(url){
   simcoGateTail=run.catch(()=>{});
   return run;
 }
-async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS){
+// opts.noRetry: one attempt only (the public-data jobs: a failed run waits for its next slot instead of retrying).
+async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS, opts=null){
   const normalizedUrl=String(url);
+  const attempts=opts?.noRetry?1:SIMCOTOOLS_RETRY_DELAYS_MS.length;
   await hydrateSimcoCooldowns();
   const knownCooldown=Number(simcoRateLimitUntilByUrl.get(normalizedUrl))||0;
   if(Math.max(knownCooldown,simcoRateLimitUntil)>Date.now()){const retryAt=new Date(Math.max(knownCooldown,simcoRateLimitUntil)).toISOString();await scmMobileNetLogBackground({kind:'request-skipped',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',status:429,reason:'rate-limit-cooldown-active',retryAt});return {ok:false,status:429,text:'rate limit cooldown active',retryAt,rateLimited:true,skipped:true};}
   let lastError=null;
-  for(let attempt=0;attempt<SIMCOTOOLS_RETRY_DELAYS_MS.length;attempt++){
+  for(let attempt=0;attempt<attempts;attempt++){
     const waitMs=SIMCOTOOLS_RETRY_DELAYS_MS[attempt];
     if(waitMs) await new Promise(resolve=>setTimeout(resolve,waitMs+Math.floor(Math.random()*500)));
-    // Shared 1-per-5-min gate. A retry is a request too: once the gate is closed the last failure is returned.
+    // Shared gate: calls at least 500 ms apart (SimcoTools limit 2 req/s, burst 25; a 429 starts a 5-min cooldown).
+    // A retry is a request too: once the gate is closed the last failure is returned.
     const gate=await simcoGateReserve(normalizedUrl);
     if(!gate.ok){
       const retryAt=new Date(gate.retryAt).toISOString();
       if(attempt>0)break;
       await scmMobileNetLogBackground({kind:'request-skipped',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',status:429,reason:'simcotools-shared-gap',retryAt});
-      return {ok:false,status:429,text:'SimcoTools limit: one request per 5 minutes',retryAt,rateLimited:true,limited:true,skipped:true};
+      return {ok:false,status:429,text:'Waiting for the SimcoTools limit',retryAt,rateLimited:true,limited:true,skipped:true};
     }
     await simcoAcquireRequestSlot();
     const controller=new AbortController();
@@ -5064,13 +5082,13 @@ async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS){
       }
       if(response.ok || (response.status>=400 && response.status<500)) return {ok:response.ok,status:response.status,text};
       lastError=new Error(`SimcoTools HTTP ${response.status}`);
-      if(attempt===SIMCOTOOLS_RETRY_DELAYS_MS.length-1) return {ok:false,status:response.status,text};
+      if(attempt===attempts-1) return {ok:false,status:response.status,text};
     }catch(e){
       lastError=e?.name==='AbortError'
-        ? new Error(`SimcoTools request timed out after ${Math.round(timeoutMs/1000)}s (attempt ${attempt+1}/${SIMCOTOOLS_RETRY_DELAYS_MS.length})`)
-        : new Error(`SimcoTools network error: ${e?.message||String(e)} (attempt ${attempt+1}/${SIMCOTOOLS_RETRY_DELAYS_MS.length})`);
+        ? new Error(`SimcoTools request timed out after ${Math.round(timeoutMs/1000)}s (attempt ${attempt+1}/${attempts})`)
+        : new Error(`SimcoTools network error: ${e?.message||String(e)} (attempt ${attempt+1}/${attempts})`);
       // Only the final attempt is an error worth logging; earlier timeouts/drops are retried (common on mobile data).
-      if(attempt===SIMCOTOOLS_RETRY_DELAYS_MS.length-1)logError('fetch:simcotools',lastError);
+      if(attempt===attempts-1)logError('fetch:simcotools',lastError);
     }finally{clearTimeout(timer);simcoReleaseRequestSlot()}
   }
   throw lastError||new Error('SimcoTools request failed.');
@@ -5214,7 +5232,7 @@ async function fetchSimcoVwapDataset(realm){
   try{
     const url=`https://api.simcotools.com/v1/realms/${requestedRealm}/market/vwaps`;
     const resp=await simcoFetch(url);
-    if(resp?.limited)return {ok:false,rows:[],source:'SimcoTools',realm:requestedRealm,failed:0,total:0,limited:true,retryAt:resp.retryAt,failures:[{error:'Waiting for the SimcoTools limit (one request per 5 min)',status:429,rateLimited:true,limited:true,retryAt:resp.retryAt}]};
+    if(resp?.limited)return {ok:false,rows:[],source:'SimcoTools',realm:requestedRealm,failed:0,total:0,limited:true,retryAt:resp.retryAt,failures:[{error:'Waiting for the SimcoTools limit',status:429,rateLimited:true,limited:true,retryAt:resp.retryAt}]};
     const data=parseSimcoResponse(resp.text);
     if(!resp.ok) return {ok:false,rows:[],source:'SimcoTools',realm:requestedRealm,failed:0,total:0,failures:[{error:`HTTP ${resp.status} from SimcoTools realm ${requestedRealm}`}]};
     const allRows=normalizeSimcoVwapRows(data);
@@ -5293,7 +5311,7 @@ async function runVwapSyncForRealm(realm,targetKey,label,options={}){
   let result=await fetchSimcoVwapDataset(realm);
   // Inside the shared SimcoTools gap: nothing was requested; the stored VWAP stays and the next run asks again.
   if(result.limited){
-    await vwapLockedStatus({message:`R${realm===0?'1':'2'} VWAP waits for the SimcoTools limit (one request per 5 min).`,vwapSyncing:false,vwapRealm:realm},realm);
+    await vwapLockedStatus({message:`R${realm===0?'1':'2'} VWAP waits for the SimcoTools limit.`,vwapSyncing:false,vwapRealm:realm},realm);
     return {ok:false,skipped:true,limited:true,realm,requested:0,failed:0,retryAt:result.retryAt,failures:result.failures};
   }
   let allVwaps=Array.isArray(result.allRows)?result.allRows:(Array.isArray(result.rows)?result.rows:[]);
@@ -5445,7 +5463,7 @@ async function fetchSimcoFollowedSnapshots(realm,pairs){
 async function fetchSimcoMarketSnapshot(realm,resourceId,quality){
   const url=`https://api.simcotools.com/v1/realms/${realm}/market/resources/${resourceId}/${quality}`;
   const resp=await simcoFetch(url,12000);
-  if(!resp.ok){const error=new Error(resp.limited?'Waiting for the SimcoTools limit (one request per 5 min)':`HTTP ${resp.status}`);error.status=resp.status;error.retryAt=resp.retryAt||null;error.rateLimited=Boolean(resp.rateLimited);error.limited=Boolean(resp.limited);throw error;}
+  if(!resp.ok){const error=new Error(resp.limited?'Waiting for the SimcoTools limit':`HTTP ${resp.status}`);error.status=resp.status;error.retryAt=resp.retryAt||null;error.rateLimited=Boolean(resp.rateLimited);error.limited=Boolean(resp.limited);throw error;}
   return normalizeSimcoMarketSnapshot(parseSimcoResponse(resp.text),resourceId,quality);
 }
 function simcoCandleRows(data){
@@ -5490,7 +5508,7 @@ function normalizeSimcoCandle(row){
 async function fetchSimcoMarketCandles(realm,resourceId,quality){
   const url=`https://api.simcotools.com/v1/realms/${realm}/market/resources/${resourceId}/${quality}/candlesticks`;
   const resp=await simcoFetch(url,12000);
-  if(!resp.ok){const error=new Error(resp.limited?'Waiting for the SimcoTools limit (one request per 5 min)':`HTTP ${resp.status}`);error.status=resp.status;error.limited=Boolean(resp.limited);error.retryAt=resp.retryAt||null;throw error;}
+  if(!resp.ok){const error=new Error(resp.limited?'Waiting for the SimcoTools limit':`HTTP ${resp.status}`);error.status=resp.status;error.limited=Boolean(resp.limited);error.retryAt=resp.retryAt||null;throw error;}
   const data=parseSimcoResponse(resp.text);
   return simcoCandleRows(data).map(normalizeSimcoCandle).filter(Boolean);
 }
@@ -5534,7 +5552,7 @@ async function runLiveMarketProduct(realmArg,resourceIdArg,qualityArg){
 
   // Fetch one selected SimcoTools product only. Preserve each completed product
   // by resource+quality so out-of-order responses cannot erase the user's selection.
-  // One SimcoTools request per call (shared 1-per-5-min gate): the current price, or - when the stored price is
+  // One SimcoTools request per call (shared 500 ms gate): the current price, or - when the stored price is
   // under 15 min old and the chart is missing or over 3 h old - the chart. A call inside the gap throws (limited).
   const pre=(await state(realm)).realmStores?.[realmKeyFromRealm(realm)]?.liveMarketProductCache?.[`${resourceId}:${quality}`]||null;
   const preAt=Date.parse(String(pre?.fetchedAt||'')),preCandlesAt=Date.parse(String(pre?.candlesFetchedAt||''));
@@ -5634,8 +5652,8 @@ async function runLiveMarketRefreshUnlocked(realmArg=null){
   for(const [url,until] of Object.entries(endpointCooldowns)){if(!Number.isFinite(Number(until))||Number(until)<=nowMs)delete endpointCooldowns[url];else simcoRateLimitUntilByUrl.set(url,Number(until));}
   const out=[],failures=[];let index=0;let freshCacheHits=0;
   const existingPriceByKey=new Map((Array.isArray(previousPriceData.rows)?previousPriceData.rows:[]).map(row=>[vwapPairKey(row.resourceId,row.quality),row]));
-  // SimcoTools allows one request per 5 min: one product per run, the one with the oldest (or no) backup price first.
-  // The others keep their stored price and come up on later runs (queued, not failed).
+  // Oldest (or no) backup price first. Normally one batched request covers every pair that needs a price; without the
+  // batch only one product is asked per run, the others keep their stored price for later runs (queued, not failed).
   const pairAge=p=>{const t=Date.parse(String(existingPriceByKey.get(vwapPairKey(p.resourceId,p.quality))?.fetchedAt||''));return Number.isFinite(t)?t:0;};
   pairs.sort((a,b)=>pairAge(a)-pairAge(b));
   let networkAttempts=0,queued=0;
@@ -5723,7 +5741,7 @@ const MARKET_STAGE_ALARM_PREFIX='scm-market-stage-r';
 // Start optional market work as soon as core Sync releases its capture lock.
 // Resource-image downloads continue independently and provide natural API quiet time.
 const POST_SYNC_MARKET_COOLDOWN_MS=1000;
-// Chained stages (after Sync / Refresh) each make one SimcoTools request, so they are spaced by the shared gap.
+// Chained stages (after Sync / Refresh) each make one SimcoTools request; they stay 5 min (+5 s) apart, well over the 500 ms gate.
 const MARKET_STAGE_COOLDOWN_MS=5*60*1000+5000;
 const MARKET_STAGE_REALM_COOLDOWN_MS=5*60*1000+5000;
 let liveMarketRefreshAlarmRun=null;
@@ -5818,7 +5836,7 @@ async function runScheduledLiveMarketRefresh(reason='scheduled'){
     const s=await state();
     const selected=validRealmNumber(s.activeRealmKey?.replace(/^realm:/,'')??s.selectedRealm??s.authData?.authCompany?.realmId);
     const first=selected??0,other=first===0?1:0;
-    // Every run (default every 5 min) makes at most ONE SimcoTools request (the shared gate enforces it too):
+    // Every run (default every 5 min) makes at most ONE SimcoTools request (by design; the shared gate only spaces calls 500 ms):
     // 1. VWAP of the game's realm, then of the other realm, when due (one bulk call each, ~1-3 a day, see VWAP_RECHECK_MS);
     // 2. otherwise one backup price, alternating realms, the product with the oldest backup price first.
     // A step that needs no request (VWAP still current, no products) moves on to the next step in the same run.
@@ -5841,6 +5859,276 @@ async function runScheduledLiveMarketRefresh(reason='scheduled'){
     return {ok:true,reason,steps:ran};
   })().finally(()=>{liveMarketRefreshAlarmRun=null;});
   return liveMarketRefreshAlarmRun;
+}
+
+// SimcoTools public data. The game's data stays the main source; these are the fallback.
+//  scmSimcoPrices:<realm>    {at, rows:[[resourceId,quality,price,tradedAtMs],...]}      every 15 min, active realm
+//  scmSimcoGovOrders:<realm> {at, orders:[{id,projectName,daysToFulfill,created,resources}]} every 1 h, active realm
+//  scmSimcoBuildings         {at, byId:{[kind]:{costUnits,buildDuration /*s*/}}}            list once a day, then one building per slot
+//  scmSimcoBuildingsMeta     {listAt, ids:[...], entryAt:{[id]:ms}, missing:{[id]:ms}}       progress of the buildings round
+//  scmSimcoResources         {at, phase, byId}                                                once a day; never written into scmGameConstants
+//  scmSimcoResourcesRetry    {until, fails}                                                   after a non-200: 1 h doubling to 24 h
+// One alarm (scm-simco-public, every 5 min, 2.5 min after the live-market alarm so it never takes its slot) runs at most
+// ONE job per firing, so at most one SimcoTools request (gov orders: one page, newest 100).
+// Every request goes through simcoFetch (shared gate, 429 cooldowns), one attempt. Nothing runs during a Sync, while the
+// SimcoTools timer (liveMarket) is off, during a 429 cooldown or while the shared gate is closed (next firing tries again).
+const SIMCO_PUBLIC_ALARM='scm-simco-public';
+const SIMCO_PUBLIC_PERIOD_MINUTES=5,SIMCO_PUBLIC_OFFSET_MS=150000,SIMCO_PUBLIC_DUE_SLACK_MS=30000;
+const SIMCO_PRICES_MAX_AGE_MS=15*60000,SIMCO_PRICES_FRESH_FOR_TICKER_MS=30*60000;
+const SIMCO_GOV_ORDERS_MAX_AGE_MS=60*60000,SIMCO_GOV_ORDERS_CAPTURE_MAX_AGE_MS=24*3600000;
+const SIMCO_BUILDINGS_LIST_MAX_AGE_MS=24*3600000,SIMCO_BUILDING_ENTRY_MAX_AGE_MS=24*3600000;
+const SIMCO_RESOURCES_MAX_AGE_MS=24*3600000,SIMCO_RESOURCES_RETRY_MIN_MS=3600000,SIMCO_RESOURCES_RETRY_MAX_MS=24*3600000;
+const SIMCO_API='https://api.simcotools.com/v1';
+let simcoPublicWriteTail=Promise.resolve(),simcoPublicRun=null;
+const simcoPricesMemo=new Map();
+// Every write of the keys above goes through this one tail (read-modify-write of the buildings merge included).
+// A run that started before Clear data writes nothing (its answer would bring cleared data back).
+let simcoPublicGen=null;
+function simcoPublicWrite(fn){const gen=simcoPublicGen;const run=simcoPublicWriteTail.then(()=>gen!=null&&gen!==extensionClearGeneration?null:fn());simcoPublicWriteTail=run.catch(()=>{});return run;}
+const simcoPricesKey=r=>`scmSimcoPrices:${r}`,simcoGovOrdersKey=r=>`scmSimcoGovOrders:${r}`;
+async function simcoPublicGet(defaults){try{return await chrome.storage.local.get(defaults);}catch{return {...defaults};}}
+function simcoAgeOk(at,maxAgeMs,now=Date.now()){const t=Number(at);return Number.isFinite(t)&&t>0&&now-t<maxAgeMs;}
+// Stored SimcoTools prices of a realm ({at,rows}) or null. Only this file writes the key, so the memo is set on write.
+async function simcoPricesFor(realm){
+  const n=validRealmNumber(realm);if(n==null)return null;
+  if(simcoPricesMemo.has(n))return simcoPricesMemo.get(n);
+  const v=(await simcoPublicGet({[simcoPricesKey(n)]:null}))[simcoPricesKey(n)];
+  const out=v&&typeof v==='object'&&Array.isArray(v.rows)?v:null;
+  simcoPricesMemo.set(n,out);return out;
+}
+// GET /market/prices -> {prices:[{datetime,resourceId,quality,price}]}; stored as compact rows.
+// Bounded storage: every stored SimcoTools answer is capped in rows and string length, and a body over 2 MB is
+// never parsed (simcoPublicParse). Only the documented fields are kept.
+const SIMCO_MAX_BODY_CHARS=2*1024*1024;
+const SIMCO_CAP={prices:5000,govOrders:200,govOrderResources:20,buildingIds:500,resources:1000,inputs:50,retailInfo:20,text:80,iso:40};
+const SIMCO_RETAIL_FIELDS=['quality','buildingLevelsNeededPerUnitPerHour','modeledProductionCostPerUnit','modeledStoreWages','modeledUnitsSoldAnHour','retailModelingQualityWeight','profitPerBuildingLevel','retailAdjustment','averagePrice','saturation','salesWages'];
+const simcoText=(v,n=SIMCO_CAP.text)=>String(v??'').slice(0,n);
+const simcoNum=v=>{const n=Number(v);return Number.isFinite(n)?n:null;};
+// {data} or {tooLarge:true} (no JSON.parse of a body over 2 MB).
+function simcoPublicParse(text){const s=String(text??'');if(s.length>SIMCO_MAX_BODY_CHARS)return {tooLarge:true,length:s.length};return {data:parseSimcoResponse(s)};}
+function simcoPricesRowsFromResponse(data){
+  const list=Array.isArray(data?.prices)?data.prices:Array.isArray(data)?data:[];const rows=[];
+  for(const x of list){if(rows.length>=SIMCO_CAP.prices)break;const id=Number(x?.resourceId),q=Number(x?.quality),p=Number(x?.price),t=Date.parse(String(x?.datetime||'').slice(0,SIMCO_CAP.iso));
+    if(!Number.isInteger(id)||id<=0||!Number.isInteger(q)||q<0||!Number.isFinite(p)||p<=0)continue;
+    rows.push([id,q,p,Number.isFinite(t)?t:0]);}
+  return rows;
+}
+function simcoGovOrdersFromResponse(data){
+  const list=Array.isArray(data?.orders)?data.orders:[];
+  return list.filter(o=>o&&typeof o==='object'&&(typeof o.id==='number'||typeof o.id==='string')).slice(0,SIMCO_CAP.govOrders).map(o=>({id:typeof o.id==='number'?o.id:simcoText(o.id,SIMCO_CAP.iso),projectName:simcoText(o.projectName),daysToFulfill:Number(o.daysToFulfill),created:simcoText(o.created,SIMCO_CAP.iso),
+    resources:(Array.isArray(o.resources)?o.resources:[]).slice(0,SIMCO_CAP.govOrderResources).map(r=>({resourceId:Number(r?.resourceId),quality:Number(r?.quality),resourceName:simcoText(r?.resourceName)})).filter(r=>Number.isInteger(r.resourceId)&&r.resourceId>0)}));
+}
+// Still open: created + daysToFulfill days is later than now.
+function simcoCurrentGovOrders(orders,now=Date.now()){return (orders||[]).filter(o=>{const c=Date.parse(String(o?.created||'')),d=Number(o?.daysToFulfill);return Number.isFinite(c)&&Number.isFinite(d)&&c+d*86400000>now;});}
+function simcoBuildingIdsFromResponse(data){
+  const list=Array.isArray(data)?data:Array.isArray(data?.buildings)?data.buildings:Array.isArray(data?.results)?data.results:Array.isArray(data?.items)?data.items:[];
+  return [...new Set(list.map(b=>String(b?.id??'').trim().slice(0,12)).filter(id=>/^\d+$/.test(id)))].slice(0,SIMCO_CAP.buildingIds);
+}
+// GET /buildings/<id> -> {building:{id,costUnits,buildDuration,name}} (buildDuration in seconds, as the game's constants).
+function simcoBuildingEntryFromResponse(data){
+  const b=data?.building&&typeof data.building==='object'?data.building:data;
+  const kind=String(b?.id??'').trim(),costUnits=Number(b?.costUnits),buildDuration=Number(b?.buildDuration);
+  if(!/^\d+$/.test(kind)||!Number.isFinite(costUnits)||costUnits<0||!Number.isFinite(buildDuration)||buildDuration<0)return null;
+  return {kind,costUnits,buildDuration};
+}
+function simcoResourcesFromResponse(data){
+  const raw=Array.isArray(data)?data:Array.isArray(data?.resources)?data.resources:data?.resources&&typeof data.resources==='object'?Object.values(data.resources):[];
+  const byId={};let n=0;
+  for(const x of raw){if(n>=SIMCO_CAP.resources)break;const id=x?.id??x?.resourceId??x?.kind;if(!x||typeof x!=='object'||id==null||!/^\d{1,9}$/.test(String(id)))continue;
+    if(!byId[String(id)])n++;byId[String(id)]=simcoResourceEntry(x,Number(id));}
+  const phase=data?.phase??data?.metadata?.phase??null;
+  return {byId,phase:phase==null||typeof phase==='object'?null:simcoText(phase)};
+}
+// Whitelisted fields of one resource (documented SimcoTools fields only; numbers as numbers, strings capped).
+function simcoResourceEntry(x,id){
+  const out={id};
+  if(x.name!=null)out.name=simcoText(x.name);
+  if(typeof x.isResearch==='boolean')out.isResearch=x.isResearch;
+  for(const k of ['transportation','producedAnHour','speedModifier','wages']){const v=simcoNum(x[k]);if(v!=null)out[k]=v;}
+  if(Array.isArray(x.inputs))out.inputs=x.inputs.slice(0,SIMCO_CAP.inputs).filter(i=>i&&typeof i==='object').map(i=>{const o={};
+    for(const k of ['id','resourceId','quantity']){const v=simcoNum(i[k]);if(v!=null)o[k]=v;}if(i.name!=null)o.name=simcoText(i.name);return o;});
+  if(Array.isArray(x.retailInfo))out.retailInfo=x.retailInfo.slice(0,SIMCO_CAP.retailInfo).filter(r=>r&&typeof r==='object').map(r=>{const o={};
+    for(const k of SIMCO_RETAIL_FIELDS){const v=simcoNum(r[k]);if(v!=null)o[k]=v;}return o;});
+  return out;
+}
+// Next resources attempt after a failed one: 1 h, doubling, at most 24 h.
+function simcoResourcesRetryNext(prev,now=Date.now()){const fails=Math.max(0,Number(prev?.fails)||0)+1;return {until:now+Math.min(SIMCO_RESOURCES_RETRY_MAX_MS,SIMCO_RESOURCES_RETRY_MIN_MS*2**(fails-1)),fails};}
+// The building due next: never read or read over a day ago (404s included), oldest first.
+function simcoNextBuildingId(meta,now=Date.now()){
+  const at=meta?.entryAt&&typeof meta.entryAt==='object'?meta.entryAt:{};let best=null,bestAt=Infinity;
+  for(const id of (Array.isArray(meta?.ids)?meta.ids:[])){const t=Number(at[id])||0;if(simcoAgeOk(t,SIMCO_BUILDING_ENTRY_MAX_AGE_MS,now))continue;if(t<bestAt){best=id;bestAt=t;}}
+  return best;
+}
+// The one job this firing runs (priority: prices, gov orders, buildings list, resources, one building), or null.
+function simcoPublicPickJob(g,realm,now=Date.now()){
+  const slack=SIMCO_PUBLIC_DUE_SLACK_MS;
+  if(realm!=null&&!simcoAgeOk(g?.[simcoPricesKey(realm)]?.at,SIMCO_PRICES_MAX_AGE_MS-slack,now))return {job:'prices'};
+  if(realm!=null&&!simcoAgeOk(g?.[simcoGovOrdersKey(realm)]?.at,SIMCO_GOV_ORDERS_MAX_AGE_MS-slack,now))return {job:'gov-orders'};
+  const meta=g?.scmSimcoBuildingsMeta||{};
+  if(!simcoAgeOk(meta.listAt,SIMCO_BUILDINGS_LIST_MAX_AGE_MS-slack,now))return {job:'buildings-list'};
+  if(realm!=null&&!(Number(g?.scmSimcoResourcesRetry?.until)>now)&&!simcoAgeOk(g?.scmSimcoResources?.at,SIMCO_RESOURCES_MAX_AGE_MS-slack,now))return {job:'resources'};
+  const id=simcoNextBuildingId(meta,now);
+  return id?{job:'building',id}:null;
+}
+async function simcoPublicFetch(url){try{return await simcoFetch(url,SIMCOTOOLS_TIMEOUT_MS,{noRetry:true});}catch(e){return {ok:false,status:0,error:e?.message||String(e)};}}
+function simcoPublicLog(realm,job,outcome,details,error,t0,trigger){return realm!=null?logActivity(realm,job,outcome,details,error,t0,trigger):logActivityAnyRealm(job,outcome,details,error);}
+// A request that did not give data: not read (no request: gate / cooldown), rate-limited (server 429) or failed.
+function simcoPublicTooLarge(realm,job,p,t0,trigger,extra={}){simcoPublicLog(realm,job,'failure',{...extra,chars:p.length},'response too large',t0,trigger);return {ok:false,outcome:'failure',tooLarge:true};}
+function simcoPublicMiss(realm,job,resp,t0,trigger,extra={}){
+  const status=Number(resp?.status)||0;
+  if(resp?.skipped||resp?.limited){simcoPublicLog(realm,job,'not-read',{...extra,retryAt:resp?.retryAt||null},'Not read: waiting for the SimcoTools limit',t0,trigger);return 'not-read';}
+  if(status===429){simcoPublicLog(realm,job,'rate-limited',{...extra,status,retryAt:resp?.retryAt||null},'SimcoTools answered 429 (rate limit); waiting for the cooldown',t0,trigger);return 'rate-limited';}
+  simcoPublicLog(realm,job,'failure',{...extra,status},resp?.error||`HTTP ${status} from SimcoTools`,t0,trigger);return 'failure';
+}
+async function simcoPublicPrices(realm,t0,trigger){
+  const job='simcotools-prices',resp=await simcoPublicFetch(`${SIMCO_API}/realms/${realm}/market/prices`);
+  if(!resp?.ok)return {ok:false,outcome:simcoPublicMiss(realm,job,resp,t0,trigger)};
+  const p=simcoPublicParse(resp.text);if(p.tooLarge)return simcoPublicTooLarge(realm,job,p,t0,trigger);
+  const rows=simcoPricesRowsFromResponse(p.data);
+  if(!rows.length){simcoPublicLog(realm,job,'failure',{status:resp.status},'SimcoTools returned no usable prices; the stored prices stay',t0,trigger);return {ok:false,outcome:'failure'};}
+  const value={at:Date.now(),rows};
+  await simcoPublicWrite(async()=>{await rawStorageSet({[simcoPricesKey(realm)]:value});simcoPricesMemo.set(realm,value);});
+  simcoPublicLog(realm,job,'success',{rows:rows.length},null,t0,trigger);
+  return {ok:true,rows:rows.length};
+}
+async function simcoPublicGovOrders(realm,t0,trigger){
+  const job='simcotools-gov-orders',base=`${SIMCO_API}/realms/${realm}/government-orders?sort=-created_at&page_size=100`;
+  // One page: newest first, 100 per page covers every order still open (a round is a few dozen orders).
+  const resp=await simcoPublicFetch(base);
+  if(!resp?.ok)return {ok:false,outcome:simcoPublicMiss(realm,job,resp,t0,trigger)};
+  const p=simcoPublicParse(resp.text);if(p.tooLarge)return simcoPublicTooLarge(realm,job,p,t0,trigger);
+  const all=simcoGovOrdersFromResponse(p.data);
+  // Only orders still open (created + daysToFulfill days > now). Between two rounds that can be none: stored as an
+  // empty list, never as expired orders (the dashboard then uses the game's data or hides the panel).
+  const orders=simcoCurrentGovOrders(all);
+  const value={at:Date.now(),orders};
+  await simcoPublicWrite(()=>rawStorageSet({[simcoGovOrdersKey(realm)]:value}));
+  simcoPublicLog(realm,job,'success',{rows:orders.length,read:all.length},orders.length?null:'0 current orders',t0,trigger);
+  return {ok:true,orders:orders.length};
+}
+async function simcoPublicBuildingsList(realm,t0,trigger){
+  const job='simcotools-buildings',resp=await simcoPublicFetch(`${SIMCO_API}/realms/0/buildings?disable_pagination=true`);
+  if(!resp?.ok)return {ok:false,outcome:simcoPublicMiss(realm,job,resp,t0,trigger,{step:'list'})};
+  const p=simcoPublicParse(resp.text);if(p.tooLarge)return simcoPublicTooLarge(realm,job,p,t0,trigger,{step:'list'});
+  const ids=simcoBuildingIdsFromResponse(p.data);
+  if(!ids.length){simcoPublicLog(realm,job,'failure',{step:'list',status:resp.status},'SimcoTools returned no building ids',t0,trigger);return {ok:false,outcome:'failure'};}
+  await simcoPublicWrite(async()=>{
+    const cur=(await simcoPublicGet({scmSimcoBuildingsMeta:null})).scmSimcoBuildingsMeta||{};
+    const keep=o=>Object.fromEntries(Object.entries(o&&typeof o==='object'?o:{}).filter(([id])=>ids.includes(id)));
+    await rawStorageSet({scmSimcoBuildingsMeta:{listAt:Date.now(),ids,entryAt:keep(cur.entryAt),missing:keep(cur.missing)}});
+  });
+  simcoPublicLog(realm,job,'success',{step:'list',rows:ids.length},null,t0,trigger);
+  return {ok:true,ids:ids.length};
+}
+async function simcoPublicBuilding(realm,id,t0,trigger){
+  const job='simcotools-buildings',resp=await simcoPublicFetch(`${SIMCO_API}/realms/0/buildings/${encodeURIComponent(id)}`);
+  const status=Number(resp?.status)||0;
+  if(!resp?.ok&&status!==404)return {ok:false,outcome:simcoPublicMiss(realm,job,resp,t0,trigger,{step:'building',id})};
+  // A body over 2 MB is not parsed: one failure line, then skipped for a day like a 404.
+  const p=resp?.ok?simcoPublicParse(resp.text):null;if(p?.tooLarge)simcoPublicTooLarge(realm,job,p,t0,trigger,{step:'building',id});
+  const entry=p&&!p.tooLarge?simcoBuildingEntryFromResponse(p.data):null;
+  const now=Date.now();
+  // A 404 (or an answer without the two numbers) is skipped for a day, not a failure.
+  const left=await simcoPublicWrite(async()=>{
+    const g=await simcoPublicGet({scmSimcoBuildingsMeta:null,scmSimcoBuildings:null});
+    const meta={...(g.scmSimcoBuildingsMeta||{})};meta.entryAt={...(meta.entryAt||{}),[id]:now};
+    const patch={};
+    if(entry){const cur=g.scmSimcoBuildings&&typeof g.scmSimcoBuildings==='object'?g.scmSimcoBuildings:{};const byId={...(cur.byId&&typeof cur.byId==='object'?cur.byId:{})};
+      byId[entry.kind]={costUnits:entry.costUnits,buildDuration:entry.buildDuration};patch.scmSimcoBuildings={at:now,byId};
+      if(meta.missing?.[id]!=null){meta.missing={...meta.missing};delete meta.missing[id];}}
+    else meta.missing={...(meta.missing||{}),[id]:now};
+    patch.scmSimcoBuildingsMeta=meta;await rawStorageSet(patch);
+    return {next:simcoNextBuildingId(meta,now),total:(meta.ids||[]).length,missing:Object.keys(meta.missing||{}).length,stored:Object.keys(patch.scmSimcoBuildings?.byId||g.scmSimcoBuildings?.byId||{}).length};
+  });
+  if(!left)return {ok:false,cleared:true};
+  // One line per round (when the last due building is read), not one per building; a skipped one gets its own line.
+  if(!entry&&!p?.tooLarge)simcoPublicLog(realm,job,'skipped',{step:'building',id,status},status===404?`Building ${id} is not on SimcoTools (404); skipped for a day`:`Building ${id}: no cost or build time in the answer; skipped for a day`,t0,trigger);
+  if(!left.next)simcoPublicLog(realm,job,'success',{step:'round',rows:left.stored,wanted:left.total,missing:left.missing},null,t0,trigger);
+  return {ok:true,id,stored:Boolean(entry)};
+}
+async function simcoPublicResources(realm,t0,trigger){
+  const job='simcotools-resources',resp=await simcoPublicFetch(`${SIMCO_API}/realms/${realm}/resources?disable_pagination=true`);
+  // No request made (gate / cooldown): no backoff step.
+  if(resp?.skipped||resp?.limited)return {ok:false,outcome:simcoPublicMiss(realm,job,resp,t0,trigger)};
+  const p=resp?.ok?simcoPublicParse(resp.text):null;
+  const parsed=p&&!p.tooLarge?simcoResourcesFromResponse(p.data):null;
+  if(!parsed||!Object.keys(parsed.byId).length){
+    const prev=(await simcoPublicGet({scmSimcoResourcesRetry:null})).scmSimcoResourcesRetry;
+    const next=simcoResourcesRetryNext(prev);
+    await simcoPublicWrite(()=>rawStorageSet({scmSimcoResourcesRetry:next}));
+    const status=Number(resp?.status)||0;
+    simcoPublicLog(realm,job,Number(resp?.status)===429?'rate-limited':'failure',{status,fails:next.fails,retryAt:new Date(next.until).toISOString()},`${p?.tooLarge?'response too large':resp?.ok?'SimcoTools returned no resources':resp?.error||`HTTP ${status} from SimcoTools`}; next try after ${new Date(next.until).toISOString().slice(11,16)} UTC`,t0,trigger);
+    return {ok:false,outcome:'failure',retry:next};
+  }
+  await simcoPublicWrite(async()=>{await rawStorageSet({scmSimcoResources:{at:Date.now(),phase:parsed.phase,byId:parsed.byId}});await chrome.storage.local.remove('scmSimcoResourcesRetry').catch(()=>{});});
+  simcoPublicLog(realm,job,'success',{rows:Object.keys(parsed.byId).length},null,t0,trigger);
+  return {ok:true,rows:Object.keys(parsed.byId).length};
+}
+async function runSimcoPublicData(trigger='alarm'){
+  if(simcoPublicRun)return simcoPublicRun;
+  simcoPublicRun=(async()=>{
+    simcoPublicGen=extensionClearGeneration;
+    if(coreSyncActive()||realmSyncSessions.size>0)return {ok:true,skipped:true,reason:'sync'};
+    // The SimcoTools timer (Settings, liveMarket) covers these too: off = no request (a fresh install starts with it off).
+    if(!(await scmTimerEnabled('liveMarket').catch(()=>true)))return {ok:true,skipped:true,reason:'switched-off'};
+    // Fired within 20 s of the live-market alarm (both were re-created at once, e.g. after an update): move this alarm
+    // 2.5 min after it and leave the slot to the VWAP / followed prices run.
+    if(trigger==='alarm'){const lm=await chrome.alarms.get(LIVE_MARKET_REFRESH_ALARM_NAME).catch(()=>null);const d=Number(lm?.scheduledTime)-Date.now();const p=Number(lm?.periodInMinutes)*60000;
+      if(lm&&(Math.abs(d)<20000||(p>0&&Math.abs(d-p)<20000))){await chrome.alarms.clear(SIMCO_PUBLIC_ALARM).catch(()=>{});await ensureSimcoPublicAlarm();return {ok:true,skipped:true,reason:'live-market-slot'};}}
+    await hydrateSimcoCooldowns();
+    if(simcoRateLimitUntil>Date.now())return {ok:true,skipped:true,reason:'rate-limit-cooldown'};
+    if(await simcoGateNextAt())return {ok:true,skipped:true,reason:'simcotools-gap'};
+    const realm=await activeRealmNumber();
+    const keys={scmSimcoBuildingsMeta:null,scmSimcoResources:null,scmSimcoResourcesRetry:null};
+    if(realm!=null){keys[simcoPricesKey(realm)]=null;keys[simcoGovOrdersKey(realm)]=null;}
+    const g=await simcoPublicGet(keys);
+    const due=simcoPublicPickJob(g,realm);
+    if(!due)return {ok:true,skipped:true,reason:'all-fresh'};
+    if(coreSyncActive())return {ok:true,skipped:true,reason:'sync'};
+    const t0=Date.now();
+    if(due.job==='prices')return {job:due.job,...(await simcoPublicPrices(realm,t0,trigger))};
+    if(due.job==='gov-orders')return {job:due.job,...(await simcoPublicGovOrders(realm,t0,trigger))};
+    if(due.job==='buildings-list')return {job:due.job,...(await simcoPublicBuildingsList(realm,t0,trigger))};
+    if(due.job==='resources')return {job:due.job,...(await simcoPublicResources(realm,t0,trigger))};
+    return {job:due.job,...(await simcoPublicBuilding(realm,due.id,t0,trigger))};
+  })().catch(e=>{logError('simcotools-public',e);return {ok:false,error:e?.message||String(e)};}).finally(()=>{simcoPublicRun=null;});
+  return simcoPublicRun;
+}
+// Created when missing (or its period changed), 2.5 min after the live-market alarm's next firing, so the two never meet.
+async function ensureSimcoPublicAlarm(){
+  try{
+    const a=await chrome.alarms.get(SIMCO_PUBLIC_ALARM);
+    if(a&&Number(a.periodInMinutes)===SIMCO_PUBLIC_PERIOD_MINUTES)return {ok:true,created:false};
+    const lm=await chrome.alarms.get(LIVE_MARKET_REFRESH_ALARM_NAME).catch(()=>null);
+    let when=Number(lm?.scheduledTime)>0?Number(lm.scheduledTime)+SIMCO_PUBLIC_OFFSET_MS:Date.now()+SIMCO_PUBLIC_OFFSET_MS;
+    const periodMs=SIMCO_PUBLIC_PERIOD_MINUTES*60000;
+    while(when-periodMs>Date.now()+30000)when-=periodMs;
+    while(when<Date.now()+30000)when+=periodMs;
+    await scmAlarmCreate(SIMCO_PUBLIC_ALARM,{when,periodInMinutes:SIMCO_PUBLIC_PERIOD_MINUTES});
+    return {ok:true,created:true,when};
+  }catch(e){return {ok:false,error:e?.message||String(e)};}
+}
+chrome.alarms.onAlarm.addListener(a=>{if(a?.name!==SIMCO_PUBLIC_ALARM)return;runSimcoPublicData('alarm').catch(()=>{});});
+ensureSimcoPublicAlarm();
+// Market ticker: the active game read is not needed while the SimcoTools prices are fresh and every product in them
+// already has its image (from a captured ticker or the constants). Returns why, or null when the read is needed.
+async function marketTickerCoveredBySimco(realm,store){
+  const sp=await simcoPricesFor(realm);
+  if(!sp||!simcoAgeOk(sp.at,SIMCO_PRICES_FRESH_FOR_TICKER_MS))return null;
+  const ids=new Set(sp.rows.map(r=>String(r?.[0])).filter(id=>/^\d+$/.test(id)));
+  if(!ids.size)return null;
+  const imgs={...(await constantsResourceImages()),...capturedResourceImages(store)};
+  for(const id of ids)if(!imgs[id])return null;
+  return {resources:ids.size,priceAgeMin:Math.round((Date.now()-Number(sp.at))/60000)};
+}
+// Game gov-orders list read after Sync: not needed while the SimcoTools copy is under 1 h old and the game's own list
+// was captured within 24 h. Only the list; the tier read stays.
+async function govOrdersListCoveredBySimco(realm,endpointData){
+  const n=validRealmNumber(realm);if(n==null)return false;
+  const g=(await simcoPublicGet({[simcoGovOrdersKey(n)]:null}))[simcoGovOrdersKey(n)];
+  if(!simcoAgeOk(g?.at,SIMCO_GOV_ORDERS_MAX_AGE_MS))return false;
+  const e=endpointData?.[`/api/v3/government-orders/${n}/`];const at=Date.parse(String(e?.receivedAt||''));
+  return Boolean(e&&e.data!=null&&Number(e.status||200)>=200&&Number(e.status||200)<300&&simcoAgeOk(at,SIMCO_GOV_ORDERS_CAPTURE_MAX_AGE_MS));
 }
 
 const RESOURCE_IMAGE_CACHE_TTL_MS = 7*24*60*60*1000;
@@ -7885,7 +8173,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
             extra.paths.push({path,ok:Boolean(r?.ok),status:Number(r?.status)||0,walkedPath:r?.walkedPath||null,valid:Boolean(r?.ok)&&!endpointFailureSuggestsMove(r,path),fromPage:Boolean(r?.fromPageCapture)});
             // The game's own answer on this page is stored like any capture outside Sync (refreshExtraGameData cannot read it now).
             if(r?.fromPageCapture){try{await withSyncTimeout(saveData(path,r.data,r.status,'GET',selected),SYNC_PERSIST_VERIFY_TIMEOUT_MS,`Save ${path}`);}catch(e){trace('walk-extra-save-failed',{path,error:e?.message||String(e)});}}
-            if(r?.directReadsBlocked){session.warnings.push(`${path}: the ${page.name} page did not load it, and the game blocks direct reads`);continue;}
+            // The status that started (or holds) the pause is named per path: a 503 (busy) is not the 403 bot block.
+            if(r?.directReadsBlocked){const st=Number(r.status)||0;session.warnings.push(`${path}: the ${page.name} page did not load it, and ${st===503?'the game answered 503 (busy); direct reads are paused':`the game blocks direct reads${st?` (HTTP ${st})`:''}`}`);continue;}
             if(r?.walkedPath)session.warnings.push(`${path} moved to ${r.walkedPath}`);
             else if(!r?.ok&&!endpointFailureSuggestsMove(r,path))session.warnings.push(`${path} failed (HTTP ${Number(r?.status)||0})`);
           }
@@ -8812,7 +9101,7 @@ async function scmRunSelfTest(opts={}){
   // 1. Extension health
   await safe('ext-version','Extension version & service worker',async()=>{add('ext-version','Extension version & service worker','pass',`v${BUILD_VERSION}, service worker answered`,{version:BUILD_VERSION,manifestVersion:chrome.runtime.getManifest().manifest_version});});
   await safe('ext-permissions','Permissions',async()=>{const want=['storage','alarms','tabs','scripting'];const p=await chrome.permissions.getAll();const missing=want.filter(x=>!(p.permissions||[]).includes(x));const hostOk=(p.origins||[]).some(o=>/simcompanies\.com/.test(o));add('ext-permissions','Permissions',missing.length||!hostOk?'fail':'pass',missing.length?`Missing: ${missing.join(', ')}`:hostOk?'Required permissions and game host access granted':'No host access to simcompanies.com',{missing:missing.length,hostAccess:hostOk,notifications:(p.permissions||[]).includes('notifications')});});
-  await safe('ext-alarms','Background alarms',async()=>{const present=await chrome.alarms.getAll();const expected=[];for(const [name,id] of [...STANDING_ALARMS.map(a=>[a[0],a[2]]),[GAME_CONSTANTS_ALARM,'gameConstants'],[CRITICAL_DATA_GUARD_ALARM,'criticalGuard']])if(await scmTimerEnabled(id).catch(()=>true))expected.push(name);/* a timer switched off in Settings is not missing */const r=C.evalAlarms(expected,present);add('ext-alarms','Background alarms',r.status,r.missing.length?`Missing: ${r.missing.join(', ')}`:`All ${r.expected} standing alarms registered`,{expected:r.expected,present:r.present,missing:r.missing});});
+  await safe('ext-alarms','Background alarms',async()=>{const present=await chrome.alarms.getAll();const expected=[];for(const [name,id] of [...STANDING_ALARMS.map(a=>[a[0],a[2]]),[GAME_CONSTANTS_ALARM,'gameConstants'],[CRITICAL_DATA_GUARD_ALARM,'criticalGuard'],[SIMCO_PUBLIC_ALARM,null]])if(id==null||await scmTimerEnabled(id).catch(()=>true))expected.push(name);/* scm-simco-public stays registered with its timer off (each run checks liveMarket itself) *//* a timer switched off in Settings is not missing */const r=C.evalAlarms(expected,present);add('ext-alarms','Background alarms',r.status,r.missing.length?`Missing: ${r.missing.join(', ')}`:`All ${r.expected} standing alarms registered`,{expected:r.expected,present:r.present,missing:r.missing});});
   await safe('ext-storage','Storage usage',async()=>{let bytes=null;try{bytes=await chrome.storage.local.getBytesInUse(null);}catch{}let top=[];try{top=await scmStorageTopKeys(8);}catch{}const last=(await chrome.storage.local.get({scmStoragePruneLast:null})).scmStoragePruneLast;const topTxt=top.length?`; largest: ${top.map(t=>`${t.key} ${(t.bytes/1024).toFixed(0)} KB`).join(', ')}`:'';let inner=null;try{inner=await scmRealmStoreTopFields(6);}catch{}const innerTxt=inner?.top?.length?`; inside ${inner.key}: ${inner.top.map(t=>`${t.key} ${(t.bytes/1024).toFixed(0)} KB`).join(', ')}`:'';const egTxt=inner?.endpointGroups?.length?`; endpointData by path: ${inner.endpointGroups.map(g=>`${g.path} x${g.count} ${(g.bytes/1024).toFixed(0)} KB`).join(', ')}`:'';add('ext-storage','Storage usage',bytes==null?'skip':'pass',bytes==null?'getBytesInUse not supported':`${(bytes/1048576).toFixed(2)} MB in storage.local${topTxt}${innerTxt}${egTxt}`,{bytes,top,realmStoreFields:inner,lastPruneAt:last?.at||null,lastPruneFreed:last?.freed??null});});
   await safe('ext-errors','Error log (24 h)',async()=>{const ver=chrome.runtime.getManifest().version;const r=C.evalErrorLog(await getErrorLog(),now,86400000,ver);const olderTxt=r.older24h?` (${r.older24h} more from older versions, ignored)`:'';add('ext-errors','Error log (24 h)',r.status,(r.count24h?`${r.count24h} error(s) in 24 h on v${ver}; top: ${r.top.map(t=>`${t.context} x${t.count}`).join(', ')}`:`No errors in the last 24 h on v${ver}`)+olderTxt,{count24h:r.count24h,older24h:r.older24h,total:r.total,top:r.top});});
   // 2. Game tab
@@ -8845,9 +9134,9 @@ async function scmRunSelfTest(opts={}){
   // 5. Calculations sanity on stored data (core market pricing)
   await safe('calc','Calculations sanity',async()=>{
     const M=globalThis.SCM_MARKET_CORE;let lots=0,priced=0,bPriced=0,bTotal=0,bBusy=0;const vals=[],amounts=[];
-    for(const [k,st] of Object.entries(stores)){const n=Number(k);
-      for(const w of (Array.isArray(st?.warehouseResources)?st.warehouseResources:[]).slice(0,300)){lots++;amounts.push(w?.amount);const id=Number(w?.kind?.db_letter??w?.kind??w?.resourceId);if(!(id>0))continue;const p=M.marketPrice(st,n,id,Number(w?.quality)||0,{mode:'exact'})?.price;if(p!=null){priced++;vals.push(p,Number(w?.amount)*p);}}
-      for(const b of (Array.isArray(st?.buildings)?st.buildings:[])){bTotal++;const rid=Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId);if(!(rid>0))continue;bBusy++;const p=M.marketPrice(st,n,rid,Number(b?.busy?.resource?.quality??b?.busy?.quality)||0,{mode:'exact'})?.price;if(p!=null){bPriced++;vals.push(p);}}}
+    for(const [k,st] of Object.entries(stores)){const n=Number(k);const simcoPrices=(await simcoPricesFor(n).catch(()=>null))||undefined;
+      for(const w of (Array.isArray(st?.warehouseResources)?st.warehouseResources:[]).slice(0,300)){lots++;amounts.push(w?.amount);const id=Number(w?.kind?.db_letter??w?.kind??w?.resourceId);if(!(id>0))continue;const p=M.marketPrice(st,n,id,Number(w?.quality)||0,{mode:'exact',simcoPrices})?.price;if(p!=null){priced++;vals.push(p,Number(w?.amount)*p);}}
+      for(const b of (Array.isArray(st?.buildings)?st.buildings:[])){bTotal++;const rid=Number(b?.busy?.resource?.kind??b?.busy?.resource?.resourceId);if(!(rid>0))continue;bBusy++;const p=M.marketPrice(st,n,rid,Number(b?.busy?.resource?.quality??b?.busy?.quality)||0,{mode:'exact',simcoPrices})?.price;if(p!=null){bPriced++;vals.push(p);}}}
     if(!bTotal&&!lots){add('calc','Calculations sanity','skip','No stored buildings or inventory to evaluate');return;}
     const s=C.scanNumbers([...vals,...amounts]);
     add('calc','Calculations sanity',s.status,`${s.checked} values checked: ${s.nan} NaN, ${s.infinite} Infinity, ${s.negative} negative; ${bPriced}/${bBusy} producing buildings priced (${bTotal} total), ${priced}/${lots} inventory lots priced`,{...s,buildings:bTotal,buildingsProducing:bBusy,buildingsPriced:bPriced,lots,lotsPriced:priced});});
@@ -9426,6 +9715,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         directReadRecheckInFlight=false;await directReadBlockSet(null);
         {const run=simcoGateTail.then(async()=>{simcoGateMem=null;try{await chrome.storage.session?.remove(SIMCOTOOLS_GATE_KEY);}catch{}});simcoGateTail=run.catch(()=>{});await run.catch(()=>{});}
         scmTimersMemo=null; // scmSyncTimers was cleared: every timer is back to its default
+        simcoPricesMemo.clear(); // scmSimcoPrices:<n> was cleared
         realmStorageMigrationChecked=false;realmMigrationPromise=null;
         const resetDefaults={...DEFAULTS,selectedRealm:null,activeRealmKey:null,vwapStatus:{message:'Waiting for VWAP sync.'},marketQueueStatus:{message:'Waiting for the logged-in Sim Companies tab.',updatedAt:new Date().toISOString()},resourceImageData:{}};
         await storageSet(resetDefaults);
@@ -9433,6 +9723,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         await applyBundledGameConstants().catch(()=>{}); // scmGameConstants back from the built-in copy (constants.json) at once
         await ensureCriticalDataGuard('clear-extension-data');
         await ensureLiveMarketRefreshAlarm('clear-extension-data'); // ClearAll removed it too
+        await ensureSimcoPublicAlarm(); // after the live-market alarm: it is placed 2.5 min after it
         await ensureOrderBookRefreshAlarm();
         send({ok:true});
       }catch(e){send({ok:false,error:e?.message||String(e)});}

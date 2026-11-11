@@ -864,7 +864,55 @@
     };
   }
 
+  // Building cost/duration: SimcoTools value per field when finite and > 0, else the game constants. Null when neither has any field.
+  function buildingConst(gameConstants, simcoBuildings, kind) {
+    const pos = v => { const x = (v == null || v === '' || typeof v === 'boolean') ? NaN : Number(v); return Number.isFinite(x) && x > 0 ? x : null; };
+    const sb = simcoBuildings?.byId?.[String(kind)], gb = gameConstants?.buildings?.[String(kind)];
+    const sc = pos(sb?.costUnits), sd = pos(sb?.buildDuration), gc = pos(gb?.costUnits), gd = pos(gb?.buildDuration);
+    const costUnits = sc ?? gc, buildDuration = sd ?? gd;
+    if (costUnits == null && buildDuration == null) return null;
+    return { costUnits, buildDuration, source: (sc != null || sd != null) ? 'simcotools' : 'game' };
+  }
+
+  // Government orders: game payload wins (amounts never changed); SimcoTools only names resources or supplies orders when the game has none.
+  // Game need mirrors dashboard renderGovernmentOrders: finite mult -> max(1, ceil(amountBase*mult)), else the base amount.
+  function mergeGovOrders(gameData, tierMult, simco, now = Date.now()) {
+    const num = v => { if (v == null || v === '' || typeof v === 'boolean') return null; const x = Number(v); return Number.isFinite(x) ? x : null; };
+    const mult = num(tierMult);
+    if (Array.isArray(gameData) && gameData.length) {
+      const names = new Map();
+      for (const o of Array.isArray(simco?.orders) ? simco.orders : []) for (const r of Array.isArray(o?.resources) ? o.resources : []) {
+        const id = num(r?.resourceId); if (id != null && r?.resourceName && !names.has(id)) names.set(id, String(r.resourceName));
+      }
+      const rows = gameData.map(o => ({
+        title: o?.projectKey ?? null, daysToFulfill: o?.daysToFulfill ?? null,
+        resources: (Array.isArray(o?.governmentorderrequiredresourceSet) ? o.governmentorderrequiredresourceSet : []).map(r => {
+          const base = num(r?.amountBase), kind = Number(r?.kind);
+          return { kind, quality: Number(r?.quality), need: base == null ? null : mult != null ? Math.max(1, Math.ceil(base * mult)) : base, name: names.get(kind) ?? null };
+        })
+      }));
+      return { source: 'game', rows, amountsMissing: mult == null };
+    }
+    if (Array.isArray(simco?.orders) && simco.orders.length) {
+      // SimcoTools daysToFulfill is the total window: report days LEFT from `created`; expired orders are dropped; unparsable `created` keeps the raw value.
+      const rows = [];
+      for (const o of simco.orders) {
+        const total = o?.daysToFulfill ?? null, t0 = Date.parse(String(o?.created ?? '')), tot = Number(total);
+        let days = total;
+        if (Number.isFinite(t0) && total != null && Number.isFinite(tot)) { days = Math.ceil((t0 + tot * 86400000 - now) / 86400000); if (days <= 0) continue; }
+        rows.push({
+          title: o?.projectName ?? null, daysToFulfill: days,
+          resources: (Array.isArray(o?.resources) ? o.resources : []).map(r => ({ kind: Number(r?.resourceId), quality: Number(r?.quality), need: null, name: r?.resourceName != null ? String(r.resourceName) : null }))
+        });
+      }
+      if (!rows.length) return { source: null, rows: [], amountsMissing: false };
+      return { source: 'simcotools', rows, amountsMissing: true };
+    }
+    return { source: null, rows: [], amountsMissing: false };
+  }
+
   const api = {
+    buildingConst, mergeGovOrders,
     gameFinancialStatements, economyLogAppend, gameConstantsOk, recipesFromGameConstants, buildingsFromGameConstants, gameBaseRate, gameRatePerLevel, gameWagePerLevel, GAME_PROFIT_CALC_ABUNDANCE_PCT, isAbundanceResource, abundanceTone, warehouseUnitCostAsGame, gameProfitCalcRatePerLevel, phaseFromMeasuredRate, gameCalcProduct, rankBuildingProducts, inputRunOut, makeOrBuy, phaseProfits, adminIncreasePerLevel, upgradePaybackFull, sellPriceAdvice, contractVerdict, effectiveAdminOverhead, executiveSkill, academyActiveSize, executiveRoster, dailyBaseLabour, executiveAdminWhatIf, executiveRoi, batchPhaseFromRate, economyStateAt, economyName, lotWorkersPerProducedUnit, projectionRate,
     HOUR, roi, loan, allocate, profitPerHour, buildingProfit,
     cleanSeries, seriesForResource, rangeStats, sliceRange, moversTable,

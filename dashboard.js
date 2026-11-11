@@ -208,7 +208,7 @@ async function get(attempt=0){
   // Perf: all remaining independent keys are read in ONE storage call (each call deserializes large blobs).
   const rn=activeRealm!=null?Number(activeRealm):null;
   const extraRealm=validRealmNumber(activeRealm!=null?rn:(s.selectedRealm!=null?Number(s.selectedRealm):null));
-  const defaults={scmGameConstants:null,scmGameConfig:null,[`scmMarketOrders:${extraRealm}`]:null};
+  const defaults={scmGameConstants:null,scmGameConfig:null,[`scmMarketOrders:${extraRealm}`]:null,[`scmSimcoPrices:${extraRealm}`]:null,scmSimcoBuildings:null,[`scmSimcoGovOrders:${extraRealm}`]:null};
   if(rn!=null){defaults[`scmRealmStore:${rn}`]=null;defaults[`scmRealmDiagnostic:${rn}`]=null;defaults[`scmProductionPlannerState:${rn}`]=null;defaults[`scmGameOverlaySnapshot:${rn}`]=null;}
   if(extraRealm!=null){defaults[`scmBackgroundJobs:${extraRealm}`]=null;defaults[`scmProductionCostHistory:${extraRealm}`]=[];defaults[`scmStatementHistory:${extraRealm}`]=null;defaults[`scmLedgerArchive:${extraRealm}`]=null;defaults[`scmEconomyStateLog:${extraRealm}`]=[];}
   const physical=await chrome.storage.local.get(defaults);
@@ -236,7 +236,7 @@ async function get(attempt=0){
     const la=physical[`scmLedgerArchive:${r}`];result.ledgerArchive=la&&typeof la==='object'?la:null;
     const el=physical[`scmEconomyStateLog:${r}`];result.economyStateLog=Array.isArray(el)?el:[];
   }}catch{}
-  try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);result.gameConstants=physical.scmGameConstants||null;result.marketOrders=physical[`scmMarketOrders:${r}`]||null;}catch{}
+  try{const r=validRealmNumber(result.viewRealm??result.selectedRealm);result.gameConstants=physical.scmGameConstants||null;result.marketOrders=physical[`scmMarketOrders:${r}`]||null;result.simcoPrices=physical[`scmSimcoPrices:${r}`]||null;result.simcoBuildings=physical.scmSimcoBuildings||null;result.simcoGovOrders=physical[`scmSimcoGovOrders:${r}`]||null;}catch{}
   try{result.gameConfig=physical.scmGameConfig||null;}catch{}
   commitDashboardState(result);
   return result;
@@ -1359,7 +1359,7 @@ async function marketManualRefresh(btn){
   if(__marketRefreshBusy)return;
   const realm=marketRealmFromState(window.__scmState);if(realm==null)return;
   const [id,q]=String(__selectedMarketKey).split(':').map(Number);const haveProduct=Number.isFinite(id)&&id>0&&Number.isFinite(q);
-  __marketRefreshBusy=true;if(btn)btn.disabled=true;setMarketRefreshNote('Updating game price…');
+  __marketRefreshBusy=true;if(btn)btn.disabled=true;setMarketRefreshNote('Updating prices…');
   const epoch=__realmViewEpoch;
   try{
     const [tools,,book]=await Promise.all([requestLiveMarketRefresh(realm,true),haveProduct?requestLiveMarketProduct(realm,id,q,true):null,haveProduct?requestMarketOrderBook(realm,id,true):null]);
@@ -1370,10 +1370,10 @@ async function marketManualRefresh(btn){
     let text;
     if(!haveProduct)text='Select a warehouse resource first.';
     else if(book?.directReadsBlocked)text=await scmBlockedNoteText(book.error);
-    else if(book?.ok&&!book.throttled)text=`Game price updated ${marketClock(Date.now())}`;
-    else if(book?.ok){const at=marketBookStamp(window.__scmState,realm,id)||Number(book.lastAt)||0;text=at?`Game price is from ${marketClock(at)}`:'Game price is up to date.';}
-    else if(book?.realmMismatch||book?.skipped)text='Game price not updated: open the game tab on this realm.';
-    else text='Game price could not be updated now. Try again in a minute.';
+    else if(book?.ok&&!book.throttled)text=`Order book updated ${marketClock(Date.now())}`;
+    else if(book?.ok){const at=marketBookStamp(window.__scmState,realm,id)||Number(book.lastAt)||0;text=at?`Order book is from ${marketClock(at)}`:'Order book is up to date.';}
+    else if(book?.realmMismatch||book?.skipped)text='Order book not updated: open the game tab on this realm.';
+    else text='Order book could not be updated now. Try again in a minute.';
     const next=tools&&tools.simcoNextAt?marketClock(tools.simcoNextAt):'';
     if(next)text+=` · Next SimcoTools refresh at ${next}`;
     setMarketRefreshNote(text);
@@ -1439,11 +1439,18 @@ function scmStoreWithRealm(store,realm){
   if(validRealmNumber(store.viewRealm??store.captureRealm??store.selectedRealm??store.authData?.authCompany?.realmId)!=null)return store;
   return {...store,viewRealm:realm};
 }
+// SimcoTools side data lives on the root state only; a realm sub-store borrows it when the root views the same realm.
+function scmSimcoData(s,field){
+  if(s&&s[field])return s[field];
+  const root=typeof window!=='undefined'?window.__scmState:null;
+  const r=validRealmNumber(s?.viewRealm??s?.captureRealm??s?.selectedRealm??s?.authData?.authCompany?.realmId),rr=root?validRealmNumber(root.viewRealm??root.captureRealm??root.selectedRealm):null;
+  return root&&root!==s&&(field==='simcoBuildings'||(r!=null&&r===rr))?(root[field]||null):null;
+}
 function scmMarketPrice(s,id,quality,mode='exact'){
   const core=globalThis.SCM_MARKET_CORE,m=scmMarketCtx(s);if(!core||!m)return null;
   const key=`${mode}|${Number(id)}|${Number(quality)}`;
   if(m.prices.has(key))return m.prices.get(key);
-  const r=core.marketPrice(s,m.realm,id,quality,{mode,now:m.t,companyId:m.companyId,ownIds:m.ownIds});
+  const r=core.marketPrice(s,m.realm,id,quality,{mode,now:m.t,companyId:m.companyId,ownIds:m.ownIds,simcoPrices:typeof scmSimcoData==='function'?scmSimcoData(s,'simcoPrices'):(s?.simcoPrices||null)});
   m.prices.set(key,r);return r;
 }
 function cachedMarketVwap(s,resourceId,quality){
@@ -1453,14 +1460,14 @@ function cachedMarketVwap(s,resourceId,quality){
   return m.vwaps.get(key)?.value??null;
 }
 // Origin label for a price that is not a real exchange order-book price (shared rule: exchange => no label).
-function scmSrcLabel(p){return p?(p.source==='vwap'?'VWAP fallback':p.source==='ticker'?'Game ticker':p.source==='simcotools'?(p.stale?'SimcoTools · stale':'SimcoTools'):''):'';}
+function scmSrcLabel(p){return p?(p.source==='vwap'?'VWAP fallback':p.source==='ticker'?'Game ticker':p.source==='simcotools'?(p.stale?'SimcoTools · stale':'SimcoTools'):p.source==='simcotools-prices'?(p.stale?'SimcoTools last trade · stale':'SimcoTools last trade'):''):'';}
 function scmSrcTag(p,cls){const l=scmSrcLabel(p);return l?`<small class="${cls||'market-inline-vwap'}">${escapeHtml(l)}</small>`:'';}
 // Short origin text for a shared-source price: where it came from, how old, and "old" when it is stale.
 function scmMarketSourceText(p){
   if(!p)return 'Market price not captured';
   const age=p.ageMs!=null?plannerAge(p.ageMs):'';
-  const base=p.source==='exchange'?'Exchange listing':p.source==='ticker'?'Game ticker':p.source==='simcotools'?'SimcoTools':scmSrcLabel(p);
-  return `${base}${age?` · ${age}`:''}${p.stale?(p.source==='simcotools'?' · stale':p.source==='exchange'?' · old':''):''}`;
+  const base=p.source==='exchange'?'Exchange listing':p.source==='ticker'?'Game ticker':p.source==='simcotools'?'SimcoTools':p.source==='simcotools-prices'?'SimcoTools last trade':scmSrcLabel(p);
+  return `${base}${age?` · ${age}`:''}${p.stale?(p.source==='simcotools'||p.source==='simcotools-prices'?' · stale':p.source==='exchange'?' · old':''):''}`;
 }
 function renderWarehouseMarketTimestamp(s){ensureLiveMarketTimer(s);const el=$('#warehouseMarketUpdated');if(!el)return;const data=s?.liveMarketPriceData;const realm=Number(s?.viewRealm??s?.captureRealm??s?.authData?.authCompany?.realmId);const valid=Number(data?.realm)===realm;const stamp=valid?(data?.updatedAt||data?.fetchedAt):null;const rows=valid&&Array.isArray(data?.rows)?data.rows:[];const pairs=new Set(warehouseRows(s).filter(r=>Number(r?._qty||0)>0&&Number.isFinite(Number(r?._id))&&Number(r?._id)>0&&Number.isFinite(Number(r?._q))&&Number(r?._q)>=0).map(r=>`${Number(r._id)}:${Number(r._q)}`));const captured=new Set(rows.filter(r=>Number(r?.price)>0&&pairs.has(`${Number(r?.resourceId)}:${Number(r?.quality)}`)).map(r=>`${Number(r.resourceId)}:${Number(r.quality)}`));const completeness=pairs.size?` · ${captured.size}/${pairs.size} warehouse prices captured`:'';el.textContent=stamp?`Market prices last updated: ${marketDate(stamp)}${completeness}`:'Market prices last updated: not captured for this realm';}
 function marketSnapshotCandle(m){
@@ -1503,8 +1510,11 @@ function renderLiveMarketProduct(s){
   if(realmEl)realmEl.textContent=realm===1?'R2':'R1';
   const sharedForLabel=scmMarketPrice(activeStore,item.id,item.quality,'exact');
   // A price from the game ticker is a real game price: its time counts like the order book's.
-  const bookOrTickerAt=Math.max(marketBookStamp(s,realm,item.id)||0,sharedForLabel?.source==='ticker'&&Number(sharedForLabel.at)>0?Number(sharedForLabel.at):0)||null;
-  const newest=marketNewestStamp(bookOrTickerAt,selected?.fetchedAt,sharedForLabel?.source==='ticker'&&Number(sharedForLabel.at)===bookOrTickerAt?'Game ticker':'Game market');
+  // The Updated label names the source of the price that is shown: the game book/ticker only when that price comes from it (SimcoTools is the default).
+  const gameShown=sharedForLabel?.source==='ticker'||sharedForLabel?.source==='exchange';
+  const bookOrTickerAt=!gameShown?null:Math.max(marketBookStamp(s,realm,item.id)||0,sharedForLabel?.source==='ticker'&&Number(sharedForLabel.at)>0?Number(sharedForLabel.at):0)||null;
+  const simcoAt=selected?.fetchedAt||(sharedForLabel?.source==='simcotools-prices'&&Number(sharedForLabel.at)>0?new Date(Number(sharedForLabel.at)).toISOString():null);
+  const newest=marketNewestStamp(bookOrTickerAt,simcoAt,sharedForLabel?.source==='ticker'&&Number(sharedForLabel.at)===bookOrTickerAt?'Game ticker':'Game market');
   const newestText=newest?`Updated ${marketDate(newest.at)} · ${newest.source}`:'';
   if(liveStatus)liveStatus.textContent=newest?'Live':'Waiting';
   if(liveUpdated)liveUpdated.textContent=newest?newestText:'Waiting for market data…';
@@ -2293,7 +2303,7 @@ const CONSTRUCTION_MATERIALS=[
   {id:108,name:'Planks',perCostUnit:16,baseQty:48,referencePrice:9.08},
   {id:111,name:'Construction units',perCostUnit:1,baseQty:3,referencePrice:2501.71}
 ];
-function constructionCostUnits(s,building){const k=String(building?.raw?.kind??building?.kind??'');const cu=Number(s?.gameConstants?.buildings?.[k]?.costUnits);return k&&cu>0?cu:null;}
+function constructionCostUnits(s,building){const k=String(building?.raw?.kind??building?.kind??'');const bc=k?globalThis.SCM_TOOLS_CORE?.buildingConst?.(s?.gameConstants,(typeof scmSimcoData==='function'?scmSimcoData(s,'simcoBuildings'):(s?.simcoBuildings||null)),k):null;const cu=Number(bc?.costUnits);return k&&cu>0?cu:null;}
 function constructionWarehouseStock(s,id){
   return warehouseRows(s).filter(row=>Number(row?._id)===Number(id)).reduce((sum,row)=>sum+(Number(row?._qty)||0),0);
 }
@@ -2428,10 +2438,11 @@ function plannerAge(ms){const m=Math.round(ms/60000);return m<1?'just now':m<60?
 function plannerMarketPrice(s,id,q,mode){
   const p=scmMarketPrice(s,id,q,mode==='any'||mode==='min'?mode:'exact');
   if(!p)return null;
-  const age=p.ageMs!=null?plannerAge(p.ageMs):'',old=p.stale?(p.source==='simcotools'?' · stale':' · old'):'';
+  const age=p.ageMs!=null?plannerAge(p.ageMs):'',old=p.stale?(p.source==='simcotools'||p.source==='simcotools-prices'?' · stale':' · old'):'';
   const where=p.source==='exchange'?(mode==='any'?'cheapest exchange listing, any quality (as game)':'exchange listing')
     :p.source==='ticker'?'Game ticker (lowest Q0 ask)'
     :p.source==='simcotools'?(mode==='any'?'SimcoTools, cheapest captured quality':'SimcoTools current price')
+    :p.source==='simcotools-prices'?'SimcoTools last trade'
     :'VWAP fallback';
   const hint=p.source==='simcotools'&&mode==='any'?' — open the game to load the exchange':'';
   return {price:p.price,quality:p.quality,source:`${where}${age?` · ${age}`:''}${old}${hint}`,stale:p.stale,origin:p.source,srcLabel:scmSrcLabel(p)};
@@ -2853,7 +2864,7 @@ function renderPlannerPayback(host,d){
     const pid=Number(b.currentResourceId),lvl=Math.max(1,Number(b.level)||1);
     if(!(pid>0))continue;
     if(lvl>=20){rows.push({b,lvl,max:true});continue;}
-    const bd=Number(gc.buildings?.[String(b.kind||'')]?.buildDuration),upHours=bd>0?lvl*bd/3600:0;
+    const bd=Number(C.buildingConst?.(gc,scmSimcoData(s,'simcoBuildings'),String(b.kind||''))?.buildDuration),upHours=bd>0?lvl*bd/3600:0;
     const extraAdmin=(wageAll+(Number(C.gameWagePerLevel(gc,String(b.kind||''),Boolean(b.robotsSpecialization)))||0))*dAdmin;
     const sale=plannerMarketPrice(s,pid,0,'any');
     const res=C.gameCalcProduct({c:gc,resourceId:pid,economyState,eventPct:eventPctOf(pid),bonusPct,adminPct,robots:Boolean(b.robotsSpecialization),salePrice:sale?.price??null,inputCostOf,abundancePct:plannerAbundancePct(s,b.raw?.id??b.id,pid)});
@@ -3951,17 +3962,25 @@ function renderGovernmentOrders(s){
   const realm=validRealmNumber(s?.viewRealm??s?.captureRealm),ep=s?.endpointData||{};
   const orders=realm!=null?ep[`/api/v3/government-orders/${realm}/`]?.data?.governmentOrders:null;
   const mult=Number(ep['/api/v3/government-orders/tier/']?.data?.tier?.resourceMultiplicator);
-  if(!Array.isArray(orders)||!orders.length){if(box)box.remove();return;}
+  const simco=scmSimcoData(s,'simcoGovOrders');
+  const merged=globalThis.SCM_TOOLS_CORE?.mergeGovOrders?.(orders,mult,simco)||{source:Array.isArray(orders)&&orders.length?'game':null,rows:[]};
+  if(!merged.source||!merged.rows.length){if(box)box.remove();return;}
   if(!box){box=document.createElement('div');box.id='govOrders';box.className='gov-orders';sec.appendChild(box);}
   let rows=[];try{rows=warehouseRows(s);}catch{}
   const have=(id,q)=>rows.filter(r=>Number(r?._id)===Number(id)&&Number(r?._quality)>=Number(q)).reduce((a,r)=>a+(Number(r._qty)||0),0);
   const title=k=>String(k||'').toLowerCase().replace(/_/g,' ').replace(/^./,c=>c.toUpperCase());
-  const at=Date.parse(String(ep[`/api/v3/government-orders/${realm}/`]?.receivedAt||''));
-  box.dataset.collapse='contracts:gov';box.innerHTML=`<h3 data-collapse-head>Government orders</h3><p class="gov-sub">${Number.isFinite(mult)?`Amounts at your tier (×${num(+mult.toFixed(3))})`:'Base amounts (tier not captured yet)'}${Number.isFinite(at)?` · ${plannerAge(Date.now()-at)}`:''}</p>`+orders.map(o=>{
-    const req=(Array.isArray(o?.governmentorderrequiredresourceSet)?o.governmentorderrequiredresourceSet:[]).map(r=>{
-      const need=Number.isFinite(mult)?Math.max(1,Math.ceil(Number(r.amountBase)*mult)):Number(r.amountBase),got=have(r.kind,r.quality);
-      return `<div class="gov-row"><span>${escapeHtml(resourceInfo({kind:Number(r.kind)},s).name||`#${r.kind}`)} Q${num(r.quality)}</span><span class="${got>=need?'gov-ok':'gov-short'}">${num(got)} / ${num(need)}</span></div>`;}).join('');
-    return `<div class="gov-card" data-collapse="gov:${escapeHtml(String(o?.projectKey||''))}"><div class="gov-head" data-collapse-head><strong>${escapeHtml(title(o?.projectKey))}</strong><span>${num(o?.daysToFulfill)} days</span></div>${req}</div>`;
+  const fromGame=merged.source==='game';
+  const at=fromGame?Date.parse(String(ep[`/api/v3/government-orders/${realm}/`]?.receivedAt||'')):Number(simco?.at);
+  const sub=fromGame?(Number.isFinite(mult)?`Amounts at your tier (×${num(+mult.toFixed(3))})`:'Base amounts (tier not captured yet)'):'Amounts need a visit to the game\u2019s Government orders page.';
+  box.dataset.collapse='contracts:gov';box.innerHTML=`<h3 data-collapse-head>Government orders</h3><p class="gov-sub">${escapeHtml(sub)}${Number.isFinite(at)?` · ${plannerAge(Date.now()-at)}`:''}</p>`+merged.rows.map(o=>{
+    const req=o.resources.map(r=>{
+      const nm=fromGame?(resourceInfo({kind:Number(r.kind)},s).name||`#${r.kind}`):(r.name||resourceInfo({kind:Number(r.kind)},s).name||`#${r.kind}`);
+      const got=have(r.kind,r.quality);
+      if(r.need==null)return `<div class="gov-row"><span>${escapeHtml(nm)} Q${num(r.quality)}</span><span>${num(got)} / —</span></div>`;
+      const need=r.need;
+      return `<div class="gov-row"><span>${escapeHtml(nm)} Q${num(r.quality)}</span><span class="${got>=need?'gov-ok':'gov-short'}">${num(got)} / ${num(need)}</span></div>`;}).join('');
+    const ttl=fromGame?title(o.title):String(o.title||'—');
+    return `<div class="gov-card" data-collapse="gov:${escapeHtml(String(o.title||''))}"><div class="gov-head" data-collapse-head><strong>${escapeHtml(ttl)}</strong><span>${num(o.daysToFulfill)} days</span></div>${req}</div>`;
   }).join('');
   scmApplyCollapse(box);
 }
@@ -4672,7 +4691,9 @@ scmOnStorageChanged((changes, area)=>{
   if((changes.realmStores||physicalRealmKeys.length>0||Object.keys(changes||{}).some(k=>/^scmRealmDiagnostic:\d+$/.test(k)))&&__scmState)queuePhysicalRealmStateRefresh(previousStateForPhysicalChange,changes);
   // Game constants / images arrive from the worker (SCM_ENSURE_GAME_DATA, daily refresh): map them onto the view state
   // and re-render whatever tab is open, so notes like "Game constants not loaded yet" clear without a reload.
-  const gameDataChanged=Boolean(changes.scmGameConstants||changes.scmGameConfig||changes.scmResourceImages);
+  const simcoKeys=Object.keys(changes||{}).filter(k=>k==='scmSimcoBuildings'||/^scmSimco(Prices|GovOrders):\d+$/.test(k));
+  if(simcoKeys.length&&__scmState){for(const k of simcoKeys){const v=changes[k].newValue??null;if(k==='scmSimcoBuildings'){__scmState.simcoBuildings=v;continue;}const m=k.match(/^scmSimco(Prices|GovOrders):(\d+)$/);if(m&&Number(m[2])===Number(__scmState.viewRealm))__scmState[m[1]==='Prices'?'simcoPrices':'simcoGovOrders']=v;}}
+  const gameDataChanged=simcoKeys.length>0||Boolean(changes.scmGameConstants||changes.scmGameConfig||changes.scmResourceImages);
   if(gameDataChanged&&__scmState){
     if(changes.scmGameConstants)__scmState.gameConstants=changes.scmGameConstants.newValue||null;
     if(changes.scmGameConfig)__scmState.gameConfig=changes.scmGameConfig.newValue||null;

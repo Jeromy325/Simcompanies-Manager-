@@ -93,7 +93,11 @@
     'ledger-catchup': 'Sales ledger catch-up',
     'lost-data-check': 'Lost-data check (contracts)',
     'sync-auto-retry-scheduled': 'Sync automatic retry scheduled',
-    'sync-auto-retry-skipped': 'Sync automatic retry not scheduled'
+    'sync-auto-retry-skipped': 'Sync automatic retry not scheduled',
+    'simcotools-prices': 'SimcoTools prices',
+    'simcotools-gov-orders': 'SimcoTools government orders',
+    'simcotools-buildings': 'SimcoTools building data',
+    'simcotools-resources': 'SimcoTools resource data'
   };
   // Outcome words in the list (not-read reads as "not read").
   const OUTCOME = { 'not-read': 'not read', waiting: 'waiting' };
@@ -107,7 +111,7 @@
     if (d.sources && /missing|unreadable/.test(d.sources)) out.push(d.sources);
     return out.length ? ' · ' + out.map(esc).join(' · ') : ''; };
   // One-line legend shown above the job list.
-  const LEGEND = 'Warehouse = last time the Manager re-read your warehouse from the game · last game action = last collect/buy/sell/contract it reacted to · prices = last SimcoTools price download (VWAP + current prices, about every 10 min). Green dot = warehouse refreshed in the last 15 min. "skipped" = nothing needed (data still fresh). "not read" = the Manager wanted game data but could not get it (reason shown). "waiting" = held for the 5-min game request slot.';
+  const LEGEND = 'Warehouse = last time the Manager re-read your warehouse from the game · last game action = last collect/buy/sell/contract it reacted to · prices = last SimcoTools price download (VWAP + current prices, about every 15 min). Green dot = warehouse refreshed in the last 15 min. "skipped" = nothing needed (data still fresh). "not read" = the Manager wanted game data but could not get it (reason shown). "waiting" = held for the 5-min game request slot.';
   // The direct-read pause after a 503 is not a bot-protection block: its own label (details.status).
   const label = j => (j.job === 'direct-reads-blocked' && Number(j.details?.status) === 503 && j.details?.directReadsBlocked ? 'Game answered 503: Manager reads paused' : null) || LABEL[`${j.job}|${j.trigger}`] || LABEL[j.job] || String(j.job || 'job').replace(/-/g, ' ');
   let realm = null, jobs = [], lastSeenId = null, toastTimer = 0, open = false, lastPollSig = '';

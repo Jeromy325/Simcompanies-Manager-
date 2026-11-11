@@ -25,6 +25,34 @@
     return { value: Number(hit.value ?? hit.vwap ?? hit.price), at, stale: d.stale === true || d.fallback === true || hit.stale === true, fallback: d.fallback === true };
   }
 
+  // Lazy per-object index: id -> [{q, price, tradedAt}]. Rows: [resourceId, quality, price, tradedAtMs].
+  const simcoIdx = new WeakMap();
+  function simcoIndex(sp) {
+    if (!sp || typeof sp !== 'object' || !Array.isArray(sp.rows)) return null;
+    let ix = simcoIdx.get(sp); if (ix) return ix;
+    ix = new Map();
+    for (const r of sp.rows) {
+      if (!Array.isArray(r)) continue;
+      const rid = n(r[0]), q = n(r[1]), pr = n(r[2]);
+      if (rid == null || q == null || !(pr > 0)) continue;
+      let a = ix.get(rid); if (!a) ix.set(rid, a = []);
+      a.push({ q, price: pr, tradedAt: n(r[3]) });
+    }
+    simcoIdx.set(sp, ix); return ix;
+  }
+  // Cheapest eligible row for id (mode 'exact' default | 'min' | 'any'). Returns {price, quality, at, stale} or null.
+  function simcoPriceLookup(simcoPrices, id, quality, now, mode) {
+    const ix = simcoIndex(simcoPrices); if (!ix) return null;
+    const want = Number(quality) || 0, list = ix.get(Number(id)); if (!list) return null;
+    const m = mode === 'min' || mode === 'any' ? mode : 'exact';
+    let best = null;
+    for (const r of list) if (eligible(m, want, r.q) && (!best || r.price < best.price)) best = r;
+    if (!best) return null;
+    now = now ?? Date.now();
+    const at = n(simcoPrices.at) ?? best.tradedAt;
+    return { price: best.price, quality: best.q, at, stale: at == null || now - at >= SIMCOTOOLS_MAX_AGE_MS };
+  }
+
   // Order: fresh game order book > fresh SimcoTools (rows, then per-product cache) > stale SimcoTools (stale:true) > exact-quality VWAP.
   // mode: 'exact' quality === q | 'min' quality >= q | 'any' any quality (the game calculator rule). opts.noVwap skips the VWAP step.
   function marketPrice(store, realm, id, quality, opts = {}) {
@@ -76,10 +104,16 @@
       const v = vwap(store, realm, id, want);
       if (v) return make(v.value, want, want, 'vwap', v.at, now, v.stale);
     }
+    // Last fallback (after VWAP): scmSimcoPrices rows. Age is the object's fetch time `at` (when the list was pulled), like the other SimcoTools sources;
+    // a row's tradedAtMs only says when it last traded and can be old for slow products, so it is used only when `at` is missing.
+    if (opts.simcoPrices) {
+      const sp = simcoPriceLookup(opts.simcoPrices, id, want, now, mode);
+      if (sp) return make(sp.price, sp.quality, want, 'simcotools-prices', sp.at, now, sp.stale);
+    }
     return null;
   }
 
-  const api = { marketPrice, vwap, SIMCOTOOLS_MAX_AGE_MS };
+  const api = { marketPrice, vwap, simcoPriceLookup, SIMCOTOOLS_MAX_AGE_MS };
   root.SCM_MARKET_CORE = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
