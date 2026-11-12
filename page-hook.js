@@ -898,6 +898,11 @@
   // 2xx reply, at most 20,000 characters (a bigger or non-JSON reply is sent without data).
   const TAKE_REPLY_MAX = 20000;
   const isTakePath = p => /^\/api\/v2\/order\/take\/\d+\/?$/.test(String(p || ''));
+  // 2.5.466: a listing post (POST /api/v2/market-order/, reply {sellOrder|contract,...}) and a cancel
+  // (DELETE /api/v2/market-order/<id>/) also hand over their reply: the game updates its own screen from it and makes no
+  // listings GET, so the Manager applies the same reply (no read of its own).
+  const isMarketOrderPath = p => /^\/api\/v2\/market-order\/(?:\d+\/?)?$/.test(String(p || ''));
+  const wantsReply = (m, p) => (m === 'POST' && (isTakePath(p) || isMarketOrderPath(p))) || (m === 'DELETE' && isMarketOrderPath(p));
   const takeReplyData = text => { const t = String(text ?? ''); if (!t || t.length > TAKE_REPLY_MAX) return null; try { return P_JSON.parse(t); } catch { return null; } };
   // Opt-in bounded recorder for same-origin game traffic. No request headers,
   // cookies, credentials, or request bodies are recorded. API response bodies are capped.
@@ -932,7 +937,7 @@
       try {
         const u = new URL(url, location.href);
         const payload = { method, url: u.pathname + u.search, status: response.status, captureRealm };
-        if (response.ok && method === 'POST' && isTakePath(u.pathname)) {
+        if (response.ok && wantsReply(String(method||'').toUpperCase(), u.pathname)) {
           // The reply is read from a clone without holding up the game's own fetch.
           let clone = null; try { clone = response.clone(); } catch {}
           if (clone) clone.text().then(t => emitRealmScoped('STOCK_MUTATION_COMPLETE', { ...payload, data: takeReplyData(t) }), () => emitRealmScoped('STOCK_MUTATION_COMPLETE', payload));
@@ -980,7 +985,7 @@
           const u = new URL(this.__scmUrl, location.href);
           if (this.status >= 200 && this.status < 300) {
             const payload = { method: this.__scmMethod, url: u.pathname + u.search, status: this.status, captureRealm: this.__scmCaptureRealm };
-            if (this.__scmMethod === 'POST' && isTakePath(u.pathname)) {
+            if (wantsReply(String(this.__scmMethod||'').toUpperCase(), u.pathname)) {
               let data = null;
               try { const rt = this.responseType; if (rt === '' || rt === 'text') data = takeReplyData(this.responseText); else if (rt === 'json' && this.response && typeof this.response === 'object') data = this.response; } catch {}
               payload.data = data;

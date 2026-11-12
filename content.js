@@ -519,7 +519,8 @@ if(!globalThis.__scmTimers)globalThis.__scmTimers=(()=>{
       // data: the parsed reply of a game collect (POST /api/v2/order/take/<id>/) when the page hook read one, else absent.
       // The page cannot be trusted: the reply is only passed for a collect URL and at most 20,000 chars.
       let takeData;
-      if (d.data !== undefined && d.data !== null && /^(?:https:\/\/(?:www\.)?simcompanies\.com)?\/api\/v2\/order\/take\/\d+\/?(?:\?|$)/.test(String(d.url || ''))) {
+      // 2.5.466: also a listing post / cancel reply (/api/v2/market-order/ and /api/v2/market-order/<id>/, not /take/).
+      if (d.data !== undefined && d.data !== null && /^(?:https:\/\/(?:www\.)?simcompanies\.com)?\/api\/v2\/(?:order\/take\/\d+|market-order(?:\/\d+)?)\/?(?:\?|$)/.test(String(d.url || ''))) {
         try { if (JSON.stringify(d.data).length <= 20000) takeData = d.data; } catch { takeData = undefined; }
       }
       safeRuntimeSend({ type: 'STOCK_MUTATION_COMPLETE', method: d.method, url: d.url, status: d.status, captureRealm: d.captureRealm, ...(takeData !== undefined ? { data: takeData } : {}) });
@@ -532,6 +533,10 @@ if(!globalThis.__scmTimers)globalThis.__scmTimers=(()=>{
     }
     if (d.type === 'API_DATA') {
       if (/\/api\/v3\/companies\/auth-data\//.test(String(d.url||''))) { const a=d.data?.authCompany||{}; const r=Number(a.realmId??a.realm??d.data?.realmId??d.data?.realm); if(Number.isFinite(r)) publishGameRealm(r,'auth-data'); }
+      // 2.5.466: a content.js injected again after a Manager update/reload never saw this page's realm events (they came
+      // at page load), so every overlay stayed blank ("unknown realm") until the next auth-data, up to 3 min. The page
+      // hook tags each response with the page's realm: the first one tells this world the realm.
+      else if (directKnownRealm == null && (d.captureRealm === 0 || d.captureRealm === 1)) publishGameRealm(d.captureRealm, 'capture');
       safeRuntimeSend({ type: 'API_DATA', url: d.url, status: d.status, data: d.data, captureRealm: d.captureRealm });
       return;
     }
@@ -1058,6 +1063,9 @@ function scmPageTextNoLayout(){
         }else{
           host.__scmRow=row;
         }
+        // One badge per row: a second host left in the same row (live 2026-11-12: the cheapest row showed its badge
+        // twice) is removed.
+        if(host)for(const extra of [...row.querySelectorAll('.scx-vwap-host')])if(extra!==host)removeBadge(extra);
         if(host&&host.dataset.open==='1'&&host.__scmPopover?.style.display==='block')positionPopover(host);
       }
       for(const host of [...document.querySelectorAll('.scx-vwap-host')])if(!wanted.has(String(host.dataset.vwapKey||'')))removeBadge(host);

@@ -271,7 +271,7 @@
   // rule. Token bucket 2 per second, burst 25; a network failure marks it unreachable (one probe at 1, 2, 5, 10, 15,
   // 15 ... min, one log line per outage); a 429 opens a cooldown (Retry-After, else 60 s). Wants: lowest prio, then oldest.
   const SIMCO = Object.freeze({
-    KEY: 'scmSimcoChannel', RATE_PER_S: 2, BURST: 25, PROBE_MS: Object.freeze([60e3, 120e3, 300e3, 600e3, 900e3]), COOLDOWN_DEFAULT_MS: 60e3, COOLDOWN_MAX_MS: 3600e3, WANT_TTL_MS: 30 * LANE_MIN,
+    KEY: 'scmSimcoChannel', RATE_PER_S: 2, BURST: 25, PROBE_MS: Object.freeze([60e3, 120e3, 300e3, 600e3, 900e3]), COOLDOWN_DEFAULT_MS: 60e3, COOLDOWN_MAX_MS: 3600e3, PROBE_GRACE_MS: 60e3, WANT_TTL_MS: 30 * LANE_MIN,
     JOBS: Object.freeze({
       refresh: Object.freeze({ prio: 1, label: 'Market Refresh' }),
       prices: Object.freeze({ prio: 2, label: 'All current prices' }),
@@ -317,7 +317,8 @@
   // take:true -> send ONE request now (a token is spent; the want stays queued, marked 'in flight', until simcoResult).
   // take:false -> reason 'bad-key' | 'cooldown' | 'unreachable' | 'rate' (no token) | 'yield' (the tokens left are
   // needed by higher wants). nextAt = when to ask again. peek:true decides without spending anything.
-  function simcoTake(raw, key, now = Date.now(), { peek = false } = {}) {
+  // canRun(key): the want has a queue runner (worker side); during an outage a want nobody serves cannot hold the probe.
+  function simcoTake(raw, key, now = Date.now(), { peek = false, canRun = null } = {}) {
     const st = simcoState(raw, now);
     if (!laneKeyOk(key)) return { take: false, reason: 'bad-key', nextAt: now + 60e3, state: st };
     const prev = st.wants[key];
@@ -328,7 +329,11 @@
     const order = simcoOrder(st.wants).filter(x => !x.flying || x.k === key);
     const ahead = Math.max(0, order.findIndex(x => x.k === key));
     if (st.unreachableSince) {
-      if (now < st.nextProbeAt || ahead !== 0) return { take: false, reason: 'unreachable', nextAt: Math.max(now, st.nextProbeAt), state: st };
+      // The probe: the first want that can be served (the caller itself always counts), so a stale or runner-less want
+      // ahead cannot hold it. Once the probe is PROBE_GRACE_MS overdue, any caller probes (no outage stays stuck).
+      const eligible = typeof canRun === 'function' ? order.filter(x => x.k === key || canRun(x.k)) : order;
+      const first = eligible.length > 0 && eligible[0].k === key;
+      if (now < st.nextProbeAt || (!first && now < st.nextProbeAt + SIMCO.PROBE_GRACE_MS)) return { take: false, reason: 'unreachable', nextAt: Math.max(now, st.nextProbeAt), state: st };
     } else {
       if (st.tokens < 1) return { take: false, reason: 'rate', nextAt: rateWait(), state: st };
       if (st.tokens < ahead + 1) return { take: false, reason: 'yield', nextAt: now + Math.ceil((ahead + 1 - st.tokens) * 1000 / SIMCO.RATE_PER_S), state: st };

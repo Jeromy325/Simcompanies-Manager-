@@ -724,6 +724,54 @@ async function captureOwnMarketOrders(realm,url,data){
   logActivity(r,'market-orders','success',{rows:orders.length,source:'game'},null,Date.now(),'game');
   return {ok:true,rows:orders.length};
 }
+// The game's reply to your own listing action, as the game itself uses it (bundle 2026-11-12): a sell post
+// (POST /api/v2/market-order/) answers {sellOrder?, moneyDelta?} and the game adds sellOrder to its own list (none when
+// it all sold at once); a contract post (same POST with contractTo) answers {contract}; a cancel
+// (DELETE /api/v2/market-order/<id>/) answers {fees} and the game drops that id. The game makes no listings GET after
+// any of them, so the stored lists are changed the same way here. Returns true when a stored list was updated (or the
+// action needs no list change); false = not a listing action / nothing stored to change (caller reads as before).
+const GAME_MARKET_ORDER_PATH_RE=/^\/api\/v2\/market-order\/(?:(\d+)\/?)?(?:\?.*)?$/i;
+async function applyGameListingReply(realm,method,url,data){
+  const r=validRealmNumber(realm);if(r==null)return false;
+  const m=String(url||'').replace(/^https:\/\/(?:www\.)?simcompanies\.com/i,'').match(GAME_MARKET_ORDER_PATH_RE);if(!m)return false;
+  const verb=String(method||'').toUpperCase(),id=m[1]?Number(m[1]):null;
+  const clearGen=extensionClearGeneration,nowIso=new Date().toISOString();
+  const ok=x=>x&&typeof x==='object'&&!Array.isArray(x);
+  if(verb==='POST'&&id==null){
+    if(!ok(data))return false;
+    if(ok(data.contract)){
+      const k=`scmOutgoingContracts:${r}`;const small=(await chrome.storage.local.get({[k]:null}))[k];
+      const captured=Object.entries((await notifyRealmStore(r))?.endpointData||{})
+        .filter(([u,v])=>/\/api\/v3\/contracts-outgoing\/me\/?(?:\?.*)?$/i.test(String(u||''))&&Number(v?.status)>=200&&Number(v?.status)<300&&Array.isArray(v?.data))
+        .map(([,v])=>({data:v.data,at:v.receivedAt}));
+      const base=[small&&Array.isArray(small.data)?{data:small.data,at:small.at}:null,...captured].filter(Boolean).sort((a,b)=>(Date.parse(b.at||0)||0)-(Date.parse(a.at||0)||0))[0];
+      if(!base)return false;
+      const list=base.data.filter(c=>c?.id==null||c.id!==data.contract.id).concat([data.contract]);
+      if(clearGen!==extensionClearGeneration)return true;
+      await rawStorageSet({[k]:{data:list,at:nowIso,source:'game-post'}});notifyGameCardsKeyChanged(k);
+      logActivity(r,'outgoing-contracts','success',{rows:list.length,source:'game-post'},null,Date.now(),'game');
+      return true;
+    }
+    const k=`scmMarketOrders:${r}`;const cur=(await chrome.storage.local.get({[k]:null}))[k];
+    if(!cur||!Array.isArray(cur.orders))return false;
+    if(!ok(data.sellOrder))return true; // sold at once: no listing was added
+    const orders=cur.orders.filter(o=>o?.id==null||o.id!==data.sellOrder.id).concat([data.sellOrder]);
+    if(clearGen!==extensionClearGeneration)return true;
+    await rawStorageSet({[k]:{...cur,orders,at:nowIso,source:'game-post'}});notifyGameCardsKeyChanged(k);
+    logActivity(r,'market-orders','success',{rows:orders.length,source:'game-post'},null,Date.now(),'game');
+    return true;
+  }
+  if(verb==='DELETE'&&id>0){
+    const k=`scmMarketOrders:${r}`;const cur=(await chrome.storage.local.get({[k]:null}))[k];
+    if(!cur||!Array.isArray(cur.orders))return false;
+    const orders=cur.orders.filter(o=>Number(o?.id)!==id);
+    if(clearGen!==extensionClearGeneration)return true;
+    await rawStorageSet({[k]:{...cur,orders,at:nowIso,source:'game-cancel'}});notifyGameCardsKeyChanged(k);
+    logActivity(r,'market-orders','success',{rows:orders.length,source:'game-cancel'},null,Date.now(),'game');
+    return true;
+  }
+  return false;
+}
 // Read through the game tab (pageGet): a plain service-worker fetch of this URL now gets a Cloudflare 403 page.
 async function refreshMarketOrders(realm,maxAgeMs=5*60000,opts=null){
   const r=validRealmNumber(realm);if(r==null)return {ok:false};
@@ -1057,11 +1105,9 @@ async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
   // Also every building that makes an abundance resource (mines, oil rigs, quarries: constants producedAt),
   // even when its abundance was never captured or the record was lost.
   for(const id of await abundanceBuildingIds(st))ab.add(id);
-  // The gov-orders LIST read is left out while the SimcoTools copy is under 1 h old and the game's own list was captured
-  // within 24 h (the Sync walk's page visit still loads it); the tier read always stays.
-  // A failed check never blocks the reads (async wrapper: any error means "read it").
-  const govListSkipped=await (async()=>govOrdersListCoveredBySimco(r,ep))().catch(()=>false);
-  const paths=['/api/v3/players/research/',...(govListSkipped?[]:[`/api/v3/government-orders/${r}/`]),'/api/v3/government-orders/tier/',...[...ab].map(id=>`/api/v2/companies/buildings/${id}/abundance/`)];
+  // Government orders are never read from the game (2.5.466): the list comes from SimcoTools only; the tier is optional,
+  // saved from passive capture when the game loads it.
+  const paths=['/api/v3/players/research/',...[...ab].map(id=>`/api/v2/companies/buildings/${id}/abundance/`)];
   const out=[],errs=[],warnings=[],t0=Date.now();
   const pool={...ep,...(captured||{})};
   // No game tab / page bridge not ready or not connected: no request was made and the
@@ -1071,7 +1117,7 @@ async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
   for(let i=0;i<paths.length;i++){const p=paths[i];try{const x=await readFollowingMoves(p,r,{movedReads,captured:pool});if(x?.realmMismatch||x?.realmUnknown||x?.laneWait||x?.queued||x?.syncRunning){notRead++;why=why||x;continue;}if(x.ok&&x.walkedPath)warnings.push(`${p} moved to ${x.walkedPath}`);if(!x.ok){const ab=/\/abundance\/$/.test(p);if(x.suspected)warnings.push(`${p} (HTTP ${x.status}) may have moved to ${x.suspected}; not adopted`);else if(ab)warnings.push(`${p} failed (HTTP ${x.status}); kept the stored record`);}if(x.ok){await saveData(p,x.data,x.status,'GET',r);out.push(p);}else errs.push(`${p.replace('/api/','')}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){if(pageBridgeUnavailable(e)){notRead+=paths.length-i;why=e;break;}errs.push(`${p.replace('/api/','')}: ${e?.message||e}`);if(/\/abundance\/$/.test(p))warnings.push(`${p} not read: ${e?.message||e}`);}}
   if(notRead&&!out.length&&!errs.length){logNotRead(r,'extra-game-data',why,{wanted:paths.length,notRead},t0,'after-sync');return {ok:true,skipped:true,bridgeUnavailable:true,saved:out,warnings,notRead};}
   const abN=paths.filter(p=>/abundance/.test(p)).length,abOk=out.filter(p=>/abundance/.test(p)).length;
-  logActivity(r,'extra-game-data',errs.length?(out.length?'partial':'failure'):'success',{rows:out.length,wanted:paths.length,abundance:`${abOk}/${abN}`,...(govListSkipped?{govOrdersList:'not read: SimcoTools copy under 1 h and game capture under 24 h'}:{}),...(notRead?{notRead,notReadReason:notReadReason(why)}:{})},errs.slice(0,4).join(' · ')||null,t0,'after-sync');
+  logActivity(r,'extra-game-data',errs.length?(out.length?'partial':'failure'):'success',{rows:out.length,wanted:paths.length,abundance:`${abOk}/${abN}`,...(notRead?{notRead,notReadReason:notReadReason(why)}:{})},errs.slice(0,4).join(' · ')||null,t0,'after-sync');
   return {ok:true,saved:out,warnings,...(notRead?{notRead}:{})};
 }
 // Sync timers (gameConstants): off = no alarm and no read on worker start (Sync still reads them); a slower
@@ -4578,7 +4624,19 @@ function endpointPayloadsEqual(left,right){
 // entry is present, realm-stamped, successful, non-empty, and written during
 // this capture (or explicitly records a fresh attempt while preserving a good
 // computed accounting statement).
-async function verifyDurableEndpointWrite(realm,path,startedAtMs,expectedData=null,expectedStatus=null,allowPreserved=false){
+// Sync only (options.acceptRecentGameMs): a record the Sync did not write but that the game page itself loaded within
+// that window (same realm, valid data) counts as verified, flagged fromGamePage ("from the game page at HH:MM").
+// The stored record has no source marker: any realm-stamped 2xx record is the game's own answer (passive capture, or
+// a Manager lane read of the same address).
+const SYNC_RECENT_GAME_CAPTURE_MS=15*60000;
+function syncRecentGameCaptureOk(entry,realm,path,now=Date.now(),maxAgeMs=SYNC_RECENT_GAME_CAPTURE_MS){
+  const n=validRealmNumber(realm);
+  if(n==null||!entry||typeof entry!=='object'||validRealmNumber(entry.captureRealm)!==n)return false;
+  const st=Number(entry.status)||0;if(st<200||st>=300||!endpointDataIsValid(path,entry.data))return false;
+  const at=Date.parse(String(entry.receivedAt||''));
+  return Number.isFinite(at)&&at<=now+60000&&now-at<=Number(maxAgeMs);
+}
+async function verifyDurableEndpointWrite(realm,path,startedAtMs,expectedData=null,expectedStatus=null,allowPreserved=false,options=null){
   const n=validRealmNumber(realm);
   if(n==null||!String(path||'').startsWith('/api/'))return {ok:false,reason:'invalid-realm-or-endpoint'};
   // Durability means the physical key, so write the coalesced realm patch first (commit lane; callers of
@@ -4598,6 +4656,9 @@ async function verifyDurableEndpointWrite(realm,path,startedAtMs,expectedData=nu
   const attemptedAt=Date.parse(String(entry.lastAttempt?.receivedAt||''));
   const freshRecord=Number.isFinite(receivedAt)&&receivedAt>=Number(startedAtMs||0);
   const freshAttempt=Number.isFinite(attemptedAt)&&attemptedAt>=Number(startedAtMs||0);
+  if(!freshRecord&&!(allowPreserved&&freshAttempt)&&Number(options?.acceptRecentGameMs)>0&&syncRecentGameCaptureOk(entry,n,path,Date.now(),Number(options.acceptRecentGameMs))){
+    return {ok:true,realm:n,path,status,receivedAt:entry.receivedAt||null,lastAttemptAt:entry.lastAttempt?.receivedAt||null,preservedPriorData:false,fromGamePage:true,fromGamePageAt:simcoChannelClock(receivedAt)};
+  }
   if(!freshRecord&&!(allowPreserved&&freshAttempt))return {ok:false,reason:'stored-endpoint-is-stale',receivedAt:entry.receivedAt||null,lastAttemptAt:entry.lastAttempt?.receivedAt||null};
   if(expectedData!=null&&freshRecord&&!endpointPayloadsEqual(entry.data,expectedData))return {ok:false,reason:'stored-payload-mismatch'};
   return {ok:true,realm:n,path,status,receivedAt:entry.receivedAt||null,lastAttemptAt:entry.lastAttempt?.receivedAt||null,preservedPriorData:!freshRecord&&freshAttempt};
@@ -4627,7 +4688,7 @@ try{chrome.storage?.session?.remove?.(LEGACY_DIRECT_READ_BLOCK_KEY)?.catch?.(()=
 // (pure page walk: pageGet refuses while a Sync runs). State: chrome.storage.session scmGameLane (survives a worker
 // restart), every change through one serialized chain.
 const GAME_LANE_WAIT_TEXT='Queued for the next game slot (one Manager game read every 5 min).';
-const PAGE_GET_DURING_SYNC_TEXT='Not read: Sync is running (Sync only walks game pages; the read is queued for the next game slot).';
+const PAGE_GET_DURING_SYNC_TEXT='Not read: Sync is running (Sync only walks game pages; the read is not queued, its own timer asks again after the Sync).';
 let gameLaneMem,gameLaneTail=Promise.resolve();
 function gameLaneCore(){const C=globalThis.SCM_TIMERS_CORE;return C&&C.laneDecide?C:null;}
 async function gameLaneLoad(){
@@ -4714,8 +4775,8 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
   if(coreSyncActive()){
     traceDiag('pageget-refused-sync-running',{lane:laneKey});
     try{logError('pageget-during-sync',`${PAGE_GET_DURING_SYNC_TEXT} ${String(path||'').slice(0,160)} (${diagnosticLabel||laneKey})`);}catch{}
-    const q=await gameLaneEnqueue(laneKey).catch(()=>null);
-    return {ok:false,status:0,skipped:true,syncRunning:true,laneWait:true,queued:Boolean(q?.queued),nextAt:Number(q?.nextAt)||0,error:PAGE_GET_DURING_SYNC_TEXT,path:String(path||'')};
+    // 2.5.466: nothing is queued from inside a Sync (the caller's own timer asks again after it).
+    return {ok:false,status:0,skipped:true,syncRunning:true,laneWait:true,queued:false,nextAt:0,error:PAGE_GET_DURING_SYNC_TEXT,path:String(path||'')};
   }
   const customTimeout=Number(options?.timeoutMs);
   const timeoutMs=Number.isFinite(customTimeout)&&customTimeout>0?customTimeout:SYNC_PAGE_API_TIMEOUT_MS;
@@ -5079,6 +5140,7 @@ const GAME_LANE_RUNNERS={
   // syncMissing:<realm>: the path is not in the key; the next Sync or page visit fills it (want dropped by the alarm).
   syncMissing:async()=>{}
 };
+const GAME_LANE_CARD_STALE_MS=60000;
 async function runGameLaneAlarm(){
   const C=gameLaneCore();if(!C)return {ok:false};
   const now=Date.now(),st=C.laneState(await gameLaneLoad(),now);
@@ -5087,8 +5149,18 @@ async function runGameLaneAlarm(){
   const next=C.laneNextSlotAt(st,now);
   if(next>now){await gameLaneScheduleAlarm(next);return {ok:true,waiting:true,nextAt:next};}
   if(coreSyncActive()){await gameLaneScheduleAlarm(now+60000);return {ok:true,sync:true};}
-  const winner=C.laneWinner(st.wants,now,st.lastAt);const [base,rs]=String(winner||'').split(':');const run=GAME_LANE_RUNNERS[base];
-  if(!run){await gameLaneScheduleAlarm(now+C.laneSpec(winner).wantTtlMs+1000);return {ok:true,winner,card:true};}
+  // A winner with no runner is a card/page read: its card asks again by itself while it is open (want.at refreshed).
+  // One not asked for in GAME_LANE_CARD_STALE_MS has no open card: drop it, or it holds the slot until its want TTL
+  // (live 2026-11-12: accounting:1 from a Sync-time open blocked marketOrders/contracts/abundance for 16+ min).
+  let winner=C.laneWinner(st.wants,now,st.lastAt);
+  for(let i=0;winner&&i<12;i++){
+    if(GAME_LANE_RUNNERS[String(winner).split(':')[0]])break;
+    if(now-Number(st.wants[winner]?.at||0)<GAME_LANE_CARD_STALE_MS)break;
+    await gameLaneDropWant(winner);delete st.wants[winner];winner=C.laneWinner(st.wants,now,st.lastAt);
+  }
+  if(!winner)return {ok:true,idle:true};
+  const [base,rs]=String(winner||'').split(':');const run=GAME_LANE_RUNNERS[base];
+  if(!run){await gameLaneScheduleAlarm(now+GAME_LANE_CARD_STALE_MS+1000);return {ok:true,winner,card:true};}
   const before=st.wants[winner]?.at;
   try{await run(rs!=null&&rs!==''?Number(rs):null,winner);}catch(e){logError('game-lane-run',e);}
   const after=C.laneState(await gameLaneLoad(),Date.now());
@@ -5275,8 +5347,12 @@ function simcoChannelNextAt(st,now=Date.now()){
 function simcoChannelArm(st,hintAt=0){
   const C=simcoChannelCore();if(!C||!st)return;
   const now=Date.now();
-  if(!Object.entries(st.wants||{}).some(([k,w])=>w?.reason!=='in flight'&&simcoChannelHasRunner(C,k)))return;
-  const at=Math.max(Number(hintAt)||0,simcoChannelNextAt(st,now));
+  // While SimcoTools is unreachable the probe is always armed, even with only runner-less wants (or none): the queue
+  // run then probes through the public-data runner (SIMCO_CHANNEL_FALLBACK_PROBE), so an outage never stays stuck.
+  const servable=Object.entries(st.wants||{}).some(([k,w])=>w?.reason!=='in flight'&&simcoChannelHasRunner(C,k));
+  if(!st.unreachableSince&&!servable)return;
+  // Fallback-probe only: no sooner than 1 min (an overdue probe whose job had nothing due does not spin every 30 s).
+  const at=Math.max(Number(hintAt)||0,simcoChannelNextAt(st,now),servable?0:now+60000);
   if(at-now<25000){if(simcoChannelTimer)clearTimeout(simcoChannelTimer);simcoChannelTimer=setTimeout(()=>{simcoChannelTimer=null;simcoChannelRunQueue('timer').catch(()=>{});},Math.max(250,at-now+50));}
   (async()=>{
     if(!chrome.alarms)return;
@@ -5291,7 +5367,7 @@ function simcoChannelTake(key,{peek=false}={}){
   return simcoChannelSerial(async()=>{
     // timers-core.js is part of the package (importScripts); only a stripped harness lacks it: the request goes as before.
     const C=simcoChannelCore();if(!C)return {take:true,noChannel:true,nextAt:Date.now()};
-    const d=C.simcoTake(await simcoChannelLoad(),key,Date.now(),{peek});
+    const d=C.simcoTake(await simcoChannelLoad(),key,Date.now(),{peek,canRun:k=>simcoChannelHasRunner(C,k)});
     await simcoChannelStore(d.state);
     if(!d.take)simcoChannelArm(d.state,d.nextAt);
     return d;
@@ -5340,6 +5416,8 @@ const SIMCO_CHANNEL_RUNNERS={
   vwap:async realm=>{if(realm!=null)await runVwapSync({realm,reason:'simco-channel-queue'});},
   followed:async realm=>{if(realm!=null)await runLiveMarketRefresh(realm);}
 };
+// The outage probe when no queued want can be served: the public-data job (prices first when they are due).
+const SIMCO_CHANNEL_FALLBACK_PROBE=async()=>{await runSimcoPublicData('channel-probe');};
 function simcoChannelRunQueue(trigger='alarm'){
   if(simcoChannelQueueRun)return simcoChannelQueueRun;
   let startLastAt=-1;
@@ -5357,7 +5435,12 @@ function simcoChannelRunQueue(trigger='alarm'){
         const first=order.find(x=>!simcoChannelHasRunner(C,x.k));
         if(first&&order[0]===first&&now-first.at>=SIMCO_CHANNEL_STALE_WANT_MS){await simcoChannelDropWant(first.k);done.add(first.k);continue;}
       }
-      const next=order.find(x=>simcoChannelHasRunner(C,x.k));if(!next)break;
+      const next=order.find(x=>simcoChannelHasRunner(C,x.k));
+      if(!next){
+        // Unreachable with no servable want (only runner-less wants, or none): probe once through the public-data job.
+        if(st.unreachableSince&&!done.has('#probe')){done.add('#probe');try{await SIMCO_CHANNEL_FALLBACK_PROBE();}catch(e){logError('simco-channel-probe',e);}ran.push('#probe');continue;}
+        break;
+      }
       done.add(next.k);
       const parts=next.k.split(':'),realm=parts.length>1?validRealmNumber(parts[1]):null;
       try{await SIMCO_CHANNEL_RUNNERS[C.laneBase(next.k)](realm);}catch(e){logError('simco-channel-runner',e);}
@@ -7992,15 +8075,16 @@ function createPageReturn(traceFn=null,{realm=null}={}){
       if(now&&now!==e.walkUrl&&GAME_URL_RX.test(now)){e.userMoved=true;e.startUrl=now;e.walkUrl=now;note('page-return-user-navigated',{tabId,url:now});await persist();}
       return e.userMoved;
     },
+    // Once the player moved the tab, no walk step (page visit, bounce, fallback click, post-Sync tail) touches it again.
     async walkClick(tabId,target){
-      await api.checkUser(tabId);
+      if(await api.checkUser(tabId)){note('page-return-click-skipped',{tabId,target:target?.name||null});return {ok:false,skipped:'user-navigated',error:'The player moved the game tab; Sync leaves it there.'};}
       const r=await executeGameClick(tabId,target);
       const e=tabs.get(tabId);const now=r?.urlAfterClick||await gameTabUrl(tabId);
       if(e&&now){e.walkUrl=now;await persist();}
       return r;
     },
     async walkTo(tabId,url){
-      await api.checkUser(tabId);
+      if(await api.checkUser(tabId)){note('page-return-route-skipped',{tabId});return {ok:false,skipped:'user-navigated',error:'The player moved the game tab; Sync leaves it there.'};}
       const r=await spaNavigateGameTab(tabId,url);
       const e=tabs.get(tabId);if(e&&r?.url){e.walkUrl=r.url;await persist();}
       return r;
@@ -8063,10 +8147,17 @@ async function restoreGamePageBounded(pageReturn,label='Return to the starting p
 // How long a walked page gets to show its traffic. Responses are what matter: a burst followed by a quiet gap means
 // the page has loaded; a confirmed page with no traffic at all is given up on sooner than one still talking.
 const SYNC_WALK_QUIET_MS=1200,SYNC_WALK_NAV_GAP_MS=1000;
+// The page clicked first when the walk finds the tab already on its target (the Warehouse link is on every HQ page;
+// on the Warehouse page itself its Incoming contracts tab is).
+function syncBouncePage(targetName){
+  return targetName==='Warehouse'
+    ?{name:'Contracts',labels:['Contracts','Contract'],hrefHints:['/headquarters/warehouse/incoming-contracts/'],route:'/headquarters/warehouse/incoming-contracts/'}
+    :{name:'Warehouse',labels:['Warehouse'],hrefHints:['/headquarters/warehouse/'],route:'/headquarters/warehouse/'};
+}
 const SYNC_WALK_NO_TRAFFIC_MS=3000;
 // ---- Sync = pure page walk (2.5.465) ----
 // Per walked page: wait until that page's expected paths are captured, at most SYNC_WALK_PATH_WAIT_MS (event-driven,
-// no fixed sleeps). A path still missing is 'not-on-page': traced, listed in the Sync result and queued for the lane.
+// no fixed sleeps). A path still missing is 'not-on-page': traced and listed in the Sync result (2.5.466: never queued).
 const SYNC_WALK_PATH_WAIT_MS=20000;
 async function waitForWalkPath(find,sinceMs,maxMs=SYNC_WALK_PATH_WAIT_MS){
   const deadline=(Number(sinceMs)||Date.now())+maxMs;
@@ -8083,11 +8174,30 @@ function syncMissingLaneKey(path,realm){
 }
 async function syncNotOnPage(session,realm,path,trace=()=>{}){
   const key=syncMissingLaneKey(path,realm);
-  if(session){const l=session.notOnPage||(session.notOnPage=[]);if(!l.includes(path))l.push(path);}
-  try{trace('not-on-page',{path,lane:key});}catch{}
-  // Queued after the Sync ends (the lane alarm does not run a want while a Sync is active).
-  try{await gameLaneEnqueue(key);}catch{}
+  // 2.5.466: Sync queues NO game read. The path is only recorded ("not loaded this Sync"); an optional address the
+  // game no longer loads (SYNC_OPTIONAL_PATH_RX) goes on its own info list, never on the error list.
+  const optional=syncPathOptional(path);
+  if(session){const l=optional?(session.optionalNotLoaded||(session.optionalNotLoaded=[])):(session.notOnPage||(session.notOnPage=[]));if(!l.includes(path))l.push(path);}
+  try{trace('not-on-page',{path,lane:key,optional,queued:false});}catch{}
 }
+// Addresses the game may no longer load (0 hits in the 2026-11-12 capture): saved when the game loads them, otherwise
+// listed as "not loaded by the game"; they never fail Accounting or Executives.
+const SYNC_OPTIONAL_PATH_RX=/^\/api\/v\d+\/companies\/me\/administration-overhead\/?$|^\/api\/v\d+\/executives\/\d+\/?$/i;
+function syncPathOptional(path){return SYNC_OPTIONAL_PATH_RX.test(String(path||'').split('?')[0]);}
+// Lane wants that only Sync's not-on-page paths queued (up to 2.5.465): removed once at start-up (Sync queues none now).
+const SYNC_STALE_LANE_WANT_RX=/^(?:syncMissing|contracts|accounting)(?::|$)/;
+function gameLanePurgeSyncWants(){
+  return gameLaneSerial(async()=>{
+    const C=gameLaneCore();if(!C)return 0;
+    const st=C.laneState(await gameLaneLoad(),Date.now());
+    const gone=Object.keys(st.wants||{}).filter(k=>SYNC_STALE_LANE_WANT_RX.test(k));
+    if(!gone.length)return 0;
+    for(const k of gone)delete st.wants[k];
+    await gameLaneStore(st);
+    return gone.length;
+  });
+}
+try{gameLanePurgeSyncWants().catch(()=>{});}catch{}
 // Before walking: the page hook in the game tab must answer (hello). If not, the tab is reloaded once (navigation,
 // not an API read) and its hello awaited.
 async function syncEnsurePageHook(tabId,trace=()=>{}){
@@ -8149,7 +8259,7 @@ async function recoverRequiredEndpointsFinal({paths,sinceMs,captureFor,revisit=n
   }
   for(const path of pending){
     if(overBudget()){trace('required-endpoint-final-retry-skipped',{path,reason:'recovery-time-budget'});out.push({path,ok:false,source:null,reason:'recovery-time-budget'});continue;}
-    // Sync makes no Manager read: a path the game's pages did not load is reported and queued for the game lane.
+    // Sync makes no Manager read: a path the game's pages did not load is reported (not queued, 2.5.466).
     trace('not-on-page',{path,stage:'final-recovery'});
     try{await onMissing?.(path);}catch{}
     out.push({path,ok:false,source:null,reason:'not-on-page'});
@@ -8570,7 +8680,8 @@ function syncExtraWalkPages(realm){
     {name:'Map',labels:['Map'],hrefHints:['/landscape/','/map/','/map'],route:'/landscape/',expects:[/\/api\/v2\/companies\/me\/buildings\/?$/i],paths:[]},
     {name:'Market',labels:['Market','Exchange'],hrefHints:['/market/resource/'],route:'/market/resource/1/',expects:[/\/api\/v\d+\/market(?:-ticker)?\//i],paths:[]},
     {name:'Research',labels:['Research'],hrefHints:['/headquarters/warehouse/research/'],route:'/headquarters/warehouse/research/',expects:[/\/api\/v\d+\/players\/research\/?$/i],paths:['/api/v3/players/research/']},
-    {name:'Government orders',labels:['Government orders','Government'],hrefHints:['/government-orders/'],expects:[/\/api\/v\d+\/government-orders\//i],paths:[`/api/v3/government-orders/${realm}/`,'/api/v3/government-orders/tier/']},
+    // Government orders are not walked (2.5.466, user decision): the list comes from SimcoTools only
+    // (simcoPublicGovOrders); the player's tier (/government-orders/tier/) is saved from passive capture when the game loads it.
   ];
 }
 // An unreachable extra page matters only when nothing else proved its data still works: every direct read must have
@@ -8800,7 +8911,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
 
     const results=[];
     const isRequiredEndpoint=(target,path,paths)=>{
-      if(!Array.isArray(paths)||!paths.includes(path))return false;
+      if(!Array.isArray(paths)||!paths.includes(path)||syncPathOptional(path))return false;
       if(target.name==='Warehouse')return /\/api\/v3\/resources\/\d+\//i.test(path);
       if(target.name==='Contracts')return /\/api\/v3\/contracts-(?:incoming\/\d+\/me|outgoing\/me)(?:\/|$)/i.test(path);
       if(target.name==='Accounting')return ACCOUNTING_SYNC_PATHS.includes(path);
@@ -8831,8 +8942,19 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       if(!c||st<200||st>=300||Number(c.at)<Number(sinceMs)||!endpointDataIsValid(path,c.data))return null;
       return {ok:true,status:st,data:c.data,captureRealm:selected,fromPageCapture:true,receivedAt:c.receivedAt};
     };
+    const syncTargetPaths=(name,companyId)=>name==='Warehouse'
+      // Warehouse's authoritative, fast path is the resources endpoint. The /buildings/ API is Cloudflare-protected on
+      // the live game and must never block or fail a Warehouse sync (building state comes from the game-state capture).
+      ? (companyId>0?[`/api/v3/resources/${companyId}/`]:[])
+      : name==='Contracts'
+        ? realmContractPaths(selected)
+        : name==='Accounting'
+          ? ACCOUNTING_SYNC_PATHS.slice()
+          : name==='Executives'
+            ? [executivesRosterPath(companyId)].filter(Boolean)
+            : [];
     // Sync makes ZERO Manager game requests (2.5.465): a path comes from the walked page's own traffic, or it is
-    // reported 'not-on-page' and queued for the game lane (served in the next 5-min slot after the Sync).
+    // reported 'not-on-page' (recorded only; 2.5.466 queues no game read).
     const capturedUnder=(walkedUrl)=>{
       const want=String(walkedUrl||'').replace(/^https?:\/\/[^/]+/,'').split('?')[0];
       for(const [url,c] of Object.entries(session.walkCaptures||{})){
@@ -8842,12 +8964,26 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       }
       return null;
     };
+    // This visit's own request for the path, answered with an error status (latest one).
+    const walkFailedCaptureFor=path=>{
+      let out=null;
+      for(const [url,c] of Object.entries(session.walkCaptures||{})){
+        if(String(url).replace(/^https?:\/\/[^/]+/,'').split('?')[0]!==path)continue;
+        const st=Number(c?.status)||0;if(Number(c?.at)<walkSinceMs||(st>=200&&st<300))continue;
+        if(!out||Number(c.at)>out.at)out={ok:false,status:st,at:Number(c.at)};
+      }
+      return out;
+    };
     const pageGetWalked=async(path)=>{
       const page=walkCaptureFor(path);
       if(page){trace('walk-page-capture-used',{path,status:page.status});return page;}
+      // The game loaded it on an earlier page of this Sync (any walked page counts).
+      const earlier=syncCaptureFor(path,startedAt);
+      if(earlier){trace('walk-sync-capture-used',{path,status:earlier.status,receivedAt:earlier.receivedAt});return earlier;}
       // The page may still be answering: wait for this path (event-driven, at most SYNC_WALK_PATH_WAIT_MS since the visit).
-      const late=await waitForWalkPath(()=>walkCaptureFor(path),walkSinceMs);
-      if(late){trace('walk-page-capture-used',{path,status:late.status,late:true});return late;}
+      // A failed answer to the page's own request ends the wait too (it is reported below, not waited out).
+      const late=await waitForWalkPath(()=>walkCaptureFor(path)||walkFailedCaptureFor(path),walkSinceMs);
+      if(late&&late.ok){trace('walk-page-capture-used',{path,status:late.status,late:true});return late;}
       // A version-only move the page itself called (same data shape): its own response is used, stored under the fixed path.
       const stored=endpointDataForSyncRealm(await state(selected),selected);
       const walked=findMovedEndpoint(path,{...stored,...session.walkCaptures},[...ACCOUNTING_SYNC_PATHS,...realmContractPaths(selected)],walkSinceMs);
@@ -8859,8 +8995,16 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
           return {...moved,walkedPath:walked};
         }
       }else if(walked?.suspected){trace('endpoint-suspected-move',{path,suspected:walked.suspected});session.warnings?.push(`${path} may have moved to ${walked.suspected}; not adopted`);}
+      // The game page did request it, and the game answered with an error: that answer is reported with its status
+      // (an optional address only on the info list). The stored record is kept (recordAuthoritative refuses a failure).
+      const failed=walkFailedCaptureFor(path);
+      if(failed){
+        trace('walk-page-capture-failed',{path,status:failed.status,optional:syncPathOptional(path)});
+        if(syncPathOptional(path)){const l=session.optionalFailed||(session.optionalFailed=[]);if(!l.some(x=>x.path===path))l.push({path,status:failed.status});}
+        return {ok:false,status:failed.status,failedOnPage:true,optional:syncPathOptional(path),captureRealm:selected,error:`The game page's own request answered HTTP ${failed.status}.`};
+      }
       await syncNotOnPage(session,selected,path,trace);
-      return {ok:false,status:0,notOnPage:true,captureRealm:selected,error:'Not on the walked game page (queued for the game lane).'};
+      return {ok:false,status:0,notOnPage:true,optional:syncPathOptional(path),captureRealm:selected,error:syncPathOptional(path)?'Not loaded by the game (optional).':'Not loaded by the game pages this Sync.'};
     };
     // Visits a page by its link; if the link did not navigate and the route is known, by the game's router. The
     // result is true only if the page was reached. Stops visiting once the player has moved the tab themselves.
@@ -8870,11 +9014,33 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const wait=walkSettledAt+SYNC_WALK_NAV_GAP_MS-Date.now();if(wait>0)await new Promise(r=>setTimeout(r,wait));
       try{return await visitWalkPageOnce(...args);}finally{walkSettledAt=Date.now();}
     };
+    // One page click; when the tab is already on the target (2.5.466) the game's SPA sends nothing for it, so another
+    // game page is clicked first, then the target again: the game makes its own fresh requests (page clicks only).
+    const walkClickFresh=async(tabId,target)=>{
+      let visit=await pageReturn.walkClick(tabId,{name:target.name,labels:target.labels,hrefHints:target.hrefHints||[]});
+      if(visit?.ok&&visit.alreadyThere){
+        const bounce=syncBouncePage(target.name);
+        let away=await pageReturn.walkClick(tabId,bounce).catch(e=>({ok:false,error:e?.message||String(e)}));
+        if(!away?.ok||away.alreadyThere){
+          // The link was not usable here: the game's own router (history navigation) to the bounce page.
+          const origin=(await gameTabUrl(tabId)||'').match(/^https:\/\/[^/]+/)?.[0];
+          const spa=origin?await pageReturn.walkTo(tabId,origin+bounce.route).catch(()=>({ok:false})):{ok:false};
+          if(spa?.ok)away={ok:true,navigated:true,via:`route-${spa.via}`};
+        }
+        trace('walk-page-bounce',{name:target.name,via:bounce.name,ok:Boolean(away?.ok),error:away?.ok?undefined:safeWalkText(away?.error||'')});
+        if(away?.ok&&!away.alreadyThere){
+          await new Promise(r=>setTimeout(r,SYNC_WALK_NAV_GAP_MS));
+          const back=await pageReturn.walkClick(tabId,{name:target.name,labels:target.labels,hrefHints:target.hrefHints||[]});
+          visit={...back,bounced:bounce.name,ok:Boolean(back?.ok),navigated:Boolean(back?.ok&&back.navigated)};
+        }
+      }
+      return visit;
+    };
     const visitWalkPageOnce=async(tabId,target,sess)=>{
       try{
         if(await pageReturn.checkUser(tabId)){trace('walk-page-skipped',{name:target.name,reason:'user-navigated'});return {ok:false,skipped:'user-navigated'};}
         const startedAt=Date.now();
-        let visit=await pageReturn.walkClick(tabId,{name:target.name,labels:target.labels,hrefHints:target.hrefHints||[]});
+        let visit=await walkClickFresh(tabId,target);
         if(!visit?.ok&&target.route){
           const origin=(await gameTabUrl(tabId)||'').match(/^https:\/\/[^/]+/)?.[0];
           const spa=origin?await pageReturn.walkTo(tabId,origin+target.route):{ok:false};
@@ -8928,6 +9094,14 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     }
   };
 
+    // Every target's paths are captured from the FIRST walked page on (2.5.466): the game loads some of them on another
+    // target's page (outgoing contracts on the Warehouse page), and that answer counts for this Sync.
+    {
+      let cid=0;
+      try{const cur=await state();const st0=cur.realmStores?.[realmKeyFromRealm(selected)]||{};cid=Number(st0.authData?.authCompany?.companyId||st0.authData?.authCompany?.id||cur.authData?.authCompany?.companyId||cur.authData?.authCompany?.id)||0;}catch{}
+      for(const t of targets)for(const p of syncTargetPaths(t.name,cid))session.syncCapturePaths.add(p);
+      trace('sync-capture-paths',{count:session.syncCapturePaths.size});
+    }
     for(let i=0;i<targets.length;i++){
       const target=targets[i];
       const step=i+1;
@@ -8952,25 +9126,13 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         companyId=Number(selectedStore.authData?.authCompany?.companyId||selectedStore.authData?.authCompany?.id||current.authData?.authCompany?.companyId||current.authData?.authCompany?.id)||0;
       }catch{}
 
-      const authoritativePaths=target.name==='Warehouse'
-        // Warehouse's authoritative, fast path is the resources endpoint.
-        // The /buildings/ API is Cloudflare-protected on the live game and
-        // must never block or fail an otherwise valid Warehouse sync. Building
-        // state is enriched separately from the game's game-state/localStorage
-        // capture, which is realm-bound and does not require a second DOM crawl.
-        ? (companyId>0?[`/api/v3/resources/${companyId}/`]:[])
-        : target.name==='Contracts'
-          ? realmContractPaths(selected)
-            : target.name==='Accounting'
-              ? ACCOUNTING_SYNC_PATHS.slice()
-              : target.name==='Executives'
-                ? [executivesRosterPath(companyId)].filter(Boolean)
-                : [];
+      const authoritativePaths=syncTargetPaths(target.name,companyId);
 
       row.optional=Boolean(target.optional);
       row.startedAtMs=targetStartedAt;
       row.requestedPaths=authoritativePaths.slice();
-      session.capturePaths=authoritativePaths.slice();
+      // The visit waits only for the required paths; an optional one (the game may no longer load it) is taken if seen.
+      session.capturePaths=authoritativePaths.filter(p=>!syncPathOptional(p));
       for(const p of authoritativePaths)session.syncCapturePaths.add(p);
       if(!authoritativePaths.length){
         row.authoritativeFailures=[{path:null,status:0,error:'No authoritative API path could be resolved from the selected realm state.'}];
@@ -9085,11 +9247,12 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
           try{ chrome.tabs.sendMessage(currentTab.id,{type:'PAGE_GAME_STATE'}).catch(()=>{}); }catch{}
         }
         if(target.name==='Contracts' && !row.endpoint) row.endpoint=directResults.find(x=>x.ok)?.path||null;
-        if(target.name==='Accounting' && directSuccessCount<authoritativePaths.length){
+        // Only a missing REQUIRED Accounting path clicks the page again; an optional one the game does not load does not.
+        if(target.name==='Accounting' && directResults.filter(x=>x.ok&&!syncPathOptional(x.path)).length<authoritativePaths.filter(p=>!syncPathOptional(p)).length){
           trace('accounting-partial-direct-capture',{successCount:directSuccessCount,requestedCount:authoritativePaths.length});
           const fallbackStart=Date.now();
           let click={ok:false,error:'Accounting UI enrichment not attempted.'};
-          try{ click=await pageReturn.walkClick(currentTab.id,{name:'Accounting',labels:target.labels,hrefHints:target.hrefHints||[]}); }catch(e){ click={ok:false,error:e?.message||String(e)}; }
+          try{ click=await walkClickFresh(currentTab.id,target); }catch(e){ click={ok:false,error:e?.message||String(e)}; }
           row.accountingUiEnrichment={click};
           if(click?.ok){
             const recovered=await waitForEndpointCapture('accounting',fallbackStart,Math.max(SYNC_CAPTURE_FALLBACK_MS,12000),selected).catch(()=>null);
@@ -9131,9 +9294,10 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
               trace('executive-detail-request',{path});
               const response=await pageGetWalked(path,selected,null,'sync-executives');
               const ok=await recordAuthoritative(path,response,row);
-              if(ok)details.saved++;else details.failed.push({path,status:Number(response?.status)||0,error:response?.error||null});
+              if(ok)details.saved++;else if(response?.notOnPage)(details.notLoaded||(details.notLoaded=[])).push(path);else details.failed.push({path,status:Number(response?.status)||0,error:response?.error||null});
             }catch(e){details.failed.push({path,status:0,error:e?.message||String(e)});}
           }
+          // Executive records the game did not load are info (optional address), not a warning; a failed answer still warns.
           if(details.failed.length)session.warnings.push(`${details.failed.length} of ${details.requested} executive records not captured (${details.failed[0].path}: HTTP ${details.failed[0].status})`);
           // Trainings done per executive: the Executives tab reads this company-wide count, and the game
           // only requests it when its Executives page opens, so Sync must fetch it itself.
@@ -9164,7 +9328,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         let click={ok:false,error:'UI fallback not yet attempted.'};
         const fallbackStart=Date.now();
         try{
-          click=await pageReturn.walkClick(currentTab.id,{name:target.name,labels:target.labels,hrefHints:target.hrefHints||[]});
+          click=await walkClickFresh(currentTab.id,target);
         }catch(e){click={ok:false,error:e?.message||String(e)};}
         row.click=click;
         row.fallbackUsed=true;
@@ -9276,7 +9440,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
             // The status that started (or holds) the pause is named per path: a 503 (busy) is not the 403 bot block.
             
             if(r?.walkedPath)session.warnings.push(`${path} moved to ${r.walkedPath}`);
-            else if(!r?.ok&&!endpointFailureSuggestsMove(r,path))session.warnings.push(`${path} failed (HTTP ${Number(r?.status)||0})`);
+            else if(!r?.ok&&!r?.notOnPage&&!endpointFailureSuggestsMove(r,path))session.warnings.push(`${path} failed (HTTP ${Number(r?.status)||0})`);
           }
         }catch(e){extra.error=e?.message||String(e);session.warnings.push(`${page.name} walk failed: ${extra.error}`);}
         if(extra.pageVisit&&extraPageVisitNeedsWarning(page,extra))session.warnings.push(`${page.name} page not reached: ${extra.pageVisit.error||'no navigation'}`);
@@ -9360,10 +9524,17 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const requiredPaths=requestedPaths.filter(path=>isRequiredEndpoint(target,path,requestedPaths));
       const verificationByPath=new Map();
       const retryPaths=[];
-      const verifyPath=async requiredPath=>withSyncTimeout(
-        verifyDurableEndpointWrite(selected,requiredPath,result.startedAtMs||startedAt,null,null,target.name==='Accounting'),
-        3000,`Final durable endpoint verification ${requiredPath}`
-      );
+      const verifyPath=async requiredPath=>{
+        const v=await withSyncTimeout(
+          verifyDurableEndpointWrite(selected,requiredPath,result.startedAtMs||startedAt,null,null,target.name==='Accounting',{acceptRecentGameMs:SYNC_RECENT_GAME_CAPTURE_MS}),
+          3000,`Final durable endpoint verification ${requiredPath}`
+        );
+        if(v?.ok&&v.fromGamePage){
+          (session.fromGamePage||(session.fromGamePage=[])).push({target:result.name,path:requiredPath,receivedAt:v.receivedAt,at:v.fromGamePageAt});
+          trace('target-required-endpoint-from-game-page',{name:result.name,path:requiredPath,receivedAt:v.receivedAt,text:`from the game page at ${v.fromGamePageAt}`});
+        }
+        return v;
+      };
       for(const requiredPath of requiredPaths){
         let verification={ok:false,reason:'required-endpoint-not-durable'};
         try{verification=await verifyPath(requiredPath);}catch(e){verification={ok:false,reason:e?.message||String(e)};}
@@ -9381,7 +9552,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         // The game's own response from this Sync first; a direct read gets 403 under bot protection.
         result.finalRecovery=await recoverRequiredEndpointsFinal({
           paths:retryPaths,
-          sinceMs:result.startedAtMs||startedAt,
+          // Any walked page of this Sync counts (2.5.466), not only this target's own visit.
+          sinceMs:startedAt,
           captureFor:syncCaptureFor,
           revisit:async paths=>{
             const tab=await simTab();
@@ -9437,10 +9609,25 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     const successful=successfulAfterDurability;
     const failed=failedAfterDurability;
     const executivesSummary=executivesSyncSuffix(results.find(result=>result.name==='Executives'));
-    if(session.notOnPage?.length)session.warnings.unshift(`${session.notOnPage.length} game address(es) were not loaded by the walked pages; queued for the game lane: ${session.notOnPage.slice(0,6).join(', ')}`);
+    // 2.5.466: only a REQUIRED address still missing is a warning. Addresses the game did not load that are optional, not
+    // required, or verified from the game's own recent load go on the info list (syncInfo), never in syncError.
+    const missingPathSet=new Set(missingRequiredEndpoints.map(item=>item.path));
+    const notLoadedRequired=(session.notOnPage||[]).filter(p=>missingPathSet.has(p));
+    const notLoadedOther=(session.notOnPage||[]).filter(p=>!missingPathSet.has(p)&&!(session.fromGamePage||[]).some(x=>x.path===p));
+    if(notLoadedRequired.length)session.warnings.unshift(`${notLoadedRequired.length} required game address(es) not loaded by the game pages this Sync: ${notLoadedRequired.slice(0,6).join(', ')}`);
+    const syncInfo=[];
+    for(const x of session.fromGamePage||[])syncInfo.push(`${x.target}: ${x.path} from the game page at ${x.at}`);
+    const optionalMissed=[...new Set([...(session.optionalNotLoaded||[]),...notLoadedOther])];
+    for(const x of session.optionalFailed||[])syncInfo.push(`optional ${x.path}: the game answered HTTP ${x.status}; stored value kept`);
+    if(optionalMissed.length)syncInfo.push(`${optionalMissed.length} optional game address(es) not loaded by the game: ${optionalMissed.slice(0,6).join(', ')}${optionalMissed.length>6?` +${optionalMissed.length-6} more`:''}`);
+    if(syncInfo.length)trace('sync-info',{info:syncInfo});
     const endpointWarnings=[...new Set((session.warnings||[]).map(w=>safeWalkText(w)))];
     if(endpointWarnings.length)trace('endpoint-warnings',{count:endpointWarnings.length,warnings:endpointWarnings});
-    const finalStatusBase=`${realmDisplayNumber(selected)||'Realm'} Sync ${requiredOk?'complete':'finished with errors'} · ${successful}/${targets.length} targets captured${accountingSuffix}${executivesSummary}`;
+    // Plain line when every required target is in ("R2 Sync complete · 4/4"); the detail stays for a failed Sync.
+    // ("complete" is kept: the dashboard and the post-Sync checks match /Sync complete/.)
+    const finalStatusBase=requiredOk
+      ?`${realmDisplayNumber(selected)||'Realm'} Sync complete · ${successful}/${targets.length}`
+      :`${realmDisplayNumber(selected)||'Realm'} Sync finished with errors · ${successful}/${targets.length} targets captured${accountingSuffix}${executivesSummary}`;
     let finalStatus=`${finalStatusBase}${syncWarningsSuffix(endpointWarnings)}`;
     const finalSyncError=requiredOk?null:`${failedAfterDurability} target(s) failed; ${missingRequiredEndpoints.length} required endpoint(s) were not durably verified.${endpointWarnings.length?` Endpoint problems: ${endpointWarnings.join('; ')}.`:''}`;
 
@@ -9471,6 +9658,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       walkResults:results,
       walkReport,
       endpointWarnings,
+      syncInfo,
       endpointCount:Object.keys(diagnosticStore.endpointData||{}).length,
       warehouseRows:Array.isArray(diagnosticStore.warehouseResources)?diagnosticStore.warehouseResources.length:0,
       startedAt,
@@ -9550,6 +9738,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
           walkResults:results,
           walkReport,
           endpointWarnings,
+          syncInfo,
           endpointCount:Object.keys(enrichStore.endpointData||{}).length,
           warehouseRows:Array.isArray(enrichStore.warehouseResources)?enrichStore.warehouseResources.length:0,
           startedAt,
@@ -9579,9 +9768,9 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       }
       // Cleanup is centralized in finally so the capture boundary is released
       // exactly once and cannot hold the caller open indefinitely.
-      return {ok:true,realm:selected,results,walkReport,marketCrawl,endpointWarnings,total,successful,failed,elapsedMs:Date.now()-startedAt};
+      return {ok:true,realm:selected,results,walkReport,marketCrawl,endpointWarnings,syncInfo,total,successful,failed,elapsedMs:Date.now()-startedAt};
     }
-    return {ok:false,realm:selected,results,walkReport,marketCrawl,endpointWarnings,total,successful,failed,missingRequiredWrites,missingRequiredEndpoints,elapsedMs:Date.now()-startedAt,error:finalSyncError};
+    return {ok:false,realm:selected,results,walkReport,marketCrawl,endpointWarnings,syncInfo,total,successful,failed,missingRequiredWrites,missingRequiredEndpoints,elapsedMs:Date.now()-startedAt,error:finalSyncError};
   }catch(e){
     const error=e?.message||String(e);
     // A transient failure that the automatic retry will run again is not an error-log entry; the retry's own failure is.
@@ -10994,7 +11183,9 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       const isTake=String(m.method||'').toUpperCase()==='POST'&&collectTakeBuildingIdFromUrl(m.url)!=null;
       // 2.5.465: a game Collect queues collectWarehouse:<realm> (prio 1, first in the next game slot); a burst shares one want.
       if(realm!=null&&isTake){gameLaneEnqueue(`collectWarehouse:${realm}`).catch(()=>{});return;}
-      if(realm!=null){scheduleWarehouseRefreshAfterStockMutation(realm,150);scheduleOwnOrdersRefresh(realm);}})();
+      // 2.5.466: a listing post/cancel is applied from the game's own reply at once (no read of the Manager's own).
+      let applied=false;if(realm!=null){try{applied=await applyGameListingReply(realm,m.method,m.url,m.data);}catch(e){logError('listing-reply',e);}}
+      if(realm!=null){scheduleWarehouseRefreshAfterStockMutation(realm,150);if(!applied)scheduleOwnOrdersRefresh(realm);}})();
     send({ok:true});return true}
   if(m?.type==='WAREHOUSE_COST_DETAIL'){saveWarehouseCostDetail(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='REPLAY_EVENT'){
