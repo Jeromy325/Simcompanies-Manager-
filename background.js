@@ -564,6 +564,7 @@ async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,
     return {ok:true};
   }catch(e){
     // Not this job's lane slot yet: a "waiting" line (parts read so far wait for the next slot).
+    if(e?.laneWait&&gameRefusalActive()){logActivityAnyRealm('game-constants','skipped',{refused:true,nextAt:Number(gameRefusalMem.until),parts:Object.keys(partial).length},gameRefusalText(gameRefusalMem.until)+'; the stored constants stay in use');return {ok:true,skipped:true,laneWait:true,refused:true,reason:'refused'};}
     if(e?.laneWait){logActivityAnyRealm('game-constants','waiting',{laneWait:true,nextAt:Number(e.nextAt)||0,parts:Object.keys(partial).length},laneWaitText(e.nextAt));return {ok:true,skipped:true,laneWait:true,reason:'lane',parts:Object.keys(partial).length};}
     const error=capRefreshError(e?.message||e);
     // No game tab / page bridge not ready / page unloaded: a "not read" line, no backoff step.
@@ -971,7 +972,9 @@ function laneWaitText(nextAt){return Number(nextAt)>0?`Waiting for the 5-min gam
 // 'other-realm' from a local realm check (two realms: the tab is in the one that is not `realm`).
 function otherRealmReason(code,realm){const n=validRealmNumber(realm);return code==='other-realm'&&n!=null?{reason:code,realmMismatch:true,error:`The game tab is in ${realmDisplayNumber(n===0?1:0)}, not ${realmDisplayNumber(n)}.`}:code;}
 function logNotRead(realm,job,v,details={},startedMs=Date.now(),trigger='manager'){return logActivity(realm,job,'not-read',details,notReadReason(v),startedMs,trigger);}
-function logLaneWait(realm,job,nextAt,details={},startedMs=Date.now(),trigger='manager'){return logActivity(realm,job,'waiting',{...details,laneWait:true,...(Number(nextAt)>0?{nextAt:Number(nextAt)}:{})},laneWaitText(nextAt),startedMs,trigger);}
+function logLaneWait(realm,job,nextAt,details={},startedMs=Date.now(),trigger='manager'){
+  if(typeof gameRefusalActive==='function'&&gameRefusalActive())return logActivity(realm,job,GAME_REFUSAL_COVERED_JOBS.has(job)?'skipped':'not-read',{...details,refused:true,nextAt:Number(gameRefusalMem.until)},gameRefusalText(gameRefusalMem.until),startedMs,trigger);
+  return logActivity(realm,job,'waiting',{...details,laneWait:true,...(Number(nextAt)>0?{nextAt:Number(nextAt)}:{})},laneWaitText(nextAt),startedMs,trigger);}
 // Anti-spam for not-read / waiting lines only: the same realm + job + outcome + error at most once per 60 s; the next
 // line written for it carries details.repeats (how many were held back since). Memory only (a worker restart may lose
 // the count). Success / failure lines are never held back. "No game tab is open" uses 30 min (ACTIVITY_REPEAT_NO_TAB_MS):
@@ -2057,7 +2060,9 @@ async function recordBackgroundJobEvent(realm,event={}){
   // A read that waited for the shared game lane made no request: a "waiting" line (planned pace, not a problem).
   if(event?.laneWait||details0.laneWait||isGameLaneWait(event?.error)||isGameLaneWait(details0.error)){
     const nextAt=Number(details0.nextAt??event?.nextAt)||0;
-    event={...event,outcome:'waiting',error:/^Waiting for the 5-min game slot/.test(String(event?.error||''))?event.error:laneWaitText(nextAt),details:{...details0,laneWait:true}};
+    // While the game's security check has paused Manager reads, the wait is that pause, not the 5-min slot.
+    if(typeof gameRefusalActive==='function'&&gameRefusalActive())event={...event,outcome:GAME_REFUSAL_COVERED_JOBS.has(String(event?.job||''))?'skipped':'not-read',error:gameRefusalText(gameRefusalMem.until),details:{...details0,laneWait:false,refused:true,nextAt:Number(gameRefusalMem.until)}};
+    else event={...event,outcome:'waiting',error:/^Waiting for the 5-min game slot/.test(String(event?.error||''))?event.error:laneWaitText(nextAt),details:{...details0,laneWait:true}};
   }
   // not-read / waiting: identical lines at most once per 60 s, "no game tab" once per 30 min (activityRepeatCheck); the next one carries details.repeats.
   // Quiet not-read lines (tab hidden / offline): one per job per stretch (activityStretchCheck).
@@ -4679,6 +4684,20 @@ function noteGameBackoffAnswer(path,status){const st=Number(status)||0;if(GAME_B
 // Startup: the old pause record (storage.session 'scmDirectReadsBlocked', up to 2.5.464) is removed once.
 const LEGACY_DIRECT_READ_BLOCK_KEY='scmDirectReadsBlocked';
 try{chrome.storage?.session?.remove?.(LEGACY_DIRECT_READ_BLOCK_KEY)?.catch?.(()=>{});}catch{}
+// 2.5.466: the game's Cloudflare check refuses the Manager's own reads with a 403 "Attention Required" page (the
+// game signs its own requests with X-Prot/X-Ts; the Manager never forges them). Only that answer (not a plain 403)
+// pauses every Manager game read for 1 h; then one read tries again. Meanwhile the game pages the user opens
+// (passive capture) and SimcoTools keep the data current. State: storage.session scmGameRefusal {at,until,path}.
+const GAME_REFUSAL_KEY='scmGameRefusal',GAME_REFUSAL_PAUSE_MS=60*60000;
+let gameRefusalMem=null,gameRefusalLoaded=false;
+function isGameSecurityRefusal(r){if(Number(r?.status)!==403)return false;const t=typeof r?.data==='string'?r.data:'';return /cloudflare|attention required|cf-ray|cf-chl|cf-error/i.test(t);}
+async function gameRefusalGet(){if(!gameRefusalLoaded){gameRefusalLoaded=true;try{const v=(await chrome.storage.session.get(GAME_REFUSAL_KEY))?.[GAME_REFUSAL_KEY];if(v&&Number(v.until)>0&&!gameRefusalMem)gameRefusalMem=v;}catch{}}return gameRefusalMem;}
+function gameRefusalActive(now=Date.now()){return Boolean(gameRefusalMem&&Number(gameRefusalMem.until)>now);}
+async function gameRefusalSet(path){const now=Date.now();gameRefusalLoaded=true;gameRefusalMem={at:now,until:now+GAME_REFUSAL_PAUSE_MS,path:String(path||'').slice(0,200)};try{await chrome.storage.session.set({[GAME_REFUSAL_KEY]:gameRefusalMem});}catch{}gameLaneScheduleAlarm(gameRefusalMem.until+1000).catch(()=>{});}
+async function gameRefusalClear(){gameRefusalLoaded=true;if(!gameRefusalMem)return;gameRefusalMem=null;try{await chrome.storage.session.remove(GAME_REFUSAL_KEY);}catch{}}
+function gameRefusalText(until){return `Not read: the game's security check (Cloudflare) refuses the Manager's own game reads; this updates from the game pages you open and from SimcoTools${Number(until)>0?` (next try ${laneWaitClock(until)})`:''}`;}
+// Jobs SimcoTools (or the built-in copy) already covers: a paused read of these is "skipped", not "not read".
+const GAME_REFUSAL_COVERED_JOBS=new Set(['order-book-refresh','game-constants','abundance','market-ticker']);
 // ---- Shared game-request lane (rules: SCM_TIMERS_CORE.laneDecide in timers-core.js) ----
 // The game's API guide: GET only, at most one request every 5 minutes; suspected bots get a captcha. EVERY Manager
 // game read (alarm, timer, card poll, Refresh button, opening a product, dashboard refresh, overlay) goes through the
@@ -4708,6 +4727,9 @@ function gameLaneDecide(key,{peek=false}={}){
   return gameLaneSerial(async()=>{
     // timers-core.js is part of the package (importScripts); only a stripped harness lacks it: the read goes as before.
     const C=gameLaneCore();if(!C)return {take:true,noLane:true,nextAt:Date.now()};
+    // The game's security check refused a Manager read: no slot until the pause ends (the want stays queued).
+    const ref=typeof gameRefusalGet==='function'?await gameRefusalGet():null;
+    if(ref&&Number(ref.until)>Date.now()){const p=C.laneDecide(await gameLaneLoad(),key,Date.now(),{peek:true});await gameLaneStore(p.state);gameLaneScheduleAlarm(Number(ref.until)+1000).catch(()=>{});return {take:false,reason:'refused',refused:true,nextAt:Number(ref.until),state:p.state};}
     const d=C.laneDecide(await gameLaneLoad(),key,Date.now(),{peek});
     await gameLaneStore(d.state);
     if(!d.take&&Object.keys(d.state.wants||{}).some(k=>gameLaneHasRunner(C,k)))gameLaneScheduleAlarm(d.nextAt).catch(()=>{});
@@ -4733,7 +4755,7 @@ function gameLaneResult(key,{ok,status}={}){
   });
 }
 function gameLaneDropWant(key){return gameLaneSerial(async()=>{const C=gameLaneCore();if(!C)return;const st=C.laneState(await gameLaneLoad(),Date.now());if(!st.wants[key])return;delete st.wants[key];await gameLaneStore(st);});}
-function gameLaneWaitResponse(path,d){return {ok:false,status:0,skipped:true,laneWait:true,queued:true,reason:d?.reason||'gap',nextAt:Number(d?.nextAt)||0,error:GAME_LANE_WAIT_TEXT,path:String(path||'')};}
+function gameLaneWaitResponse(path,d){return {ok:false,status:0,skipped:true,laneWait:true,queued:true,reason:d?.reason||'gap',nextAt:Number(d?.nextAt)||0,error:d?.refused?gameRefusalText(d.nextAt):GAME_LANE_WAIT_TEXT,...(d?.refused?{refused:true}:{}),path:String(path||'')};}
 function isGameLaneWait(v){return Boolean(v?.laneWait)||String(v?.error??v?.message??v??'').includes(GAME_LANE_WAIT_TEXT);}
 // The lane job of a read whose caller named none (Refresh buttons, opening a product, dashboard / overlay reads).
 // Keys are '<job>' or '<job>:<realm>' (laneKeyOk).
@@ -4817,6 +4839,9 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
     if(r?.ok&&tr!=null&&rr==null&&/\/me\//.test(String(path))&&!/\/api\/v3\/companies\/auth-data\//.test(String(path))){traceDiag('pageget-realm-unknown',{attempt:1,tabId:tab.id,targetRealm:tr});return {ok:false,status:0,error:'The game tab has not shown which realm it is in yet.',realmUnknown:true};}
     if(r?.ok&&tr!=null&&rr!=null&&rr!==tr&&!/\/api\/v3\/companies\/auth-data\//.test(String(path))){traceDiag('pageget-realm-mismatch',{attempt:1,tabId:tab.id,targetRealm:tr,tabRealm:rr});return {ok:false,status:0,error:`The game tab is in ${realmDisplayNumber(rr)||'the other realm'}, not ${realmDisplayNumber(tr)||'the requested realm'}.`,captureRealm:rr,realmMismatch:true};}
     if(!r?.ok)noteGameBackoffAnswer(path,Number(r?.status)||0);
+    // Cloudflare refused it: pause every Manager read for 1 h; the caller logs a "not read" line, not a failure.
+    if(r&&isGameSecurityRefusal(r)){traceDiag('pageget-security-refusal',{attempt:1});await gameRefusalSet(path);return {ok:false,status:403,skipped:true,laneWait:true,refused:true,queued:true,reason:'refused',nextAt:Number(gameRefusalMem?.until)||0,error:gameRefusalText(gameRefusalMem?.until),path:String(path||'')};}
+    if(r?.ok)gameRefusalClear().catch(()=>{});
     return r||{ok:false,status:0,error:'No response from Sim Companies page.'};
   }finally{managerReadsInFlight--;}
 }
@@ -10442,6 +10467,10 @@ async function scmRunSelfTest(opts={}){
     if(tabRealm!=null&&syncSessionForRealm(tabRealm)){add('live-fetch','Live read-only fetch','skip','A sync is running; skipped to respect rate limits');return;}
     scmSelfTestLiveAt=now;const t0=Date.now();
     const r=await pageGet('/api/v3/companies/auth-data/',tabRealm,null,'self-test',{timeoutMs:8000,attempts:1}).catch(e=>({ok:false,status:0,error:e?.message||String(e)}));
+    // 2.5.466: the shared 5-min game slot was taken = planned pace, not a failure (live self-test said FAIL). No read was
+    // sent; its want is dropped so the self-test leaves nothing queued, and the cooldown is not spent.
+    if(r?.refused){scmSelfTestLiveAt=0;add('live-fetch','Live read-only fetch','skip',`${gameRefusalText(r.nextAt)}.`);return;}
+    if(isGameLaneWait(r)){gameLaneDropWant(gameLaneKeyForPath('/api/v3/companies/auth-data/',tabRealm)).catch(()=>{});scmSelfTestLiveAt=0;const s=Math.max(0,Math.ceil((Number(r?.nextAt)-Date.now())/1000));add('live-fetch','Live read-only fetch','skip',`Waiting for the game slot (one Manager game read every 5 min)${s?`; next slot in ${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`:''}. Run again then.`);return;}
     const v=C.evalLiveFetch(r);add('live-fetch','Live read-only fetch',v.status,v.status==='pass'?'GET auth-data returned 200 with the expected shape':`GET auth-data: ${r?.error?String(r.error).slice(0,160):`status ${v.httpStatus}`}`,{httpStatus:v.httpStatus,shapeOk:v.shapeOk,ms:Date.now()-t0});});
   // 5. Calculations sanity on stored data (core market pricing)
   await safe('calc','Calculations sanity',async()=>{
@@ -11168,7 +11197,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     return true;
   }
   // Both request channels at a glance (game lane + SimcoTools): SCM_TIMERS_CORE.channelSnapshot over storage.session.
-  if(m?.type==='scm-channels-snapshot'){(async()=>{try{const C=globalThis.SCM_TIMERS_CORE;if(!C||typeof C.channelSnapshot!=='function'){send({ok:false,error:'channelSnapshot unavailable'});return;}const simKey=C.SIMCO?.KEY||'scmSimcoChannel';const v=await chrome.storage.session.get([C.LANE.KEY,simKey]);const snap=C.channelSnapshot(v?.[C.LANE.KEY]||null,v?.[simKey]||null,Date.now());send({ok:true,snapshot:snap,...snap});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;}
+  if(m?.type==='scm-channels-snapshot'){(async()=>{try{const C=globalThis.SCM_TIMERS_CORE;if(!C||typeof C.channelSnapshot!=='function'){send({ok:false,error:'channelSnapshot unavailable'});return;}const simKey=C.SIMCO?.KEY||'scmSimcoChannel';const v=await chrome.storage.session.get([C.LANE.KEY,simKey]);const snap=C.channelSnapshot(v?.[C.LANE.KEY]||null,v?.[simKey]||null,Date.now());{const ref=await gameRefusalGet();if(ref&&Number(ref.until)>Date.now()&&snap?.game)snap.game.nextAt=Math.max(Number(snap.game.nextAt)||0,Number(ref.until)),snap.game.paused={until:Number(ref.until),refused:true,reason:"the game's security check refuses Manager reads; pages you open and SimcoTools keep the data current"};}send({ok:true,snapshot:snap,...snap});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;}
   if(m?.type==='STOCK_MUTATION_COMPLETE'){
     // An untagged action belongs to the active realm. Check for null first: validRealmNumber(null) is 0 (R1).
     (async()=>{let realm=(m.captureRealm===null||m.captureRealm===undefined||m.captureRealm==='')?null:validRealmNumber(m.captureRealm);

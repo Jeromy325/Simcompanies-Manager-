@@ -152,7 +152,10 @@
       tile('company', 'EVA this week', sbig(thisW?.v), thisW && lastW ? `${thisW.v >= lastW.v ? 'up' : 'down'} on last week` : `${thisW?.days || 0} days so far`, thisW && lastW ? tone(thisW.v - lastW.v) : ''),
       tile('margins', 'Earned from sales', big(m.earned), `${S.days} days, after cost and fee${m.earnedBy.contract || m.earnedBy.retail ? ' · all channels' : ''}`),
       tile('stock', 'Warehouse vs cost', sbig(m.stock.diff), `${big(m.stock.value)} at today's prices`, '', tone(m.stock.diff)),
-      tile('fees', 'Exchange fees', big(m.fees.paid), m.rate != null ? `${pct(m.rate, 2)} of ${big(m.fees.gross)} sold` : 'no fee rows yet'),
+      // No paired ledger fee rows (ledger pages not captured): the game's day statements still give the company total.
+      (() => { const dayFees = m.feeDays.filter(d => d.t >= m.now - S.days * 864e5).reduce((a, d) => a + d.fee, 0);
+        return m.fees.paid > 0 || !(dayFees > 0) ? tile('fees', 'Exchange fees', big(m.fees.paid), m.rate != null ? `${pct(m.rate, 2)} of ${big(m.fees.gross)} sold` : 'no fee rows yet')
+          : tile('fees', 'Exchange fees', big(dayFees), `${S.days} days, from the game's day statements`); })(),
       tile('cash', 'Idle cash', pct(ca?.shareNow, 0), 'of total assets', 'an-warn')
     ].join('');
     const pts = cut(c?.pts || [], 30);
