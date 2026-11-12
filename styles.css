@@ -1872,3 +1872,24 @@ html.scm-mobile table.mobile-cards tr:has(>td[colspan]:only-child){border:0!impo
 .exec-lookup .el-own{background:rgba(126,191,104,.10);padding-left:6px;padding-right:6px;border-radius:8px}
 .exec-lookup .ch-note{margin-top:8px;font-size:11px}
 @media(max-width:650px){.exec-lookup-form label:first-child{flex-basis:100%}.exec-lookup-form label:nth-child(2){flex:1 1 120px}}
+
+/* Update channels card (Overview and Settings > Background timers) */
+.scm-channels-card h3{margin:0}
+.scm-ch-cols{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px}
+.scm-ch-col{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-sm,8px);padding:12px;min-width:0}
+.scm-ch-colhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.scm-ch-colhead h4{margin:0;font-size:var(--fs-md)}
+.scm-ch-rule{color:var(--text-2);font-size:var(--fs-xs)}
+.scm-ch-rows{margin:0}
+.scm-ch-rows>div{display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px solid var(--border);font-size:var(--fs-sm)}
+.scm-ch-rows dt{color:var(--text-2);flex:0 0 auto}
+.scm-ch-rows dd{margin:0;text-align:right;min-width:0;overflow-wrap:anywhere}
+.scm-ch-qhead{margin-top:10px;color:var(--text-2);font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:.04em}
+.scm-ch-queue{list-style:none;margin:6px 0 0;padding:0}
+.scm-ch-queue li{display:flex;flex-direction:column;gap:2px;padding:6px 0;border-bottom:1px solid var(--border);font-size:var(--fs-sm);overflow-wrap:anywhere}
+.scm-ch-queue li:last-child{border-bottom:0}
+.scm-ch-dim,.scm-ch-empty{color:var(--text-2)}
+.scm-ch-empty{font-size:var(--fs-sm);padding:6px 0}
+.scm-ch-ok{color:var(--good,#6fbf73)}
+.scm-ch-bad{color:var(--warn,#e0b44c)}
+@media(max-width:720px){.scm-ch-cols{grid-template-columns:1fr}}

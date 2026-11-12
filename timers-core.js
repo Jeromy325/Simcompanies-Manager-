@@ -15,7 +15,7 @@
     { id: 'orderBook', label: 'Game market prices (order books)', group: 'Service worker', kind: 'interval', unit: 'min', default: 5, min: 5, max: 30, hitsServer: true, server: 'game', alarmName: 'scm-order-book-refresh',
       description: 'Reads one product\'s game order book when the shared game-request slot is free (at most one game request every 5 minutes for all background jobs). This is the price the Manager shows first. When off, these game prices stop updating.' },
     { id: 'liveMarket', label: 'SimcoTools backup prices and VWAP', group: 'Service worker', kind: 'interval', unit: 'min', default: 5, min: 5, max: 720, hitsServer: true, server: 'SimcoTools', alarmName: 'scm-live-market-refresh',
-      description: "Every 5 min, one SimcoTools request for the due job: prices every 15 min, government orders hourly, phases, events and company history as a backup to the game pages, building and resource data daily. One gate: 2 per second, 500 ms apart, a 429 pauses 5 min." },
+      description: "Every 5 min, one SimcoTools request for the due job: prices every 15 min, government orders hourly, phases, events and company history as a backup to the game pages, building and resource data daily. SimcoTools allows 2 requests per second (burst 25); it never waits for the game. When SimcoTools is down, the Manager retries after 1, 2, 5, 10, then every 15 min." },
     { id: 'criticalGuard', label: 'Lost data check', group: 'Service worker', kind: 'interval', unit: 'min', default: 10, min: 10, max: 120, hitsServer: true, server: 'game', alarmName: 'scm-critical-data-guard',
       description: 'Checks that saved contracts and VWAP are still there; a missing one is read again in the shared game-request slot (one background game request every 5 min). When off, lost contracts or VWAP stay missing until the next Sync.' },
     { id: 'gameConstants', label: 'Game constants refresh', group: 'Service worker', kind: 'interval', unit: 'min', default: 360, min: 360, max: 1440, hitsServer: true, server: 'game', alarmName: 'scm-game-constants',
@@ -33,7 +33,7 @@
     { id: 'listingsRefresh', label: 'My listings and contracts refresh', group: 'Game page', kind: 'interval', unit: 'sec', default: 15, min: 15, max: 300, hitsServer: true, server: 'game',
       description: 'While the game tab is visible and the listings card is open, re-reads your exchange listings and outgoing contracts about every 15 min each in the shared slot (1 game request per 5 min). When off, the card updates only after a game action.' },
     { id: 'dashLiveMarket', label: 'Dashboard market refresh', group: 'Dashboard', kind: 'interval', unit: 'min', default: 5, min: 5, max: 60, hitsServer: true, server: 'SimcoTools',
-      description: "While the dashboard Market or Warehouse tab is open, refreshes prices for the realm and the product you look at, through the shared SimcoTools gate (500 ms between calls, 429 pauses 5 min). When off, they update only when you press Refresh." },
+      description: "While the dashboard Market or Warehouse tab is open, refreshes prices for the realm and the product you look at, through SimcoTools (2 requests per second, burst 25; when it is down, retried after 1, 2, 5, 10, then every 15 min). When off, they update only when you press Refresh." },
     { id: 'syncMarketCrawl', label: 'Market prices during Sync', group: 'Sync', kind: 'toggle', unit: null, default: null, defaultText: 'on', min: null, max: null, hitsServer: true, server: 'game',
       description: "After each Sync, opens the game market page of each product you stock or produce, so the game loads its order book and the Manager keeps the exact game price. Adds about 1-3 s per product (max 6 s). When off, only pages you open update prices." },
     // 2.5.458 switches (toggle, on for existing installs, off on a fresh install like every hitsServer timer).
@@ -131,8 +131,8 @@
   // Manager read of www.simcompanies.com/api/ takes a slot: at most one per GAP_MS across all realms and all jobs.
   // A user-initiated read (Sync, Refresh press, opening a product, the dashboard refresh button) is not in the lane but
   // moves lastAt, so the next unattended read waits 5 min after it.
-  // Jobs (key = job or job:realm): prio 1 = your stock (warehouse), 2 = order books, 3 = contracts / own orders /
-  // lost-data check, 4 = market ticker (once an hour), 5 = everything else. everyMs = the job's own minimum spacing
+  // Jobs (key = job or job:realm): prio 1 = warehouse after Collect (always first), 2 = exchange listings,
+  // 3 = contracts, 4 = warehouse / auth-data, 5 = accounting, 6 = everything else. everyMs = the job's own minimum spacing
   // (per key). wantTtlMs = how long a refused job keeps its place in the queue without asking again (card polls ask
   // every 10-15 s; alarm jobs are run again by the lane alarm). A want older than STARVE_MS goes before the wants
   // that are younger (priority order among the starved), so lower jobs are never starved by an always-due higher one.
@@ -140,42 +140,54 @@
   const LANE = Object.freeze({
     KEY: 'scmGameLane', ALARM: 'scm-game-lane', GAP_MS: 5 * LANE_MIN, STARVE_MS: 10 * LANE_MIN, STARVE_LONG_MS: 30 * LANE_MIN,
     JOBS: Object.freeze({
-      warehouse: Object.freeze({ prio: 1, everyMs: 15 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Warehouse (your stock)' }),
-      // Only while no auth-data was ever captured for the realm (the warehouse read needs its company id); the game's
-      // own pages capture it for free, so this is rare. Same priority as the warehouse, ties go to the older want.
-      authData: Object.freeze({ prio: 1, everyMs: 15 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Company auth-data' }),
-      orderBook: Object.freeze({ prio: 2, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Game order book' }),
-      contractBook: Object.freeze({ prio: 2, everyMs: 5 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Order book for an incoming contract' }),
-      contracts: Object.freeze({ prio: 3, everyMs: 15 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Outgoing contracts' }),
-      marketOrders: Object.freeze({ prio: 3, everyMs: 15 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Your exchange listings' }),
-      // A listings read held back after a game action (scheduleOwnOrdersRefresh / overlay refresh): its retry asks the
-      // lane (key listings:<realm>) and the lane alarm runs it, so it keeps its place in the queue between slots.
-      listings: Object.freeze({ prio: 3, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Your exchange listings (after a game action)' }),
-      lostData: Object.freeze({ prio: 3, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Lost data check' }),
-      ticker: Object.freeze({ prio: 4, everyMs: 60 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Market ticker' }),
-      gameConstants: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Game constants' }),
-      abundance: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Abundance' }),
-      // Retries of the after-Sync week sales ledger (capped at 3, 5/10/20 min apart; its own alarm asks again).
-      // Dashboard-open Accounting re-read (accountingOnOpen): one statement per slot, same priority as the other accounting job.
-      accounting: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Accounting statement' }),
+      // Priority 1 = the warehouse read right after a Collect (always first, no spacing of its own).
+      collectWarehouse: Object.freeze({ prio: 1, everyMs: 0, wantTtlMs: 15 * LANE_MIN, label: 'Warehouse after Collect' }),
+      marketOrders: Object.freeze({ prio: 2, everyMs: 15 * LANE_MIN, wantTtlMs: 20 * LANE_MIN, label: 'Your exchange listings' }),
+      // A listings read held back after a game action: its retry asks the lane (key listings:<realm>) and the lane alarm runs it.
+      listings: Object.freeze({ prio: 2, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Your exchange listings (after a game action)' }),
+      contracts: Object.freeze({ prio: 3, everyMs: 15 * LANE_MIN, wantTtlMs: 20 * LANE_MIN, label: 'Outgoing contracts' }),
+      warehouse: Object.freeze({ prio: 4, everyMs: 15 * LANE_MIN, wantTtlMs: 20 * LANE_MIN, label: 'Warehouse (your stock)' }),
+      // Only while no auth-data was ever captured for the realm (the warehouse read needs its company id).
+      authData: Object.freeze({ prio: 4, everyMs: 15 * LANE_MIN, wantTtlMs: 20 * LANE_MIN, label: 'Company auth-data' }),
+      // Dashboard-open Accounting re-read: one statement per slot; week sales ledger retries (capped at 3).
+      accounting: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: 20 * LANE_MIN, label: 'Accounting statement' }),
       accountingWeek: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, label: 'Week sales ledger retry' }),
-      other: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Other' })
+      orderBook: Object.freeze({ prio: 6, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Game order book' }),
+      contractBook: Object.freeze({ prio: 6, everyMs: 5 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Order book for an incoming contract' }),
+      lostData: Object.freeze({ prio: 6, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Lost data check' }),
+      ticker: Object.freeze({ prio: 6, everyMs: 60 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Market ticker' }),
+      gameConstants: Object.freeze({ prio: 6, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Game constants' }),
+      abundance: Object.freeze({ prio: 6, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Abundance' }),
+      // key executive:<realm>:<id> (one executive record per key).
+      executive: Object.freeze({ prio: 6, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, label: 'Executive record' }),
+      syncMissing: Object.freeze({ prio: 6, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, label: 'Data a Sync page did not load' }),
+      other: Object.freeze({ prio: 6, everyMs: 5 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Other' })
     })
   });
   const laneNum = v => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0; };
   function laneBase(key) { return String(key || '').split(':')[0]; }
   function laneSpec(key) { return LANE.JOBS[laneBase(key)] || LANE.JOBS.other; }
-  function laneKeyOk(key) { return typeof key === 'string' && /^[A-Za-z]+(?::[01])?$/.test(key); }
-  // Stored value (any shape) -> {v:1, lastAt, lastJob, jobs:{key:lastTakenAt}, wants:{key:{since, at}}}. A time in
-  // the future (clock moved back) is pulled back to now, so a bad stamp can never close the lane for long.
+  function laneKeyOk(key) { return typeof key === 'string' && key.length <= 60 && /^[A-Za-z]+(?::[01])?(?::\d{1,12})?$/.test(key); }
+  // Failure backoff per key: 1st failure 5 min, 2nd 10 min, 3rd and later 15 min.
+  const LANE_BACKOFF_MS = Object.freeze([5 * LANE_MIN, 10 * LANE_MIN, 15 * LANE_MIN]);
+  function laneBackoffUntil(st, key) { const f = st && st.fails && st.fails[key]; return f ? f.at + LANE_BACKOFF_MS[Math.min(f.n - 1, 2)] : 0; }
+  // Stored value (any shape) -> {v:1, lastAt, lastJob, lastSince, lastResult, jobs:{key:lastTakenAt}, wants:{key:{since, at}},
+  // fails:{key:{n, at}}}. A time in the future (clock moved back) is pulled back to now, so a bad stamp can never close the lane for long.
   function laneState(raw, now = Date.now()) {
     const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
     const cap = v => Math.min(laneNum(v), now);
-    const out = { v: 1, lastAt: cap(src.lastAt), lastJob: typeof src.lastJob === 'string' ? src.lastJob.slice(0, 40) : null, jobs: {}, wants: {} };
+    const out = { v: 1, lastAt: cap(src.lastAt), lastJob: typeof src.lastJob === 'string' ? src.lastJob.slice(0, 40) : null, lastSince: cap(src.lastSince), lastResult: null, jobs: {}, wants: {}, fails: {} };
+    const lr = src.lastResult;
+    if (lr && typeof lr === 'object' && laneKeyOk(lr.key) && cap(lr.at)) out.lastResult = { key: lr.key, ok: !!lr.ok, status: Math.max(0, Math.round(Number(lr.status)) || 0), at: cap(lr.at) };
     for (const [k, v] of Object.entries(src.jobs && typeof src.jobs === 'object' ? src.jobs : {})) { const t = cap(v); if (laneKeyOk(k) && t && now - t < 86400000) out.jobs[k] = t; }
+    for (const [k, f] of Object.entries(src.fails && typeof src.fails === 'object' ? src.fails : {})) {
+      const at = cap(f && f.at), n = Math.min(99, Math.round(Number(f && f.n)) || 0);
+      if (laneKeyOk(k) && at && n >= 1 && now - at < 86400000) out.fails[k] = { n, at };
+    }
+    // a key that failed keeps its queued retry through its backoff
     for (const [k, w] of Object.entries(src.wants && typeof src.wants === 'object' ? src.wants : {})) {
       const at = cap(w && w.at), since = Math.min(cap(w && w.since) || at, at);
-      if (laneKeyOk(k) && at && now - at <= laneSpec(k).wantTtlMs) out.wants[k] = { since, at };
+      if (laneKeyOk(k) && at && now - at <= (out.fails[k] ? Math.max(laneSpec(k).wantTtlMs, LANE_BACKOFF_MS[2]) : laneSpec(k).wantTtlMs)) out.wants[k] = { since, at };
     }
     return out;
   }
@@ -191,8 +203,7 @@
     if (!list.length) return null;
     const last = laneNum(lastAt);
     const byAge = (a, b) => a.since - b.since || a.prio - b.prio || (a.k < b.k ? -1 : a.k > b.k ? 1 : 0);
-    // A waiting priority-1 job (your warehouse, the company auth-data it needs) always goes first: those have their
-    // own 15 min spacing, so they never hold the lane for more than two slots in three.
+    // A waiting priority-1 job (the warehouse read after a Collect) always goes first.
     const top = list.filter(x => x.prio === 1);
     if (top.length) { top.sort((a, b) => a.since - b.since || (a.k < b.k ? -1 : a.k > b.k ? 1 : 0)); return top[0].k; }
     // 2. a want that already lost a slot (made before the last slot went out): next, oldest first.
@@ -209,7 +220,8 @@
     return pool[0].k;
   }
   // One decision for job `key` at `now`. take:true -> the caller may send ONE request now (state has the slot stamped).
-  // take:false -> reason 'job-gap' (this job's own spacing; no want kept), 'gap' (5 min since the last game request
+  // take:false -> reason 'job-gap' (this job's own spacing; no want kept), 'fail-backoff' (this key failed lately; want
+  // kept, nextAt = end of its 5/10/15 min backoff; other keys are not affected), 'gap' (5 min since the last game request
   // not over; want kept), 'yield' (slot free, another job is first; want kept). nextAt = when to ask again.
   // peek:true decides without stamping the slot (a want is still recorded).
   function laneDecide(raw, key, now = Date.now(), { peek = false } = {}) {
@@ -219,13 +231,34 @@
     if (own && now - own < spec.everyMs) return { take: false, reason: 'job-gap', nextAt: own + spec.everyMs, state: st };
     const prev = st.wants[key];
     st.wants[key] = { since: prev ? prev.since : now, at: now };
+    const until = laneBackoffUntil(st, key);
+    if (until > now) return { take: false, reason: 'fail-backoff', nextAt: until, state: st };
     if (st.lastAt && now - st.lastAt < LANE.GAP_MS) return { take: false, reason: 'gap', nextAt: st.lastAt + LANE.GAP_MS, state: st };
-    const winner = laneWinner(st.wants, now, st.lastAt);
+    const eligible = {};
+    for (const [k, w] of Object.entries(st.wants)) if (laneBackoffUntil(st, k) <= now) eligible[k] = w;
+    const winner = laneWinner(eligible, now, st.lastAt);
     if (winner !== key) return { take: false, reason: 'yield', winner, nextAt: now, state: st };
     if (peek) return { take: true, peek: true, nextAt: now, state: st };
+    st.lastSince = st.wants[key].since;
     delete st.wants[key];
     st.lastAt = now; st.lastJob = key; st.jobs[key] = now;
     return { take: true, nextAt: now + LANE.GAP_MS, state: st };
+  }
+  // The outcome of a lane request: {ok, status}. Failure (403 / 503 / 429 / network): the key backs off (see
+  // laneBackoffUntil) and its want is queued again with its original since; success clears the key's failures.
+  function laneResult(raw, key, res, now = Date.now()) {
+    const st = laneState(raw, now);
+    if (!laneKeyOk(key)) return st;
+    const ok = !!(res && res.ok), status = Math.max(0, Math.round(Number(res && res.status)) || 0);
+    st.lastResult = { key, ok, status, at: now };
+    if (ok) { delete st.fails[key]; return st; }
+    const prev = st.fails[key];
+    st.fails[key] = { n: Math.min(99, (prev ? prev.n : 0) + 1), at: now };
+    const was = st.wants[key] ? st.wants[key].since : 0, taken = st.lastJob === key ? st.lastSince : 0;
+    const since = Math.min(...[was, taken].filter(Boolean), now);
+    delete st.jobs[key];
+    st.wants[key] = { since, at: now };
+    return st;
   }
   // A user-initiated game request went out: the lane waits GAP_MS after it.
   function laneNote(raw, now = Date.now(), job = 'user') {
@@ -234,7 +267,128 @@
     return st;
   }
 
+  // SimcoTools channel (pure; state in chrome.storage.session scmSimcoChannel). Independent of the game lane: no 5 min
+  // rule. Token bucket 2 per second, burst 25; a network failure marks it unreachable (one probe at 1, 2, 5, 10, 15,
+  // 15 ... min, one log line per outage); a 429 opens a cooldown (Retry-After, else 60 s). Wants: lowest prio, then oldest.
+  const SIMCO = Object.freeze({
+    KEY: 'scmSimcoChannel', RATE_PER_S: 2, BURST: 25, PROBE_MS: Object.freeze([60e3, 120e3, 300e3, 600e3, 900e3]), COOLDOWN_DEFAULT_MS: 60e3, COOLDOWN_MAX_MS: 3600e3, WANT_TTL_MS: 30 * LANE_MIN,
+    JOBS: Object.freeze({
+      refresh: Object.freeze({ prio: 1, label: 'Market Refresh' }),
+      prices: Object.freeze({ prio: 2, label: 'All current prices' }),
+      vwap: Object.freeze({ prio: 3, label: 'Prices for products you hold' }),
+      snapshot: Object.freeze({ prio: 4, label: 'Product snapshot' }),
+      candles: Object.freeze({ prio: 4, label: 'Price history' }),
+      followed: Object.freeze({ prio: 4, label: 'Followed products' }),
+      public: Object.freeze({ prio: 5, label: 'Public data' }),
+      other: Object.freeze({ prio: 5, label: 'Other' })
+    })
+  });
+  function simcoSpec(key) { return SIMCO.JOBS[laneBase(key)] || SIMCO.JOBS.other; }
+  function simcoRefill(st, now) {
+    const el = Math.max(0, now - st.tokensAt);
+    st.tokens = Math.min(SIMCO.BURST, st.tokens + el * SIMCO.RATE_PER_S / 1000); st.tokensAt = now;
+  }
+  function simcoState(raw, now = Date.now()) {
+    const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const cap = v => Math.min(laneNum(v), now), last = SIMCO.PROBE_MS.length - 1;
+    const tk = Number(src.tokens);
+    const out = { v: 1, tokens: Number.isFinite(tk) && tk >= 0 ? Math.min(SIMCO.BURST, tk) : SIMCO.BURST, tokensAt: cap(src.tokensAt) || now,
+      lastAt: cap(src.lastAt), lastJob: typeof src.lastJob === 'string' ? src.lastJob.slice(0, 40) : null, lastResult: null,
+      unreachableSince: cap(src.unreachableSince), probeStep: Math.min(last, Math.max(0, Math.round(Number(src.probeStep)) || 0)), nextProbeAt: 0,
+      cooldownUntil: 0, loggedOutage: false, wants: {} };
+    const lr = src.lastResult;
+    if (lr && typeof lr === 'object' && cap(lr.at)) out.lastResult = { key: typeof lr.key === 'string' ? lr.key.slice(0, 60) : '', ok: !!lr.ok, status: Math.max(0, Math.round(Number(lr.status)) || 0), at: cap(lr.at) };
+    if (out.unreachableSince) {
+      out.loggedOutage = !!src.loggedOutage;
+      out.nextProbeAt = Math.min(laneNum(src.nextProbeAt) || out.unreachableSince + SIMCO.PROBE_MS[out.probeStep], now + SIMCO.PROBE_MS[last]);
+    } else out.probeStep = 0;
+    const cu = laneNum(src.cooldownUntil); out.cooldownUntil = cu > now ? Math.min(cu, now + SIMCO.COOLDOWN_MAX_MS) : 0;
+    for (const [k, w] of Object.entries(src.wants && typeof src.wants === 'object' ? src.wants : {})) {
+      const at = cap(w && w.at), since = Math.min(cap(w && w.since) || at, at);
+      if (laneKeyOk(k) && at && now - at <= SIMCO.WANT_TTL_MS) out.wants[k] = { since, at, reason: typeof (w && w.reason) === 'string' ? w.reason.slice(0, 40) : 'waiting' };
+    }
+    simcoRefill(out, now);
+    return out;
+  }
+  function simcoOrder(wants) {
+    return Object.entries(wants || {}).map(([k, w]) => ({ k, since: laneNum(w && w.since), prio: simcoSpec(k).prio, flying: !!w && w.reason === 'in flight' }))
+      .sort((a, b) => a.prio - b.prio || a.since - b.since || (a.k < b.k ? -1 : a.k > b.k ? 1 : 0));
+  }
+  // take:true -> send ONE request now (a token is spent; the want stays queued, marked 'in flight', until simcoResult).
+  // take:false -> reason 'bad-key' | 'cooldown' | 'unreachable' | 'rate' (no token) | 'yield' (the tokens left are
+  // needed by higher wants). nextAt = when to ask again. peek:true decides without spending anything.
+  function simcoTake(raw, key, now = Date.now(), { peek = false } = {}) {
+    const st = simcoState(raw, now);
+    if (!laneKeyOk(key)) return { take: false, reason: 'bad-key', nextAt: now + 60e3, state: st };
+    const prev = st.wants[key];
+    if (prev && prev.reason === 'in flight') prev.at = now;
+    else st.wants[key] = { since: prev ? prev.since : now, at: now, reason: 'waiting' };
+    if (st.cooldownUntil > now) return { take: false, reason: 'cooldown', nextAt: st.cooldownUntil, state: st };
+    const rateWait = () => now + Math.ceil((1 - st.tokens) * 1000 / SIMCO.RATE_PER_S);
+    const order = simcoOrder(st.wants).filter(x => !x.flying || x.k === key);
+    const ahead = Math.max(0, order.findIndex(x => x.k === key));
+    if (st.unreachableSince) {
+      if (now < st.nextProbeAt || ahead !== 0) return { take: false, reason: 'unreachable', nextAt: Math.max(now, st.nextProbeAt), state: st };
+    } else {
+      if (st.tokens < 1) return { take: false, reason: 'rate', nextAt: rateWait(), state: st };
+      if (st.tokens < ahead + 1) return { take: false, reason: 'yield', nextAt: now + Math.ceil((ahead + 1 - st.tokens) * 1000 / SIMCO.RATE_PER_S), state: st };
+    }
+    if (st.tokens < 1) return { take: false, reason: 'rate', nextAt: rateWait(), state: st };
+    if (peek) return { take: true, peek: true, nextAt: now, state: st };
+    st.tokens -= 1; st.lastAt = now; st.lastJob = key; st.wants[key].reason = 'in flight';
+    if (st.unreachableSince) st.nextProbeAt = now + SIMCO.PROBE_MS[st.probeStep];
+    return { take: true, nextAt: now, state: st };
+  }
+  // The outcome of a request: {ok, status, network, retryAfterMs}. Returns {state, logOutage, recovered}.
+  function simcoResult(raw, key, res, now = Date.now()) {
+    const st = simcoState(raw, now), r = res || {};
+    const ok = !!r.ok, status = Math.max(0, Math.round(Number(r.status)) || 0);
+    const network = !ok && (r.network === true || status === 0);
+    const w = st.wants[key], since = w ? w.since : now;
+    st.lastResult = { key: String(key || '').slice(0, 60), ok, status, at: now };
+    let logOutage = false, recovered = false;
+    const last = SIMCO.PROBE_MS.length - 1;
+    if (network) {
+      if (!st.unreachableSince) { st.unreachableSince = now; st.probeStep = 0; logOutage = true; st.loggedOutage = true; }
+      else st.probeStep = Math.min(last, st.probeStep + 1);
+      st.nextProbeAt = now + SIMCO.PROBE_MS[st.probeStep];
+      if (laneKeyOk(key)) st.wants[key] = { since, at: now, reason: 'waiting' };
+      return { state: st, logOutage, recovered };
+    }
+    if (st.unreachableSince) { recovered = true; st.unreachableSince = 0; st.probeStep = 0; st.nextProbeAt = 0; st.loggedOutage = false; }
+    if (status === 429) {
+      const ra = Number(r.retryAfterMs);
+      st.cooldownUntil = now + Math.min(SIMCO.COOLDOWN_MAX_MS, ra > 0 ? ra : SIMCO.COOLDOWN_DEFAULT_MS);
+      if (laneKeyOk(key)) st.wants[key] = { since, at: now, reason: 'waiting' };
+    } else delete st.wants[key];
+    return { state: st, logOutage, recovered };
+  }
+  // What the UI and the worker show: both channels, each queue in the exact order the channel would serve it.
+  function channelSnapshot(laneRaw, simcoRaw, now = Date.now()) {
+    const ls = laneState(laneRaw, now), ss = simcoState(simcoRaw, now);
+    const elig = {}, backed = [];
+    for (const [k, w] of Object.entries(ls.wants)) { if (laneBackoffUntil(ls, k) > now) backed.push(k); else elig[k] = w; }
+    const gq = [], item = (k, reason) => ({ key: k, label: laneSpec(k).label, since: ls.wants[k].since, prio: laneSpec(k).prio, reason });
+    const reasonOf = k => ls.fails[k] ? `retry after failure (${ls.fails[k].n})` : 'waiting for slot';
+    for (let k = laneWinner(elig, now, ls.lastAt); k; k = laneWinner(elig, now, ls.lastAt)) { gq.push(item(k, reasonOf(k))); delete elig[k]; }
+    backed.sort((a, b) => laneBackoffUntil(ls, a) - laneBackoffUntil(ls, b) || (a < b ? -1 : 1));
+    for (const k of backed) gq.push(item(k, reasonOf(k)));
+    const sq = simcoOrder(ss.wants).map(x => ({ key: x.k, label: simcoSpec(x.k).label, since: x.since, prio: x.prio,
+      reason: ss.cooldownUntil > now ? 'cooling down after 429' : ss.unreachableSince ? 'waiting for SimcoTools to answer' : x.flying ? 'in flight' : 'waiting' }));
+    let sNext = now;
+    if (ss.cooldownUntil > now) sNext = ss.cooldownUntil;
+    else if (ss.unreachableSince) sNext = Math.max(now, ss.nextProbeAt);
+    else if (ss.tokens < 1) sNext = now + Math.ceil((1 - ss.tokens) * 1000 / SIMCO.RATE_PER_S);
+    return {
+      at: now,
+      game: { lastAt: ls.lastAt || null, lastJob: ls.lastJob, lastResult: ls.lastResult, nextAt: Math.max(now, ls.lastAt ? ls.lastAt + LANE.GAP_MS : now), paused: null, queue: gq },
+      simco: { lastAt: ss.lastAt || null, lastJob: ss.lastJob, lastResult: ss.lastResult, nextAt: sNext, unreachableSince: ss.unreachableSince || null,
+        nextProbeAt: ss.unreachableSince ? ss.nextProbeAt : null, cooldownUntil: ss.cooldownUntil || null, tokens: Math.floor(ss.tokens * 100) / 100, queue: sq }
+    };
+  }
+
   root.SCM_TIMERS_CORE = { KEY: 'scmSyncTimers', TIMERS, byId, IDS, UNIT_MS, defaults, freshInstall, SWITCHED_OFF_TEXT: 'Not read: switched off (Background timers)', normalize, normalizeAt, merge, toStored, isDefault, clamp, intervalMs, intervalMinutes, nextDailyAt, clockOf, timerForAlarm,
-    LANE, laneBase, laneSpec, laneKeyOk, laneState, laneNextSlotAt, laneWinner, laneDecide, laneNote };
+    LANE, laneBase, laneSpec, laneKeyOk, laneState, laneNextSlotAt, laneWinner, laneDecide, laneNote, laneResult, laneBackoffUntil, LANE_BACKOFF_MS,
+    SIMCO, simcoSpec, simcoState, simcoTake, simcoResult, channelSnapshot };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.SCM_TIMERS_CORE;
 })(typeof globalThis !== 'undefined' ? globalThis : self);

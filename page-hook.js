@@ -893,6 +893,12 @@
     } catch { return false; }
   };
 
+  // A game collect (POST /api/v2/order/take/<id>/) also hands its parsed reply to the worker (data on
+  // STOCK_MUTATION_COMPLETE), so the collected amount can go into the stored warehouse at once. Only this path, only a
+  // 2xx reply, at most 20,000 characters (a bigger or non-JSON reply is sent without data).
+  const TAKE_REPLY_MAX = 20000;
+  const isTakePath = p => /^\/api\/v2\/order\/take\/\d+\/?$/.test(String(p || ''));
+  const takeReplyData = text => { const t = String(text ?? ''); if (!t || t.length > TAKE_REPLY_MAX) return null; try { return P_JSON.parse(t); } catch { return null; } };
   // Opt-in bounded recorder for same-origin game traffic. No request headers,
   // cookies, credentials, or request bodies are recorded. API response bodies are capped.
   let networkCaptureEnabled=false, networkCaptureId='', networkCaptureCount=0;
@@ -925,7 +931,13 @@
     if (isStockMutationUrl(url, method)) {
       try {
         const u = new URL(url, location.href);
-        if (response.ok) emitRealmScoped('STOCK_MUTATION_COMPLETE', { method, url: u.pathname + u.search, status: response.status, captureRealm });
+        const payload = { method, url: u.pathname + u.search, status: response.status, captureRealm };
+        if (response.ok && method === 'POST' && isTakePath(u.pathname)) {
+          // The reply is read from a clone without holding up the game's own fetch.
+          let clone = null; try { clone = response.clone(); } catch {}
+          if (clone) clone.text().then(t => emitRealmScoped('STOCK_MUTATION_COMPLETE', { ...payload, data: takeReplyData(t) }), () => emitRealmScoped('STOCK_MUTATION_COMPLETE', payload));
+          else emitRealmScoped('STOCK_MUTATION_COMPLETE', payload);
+        } else if (response.ok) emitRealmScoped('STOCK_MUTATION_COMPLETE', payload);
       } catch {}
     }
     if (!explicitManagerApiGet && isApi(url) && (method === 'GET' || /\/api\/(?:v2|v3)\/.*contracts/i.test(url))) {
@@ -966,7 +978,15 @@
       this.addEventListener('load', () => {
         try {
           const u = new URL(this.__scmUrl, location.href);
-          if (this.status >= 200 && this.status < 300) emitRealmScoped('STOCK_MUTATION_COMPLETE', { method: this.__scmMethod, url: u.pathname + u.search, status: this.status, captureRealm: this.__scmCaptureRealm });
+          if (this.status >= 200 && this.status < 300) {
+            const payload = { method: this.__scmMethod, url: u.pathname + u.search, status: this.status, captureRealm: this.__scmCaptureRealm };
+            if (this.__scmMethod === 'POST' && isTakePath(u.pathname)) {
+              let data = null;
+              try { const rt = this.responseType; if (rt === '' || rt === 'text') data = takeReplyData(this.responseText); else if (rt === 'json' && this.response && typeof this.response === 'object') data = this.response; } catch {}
+              payload.data = data;
+            }
+            emitRealmScoped('STOCK_MUTATION_COMPLETE', payload);
+          }
         } catch {}
       });
     }

@@ -8,7 +8,7 @@
 (function () {
   'use strict';
   // Bar counts for the last hour (pure, also loaded by the Node tests): failed = failure or partial lines; not read =
-  // not-read lines, plus older failure lines a direct-read block stopped (details.directReadsBlocked). Waiting and
+  // not-read lines, plus failure lines older versions marked details.directReadsBlocked (a held read, not a fault). Waiting and
   // skipped lines are not counted. t(job) = its time in ms.
   function barCounts(list, now, t) {
     let fails = 0, notRead = 0;
@@ -85,7 +85,8 @@
     'accounting-refresh': 'Accounting statements refreshed',
     'alert-sent': 'Alert sent',
     'game-data-saved': 'Saved from the game',
-    'direct-reads-blocked': 'Game blocks direct reads',
+    // Lines older versions wrote when they held game reads back; game reads are allowed (one Manager read per 5-min slot).
+    'direct-reads-blocked': 'Game reads held for the next game slot (older version)',
     'outgoing-contracts': 'Your outgoing contracts checked',
     'auth-data-read': 'Company data (auth-data) read',
     'order-book-refresh': 'Exchange order book refreshed',
@@ -122,8 +123,7 @@
     return out.length ? ' · ' + out.map(esc).join(' · ') : ''; };
   // One-line legend shown above the job list.
   const LEGEND = 'Warehouse = last time the Manager re-read your warehouse from the game · last game action = last collect/buy/sell/contract it reacted to · prices = last SimcoTools price download (VWAP + current prices, about every 15 min). Green dot = warehouse refreshed in the last 15 min. "skipped" = nothing needed (data still fresh). "not read" = the Manager wanted game data but could not get it (reason shown). "waiting" = held for the 5-min game request slot.';
-  // The direct-read pause after a 503 is not a bot-protection block: its own label (details.status).
-  const label = j => (j.job === 'direct-reads-blocked' && Number(j.details?.status) === 503 && j.details?.directReadsBlocked ? 'Game answered 503: Manager reads paused' : null) || LABEL[`${j.job}|${j.trigger}`] || LABEL[j.job] || String(j.job || 'job').replace(/-/g, ' ');
+  const label = j => LABEL[`${j.job}|${j.trigger}`] || LABEL[j.job] || String(j.job || 'job').replace(/-/g, ' ');
   let realm = null, jobs = [], lastSeenId = null, toastTimer = 0, open = false, lastPollSig = '';
   try { open = GAME && localStorage.getItem('scmMonitorOpen') === '1'; } catch {}
 
@@ -133,6 +133,13 @@
     t.textContent = text; t.classList.add('show');
     clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 4500);
   }
+  // 2.5.465: the game's collect reply is seen on this page (content.js) -> toast at once; takes within 1 s of the last
+  // one count as one Collect all. The background's warehouse line (pushed to this tab) then says "warehouse updated".
+  let takeCount = 0, takeLastAt = 0;
+  if (GAME) globalThis.__scmCollectTakeSeen = () => {
+    const now = Date.now(); if (now - takeLastAt > 1000) takeCount = 0; takeLastAt = now; takeCount++;
+    toast(`✓ Collected from ${takeCount} building${takeCount === 1 ? '' : 's'} · warehouse updating…`);
+  };
   function lastOf(pred) { for (let i = jobs.length - 1; i >= 0; i--) if (pred(jobs[i])) return jobs[i]; return null; }
   // The structure is built once and only changed text is written, so the dot animation does not restart and the
   // open list does not flash on each refresh.
@@ -152,18 +159,20 @@
     const wh = lastOf(j => j.job === 'warehouse-refresh' && j.outcome === 'success');
     const action = lastOf(j => j.job === 'warehouse-refresh' && j.trigger === 'stock-mutation-or-forced' && j.outcome === 'success');
     const price = lastOf(j => /^market-(?:current-price|vwap)-stage$/.test(j.job) && j.outcome === 'success');
-    // Last hour: failed = failure or partial lines; not read = not-read lines (a read the game's direct-read block
-    // stopped is one of these, never a failure). Waiting lines (planned pace) are not counted.
+    // Last hour: failed = failure or partial lines; not read = not-read lines (never a failure). Waiting lines (held for
+    // the 5-min game slot, planned pace) are not counted.
     const { fails, notRead } = barCounts(jobs, Date.now(), t);
-    // The block is on while its newest line is the block (not the recovery) and no Manager read has succeeded since.
-    const blockLine = lastOf(j => j.job === 'direct-reads-blocked');
-    const blocked = blockLine && blockLine.details?.directReadsBlocked && !jobs.some(j => t(j) > t(blockLine) && j.outcome === 'success' && /^(?:warehouse-refresh|market-orders|accounting-refresh|order-book-refresh)$/.test(j.job)) ? (blockLine.error || 'The game now blocks direct reads; data updates from game pages you open and from Sync.') : '';
+    // A Manager game read waiting for the 5-min slot: its newest line is "waiting" (details.nextAt) and nothing newer for
+    // that job succeeded. Shown as "next game read in m:ss" while that time is ahead.
+    const waitLine = lastOf(j => j.outcome === 'waiting' && j.details?.laneWait && Number(j.details?.nextAt) > Date.now());
+    const waitLeft = waitLine && !jobs.some(j => t(j) > t(waitLine) && j.job === waitLine.job && j.outcome === 'success') ? Number(waitLine.details.nextAt) - Date.now() : 0;
+    const slotNote = waitLeft > 0 ? `next game read in ${Math.floor(Math.ceil(waitLeft / 1000) / 60)}:${String(Math.ceil(waitLeft / 1000) % 60).padStart(2, '0')}` : '';
     const fresh = !!(wh && Date.now() - t(wh) < 15 * 60e3);
     const parts = [
       wh ? `Warehouse <b>${esc(ago(t(wh)))}</b>` : 'Warehouse: waiting',
       action ? `last game action <b>${esc(ago(t(action)))}</b>` : null,
       price ? `prices <b>${esc(ago(t(price)))}</b>` : null,
-      blocked ? `<span class="lu-info" role="note">${esc(blocked)}</span>` : null,
+      slotNote ? `<span class="lu-info" role="note">${esc(slotNote)}</span>` : null,
       fails || notRead ? [fails ? `<span class="lu-bad">${fails} failed</span>` : null, notRead ? `<span class="lu-warn">${notRead} not read</span>` : null].filter(Boolean).join(' · ') + ' in the last hour' : null
     ].filter(Boolean);
     ui.dot.classList.toggle('on', fresh);
@@ -202,7 +211,8 @@
       jobs = Array.isArray(h) ? h.filter(j => j && typeof j === 'object') : [];
       const newest = lastOf(j => j.job === 'warehouse-refresh' && j.trigger === 'stock-mutation-or-forced' && j.outcome === 'success');
       if (notify && newest && newest.id !== lastSeenId && Date.now() - Date.parse(newest.finishedAt || 0) < 60e3) {
-        toast(`✓ Warehouse updated from the game${newest.details?.rows != null ? ` (${newest.details.rows} items)` : ''}`);
+        const d = newest.details || {};
+        toast(d.source === 'collect' && Number(d.buildings) > 0 ? `✓ Collected from ${d.buildings} building${Number(d.buildings) === 1 ? '' : 's'} · warehouse updated` : `✓ Warehouse updated from the game${d.rows != null ? ` (${d.rows} items)` : ''}`);
         el.classList.remove('lu-flash'); void el.offsetWidth; el.classList.add('lu-flash');
       }
       if (newest) lastSeenId = newest.id;
@@ -219,6 +229,8 @@
   });
   // game page: the tab learns its realm a few seconds after load; jobs and mode are re-read every 3 s while visible
   setInterval(() => { if (GAME) { if (document.hidden) return; const tr = Number(window.__SCM_GAME_REALM__); if ((tr === 0 || tr === 1) && tr !== realm) { load(false); return; } load('poll'); return; } if (!document.hidden) paint(); }, GAME ? 3000 : 15000);
+  // Background push: this realm's job list changed (a Collect line) -> read it now, not at the next 3 s poll.
+  if (GAME) try { chrome.runtime.onMessage.addListener(msg => { if (msg?.type === 'SCM_CARD_KEY_CHANGED' && realm != null && msg.key === `scmBackgroundJobs:${realm}`) load(true); return false; }); } catch {}
   if (globalThis.scmOnDashboardResume) globalThis.scmOnDashboardResume(() => load(true));
   load(false);
   }

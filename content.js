@@ -516,7 +516,18 @@ if(!globalThis.__scmTimers)globalThis.__scmTimers=(()=>{
       return;
     }
     if (d.type === 'STOCK_MUTATION_COMPLETE') {
-      safeRuntimeSend({ type: 'STOCK_MUTATION_COMPLETE', method: d.method, url: d.url, status: d.status, captureRealm: d.captureRealm });
+      // data: the parsed reply of a game collect (POST /api/v2/order/take/<id>/) when the page hook read one, else absent.
+      // The page cannot be trusted: the reply is only passed for a collect URL and at most 20,000 chars.
+      let takeData;
+      if (d.data !== undefined && d.data !== null && /^(?:https:\/\/(?:www\.)?simcompanies\.com)?\/api\/v2\/order\/take\/\d+\/?(?:\?|$)/.test(String(d.url || ''))) {
+        try { if (JSON.stringify(d.data).length <= 20000) takeData = d.data; } catch { takeData = undefined; }
+      }
+      safeRuntimeSend({ type: 'STOCK_MUTATION_COMPLETE', method: d.method, url: d.url, status: d.status, captureRealm: d.captureRealm, ...(takeData !== undefined ? { data: takeData } : {}) });
+      // 2.5.465: the Collect toast shows at once on this page (live-updates.js, same isolated world); the background's
+      // warehouse line then turns it into "warehouse updated".
+      if (String(d.method || '').toUpperCase() === 'POST' && Number(d.status) >= 200 && Number(d.status) < 300 && /^(?:https:\/\/(?:www\.)?simcompanies\.com)?\/api\/v2\/order\/take\/\d+\/?(?:\?|$)/.test(String(d.url || ''))) {
+        try { globalThis.__scmCollectTakeSeen?.(); } catch {}
+      }
       return;
     }
     if (d.type === 'API_DATA') {
@@ -1443,6 +1454,45 @@ function scmPageTextNoLayout(){
   // scmCardPos:scm-listings-card / scmCardPos:scm-listings-pill (ids kept so saved positions carry over). No
   // MutationObserver: it lives on <html>, outside the game's React root; it re-renders only when a section's data
   // signature changes; the "ago" texts are updated in place every 30 s.
+  // Both request channels (game 5-min slot + SimcoTools) for the cards: background 'scm-channels-snapshot'
+  // ({ok,snapshot:{at,game:{nextAt,queue},simco:{nextAt,unreachableSince,queue}}}), asked every 5 s only while the tab is
+  // visible. Countdowns tick once a second in place: [data-scm-chan] gets the one-line summary, [data-scm-slot-at] a
+  // prefix + m:ss to that time. No storage read, no game request.
+  const Channels=(()=>{
+    const C={snap:null,subs:[],started:false,inFlight:false,timers:[]};
+    const mmss=ms=>{const s=Math.max(0,Math.ceil((Number(ms)||0)/1000));return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;};
+    const hhmm=t=>{const d=new Date(Number(t));return Number.isFinite(d.getTime())?`${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`:'';};
+    const summary=(snap,now=Date.now())=>{
+      if(!snap||!snap.game)return '';
+      const g=snap.game,s=snap.simco||{},gq=Array.isArray(g.queue)?g.queue.length:0,sq=Array.isArray(s.queue)?s.queue.length:0;
+      const game=`Game: next ${mmss((Number(g.nextAt)||now)-now)} · ${gq} waiting`;
+      const simco=s.unreachableSince?`SimcoTools unreachable since ${hhmm(s.unreachableSince)}`:`SimcoTools: next ${mmss((Number(s.nextAt)||now)-now)} · ${sq} waiting`;
+      return `${game} · ${simco}`;
+    };
+    // The game-slot time when a read of this job (key prefix, e.g. 'marketOrders:1') is waiting, else 0.
+    const queuedAt=prefix=>{const g=C.snap?.game;if(!g||!Array.isArray(g.queue))return 0;return g.queue.some(q=>String(q?.key||'')===prefix||String(q?.key||'').startsWith(prefix+':'))?(Number(g.nextAt)||Date.now()):0;};
+    const tick=()=>{
+      if(document.visibilityState!=='visible')return;
+      const now=Date.now(),line=summary(C.snap,now);
+      document.querySelectorAll('[data-scm-chan]').forEach(el=>{if(el.textContent!==line){el.textContent=line;el.title=line;el.hidden=!line;}});
+      document.querySelectorAll('[data-scm-slot-at]').forEach(el=>{const job=el.getAttribute('data-scm-slot-job'),at=(job?queuedAt(job):0)||Number(el.getAttribute('data-scm-slot-at'))||0,t=`${el.getAttribute('data-scm-slot-prefix')||''}${mmss(at-now)}`;if(el.textContent!==t)el.textContent=t;});
+    };
+    const fetchSnap=()=>{
+      // A reloaded / removed extension: stop both loops (this content script is orphaned).
+      let alive=false;try{alive=!!chrome?.runtime?.id;}catch{}
+      if(!alive){for(const t of C.timers)clearInterval(t);C.timers=[];return;}
+      if(document.visibilityState!=='visible'||C.inFlight)return;
+      C.inFlight=true;
+      try{chrome.runtime.sendMessage({type:'scm-channels-snapshot'},r=>{C.inFlight=false;if(chrome.runtime.lastError||!r?.ok||!r.snapshot)return;C.snap=r.snapshot;tick();for(const fn of C.subs){try{fn(C.snap);}catch{}}});}catch{C.inFlight=false;}
+    };
+    const start=()=>{
+      if(C.started)return;C.started=true;
+      if(!document.getElementById('scm-chan-style')){const st=document.createElement('style');st.id='scm-chan-style';st.textContent='#scm-game-balance-card .scm-go-chan{margin:4px 0 0;font:500 10.5px/1.3 system-ui,-apple-system,sans-serif;color:#b9b6b4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}#scm-game-balance-card .scm-go-note{margin:4px 0 0;font-size:11.5px;color:#c9c6c4}';(document.head||document.documentElement).appendChild(st);}
+      fetchSnap();C.timers.push(setInterval(fetchSnap,5000),setInterval(tick,1000));
+      document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')fetchSnap();});
+    };
+    return {start,summary,queuedAt,mmss,get snap(){return C.snap;},onSnap:fn=>{C.subs.push(fn);}};
+  })();
   const Listings=(()=>{
     const CARD='scm-listings-card',PILL='scm-listings-pill',OPEN_KEY='scm-lc-card-v1';
     const L={open:true,data:null,cdata:null,realm:null,sig:'',seq:0,cseq:0,changeTimer:0,cchangeTimer:0,agoTimer:0,refreshTimer:0,started:false,noClickUntil:0};
@@ -1487,13 +1537,13 @@ function scmPageTextNoLayout(){
       const vs=withVs&&Number.isFinite(r.vsVwapPct)?r.vsVwapPct:null;const cls=vs==null||Math.abs(vs)<1?'':vs>0?'hi':'lo';
       return `<div class="scm-ls-row">${r.image?`<img src="${esc(r.image)}" alt="" loading="lazy">`:'<span class="scm-ls-noimg"></span>'}<span class="scm-ls-name">${esc(r.name)} <span class="scm-ls-q">Q${esc(r.quality)}</span></span><span class="scm-ls-total">${money(r.total)}</span><span class="scm-ls-sub">${num(r.quantity)} × ${money(r.price)}</span><span class="scm-ls-vs ${cls}">${vs==null?'':`${vs>0?'+':''}${vs.toFixed(1)}% vs VWAP`}</span></div>`;
     };
-    const section=(key,heading,noun,d,realm,agoFn,msgs,withVs,warn,info='')=>{
+    const section=(key,heading,noun,d,realm,agoFn,msgs,withVs,warn,slotAt=0)=>{
       const rows=byTotal(d),total=rows.reduce((a,r)=>a+(Number(r.total)||0),0);
       const body=realm==null?`<div class="scm-ls-none">${msgs.realm}</div>`
         :!d?`<div class="scm-ls-none">${msgs.loading}</div>`
         :d.missing?`<div class="scm-ls-none">${msgs.missing}</div>`
         :`<div class="scm-ls-sum"><span><b>${rows.length}</b> ${noun}${rows.length===1?'':'s'} · <b>${money(total)}</b></span><span class="scm-ls-ago" data-ago="${key}">${esc(agoFn(d.at))}</span></div>${rows.length?rows.map(r=>rowHtml(r,withVs)).join(''):`<div class="scm-ls-none">${msgs.empty}</div>`}`;
-      return `<div class="scm-ls-sec" data-sec="${key}"><div class="scm-ls-sech">${heading}</div>${warn?`<div class="scm-ls-warn">${esc(warn)}</div>`:''}${info?`<div class="scm-ls-info" role="note">${esc(info)}</div>`:''}${body}</div>`;
+      return `<div class="scm-ls-sec" data-sec="${key}"><div class="scm-ls-sech">${heading}</div>${warn?`<div class="scm-ls-warn">${esc(warn)}</div>`:''}${slotAt>0?`<div class="scm-ls-info" role="note" data-scm-slot-at="${Number(slotAt)}" data-scm-slot-job="marketOrders:${Number(realm)}" data-scm-slot-prefix="Waiting for game slot · ">Waiting for game slot · ${Channels.mmss(slotAt-Date.now())}</div>`:''}${body}</div>`;
     };
     const render=()=>{
       lstyle();
@@ -1502,15 +1552,17 @@ function scmPageTextNoLayout(){
       pill?.remove();
       const card=ensure(CARD,'section');const realm=currentRealm();
       const title=`${realm!=null?`R${realm+1}`:'Game'} · Listings & contracts`;
-      // The game blocking direct reads (directReadsBlocked) is an info note, not a failed update.
-      const re=L.data?.refreshError;const blocked=!!(re&&re.directReadsBlocked);const warn=re&&re.error&&!blocked?`Couldn't update: ${re.error}`:'';const info=blocked?String(re.error||''):'';
-      const sec1=section('listings','My listings','listing',L.data,realm,agoL,{realm:'Checking which realm this game tab is in…',loading:'Loading your listings…',missing:'Your listings have not been read yet. They load once the game has told the Manager your company.',empty:'Nothing listed on the exchange.'},true,warn,info);
+      // A listings read waiting in the game's 5-min lane (channel snapshot queue) is a note with the slot countdown, not
+      // a failed update.
+      const re=L.data?.refreshError;const warn=re&&re.error?`Couldn't update: ${re.error}`:'';
+      const slotAt=realm!=null?Channels.queuedAt(`marketOrders:${realm}`):0;
+      const sec1=section('listings','My listings','listing',L.data,realm,agoL,{realm:'Checking which realm this game tab is in…',loading:'Loading your listings…',missing:'Your listings have not been read yet. They load once the game has told the Manager your company.',empty:'Nothing listed on the exchange.'},true,warn,slotAt);
       const sec2=section('contracts','Outgoing contracts','contract',L.cdata,realm,agoC,{realm:'Checking which realm this game tab is in…',loading:'Loading your contracts…',missing:'Outgoing contracts have not been captured yet. Open your contracts in the game (or run Sync) and they appear here.',empty:'No outgoing contracts.'},false,'');
       card.innerHTML=`<div class="scm-ls-head"><span class="scm-ls-grip" aria-hidden="true">⠿</span><span class="scm-ls-title">${esc(title)}</span><button type="button" class="scm-ls-close" aria-label="Close my listings and outgoing contracts">×</button></div>${sec1}${sec2}`;
       applyMin(card);if(drag?.el!==card)placeSaved(card);
     };
     // `at` of the contracts is left out of the signature: a read with the same contracts only updates the "captured X ago" text
-    const signature=()=>{const d=L.data,c=L.cdata;return JSON.stringify([currentRealm(),L.open,d?.realm,d?.at,d?.missing,d?.refreshError?.error||null,!!d?.refreshError?.directReadsBlocked,(d?.rows||[]).map(r=>[r.id,r.kind,r.quality,r.quantity,r.price,r.vwap,r.image]),c?.realm,c?.missing,(c?.rows||[]).map(r=>[r.id,r.kind,r.quality,r.quantity,r.price])]);};
+    const signature=()=>{const d=L.data,c=L.cdata;return JSON.stringify([currentRealm(),L.open,d?.realm,d?.at,d?.missing,d?.refreshError?.error||null,Channels.queuedAt(`marketOrders:${currentRealm()}`)>0,(d?.rows||[]).map(r=>[r.id,r.kind,r.quality,r.quantity,r.price,r.vwap,r.image]),c?.realm,c?.missing,(c?.rows||[]).map(r=>[r.id,r.kind,r.quality,r.quantity,r.price])]);};
     const updateAgo=()=>{const root=document.getElementById(CARD);if(!root)return;const a=root.querySelector('[data-ago="listings"]'),b=root.querySelector('[data-ago="contracts"]');if(a&&L.data)a.textContent=agoL(L.data.at);if(b&&L.cdata)b.textContent=agoC(L.cdata.at);};
     const paint=()=>{const s=signature();const have=document.getElementById(L.open?CARD:PILL);
       if(s===L.sig&&have){if(L.open)updateAgo();return;}
@@ -1568,7 +1620,7 @@ function scmPageTextNoLayout(){
     document.addEventListener('visibilitychange',()=>{if(!document.hidden&&L.open){request(true);tickAgo();}});
     // the game re-announces its realm on every state update; act only on a real change
     window.addEventListener('scm-game-realm-change',()=>{const r=currentRealm();if(r===L.realm)return;L.realm=r;L.data=null;L.cdata=null;L.seq++;L.cseq++;paint();request(true);});
-    const start=()=>{if(L.started||!isSimCompaniesPage())return;L.started=true;L.realm=currentRealm();paint();request(true);L.agoTimer=setInterval(tickAgo,30000);L.refreshTimer=globalThis.__scmTimers.loop('listingsRefresh',15000,()=>{if(!document.hidden&&L.open)request(true);});};
+    const start=()=>{if(L.started||!isSimCompaniesPage())return;L.started=true;L.realm=currentRealm();Channels.onSnap(()=>paint());Channels.start();paint();request(true);L.agoTimer=setInterval(tickAgo,30000);L.refreshTimer=globalThis.__scmTimers.loop('listingsRefresh',15000,()=>{if(!document.hidden&&L.open)request(true);});};
     return {start,style:lstyle};
   })();
   if(document.readyState!=='loading')Listings.start();else document.addEventListener('DOMContentLoaded',()=>Listings.start(),{once:true});
@@ -1705,11 +1757,11 @@ function scmPageTextNoLayout(){
   };
   const refreshGameOverlay=()=>{
     if(S.refreshBusy||(S.realm!==0&&S.realm!==1))return;
-    S.refreshBusy=true;S.refreshError='';S.refreshBlocked='';
+    S.refreshBusy=true;S.refreshError='';S.refreshQueuedAt=0;
     let done=false;
-    // blocked: the game blocks direct reads (reply flag directReadsBlocked) — shown as a note, not as an error
-    const finish=(err,blocked='')=>{
-      if(done)return;done=true;clearTimeout(S.refreshTimeout);S.refreshBusy=false;S.refreshError=blocked?'':(err||'');S.refreshBlocked=blocked||'';
+    // queuedAt: the reply says the reads wait for the next game slot (queued + nextAt): a note with a countdown, not an error
+    const finish=(err,queuedAt=0)=>{
+      if(done)return;done=true;clearTimeout(S.refreshTimeout);S.refreshBusy=false;S.refreshError=queuedAt?'':(err||'');S.refreshQueuedAt=Number(queuedAt)||0;
       try{load();}catch{}
       renderBalance();
     };
@@ -1719,7 +1771,7 @@ function scmPageTextNoLayout(){
       chrome.runtime.sendMessage({type:'REFRESH_GAME_OVERLAY_NOW',realm:S.realm},res=>{
         const le=chrome.runtime.lastError;
         if(le)return finish(le.message||'Refresh failed');
-        if(res&&res.directReadsBlocked)return finish('',String(res.error||'The game now blocks direct reads.'));
+        if(res&&res.queued)return finish('',Number(res.nextAt)||Date.now());
         finish(res&&res.ok===false?(res.error||'Refresh failed'):'');
       });
     }catch(e){finish(String(e&&e.message||e||'Refresh failed'));}
@@ -1732,10 +1784,15 @@ function scmPageTextNoLayout(){
     const rows=Array.isArray(S.data?.rows)?S.data.rows:[];
     const title=`${S.realm!=null?`R${S.realm+1}`:'Game'} · Stock After Demand & Contracts`;
     const items=rows.map(r=>{const remaining=Number(r.remaining??r.difference)||0;const cls=remaining>0?'positive':remaining<0?'negative':'balanced';const sub=Array.isArray(r.substituteQualities)&&r.substituteQualities.length?` scm-go-sub ${remaining<0?'scm-go-sub-neg':'scm-go-sub-pos'}`:'';return `<div class="scm-go-row${sub}"${sub?` title="Includes Q${r.substituteQualities.join(', Q')} stock"`:''}><span>${r.image?`<img src="${esc(r.image)}" alt="">`:''}</span><span class="scm-go-name">${esc(r.name)}${Number.isFinite(Number(r.quality))?` Q${Number(r.quality)}`:''}</span><span class="scm-go-stock">Warehouse ${num(r.warehouse)}${sub&&Array.isArray(r.warehouseByQuality)?`<span class="scm-go-split">${r.warehouseByQuality.map(x=>`${num(x.amount)} Q${x.quality}`).join(' + ')}</span>`:''}</span><span class="scm-go-contract">Demand ${num(r.demand)}</span><span class="scm-go-contract">Contracts (net) ${num(r.contracted)}</span><span class="scm-go-remaining ${cls}">Left ${num(remaining)}</span>${etaStrip(r,remaining)}</div>`;}).join('');
-    host.innerHTML=`<div class="scm-go-head"><span class="scm-go-title">${esc(title)}</span><span class="scm-go-head-actions"><button type="button" class="scm-go-toggle scm-go-copy" aria-label="Copy left resources">COPY LEFT</button><button type="button" class="scm-go-toggle scm-go-refresh" aria-label="Refresh stock after demand">↻</button><button type="button" class="scm-go-toggle" aria-label="Collapse production balance">‹</button></span></div>${S.refreshBlocked?`<div class="scm-go-note" role="note">${esc(S.refreshBlocked)}</div>`:''}${items?`<div class="scm-go-grid">${items}</div>`:`<div class="scm-ch-none">${S.realm==null?'Checking which realm this game tab is in…':'Waiting for production data.'}</div>`}`;
+    // Status area under the header: both request channels in one line, and the note of a refresh that waits for the game slot.
+    Channels.start();
+    const chanText=Channels.summary(Channels.snap);
+    const chanLine=`<div class="scm-go-chan" data-scm-chan title="${esc(chanText)}"${chanText?'':' hidden'}>${esc(chanText)}</div>`;
+    const qAt=Number(S.refreshQueuedAt)||0,queuedNote=qAt>Date.now()-5000?`<div class="scm-go-note" role="note" data-scm-slot-at="${qAt}" data-scm-slot-prefix="Queued for the next game slot · next game read in ">Queued for the next game slot · next game read in ${Channels.mmss(qAt-Date.now())}</div>`:'';
+    host.innerHTML=`<div class="scm-go-head"><span class="scm-go-title">${esc(title)}</span><span class="scm-go-head-actions"><button type="button" class="scm-go-toggle scm-go-copy" aria-label="Copy left resources">COPY LEFT</button><button type="button" class="scm-go-toggle scm-go-refresh" aria-label="Refresh stock after demand">↻</button><button type="button" class="scm-go-toggle" aria-label="Collapse production balance">‹</button></span></div>${chanLine}${queuedNote}${items?`<div class="scm-go-grid">${items}</div>`:`<div class="scm-ch-none">${S.realm==null?'Checking which realm this game tab is in…':'Waiting for production data.'}</div>`}`;
     host.querySelector('.scm-go-copy').onclick=openLeftCopy;
     const rbtn=host.querySelector('.scm-go-refresh');
-    if(rbtn){rbtn.onclick=refreshGameOverlay;rbtn.disabled=!!S.refreshBusy;if(S.refreshError||S.refreshBlocked)rbtn.title=S.refreshError||S.refreshBlocked;}
+    if(rbtn){rbtn.onclick=refreshGameOverlay;rbtn.disabled=!!S.refreshBusy;if(S.refreshError||qAt)rbtn.title=S.refreshError||'Queued for the next game slot';}
     host.querySelectorAll('.scm-go-toggle:not(.scm-go-copy):not(.scm-go-refresh)').forEach(btn=>btn.onclick=()=>{S.collapsed=true;writeCollapsedPreference(true);renderBalance();schedulePosition();});
     if(S.leftCopyOpen){
       const sig=JSON.stringify({discount:S.leftCopyDiscount,rows:leftRows().map(r=>[r.id,r.remaining??r.difference,r.vwap,r.quality])});

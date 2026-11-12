@@ -1331,13 +1331,77 @@ function marketNewestStamp(bookAt,toolsAt,bookSource='Game market'){
 }
 let __marketRefreshNote='';let __marketRefreshBusy=false;
 function setMarketRefreshNote(text){__marketRefreshNote=String(text||'');const el=$('#marketRefreshNote');if(el)el.textContent=__marketRefreshNote;}
-const MARKET_BLOCKED_NOTE='The game now blocks direct reads; data updates from game pages you open and from Sync.';
-const MARKET_BUSY_NOTE="The game answered 503 (busy or refusing reads); the Manager's own reads pause for 30 min. Data still updates from game pages you open.";
-// 403 or 503 wording for a blocked read: the background's own text when it is a notice, else the block status kept in session storage (read only).
-async function scmBlockedNoteText(errText){
-  const t=String(errText||'');if(scmIsBlockNotice(t))return t;
-  try{const r=await chrome.storage.session.get('scmDirectReadsBlocked');if(Number(r?.scmDirectReadsBlocked?.status)===503)return MARKET_BUSY_NOTE;}catch{}
-  return /503/.test(t)?MARKET_BUSY_NOTE:MARKET_BLOCKED_NOTE;
+// ---- Update channels (Game lane and SimcoTools channel) ----
+let __scmChannels=null,__scmChannelsFailed=false,__scmChannelsTimer=null,__scmChannelsBusy=false;
+function scmChMmss(ms){const s=Math.max(0,Math.ceil(ms/1000));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
+function scmChAgo(at){const t=Number(at);if(!(t>0))return '—';const s=Math.max(0,Math.round((Date.now()-t)/1000));if(s<5)return 'just now';if(s<60)return s+' s ago';const m=Math.floor(s/60);if(m<60)return m+' min ago';const h=Math.floor(m/60);return h<24?h+' h '+(m%60)+' min ago':Math.floor(h/24)+' d ago';}
+function scmChCountdown(at){const t=Number(at);if(!(t>0))return '—';return t-Date.now()<=0?'now':scmChMmss(t-Date.now());}
+function scmChLast(lane){
+  const r=lane?.lastResult;if(!r&&!lane?.lastJob)return '<span class="scm-ch-dim">No request yet</span>';
+  const res=r?(r.ok?'<span class="scm-ch-ok">OK</span>':'<span class="scm-ch-bad">'+(r.status?'HTTP '+escapeHtml(String(r.status)):'Failed')+'</span>'):'';
+  const label=escapeHtml(String(lane?.lastJob||r?.key||'Request'));
+  return label+(res?' · '+res:'')+' · <span class="scm-ch-dim">'+escapeHtml(scmChAgo(r?.at||lane?.lastAt))+'</span>';
+}
+function scmChStatus(kind,lane){
+  if(kind==='game'){
+    if(lane?.paused&&lane.paused.until>Date.now()){const q=lane.queue?.[0];return 'Retrying '+escapeHtml(String(lane.lastJob||q?.label||'the last job'))+' after failure'+(lane.paused.reason?' ('+escapeHtml(String(lane.paused.reason))+')':'');}
+    if(lane?.lastResult&&lane.lastResult.ok===false)return 'Retrying '+escapeHtml(String(lane.lastJob||lane.lastResult.key||'the last job'))+' after failure';
+    return 'Running';
+  }
+  if(lane?.cooldownUntil&&lane.cooldownUntil>Date.now())return 'Cooling down '+scmChMmss(lane.cooldownUntil-Date.now());
+  if(lane?.unreachableSince)return 'Unreachable since '+escapeHtml(marketClock(lane.unreachableSince))+(lane.nextProbeAt?' · next try '+scmChCountdown(lane.nextProbeAt):'');
+  return 'Running';
+}
+function scmChQueue(lane){
+  const q=Array.isArray(lane?.queue)?lane.queue:[];
+  if(!q.length)return '<div class="scm-ch-empty">Nothing waiting</div>';
+  return '<ol class="scm-ch-queue">'+q.map(i=>'<li><strong>'+escapeHtml(String(i.label||i.key||'Job'))+'</strong><span class="scm-ch-dim">waiting '+escapeHtml(scmChAgo(i.since).replace(' ago',''))+(i.reason?' · '+escapeHtml(String(i.reason)):'')+'</span></li>').join('')+'</ol>';
+}
+function scmChColumn(kind,lane){
+  const game=kind==='game';
+  const bad=!game&&(lane?.unreachableSince||lane?.cooldownUntil>Date.now());
+  return '<div class="scm-ch-col"><div class="scm-ch-colhead"><h4>'+(game?'Game':'SimcoTools')+'</h4><span class="scm-ch-rule">'+(game?'1 read / 5 min':'2 / s, burst 25')+'</span></div>'+
+   '<dl class="scm-ch-rows"><div><dt>Last request</dt><dd>'+scmChLast(lane)+'</dd></div>'+
+   '<div><dt>'+(game?'Next game read':'Next slot')+'</dt><dd>'+escapeHtml(scmChCountdown(lane?.nextAt))+'</dd></div>'+
+   '<div><dt>Status</dt><dd class="'+(bad?'scm-ch-bad':'')+'">'+scmChStatus(kind,lane)+'</dd></div></dl>'+
+   '<div class="scm-ch-qhead">Waiting ('+(Array.isArray(lane?.queue)?lane.queue.length:0)+')</div>'+scmChQueue(lane)+'</div>';
+}
+function renderChannelsCard(){
+  const s=__scmChannels;
+  const body=s&&s.game&&s.simco?'<div class="scm-ch-cols">'+scmChColumn('game',s.game)+scmChColumn('simco',s.simco)+'</div>':'<div class="scm-ch-empty">'+(__scmChannelsFailed?'Channel status not available yet':'Loading channel status…')+'</div>';
+  const html=body;
+  document.querySelectorAll('.scm-channels-host').forEach((h,i)=>{
+    if(!h.firstElementChild)h.innerHTML='<div class="overview-section scm-channels-card" data-collapse="channels:'+(i?'activity':'overview')+'" data-collapse-default="open"><div class="overview-section-head"><div><h3>Update channels</h3><span>How the Manager reads from the game and SimcoTools</span></div></div><div class="scm-ch-body"></div></div>';
+    const bd=h.querySelector('.scm-ch-body');if(bd&&h.__scmChHtml!==html){bd.innerHTML=html;h.__scmChHtml=html;}
+  });
+}
+async function refreshChannelsSnapshot(){
+  if(__scmChannelsBusy)return;__scmChannelsBusy=true;
+  try{const r=await chrome.runtime.sendMessage({type:'scm-channels-snapshot'});if(r&&r.game&&r.simco){__scmChannels=r;__scmChannelsFailed=false;}else __scmChannelsFailed=true;}catch{__scmChannelsFailed=true;}
+  finally{__scmChannelsBusy=false;}
+  renderChannelsCard();scmMarketNoteTick();
+}
+// Local 1 s tick: rebuild from the last snapshot so countdowns and "ago" times move without a request.
+function startChannelsCard(){
+  if(__scmChannelsTimer)return;
+  renderChannelsCard();refreshChannelsSnapshot();
+  __scmChannelsTimer=setInterval(()=>{if(!document.hidden){renderChannelsCard();scmMarketNoteTick();}},1000);
+  try{chrome.storage.onChanged.addListener((ch,area)=>{if(area==='session'&&(ch.scmGameLane||ch.scmSimcoChannel))refreshChannelsSnapshot();});}catch{}
+  setInterval(()=>{if(!document.hidden)refreshChannelsSnapshot();},60000);
+}
+// SimcoTools status wording for the Market Refresh note.
+function scmSimcoNoteText(){
+  const sc=__scmChannels?.simco;
+  if(sc?.unreachableSince){
+    const shown=window.__scmMarketShownAt;
+    return 'SimcoTools unreachable since '+marketClock(sc.unreachableSince)+(sc.nextProbeAt?' · retry '+scmChCountdown(sc.nextProbeAt):'')+(shown?' — showing prices from '+marketClock(shown):'');
+  }
+  return '';
+}
+function scmGameWaitText(){const g=__scmChannels?.game;return g&&g.queue&&g.queue.length&&g.nextAt?'next game read in '+scmChCountdown(g.nextAt):'';}
+function scmMarketNoteTick(){
+  if(__marketRefreshBusy)return;const el=$('#marketRefreshNote');if(!el)return;
+  const t=scmSimcoNoteText();if(t&&el.textContent!==t&&(!__marketRefreshNote||/^SimcoTools unreachable|^Updating from SimcoTools/.test(__marketRefreshNote))){el.textContent=t;__marketRefreshNote=t;}
 }
 const __marketBookAsked=new Map();
 // Ask the background for the product's game order book. manual=true is the Refresh press (30 s gap there), otherwise automatic (5 min gap).
@@ -1360,24 +1424,21 @@ function marketAutoOrderBook(realm,id){
 async function marketManualRefresh(btn){
   if(__marketRefreshBusy)return;
   const realm=marketRealmFromState(window.__scmState);if(realm==null)return;
-  const [id,q]=String(__selectedMarketKey).split(':').map(Number);const haveProduct=Number.isFinite(id)&&id>0&&Number.isFinite(q);
-  __marketRefreshBusy=true;if(btn)btn.disabled=true;setMarketRefreshNote('Updating prices…');
+  const [id,q]=String(__selectedMarketKey).split(":").map(Number);const haveProduct=Number.isFinite(id)&&id>0&&Number.isFinite(q);
+  __marketRefreshBusy=true;if(btn)btn.disabled=true;setMarketRefreshNote("Updating from SimcoTools…");
   const epoch=__realmViewEpoch;
   try{
-    const [tools,,book]=await Promise.all([requestLiveMarketRefresh(realm,true),haveProduct?requestLiveMarketProduct(realm,id,q,true):null,haveProduct?requestMarketOrderBook(realm,id,true):null]);
+    // 2.5.465: Refresh uses SimcoTools only (never a game read). With a product: that product; else all current prices.
+    let r=null;try{r=await chrome.runtime.sendMessage(haveProduct?{type:"LIVE_MARKET_REFRESH",realm,resourceId:id,quality:q,manual:true}:{type:"LIVE_MARKET_REFRESH",realm,manual:true});}catch{r=null;}
     if(epoch!==__realmViewEpoch)return;
-    // The two parallel requests each render from their own read; one last local read so the newest storage wins.
     try{const fresh=await get();if(epoch===__realmViewEpoch&&marketRealmFromState(fresh)===realm){commitDashboardState(fresh);renderLiveMarketProduct(fresh);}}catch{}
     if(epoch!==__realmViewEpoch)return;
+    const what=haveProduct?"This product":"All prices";
     let text;
-    if(!haveProduct)text='Select a warehouse resource first.';
-    else if(book?.directReadsBlocked)text=await scmBlockedNoteText(book.error);
-    else if(book?.ok&&!book.throttled)text=`Order book updated ${marketClock(Date.now())}`;
-    else if(book?.ok){const at=marketBookStamp(window.__scmState,realm,id)||Number(book.lastAt)||0;text=at?`Order book is from ${marketClock(at)}`:'Order book is up to date.';}
-    else if(book?.realmMismatch||book?.skipped)text='Order book not updated: open the game tab on this realm.';
-    else text='Order book could not be updated now. Try again in a minute.';
-    const next=tools&&tools.simcoNextAt?marketClock(tools.simcoNextAt):'';
-    if(next)text+=` · Next SimcoTools refresh at ${next}`;
+    if(r?.unreachableSince){const unreach=scmSimcoNoteText();text=unreach||`SimcoTools unreachable since ${marketClock(r.unreachableSince)}${r.nextAt?" · retry "+scmChCountdown(r.nextAt):""}`;}
+    else if(r?.ok&&!r.queued)text=`${what} updated from SimcoTools ${marketClock(r.fetchedAt||Date.now())}`;
+    else if(r?.queued)text=`${what}: queued for SimcoTools${r.nextAt?" · "+scmChCountdown(r.nextAt):""}`;
+    else text=`SimcoTools did not answer${r?.error?": "+String(r.error).slice(0,80):""}. Showing the last prices.`;
     setMarketRefreshNote(text);
   }finally{__marketRefreshBusy=false;if(btn)btn.disabled=false;}
 }
@@ -1517,6 +1578,7 @@ function renderLiveMarketProduct(s){
   const bookOrTickerAt=!gameShown?null:Math.max(marketBookStamp(s,realm,item.id)||0,sharedForLabel?.source==='ticker'&&Number(sharedForLabel.at)>0?Number(sharedForLabel.at):0)||null;
   const simcoAt=selected?.fetchedAt||(sharedForLabel?.source==='simcotools-prices'&&Number(sharedForLabel.at)>0?new Date(Number(sharedForLabel.at)).toISOString():null);
   const newest=marketNewestStamp(bookOrTickerAt,simcoAt,sharedForLabel?.source==='ticker'&&Number(sharedForLabel.at)===bookOrTickerAt?'Game ticker':'Game market');
+  window.__scmMarketShownAt=newest?newest.at:null;
   const newestText=newest?`Updated ${marketDate(newest.at)} · ${newest.source}`:'';
   if(liveStatus)liveStatus.textContent=newest?'Live':'Waiting';
   if(liveUpdated)liveUpdated.textContent=newest?newestText:'Waiting for market data…';
@@ -1753,8 +1815,8 @@ async function scmLoadTimers(){
   })().finally(()=>{__timersLoading=null;});
   return __timersLoading;
 }
-// The block notice from the background (game blocks direct reads) is information, not a failure: no "failed" wording.
-function scmIsBlockNotice(t){return /blocks direct reads|Manager's own reads pause/i.test(String(t||''));}
+// A read held for the 5-min game slot (lane wording from the background) is information, not a failure: no "failed" wording.
+function scmIsBlockNotice(t){return /^(?:Waiting for the 5-min game slot|Queued for the next game slot)/i.test(String(t||''));}
 function scmSyncProblemText(err,fallback){const m=String(err||fallback||'');return scmIsBlockNotice(m)?m:`Sync failed: ${m}`;}
 function timersClock(ms){const d=new Date(Number(ms));if(!Number.isFinite(d.getTime()))return null;const same=new Date().toDateString()===d.toDateString();const t=d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});return same?t:`${d.toLocaleDateString(undefined,{weekday:'short'})} ${t}`;}
 function timersAgo(ms){const d=Date.now()-Number(ms);if(!Number.isFinite(d))return null;if(d<60000)return 'just now';if(d<3600000)return `${Math.round(d/60000)} min ago`;if(d<86400000)return `${Math.round(d/3600000)} h ago`;return `${Math.round(d/86400000)} d ago`;}
@@ -5201,3 +5263,6 @@ try{chrome.runtime.sendMessage({type:'SCM_CLEAR_ALERT_BADGE'}).catch(()=>{});}ca
 
 // Settings → Diagnostic → Storage: "Trim now" runs the 90-day retention pass and shows bytes before/after.
 document.querySelector('#trimStorageNow')?.addEventListener('click',async e=>{const btn=e.currentTarget,out=document.querySelector('#trimStorageStatus');const mb=b=>b==null?'?':`${(b/1048576).toFixed(2)} MB`;btn.disabled=true;if(out)out.textContent='Trimming…';try{const r=await chrome.runtime.sendMessage({type:'PRUNE_STORAGE'});if(out)out.textContent=r?.ok?`${mb(r.before)} → ${mb(r.after)}${r.written?.length?'':' (nothing older than 90 days)'}`:`Trim failed: ${r?.error||'no answer'}`;}catch(err){if(out)out.textContent=`Trim failed: ${err?.message||err}`;}finally{btn.disabled=false;}});
+
+// Update channels card (Overview and Settings > Background timers): start once the page is built.
+startChannelsCard();

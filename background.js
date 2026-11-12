@@ -143,13 +143,12 @@ const syncAutoRetryRuns=new Set();
 // No answer from the game (HTTP 0), a timeout, or the page bridge not ready yet: worth the one automatic retry.
 function syncFailureIsTransient(error){return /\(HTTP 0\)|HTTP 0\b|timed out|time-?out|bridge is not (?:ready|connected)|message channel closed/i.test(String(error||''));}
 // The game pushed back (HTTP 401 / 403 / 429 / 503 named in the failure, such an answer to a Manager read during this
-// run, or the direct-read block on): a retry a minute later would only hit it again, so none is scheduled.
+// run): a retry a minute later would only hit it again, so none is scheduled.
 // Returns the plain-English reason, or null when the retry may run.
 function syncAutoRetrySkipReason({error=null,blocked=false,backoff=null,startedAt=0}={}){
   const m=String(error||'').match(/HTTP (401|403|429|503)\b/);
   if(m)return `the Sync failure includes HTTP ${m[1]}`;
   if(backoff&&Number(backoff.at)>=(Number(startedAt)||0)&&Number(backoff.status))return `the game answered HTTP ${Number(backoff.status)} during this Sync`;
-  if(blocked)return "the Manager's own game reads are paused (30-min direct-read block)";
   return null;
 }
 let extensionClearGeneration=0; // bumped by Clear Stored Data; work started before it must not write afterwards
@@ -323,57 +322,35 @@ function replayEvent(type,payload={}){
 }
 
 const SIMCOTOOLS_TIMEOUT_MS=30000;
-// Retry only transient non-rate-limit failures. A 429 activates a shared cooldown.
-const SIMCOTOOLS_RETRY_DELAYS_MS=[0,2500,8000];
-const SIMCOTOOLS_DEFAULT_RATE_LIMIT_COOLDOWN_MS=5*60*1000;
-const SIMCOTOOLS_MAX_RATE_LIMIT_COOLDOWN_MS=30*60*1000;
-const SIMCOTOOLS_MAX_CONCURRENT_REQUESTS=1;
+// SimcoTools (api.simcotools.com) has its OWN limit: 2 requests per second, burst 25 (api docs). It has nothing to do
+// with the game's 5-min rule: it never waits on the game lane and never blocks it. Every SimcoTools request goes through
+// the SimcoTools channel (simcoFetch -> simcoChannelTake / simcoChannelResult; rules: SCM_TIMERS_CORE.simcoTake /
+// simcoResult in timers-core.js). One attempt per request, no in-call retries: a refusal sends nothing and returns
+// {queued:true,nextAt,reason}; the job's want stays queued and the 'scm-simco-channel' alarm runs it later.
+// A 429 opens the channel cooldown (Retry-After, else SIMCO.COOLDOWN_DEFAULT_MS); a network failure (no connection,
+// timeout) marks SimcoTools unreachable: one probe after 1, 2, 5, 10, then every 15 min, ONE log line per outage.
+const SIMCOTOOLS_DEFAULT_RATE_LIMIT_COOLDOWN_MS=60*1000;
+const SIMCOTOOLS_MAX_RATE_LIMIT_COOLDOWN_MS=60*60*1000;
 const SIMCOTOOLS_PAIR_RATE_LIMIT_COOLDOWN_MS=5*60*1000;
-const SIMCOTOOLS_MIN_REQUEST_SPACING_MS=500;
-// SimcoTools published limit: 2 requests per second, burst 25 (api docs). ONE gate for every api.simcotools.com call (simcoFetch is the
-// only caller of fetch for that host): the time of the last request lives in storage.session (scmSimcoToolsGate), so a
-// worker restart does not reset it. A call inside the gap is SKIPPED (never queued): it returns
-// {ok:false,status:429,rateLimited:true,limited:true,skipped:true,retryAt}; each caller keeps its stored data and its
-// next scheduled run tries again. No retries (a retry would be a second request inside the gap).
-const SIMCOTOOLS_SHARED_GAP_MS=500;
-const SIMCOTOOLS_GATE_KEY='scmSimcoToolsGate';
-let simcoGateMem=null,simcoGateTail=Promise.resolve();
-let simcoLastRequestAt=0;
+// Up to 2.5.465: storage.session scmSimcoToolsGate (500 ms gate) and storage.local simcoToolsRateLimitUntil (5-min
+// global cooldown). Both are replaced by scmSimcoChannel and removed once at startup (an old 5-min cooldown would
+// otherwise hold every SimcoTools job).
+try{chrome.storage?.session?.remove?.('scmSimcoToolsGate')?.catch?.(()=>{});}catch{}
+try{chrome.storage?.local?.remove?.('simcoToolsRateLimitUntil')?.catch?.(()=>{});}catch{}
+// Mirror of the channel's 429 cooldown (scmSimcoChannel.cooldownUntil), kept for the synchronous checks of the market
+// stages; written only by simcoChannelStore.
 let simcoRateLimitUntil=0;
-let simcoActiveRequests=0;
-const simcoRequestWaiters=[];
 const simcoRefreshRuns=new Map();
+// Per-endpoint 429 cooldowns of the live-market price job (storage.local simcoToolsRateLimitUntilByUrl).
 const simcoRateLimitUntilByUrl=new Map();
+// Retry-After: seconds or an HTTP date -> ms from now (null when missing or unreadable).
 function simcoRetryAfterMs(response){
   const raw=response?.headers?.get?.('Retry-After');
-  if(!raw)return null;
+  if(raw==null||raw==='')return null;
   const seconds=Number(raw);
-  let ms=Number.isFinite(seconds)&&seconds>=0?seconds*1000:Date.parse(raw)-Date.now();
+  let ms=Number.isFinite(seconds)&&seconds>=0?seconds*1000:Date.parse(String(raw))-Date.now();
   if(!Number.isFinite(ms)||ms<0)return null;
   return Math.min(ms,SIMCOTOOLS_MAX_RATE_LIMIT_COOLDOWN_MS);
-}
-function simcoActivateRateLimitCooldown(response){
-  const retryAfter=simcoRetryAfterMs(response);
-  const cooldown=Math.max(SIMCOTOOLS_DEFAULT_RATE_LIMIT_COOLDOWN_MS,retryAfter??SIMCOTOOLS_DEFAULT_RATE_LIMIT_COOLDOWN_MS);
-  simcoRateLimitUntil=Math.max(simcoRateLimitUntil,Date.now()+cooldown);
-  return simcoRateLimitUntil;
-}
-async function simcoWaitForRateLimitCooldown(){
-  while(Date.now()<simcoRateLimitUntil){
-    await new Promise(resolve=>setTimeout(resolve,Math.min(simcoRateLimitUntil-Date.now(),1000)));
-  }
-}
-async function simcoAcquireRequestSlot(){
-  await simcoWaitForRateLimitCooldown();
-  if(simcoActiveRequests<SIMCOTOOLS_MAX_CONCURRENT_REQUESTS){simcoActiveRequests++;return;}
-  await new Promise(resolve=>simcoRequestWaiters.push(resolve));
-  simcoActiveRequests++;
-  await simcoWaitForRateLimitCooldown();
-}
-function simcoReleaseRequestSlot(){
-  simcoActiveRequests=Math.max(0,simcoActiveRequests-1);
-  const next=simcoRequestWaiters.shift();
-  if(next)next();
 }
 // Game API answers can take 14–70 s on a slow phone connection. One attempt, up to 45 s (the page hook aborts at
 // the same limit, max 60 s); retrying a slow request only doubles the load.
@@ -544,13 +521,6 @@ async function applyBundledGameConstants(){
     return {ok:true,applied:true,source:'bundled',bundle:b.bundle||null,replaced:cur?(cur.source==='bundled'?'bundled':'game'):null};
   });
 }
-// Result of a refresh that did not read the API because direct reads are blocked: the stored copy stays (built-in or live).
-function gameConstantsBlockedResult(cur,extra={}){
-  const ok=Boolean(globalThis.SCM_TOOLS_CORE.gameConstantsOk(cur)),bundled=cur?.source==='bundled';
-  return {ok,skipped:true,directReadsBlocked:true,kept:true,source:ok?(bundled?'bundled':'game'):null,bundle:bundled?(cur.bundle||null):null,
-    message:bundled?bundledGameConstantsText(cur):ok?'Game constants from the last read of the game (direct reads are blocked now).':'Game constants missing: direct reads are blocked and the built-in copy could not be loaded.',
-    error:(typeof directReadBlockMem==='object'&&Number(directReadBlockMem?.status)===503?DIRECT_READS_BUSY_TEXT:DIRECT_READS_BLOCKED_TEXT),...extra};
-}
 async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,opts={}){
   // No game tab / bridge not up: quiet (flag, read on the next GAME_STATE) for every caller but a Sync or a forced
   // read, so a caller that forgets the option cannot bring the line back.
@@ -561,9 +531,6 @@ async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,
   try{
     const cur=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;
     if(!force&&cur&&Date.now()-Date.parse(cur.at||0)<Math.max(GAME_CONSTANTS_PERIOD_MS,Number(maxAgeMs)||0))return {ok:true,cached:true,source:cur.source==='bundled'?'bundled':'game',...(cur.source==='bundled'?{message:bundledGameConstantsText(cur)}:{})};
-    // While the game blocks direct reads the API is not tried at all (the block's own recheck runs through pageGet
-    // when its pause ends); the built-in or last live copy stays. The API path below stays for when the block is lifted.
-    if(await directReadsBlockedNow()){logActivityAnyRealm('game-constants','not-read',{directReadsBlocked:true},notReadReason({directReadsBlocked:true}));return gameConstantsBlockedResult(cur);}
     // A real backoff / missing tab only matters for the API read: the built-in copy already covers missing constants.
     if(cur?.source==='bundled'&&!(await simTab())?.id){if(opts?.quietNoTab){await gameConstantsOnBridgeSet(true);return {ok:true,skipped:true,quiet:true,source:'bundled',bundle:cur.bundle||null,message:bundledGameConstantsText(cur),error:'No Sim Companies tab open.'};}logActivityAnyRealm('game-constants','not-read',{},notReadReason('no-game-tab'));return {ok:true,skipped:true,source:'bundled',bundle:cur.bundle||null,message:bundledGameConstantsText(cur),error:'No Sim Companies tab open.'};}
     const retry=await gameConstantsRetryGet();
@@ -573,7 +540,8 @@ async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,
   // Unattended (alarm, worker start, a game page or the dashboard asking for missing data): the three reads go through
   // the shared game lane (job 'gameConstants'), one per free slot; the parts already read wait in storage.session
   // (scmGameConstantsPartial, kept 1 h) for the next slot. After a Sync (afterSync) or force: all three now.
-  const lane=!force&&!opts?.afterSync;
+  // 2.5.465: every read is a lane read (forced / after Sync too): the parts already read wait for the next slot.
+  const lane=true;
   let partial={};
   if(lane){try{const v=(await chrome.storage.session.get(GAME_CONSTANTS_PARTIAL_KEY))?.[GAME_CONSTANTS_PARTIAL_KEY];if(v&&typeof v==='object')partial=v;}catch{}}
   const partialFresh=p=>Boolean(partial[p]&&partial[p].data&&typeof partial[p].data==='object'&&Date.now()-Number(partial[p].at)<3600e3);
@@ -582,7 +550,7 @@ async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,
       if(lane&&partialFresh(p))return partial[p].data;
       const x=await pageGet(p,null,null,'game-constants',{timeoutMs:GAME_CONSTANTS_READ_TIMEOUT_MS,attempts:1,...(lane?{lane:'gameConstants'}:{})});
       if(x?.laneWait){const e=new Error(GAME_LANE_WAIT_TEXT);e.laneWait=true;e.nextAt=Number(x.nextAt)||0;throw e;}
-      if(!x?.ok){const fe=new Error(`${p} ${x?.error||`HTTP ${x?.status||0}`}`);if(x?.recheckFailed)fe.recheckFailed=true;throw fe;}if(!x.data||typeof x.data!=='object')throw new Error(`${p} not JSON`);
+      if(!x?.ok){const fe=new Error(`${p} ${x?.error||`HTTP ${x?.status||0}`}`);throw fe;}if(!x.data||typeof x.data!=='object')throw new Error(`${p} not JSON`);
       if(lane){partial={...partial,[p]:{data:x.data,at:Date.now()}};try{await chrome.storage.session.set({[GAME_CONSTANTS_PARTIAL_KEY]:partial});}catch{}}
       return x.data;};
     // One at a time: the first failure stops the rest.
@@ -603,9 +571,6 @@ async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,
     // the read runs on the next GAME_STATE. Hidden tab / offline lines go through the quiet-stretch rule instead.
     if(pageBridgeUnavailable(e)&&opts?.quietNoTab&&!e?.tabHidden&&!e?.offline&&!e?.pageClosed){await gameConstantsOnBridgeSet(true);return {ok:false,skipped:true,quiet:true,reason:'bridge-not-ready',error};}
     if(pageBridgeUnavailable(e)){logActivityAnyRealm('game-constants','not-read',{},notReadReason(e));return {ok:false,skipped:true,reason:'bridge-not-ready',reachedTab:!(e?.bridgeNotReady||e?.noGameTab)&&!/page bridge is not (?:ready|connected)|Open Sim Companies and log in/i.test(error),error};}
-    // The game does not load /api/v2/constants/* on its own pages (2026-11-10 bundle), so there is no capture to use:
-    // the stored constants stay, and the next read is the block's recheck.
-    if(isDirectReadsBlockedError(error)){logActivityAnyRealm('game-constants','not-read',{directReadsBlocked:true},notReadReason({directReadsBlocked:true,recheckFailed:Boolean(e?.recheckFailed)}));let cur=null;try{cur=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;}catch{}return gameConstantsBlockedResult(cur);}
     try{const prev=await gameConstantsRetryGet();const failures=Math.min(30,(Number(prev?.failures)||0)+1);
       const waitMs=Math.min(GAME_CONSTANTS_PERIOD_MS,GAME_CONSTANTS_RETRY_MIN_MS*2**(failures-1));
       await gameConstantsRetrySet({failures,nextAt:Date.now()+waitMs,error,at:new Date().toISOString()});}catch{}
@@ -703,7 +668,7 @@ async function runMarketOrdersRetry(realm){
     if(coreSyncActive())return await rearm(now+MARKET_ORDERS_RETRY_RECHECK_MS,'sync');
     const at=await marketOrdersRetryAt(r,now);if(at>now+1500)return await rearm(at,'slot');
     const {tab,b}=await gameTabBridgeStatus();
-    const skip=!tab?'no-game-tab':b?.online===false||(typeof navigator!=='undefined'&&navigator.onLine===false)?'offline':b?.visible===false?'game-tab-hidden':null;
+    const skip=!tab?'no-game-tab':b?.online===false||(typeof navigator!=='undefined'&&navigator.onLine===false)?'offline':null;
     if(skip==='offline'||skip==='game-tab-hidden'){logNotRead(r,'market-orders',skip,{deferredRetry:true},now,'retry');return await rearm(now+MARKET_ORDERS_RETRY_RECHECK_MS,skip);}
     if(skip){await marketOrdersRetrySet(r,null);logNotRead(r,'market-orders',skip,{deferredRetry:true},now,'retry');return {run:false,reason:skip};}
     return {run:true,cur};
@@ -748,8 +713,13 @@ async function captureOwnMarketOrders(realm,url,data){
   const own=(acRealm==null||acRealm===r?safeCid(ac?.companyId??ac?.id):0)||capturedCompanyIdForRealm(st,r)||safeCid(cur?.companyId);
   if(m[1].toLowerCase()!=='me'&&!(own>0&&Number(m[1])===own))return {ok:false,reason:'other-company'};
   const orders=helperArray(data,keys);
+  // /me/ and /<own id>/ are the same list, but /me/ answered [] while /<id>/ had 4 (user capture 2026-11-12): within
+  // 60 s of an /<id>/ answer (or a Manager read, which uses /<id>/) a /me/ answer is not stored.
+  const via=m[1].toLowerCase()==='me'?'me':'id';
+  const decision=ownOrdersCaptureDecision(cur,via,orders);
+  if(!decision.write){if(decision.recheck&&typeof gameLaneEnqueue==='function')gameLaneEnqueue(`marketOrders:${r}`).catch(()=>{});return {ok:true,skipped:true,reason:decision.reason};}
   if(clearGen!==extensionClearGeneration)return {ok:false,reason:'cleared'};
-  await rawStorageSet({[k]:{companyId:own||null,orders,at:new Date().toISOString(),source:'game'}});ownListingsRefreshError.delete(r);
+  await rawStorageSet({[k]:{companyId:own||null,orders,at:new Date().toISOString(),via,source:'game'}});ownListingsRefreshError.delete(r);
   {const at=Date.now();await marketOrdersGateSet(r,{lastAt:at});notifyGameCardsKeyChanged(k);if(typeof marketOrdersServed==='function')marketOrdersServed(r,at);}
   logActivity(r,'market-orders','success',{rows:orders.length,source:'game'},null,Date.now(),'game');
   return {ok:true,rows:orders.length};
@@ -831,8 +801,6 @@ async function marketOrdersReadOnce(r,cur,background,lane=false){
     if(x?.laneWait){logLaneWait(r,'market-orders',x.nextAt);return {ok:false,skipped:true,laneWait:true,reason:'lane',nextAt:x.nextAt};}
     // The tab moved to the other realm meanwhile: a "not read" line (the gap still counts, no backoff step).
     if(x?.realmMismatch){logNotRead(r,'market-orders',x);return {ok:false,skipped:true,reason:'other-realm'};}
-    // The game blocks direct reads: an info note on the card (directReadsBlocked) and a "not read" line, no backoff step.
-    if(x?.directReadsBlocked){if(cleared())return cancelled;logNotRead(r,'market-orders',x,{directReadsBlocked:true,...(x.recheckFailed?{recheckFailed:true}:{})});const error=x.error||DIRECT_READS_BLOCKED_TEXT;ownListingsRefreshError.set(r,{error,at:new Date().toISOString(),directReadsBlocked:true});notifyGameCardsKeyChanged(k);return {ok:false,skipped:true,directReadsBlocked:true,error};}
     if(!x?.ok||x.data==null)return await fail(x?.error||`HTTP ${x?.status||0}`);
     if(!Array.isArray(x.data)&&!(x.data&&typeof x.data==='object'&&['data','items','results','orders','marketOrders'].some(f=>Array.isArray(x.data[f]))))return await fail('not a list');
     const orders=helperArray(x.data,['data','items','results','orders','marketOrders']);
@@ -863,7 +831,6 @@ async function refreshOutgoingContracts(realm,minGapMs=OUTGOING_CONTRACTS_REFRES
   try{
     const x=await pageGet('/api/v3/contracts-outgoing/me/',r,null,'outgoing-contracts-card',{timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS,attempts:1,...(lane?{lane}:{})});
     if(x?.laneWait){if(outgoingContractsRefreshAt.get(r)===now)outgoingContractsRefreshAt.set(r,prevAt);logLaneWait(r,'outgoing-contracts',x.nextAt);return {ok:false,skipped:true,laneWait:true,nextAt:x.nextAt};}
-    if(x?.directReadsBlocked){logNotRead(r,'outgoing-contracts',x,{directReadsBlocked:true,...(x.recheckFailed?{recheckFailed:true}:{})});return {ok:false,skipped:true,directReadsBlocked:true,error:x.error||DIRECT_READS_BLOCKED_TEXT};}
     // Other realm / realm not shown yet: a "not read" line; a real failed read: a failure line.
     if(!x?.ok&&(x?.realmMismatch||x?.realmUnknown)){logNotRead(r,'outgoing-contracts',x);return {ok:false,error:x.error};}
     if(!x?.ok||x.data==null){const error=capRefreshError(x?.error||`HTTP ${x?.status||0}`);logActivity(r,'outgoing-contracts','failure',{},error);return {ok:false,error:x?.error||`HTTP ${x?.status||0}`};}
@@ -929,7 +896,7 @@ function logActivity(realm,job,outcome,details={},error=null,startedMs=Date.now(
   return recordBackgroundJobEvent(n,{job,trigger,outcome,startedAt:new Date(startedMs).toISOString(),finishedAt:new Date().toISOString(),durationMs:Date.now()-startedMs,details,error}).catch(()=>{});
 }
 // "not read" lines: the Manager wanted game data but could not get it (no game tab, page bridge not ready, page
-// unloaded mid-read, tab in the other realm or its realm not shown yet, the game blocks direct reads, no company id
+// unloaded mid-read, tab in the other realm or its realm not shown yet, no company id
 // yet). Not a failure: no backoff step, the data stays not fresh, the next cycle tries again. "waiting" lines: held for
 // the shared 5-min game-request slot (planned pace). Plain-English reason for a pageGet answer, an Error or a reason code.
 function notReadReason(v){
@@ -937,11 +904,6 @@ function notReadReason(v){
   const code=typeof v==='string'?v:String(v?.reason||'');
   const msg=typeof v==='string'?'':String(v?.error??v?.message??'');
   if(/^Not read: /.test(msg))return msg;
-  if(v?.directReadsBlocked||isDirectReadsBlockedError(msg)||code==='direct-reads-blocked'){
-    const busy=Number(v?.answerStatus)===503||Number(v?.status)===503||msg.includes(DIRECT_READS_BUSY_TEXT)||(Number(v?.status)!==403&&typeof directReadBlockMem==='object'&&Number(directReadBlockMem?.status)===503);
-    if(busy)return v?.recheckFailed?'Not read: the game still answers 503 (recheck); Manager reads paused':'Not read: the game answered 503; Manager reads paused for 30 min';
-    return v?.recheckFailed?'Not read: the game still blocks direct reads (recheck)':'Not read: the game blocks direct reads';
-  }
   if(v?.realmMismatch||code==='other-realm'){const m=msg.match(/The game tab is in (.+?), not (.+?)\.?$/);return m?`Not read: the game tab is in ${m[1]}, not ${m[2]}`:'Not read: the game tab is in the other realm';}
   if(v?.realmUnknown||code==='realm-unknown')return 'Not read: the game tab has not shown its realm yet';
   if(code==='no-company-id')return 'Not read: no company id yet (open the game once)';
@@ -955,7 +917,7 @@ function notReadReason(v){
   return `Not read: ${msg||code||'the game page did not answer'}`.slice(0,200);
 }
 // True when a read made no request for one of the not-read reasons above (not a real failure).
-function isNotReadAnswer(v){return Boolean(v&&(v.directReadsBlocked||v.realmMismatch||v.realmUnknown||v.pageClosed||v.bridgeNotReady||v.noGameTab))||isDirectReadsBlockedError(v)||pageBridgeUnavailable(v)||(v instanceof Error&&pageMessageChannelClosed(v));}
+function isNotReadAnswer(v){return Boolean(v&&(v.syncRunning||v.realmMismatch||v.realmUnknown||v.pageClosed||v.bridgeNotReady||v.noGameTab))||pageBridgeUnavailable(v)||(v instanceof Error&&pageMessageChannelClosed(v));}
 function laneWaitClock(ms){const d=new Date(Number(ms)||0);return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;}
 function laneWaitText(nextAt){return Number(nextAt)>0?`Waiting for the 5-min game slot (next at ${laneWaitClock(nextAt)})`:'Waiting for the 5-min game slot';}
 // 'other-realm' from a local realm check (two realms: the tab is in the one that is not `realm`).
@@ -1042,15 +1004,15 @@ async function refreshAbundanceIfStale(realm,trigger='game-buildings'){
     const ids=staleAbundanceIds(info.ids,st?.endpointData||{});
     if(!info.ids.length){logActivity(r,'abundance-refresh','skipped',{buildings:info.buildings,sources:info.sources.join(', ')},'No mine, oil rig or quarry found in your buildings',t0,trigger);return {ok:true,saved,wanted:0};}
     if(!ids.length){logActivity(r,'abundance-refresh','skipped',{mines:info.ids.length},'all fresh (under 1 h)',t0,trigger);return {ok:true,saved,wanted:0};}
-    // No game tab / page bridge not ready or not connected, the game blocks direct reads, or the shared game lane slot
+    // No game tab / page bridge not ready or not connected, or the shared game lane slot
     // is taken: no request was made, and the rest would meet the same, so the loop stops there. Those buildings are
     // not failures (notRead) and stay stale for the next run. Unattended: one lane read (job 'abundance:<realm>') per slot.
     let notRead=0,why=null;
-    for(let i=0;i<ids.length;i++){const id=ids[i];const p=`/api/v2/companies/buildings/${id}/abundance/`;try{const x=await readFollowingMoves(p,r,{captured:st?.endpointData||null,lane:`abundance:${r}`});if(x?.laneWait||x?.directReadsBlocked){notRead+=ids.length-i;why=x;break;}if(x?.realmMismatch||x?.realmUnknown){notRead++;why=why||x;continue;}if(x?.ok){await saveData(p,x.data,x.status,'GET',r);saved.push(id);}else errors.push(`#${id}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){if(pageBridgeUnavailable(e)){notRead+=ids.length-i;why=e;break;}errors.push(`#${id}: ${e?.message||e}`);}}
+    for(let i=0;i<ids.length;i++){const id=ids[i];const p=`/api/v2/companies/buildings/${id}/abundance/`;try{const x=await readFollowingMoves(p,r,{captured:st?.endpointData||null,lane:`abundance:${r}`});if(x?.laneWait){notRead+=ids.length-i;why=x;break;}if(x?.realmMismatch||x?.realmUnknown||x?.laneWait||x?.queued||x?.syncRunning){notRead++;why=why||x;continue;}if(x?.ok){await saveData(p,x.data,x.status,'GET',r);saved.push(id);}else errors.push(`#${id}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){if(pageBridgeUnavailable(e)){notRead+=ids.length-i;why=e;break;}errors.push(`#${id}: ${e?.message||e}`);}}
     // Nothing read and no real failure: a "waiting" (lane slot) or "not read" line, and the 5 min gap does not count.
     if(notRead&&!saved.length&&!errors.length){bridgeSkip=true;
       if(why?.laneWait)logLaneWait(r,'abundance-refresh',why.nextAt,{wanted:ids.length},t0,trigger);
-      else logNotRead(r,'abundance-refresh',why,{wanted:ids.length,notRead,...(why?.directReadsBlocked?{directReadsBlocked:true}:{})},t0,trigger);
+      else logNotRead(r,'abundance-refresh',why,{wanted:ids.length,notRead},t0,trigger);
       return {ok:true,skipped:true,bridgeUnavailable:true,saved,wanted:ids.length,notRead};}
     const tried=ids.length-notRead;
     logActivity(r,'abundance-refresh',saved.length===tried?'success':saved.length?'partial':'failure',{rows:saved.length,wanted:ids.length,...(notRead?{notRead,notReadReason:why?.laneWait?laneWaitText(why.nextAt):notReadReason(why)}:{}),sources:info.sources.join(', ')},errors.join(' · ')||null,t0,trigger);
@@ -1068,9 +1030,9 @@ async function readFollowingMoves(path,realm,{movedReads=null,captured=null,lane
   const x=await pageGet(from,realm,null,null,lane?{lane,timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS}:null);
   if(x?.ok&&endpointDataIsValid(path,x.data))return {ok:true,data:x.data,status:x.status,walkedPath:from!==path?from:null};
   const status=Number(x?.status)||0,failed={ok:false,status,error:x?.error||`HTTP ${status}`};
-  // No request (lane slot taken) or the game blocks direct reads: no move to look for; the caller logs a waiting / not-read line.
+  // No request (lane slot taken): no move to look for; the caller logs a waiting / not-read line.
   if(x?.laneWait)return {...failed,laneWait:true,nextAt:Number(x.nextAt)||0};
-  if(x?.directReadsBlocked)return {...failed,directReadsBlocked:true,...(x.recheckFailed?{recheckFailed:true}:{})};
+  
   if(x?.realmMismatch||x?.realmUnknown)return {...failed,...(x.realmMismatch?{realmMismatch:true}:{realmUnknown:true})};
   if(!endpointFailureSuggestsMove(x,path))return failed;
   const pool={};
@@ -1102,12 +1064,12 @@ async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
   const paths=['/api/v3/players/research/',...(govListSkipped?[]:[`/api/v3/government-orders/${r}/`]),'/api/v3/government-orders/tier/',...[...ab].map(id=>`/api/v2/companies/buildings/${id}/abundance/`)];
   const out=[],errs=[],warnings=[],t0=Date.now();
   const pool={...ep,...(captured||{})};
-  // No game tab / page bridge not ready or not connected, or the game blocks direct reads: no request was made and the
+  // No game tab / page bridge not ready or not connected: no request was made and the
   // rest would meet the same, so the loop stops; those reads are not failures (notRead), and nothing read with no real
   // failure logs a "not read" line with the reason.
   let notRead=0,why=null;
-  for(let i=0;i<paths.length;i++){const p=paths[i];try{const x=await readFollowingMoves(p,r,{movedReads,captured:pool});if(x?.directReadsBlocked){notRead+=paths.length-i;why=x;break;}if(x?.realmMismatch||x?.realmUnknown){notRead++;why=why||x;continue;}if(x.ok&&x.walkedPath)warnings.push(`${p} moved to ${x.walkedPath}`);if(!x.ok){const ab=/\/abundance\/$/.test(p);if(x.suspected)warnings.push(`${p} (HTTP ${x.status}) may have moved to ${x.suspected}; not adopted`);else if(ab)warnings.push(`${p} failed (HTTP ${x.status}); kept the stored record`);}if(x.ok){await saveData(p,x.data,x.status,'GET',r);out.push(p);}else errs.push(`${p.replace('/api/','')}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){if(pageBridgeUnavailable(e)){notRead+=paths.length-i;why=e;break;}errs.push(`${p.replace('/api/','')}: ${e?.message||e}`);if(/\/abundance\/$/.test(p))warnings.push(`${p} not read: ${e?.message||e}`);}}
-  if(notRead&&!out.length&&!errs.length){logNotRead(r,'extra-game-data',why,{wanted:paths.length,notRead,...(why?.directReadsBlocked?{directReadsBlocked:true}:{})},t0,'after-sync');return {ok:true,skipped:true,bridgeUnavailable:true,saved:out,warnings,notRead};}
+  for(let i=0;i<paths.length;i++){const p=paths[i];try{const x=await readFollowingMoves(p,r,{movedReads,captured:pool});if(x?.realmMismatch||x?.realmUnknown||x?.laneWait||x?.queued||x?.syncRunning){notRead++;why=why||x;continue;}if(x.ok&&x.walkedPath)warnings.push(`${p} moved to ${x.walkedPath}`);if(!x.ok){const ab=/\/abundance\/$/.test(p);if(x.suspected)warnings.push(`${p} (HTTP ${x.status}) may have moved to ${x.suspected}; not adopted`);else if(ab)warnings.push(`${p} failed (HTTP ${x.status}); kept the stored record`);}if(x.ok){await saveData(p,x.data,x.status,'GET',r);out.push(p);}else errs.push(`${p.replace('/api/','')}: ${x?.error||'HTTP '+(x?.status||0)}`);}catch(e){if(pageBridgeUnavailable(e)){notRead+=paths.length-i;why=e;break;}errs.push(`${p.replace('/api/','')}: ${e?.message||e}`);if(/\/abundance\/$/.test(p))warnings.push(`${p} not read: ${e?.message||e}`);}}
+  if(notRead&&!out.length&&!errs.length){logNotRead(r,'extra-game-data',why,{wanted:paths.length,notRead},t0,'after-sync');return {ok:true,skipped:true,bridgeUnavailable:true,saved:out,warnings,notRead};}
   const abN=paths.filter(p=>/abundance/.test(p)).length,abOk=out.filter(p=>/abundance/.test(p)).length;
   logActivity(r,'extra-game-data',errs.length?(out.length?'partial':'failure'):'success',{rows:out.length,wanted:paths.length,abundance:`${abOk}/${abN}`,...(govListSkipped?{govOrdersList:'not read: SimcoTools copy under 1 h and game capture under 24 h'}:{}),...(notRead?{notRead,notReadReason:notReadReason(why)}:{})},errs.slice(0,4).join(' · ')||null,t0,'after-sync');
   return {ok:true,saved:out,warnings,...(notRead?{notRead}:{})};
@@ -1907,7 +1869,6 @@ function rebuildAccountingWeekSales(store, weekStartMs){
 }
 // A ledger read skipped by the direct-read block: thrown (callers such as Sync keep their error path) but tagged, so
 // the deferred week refresh treats it as a "not read" (not a failure).
-function accountingDirectReadsBlockedError(r){const e=new Error(r?.error||DIRECT_READS_BLOCKED_TEXT);e.directReadsBlocked=true;if(r?.recheckFailed)e.recheckFailed=true;return e;}
 // opts.lane: an unattended retry (the deferred week refresh after a failed run): every read goes through the shared
 // game lane, one per slot; a read refused by the lane throws a laneWait-tagged error (no request went out), and a
 // week / ledger page stored by an earlier slot of the same refresh (under 30 min old) is reused instead of read again,
@@ -1959,7 +1920,7 @@ async function syncCurrentWeekAccountingSales(realm, trace, opts=null){
   }
 
   const week=await read(weekPath);
-  if(week?.directReadsBlocked)throw accountingDirectReadsBlockedError(week);
+  
   if(!week?.ok)throw new Error(`Current accounting week boundary request failed (HTTP ${week?.status||0}).`);
   if(!week.reused)await saveData(weekPath,week.data,week.status,'GET',target);
   s=await state(target); store=s.realmStores?.[realmKeyFromRealm(target)]||{};
@@ -1969,7 +1930,7 @@ async function syncCurrentWeekAccountingSales(realm, trace, opts=null){
   recentRows=store.endpointData?.[recentPath]?.data?.data;
   if(!Array.isArray(recentRows)){
     const recent=await read(recentPath);
-    if(recent?.directReadsBlocked)throw accountingDirectReadsBlockedError(recent);
+    
     if(!recent?.ok)throw new Error(`Current accounting ledger request failed (HTTP ${recent?.status||0}).`);
     if(!recent.reused)await saveData(recentPath,recent.data,recent.status,'GET',target);
     s=await state(target); store=s.realmStores?.[realmKeyFromRealm(target)]||{}; recentRows=store.endpointData?.[recentPath]?.data?.data;
@@ -1999,7 +1960,7 @@ async function syncCurrentWeekAccountingSales(realm, trace, opts=null){
     trace?.('ledger-page-request',{realm:target,cursor,path,page:pages});
     const response=await read(path,trace,'accounting-ledger-page');
     trace?.('ledger-page-response',{realm:target,cursor,path,page:pages,ok:!!response?.ok,status:response?.status||0,error:response?.error||null});
-    if(response?.directReadsBlocked)throw accountingDirectReadsBlockedError(response);
+    
     if(!response?.ok)throw new Error(`Accounting ledger page ${cursor} failed (HTTP ${response?.status||0}).`);
     if(!response.reused)await saveData(path,response.data,response.status,'GET',target);
     const rows=Array.isArray(response.data?.data)?response.data.data:[];
@@ -2051,13 +2012,6 @@ async function recordBackgroundJobEvent(realm,event={}){
   if(event?.laneWait||details0.laneWait||isGameLaneWait(event?.error)||isGameLaneWait(details0.error)){
     const nextAt=Number(details0.nextAt??event?.nextAt)||0;
     event={...event,outcome:'waiting',error:/^Waiting for the 5-min game slot/.test(String(event?.error||''))?event.error:laneWaitText(nextAt),details:{...details0,laneWait:true}};
-  // A read the game's direct-read block stopped (the block's own 'direct-reads-blocked' line aside): a "not read"
-  // line, never a failure. details.directReadsBlocked lets the monitor tell it apart without reading the text.
-  }else if(String(event?.job||'')!=='direct-reads-blocked'&&(event?.directReadsBlocked||details0.directReadsBlocked||isDirectReadsBlockedError(event?.error)||isDirectReadsBlockedError(details0.error))){
-    const toNotRead=event.outcome==='failure'||event.outcome==='skipped'||event.outcome==null||event.outcome==='not-read';
-    event={...event,outcome:toNotRead?'not-read':event.outcome,error:toNotRead&&(!event.error||isDirectReadsBlockedError(event.error))?notReadReason({directReadsBlocked:true,recheckFailed:Boolean(details0.recheckFailed||event.recheckFailed)}):event.error,details:{...details0,directReadsBlocked:true}};
-  }else if(event?.directReadsBlocked||details0.directReadsBlocked||isDirectReadsBlockedError(event?.error)||isDirectReadsBlockedError(details0.error)){
-    event={...event,outcome:event.outcome==='failure'||event.outcome==null?'skipped':event.outcome,details:{...details0,directReadsBlocked:true}};
   }
   // not-read / waiting: identical lines at most once per 60 s, "no game tab" once per 30 min (activityRepeatCheck); the next one carries details.repeats.
   // Quiet not-read lines (tab hidden / offline): one per job per stretch (activityStretchCheck).
@@ -2152,12 +2106,14 @@ async function catchUpLedgerArchive(realm,reason='daily-walk'){
   while(cursor&&oldest>plan.stopAt&&!seen.has(cursor)&&pages<LEDGER_CATCHUP_MAX_PAGES){
     seen.add(cursor);pages++;
     const path=`/api/v2/companies/me/cashflow/${cursor}/`;
-    // No game tab / bridge not ready, or the game blocks direct reads: no page was read, a "not read" line (not a
+    // No game tab / bridge not ready: no page was read, a "not read" line (not a
     // failure); the archive stays where it is and the next walk carries on. A real HTTP error stays a failure.
     let res;
     try{res=await pageGet(path,n,null,`ledger-catchup:${reason}`);}
     catch(e){if(pageBridgeUnavailable(e)){logNotRead(n,'ledger-catchup',e,{pages:pages-1},Date.now(),reason);return {ok:true,skipped:true,bridgeUnavailable:true,pages:pages-1,caughtUp:false,error:e?.message||String(e)};}throw e;}
-    if(res?.directReadsBlocked){logNotRead(n,'ledger-catchup',res,{pages:pages-1,directReadsBlocked:true,...(res.recheckFailed?{recheckFailed:true}:{})},Date.now(),reason);return {ok:true,skipped:true,directReadsBlocked:true,pages:pages-1,caughtUp:false,error:res.error||DIRECT_READS_BLOCKED_TEXT};}
+    
+    // 2.5.465: waiting for the 5-min game slot is not a failure; the next walk carries on.
+    if(res?.laneWait||res?.queued||res?.syncRunning)return {ok:true,skipped:true,queued:true,nextAt:res?.nextAt||null,pages:pages-1,caughtUp:false};
     if(!res?.ok)return {ok:false,pages,error:`Ledger page ${cursor} failed (HTTP ${res?.status||0}).`};
     await saveData(path,res.data,res.status,'GET',n);
     cursor=null;
@@ -2480,14 +2436,14 @@ function warehouseOverlayRefreshInBackoff(realm,maxAgeMs,now=Date.now()){
 }
 function noteWarehouseOverlayRefreshResult(realm,maxAgeMs,result,now=Date.now()){
   if(result?.ok){warehouseOverlayBackoffUntil.delete(realm);return;}
-  if(Number(maxAgeMs)===0||result?.stale||result?.notReady||result?.otherRealm||result?.pageClosed||result?.directReadsBlocked||result?.bridgeUnavailable||result?.laneWait)return;
+  if(Number(maxAgeMs)===0||result?.stale||result?.notReady||result?.otherRealm||result?.pageClosed||result?.bridgeUnavailable||result?.laneWait)return;
   warehouseOverlayBackoffUntil.set(realm,now+WAREHOUSE_OVERLAY_FAILURE_BACKOFF_MS);
 }
 // maxAgeMs>0: the game-page card's own refresh (unattended): a lane read (job 'warehouse:<realm>', priority 1, at most
 // every 15 min), and a warehouse captured from the game's own pages in the last 15 min counts as fresh.
 // maxAgeMs 0: a game action changed stock or the player pressed refresh: user-initiated, read now.
 const WAREHOUSE_LANE_FRESH_MS=15*60000;
-async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000){
+async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000, opts=null){
   const totalStartedAt=Date.now();
   const laneRead=Number(maxAgeMs)>0,freshMs=laneRead?Math.max(Number(maxAgeMs),WAREHOUSE_LANE_FRESH_MS):Number(maxAgeMs)||0;
   const n=validRealmNumber(realm); if(n==null)return {ok:false,error:'Invalid realm.'};
@@ -2510,11 +2466,11 @@ async function refreshRealmWarehouseForOverlayUnlocked(realm, maxAgeMs=15000){
   const path=`/api/v3/resources/${companyId}/`;
   try{
     const requestStartedAt=Date.now();
-    const r=await pageGet(path,n,null,null,{timeoutMs:WAREHOUSE_REFRESH_PAGE_TIMEOUT_MS,attempts:1,...(laneRead?{lane:`warehouse:${n}`}:{})});
+    const r=await pageGet(path,n,null,null,{timeoutMs:WAREHOUSE_REFRESH_PAGE_TIMEOUT_MS,attempts:1,lane:typeof opts?.lane==='string'&&opts.lane?opts.lane:`warehouse:${n}`});
     const requestDurationMs=Date.now()-requestStartedAt;
     if(r?.laneWait)return {ok:false,skipped:true,laneWait:true,reason:r.reason,nextAt:r.nextAt,error:r.error,requestDurationMs};
     if(r?.realmMismatch){s=await state(n);return {...otherRealmSkip(),requestDurationMs};}
-    if(r?.directReadsBlocked)return {ok:false,skipped:true,directReadsBlocked:true,...(r.recheckFailed?{recheckFailed:true}:{}),error:r.error||DIRECT_READS_BLOCKED_TEXT,status:r.status||403,requestDurationMs};
+    
     if(!r?.ok)return {ok:false,error:r?.error||`HTTP ${r?.status||0}`,status:r?.status||0,requestDurationMs};
     const rows=normalizeWarehouse(r.data);
     if(!looksLikeWarehouseRows(rows))return {ok:false,error:'Current game warehouse response was not recognizable.',status:r.status,requestDurationMs};
@@ -2593,7 +2549,7 @@ async function ensureRealmAuthData(realmArg){
   try{
     const r=await pageGet('/api/v3/companies/auth-data/',realm,null,'auth-data-fallback',{lane:`authData:${realm}`});
     if(r?.laneWait){logLaneWait(realm,'auth-data-read',r.nextAt);return {ok:false,skipped:true,laneWait:true,realm,nextAt:r.nextAt||null};}
-    if(r?.directReadsBlocked){logNotRead(realm,'auth-data-read',r,{directReadsBlocked:true,...(r.recheckFailed?{recheckFailed:true}:{})});return {ok:false,skipped:true,directReadsBlocked:true,realm};}
+    
     if(!r?.ok){logActivity(realm,'auth-data-read','failure',{},capRefreshError(r?.error||`HTTP ${r?.status||0}`));return {ok:false,realm,error:r?.error||`HTTP ${r?.status||0}`};}
     if(endpointResponseRejected('/api/v3/companies/auth-data/',r)){logActivity(realm,'auth-data-read','failure',{},'The game answered with a page instead of data.');return {ok:false,realm,error:'The game answered with a page instead of data.'};}
     await saveData('/api/v3/companies/auth-data/',r.data,r.status||200,'GET',realm);
@@ -2906,34 +2862,191 @@ function buildingsSnapshotMs(store){
   }
   return at;
 }
+// >>> scm-collect-core (2.5.465; pure, loaded by tests/collect-warehouse-apply.test.js)
+// A game Collect (POST /api/v2/order/take/<buildingId>/) put into the stored warehouse at once, before the queued
+// collectWarehouse game read confirms it. Per take: the reply body when it names what was taken, else an estimate from
+// the stored buildings snapshot. busy.resource.amount is what the run still had to make as of its last collect (it
+// counts down), amountAvailableNow the uncollected part at the snapshot. The run makes the rest evenly up to its
+// finish, so at time T the uncollected output is amountAvailableNow + rate*(T - snapshot), rate = (amount -
+// amountAvailableNow) / (finish - snapshot), never more than amount; a collect stamp after the snapshot (an earlier
+// collect of the same run) starts the count from 0 at that stamp instead.
+// Reply shapes (no capture of a reply body yet, 2026-11-12): a list or {resources|items|taken|collected|data:[...]} of
+// rows with kind (or resource.kind) + quality + amount/quantity, or one such row. A row that looks like a full
+// warehouse lot (has cost / datetime) is the new warehouse amount ('set'); otherwise it is the amount taken ('add').
+// A building object (busy / category / position) is never read as taken output.
+// A reply amount above this is not a real collect (page data cannot be trusted): ignored, the estimate is used instead.
+const COLLECT_AMOUNT_MAX=1e7,COLLECT_PENDING_MAX=200;
+function collectTakeRowsFromReply(body){
+  const isBuilding=o=>o&&typeof o==='object'&&('busy' in o||'position' in o||(typeof o.category==='string'&&'size' in o));
+  const rowOf=o=>{
+    if(!o||typeof o!=='object'||Array.isArray(o)||isBuilding(o))return null;
+    const res=o.resource&&typeof o.resource==='object'?o.resource:null;
+    const kind=Number(o.kind??o.resourceId??res?.kind??res?.id),quality=Number(o.quality??res?.quality??0),amount=Number(o.amount??o.quantity??res?.amount);
+    if(!(Number.isSafeInteger(kind)&&kind>0&&kind<100000)||!Number.isFinite(quality)||quality<0||quality>12||!Number.isFinite(amount)||amount<0||amount>COLLECT_AMOUNT_MAX)return null;
+    const mode=(o.cost&&typeof o.cost==='object')||o.datetime!=null?'set':'add';
+    return {kind,quality:Math.floor(quality),amount,mode};
+  };
+  let list=null;
+  if(Array.isArray(body))list=body;
+  else if(body&&typeof body==='object'){for(const k of ['resources','items','taken','collected','data']){if(Array.isArray(body[k])){list=body[k];break;}}if(!list){const one=rowOf(body);return one?[one]:[];}}
+  else return [];
+  const rows=list.map(rowOf);
+  return rows.length&&rows.every(Boolean)?rows:[];
+}
+function collectEstimateFromBuilding(building,{at,snapshotMs,priorStampMs}={}){
+  const busy=building?.busy,res=busy?.resource;
+  if(!busy||!res||String(busy.category||'')==='b'||busy.expanding)return null;
+  const kind=Number(res.kind??res.resourceId),quality=Number(res.quality??0);
+  const startedMs=Date.parse(String(busy.started||'')),finishMs=startedMs+Number(busy.duration)*1000;
+  const remaining=Number(res.amount),avail=Math.max(0,Number(res.amountAvailableNow)||0),T=Number(at);
+  if(!(kind>0)||!Number.isFinite(startedMs)||!Number.isFinite(finishMs)||!Number.isFinite(remaining)||remaining<=0||!Number.isFinite(T))return null;
+  if(startedMs>T)return null;
+  const snap=Number(snapshotMs);
+  // Uncollected output made by time t, counted from the snapshot (or from the take time when no snapshot time is known).
+  const base=Number.isFinite(snap)&&snap<=T?snap:T;
+  const rate=finishMs>base?(remaining-avail)/(finishMs-base):0;
+  const madeBy=t=>Math.min(remaining,avail+Math.max(0,rate)*Math.max(0,Math.min(t,finishMs)-base));
+  const prior=Number(priorStampMs);
+  const from=Number.isFinite(prior)&&prior>base&&prior<=T&&prior>=startedMs?madeBy(prior):0;
+  const amount=Math.floor(Math.max(0,madeBy(T)-from));
+  return amount>0?{kind,quality:Math.max(0,Math.floor(quality)),amount,mode:'add'}:null;
+}
+// takes: [{id, at, body}] of one realm's Collect burst. Returns {changes:[{kind,quality,amount,mode,buildingId,source}],
+// fromReply, estimated, unknown:[ids]}.
+function collectTakeChanges(takes,{buildings=[],stamps={},snapshotMs=NaN}={}){
+  const out={changes:[],fromReply:0,estimated:0,unknown:[]};
+  const byId=new Map((Array.isArray(buildings)?buildings:[]).map(b=>[String(b?.id),b]));
+  for(const t of Array.isArray(takes)?takes:[]){
+    const id=String(t?.id??'');if(!id)continue;
+    const fromReply=collectTakeRowsFromReply(t.body);
+    if(fromReply.length){out.fromReply++;for(const r of fromReply)out.changes.push({...r,buildingId:id,source:'reply'});continue;}
+    const est=collectEstimateFromBuilding(byId.get(id),{at:t.at,snapshotMs,priorStampMs:stamps?.[id]});
+    if(est){out.estimated++;out.changes.push({...est,buildingId:id,source:'building'});}
+    else out.unknown.push(id);
+  }
+  return out;
+}
+// The stored warehouse rows with the changes applied (new array, rows copied; the amount field of a row is 'amount', or
+// 'quantity' when the row only has that). A kind/quality not in the warehouse yet gets a new row {kind,quality,amount}.
+function applyCollectToWarehouse(rows,changes){
+  const next=(Array.isArray(rows)?rows:[]).map(r=>r&&typeof r==='object'?{...r}:r);
+  const keyOf=r=>{if(!r||typeof r!=='object')return null;const k=r.kind&&typeof r.kind==='object'?Number(r.kind.id??r.kind.kind):Number(r.kind??r.resourceId);const q=Number(r.quality??0);return Number.isFinite(k)&&Number.isFinite(q)?`${k}:${q}`:null;};
+  const idx=new Map();next.forEach((r,i)=>{const k=keyOf(r);if(k&&!idx.has(k))idx.set(k,i);});
+  let added=0;
+  for(const c of Array.isArray(changes)?changes:[]){
+    const k=`${c.kind}:${c.quality}`;let i=idx.get(k);
+    if(i==null){next.push({kind:c.kind,quality:c.quality,amount:0,source:'collect'});i=next.length-1;idx.set(k,i);}
+    const row=next[i],field=row.amount==null&&row.quantity!=null?'quantity':'amount',cur=Number(row[field])||0;
+    row[field]=c.mode==='set'?Number(c.amount):cur+Number(c.amount);added+=c.mode==='set'?0:Number(c.amount);
+  }
+  return {rows:next,added};
+}
+// Own listings from the game: /companies/me/market-orders/ and /companies/<own id>/market-orders/ are the same list,
+// but the game's /me/ answer was [] while the /<id>/ answer had 4 listings (user capture 2026-11-12). Within 60 s of an
+// /<id>/ answer (or a Manager read, which uses /<id>/), a /me/ answer never replaces it. Stored value: {..., via}.
+const OWN_ORDERS_ID_PREFERRED_MS=60000;
+function ownOrdersCaptureDecision(cur,via,orders,now=Date.now()){
+  if(via!=='me')return {write:true};
+  if(!cur||typeof cur!=='object')return {write:true};
+  const curVia=cur.via==='me'?'me':'id',at=Date.parse(String(cur.at||''));
+  // An empty /me/ never wipes a non-empty /<id>/ list (any age): /me/ answered [] while /<id>/ had 4; the queued
+  // marketOrders game read (by id) decides whether the listings are really gone.
+  if(curVia==='id'&&Array.isArray(orders)&&!orders.length&&Array.isArray(cur.orders)&&cur.orders.length)return {write:false,reason:'me-empty-kept-id',recheck:true};
+  if(curVia==='id'&&Number.isFinite(at)&&now-at>=0&&now-at<OWN_ORDERS_ID_PREFERRED_MS)return {write:false,reason:Array.isArray(orders)&&!orders.length&&Array.isArray(cur.orders)&&cur.orders.length?'me-empty-kept-id':'id-preferred'};
+  return {write:true};
+}
+// <<< scm-collect-core
 const pendingBuildingCollects=new Map(); // buildingId -> {at, tagged}
 let buildingCollectFlushTimer=null;
-function noteBuildingTake(url,taggedRealm){
+// Collect all sends one POST per building (13 in the user's 2026-11-12 capture, same millisecond; on a slow phone the
+// replies can spread): one flush 1 s after the last take, at most 4 s after the first = one warehouse write + one toast.
+const BUILDING_COLLECT_DEBOUNCE_MS=1000,BUILDING_COLLECT_MAX_WAIT_MS=4000;let buildingCollectFirstAt=0;
+function noteBuildingTake(url,taggedRealm,body){
   const id=collectTakeBuildingIdFromUrl(url);if(id==null||!(id>0))return;
-  pendingBuildingCollects.set(id,{at:Date.now(),tagged:taggedRealm===0||taggedRealm===1?taggedRealm:null});
-  // Collect all sends one POST per building: one read of both realms per burst.
-  if(!buildingCollectFlushTimer)buildingCollectFlushTimer=setTimeout(()=>{buildingCollectFlushTimer=null;flushBuildingCollects().catch(()=>{});},300);
+  const now=Date.now();
+  if(!pendingBuildingCollects.has(id)&&pendingBuildingCollects.size>=COLLECT_PENDING_MAX)return;
+  try{if(body!=null&&JSON.stringify(body).length>20000)body=null;}catch{body=null;}
+  pendingBuildingCollects.set(id,{at:now,tagged:taggedRealm===0||taggedRealm===1?taggedRealm:null,body:body===undefined?null:body});
+  if(buildingCollectFlushTimer)clearTimeout(buildingCollectFlushTimer);else buildingCollectFirstAt=now;
+  const wait=Math.max(0,Math.min(BUILDING_COLLECT_DEBOUNCE_MS,buildingCollectFirstAt+BUILDING_COLLECT_MAX_WAIT_MS-now));
+  buildingCollectFlushTimer=setTimeout(()=>{buildingCollectFlushTimer=null;flushBuildingCollects().catch(()=>{});},wait);
 }
 async function flushBuildingCollects(){
   const batch=[...pendingBuildingCollects];pendingBuildingCollects.clear();
   if(!batch.length)return;
-  const gen=extensionClearGeneration,idsByRealm={},buildingsByRealm={};
-  for(const r of [0,1]){
+  const gen=extensionClearGeneration,idsByRealm={},buildingsByRealm={},snapshotByRealm={};
+  // Read only the realm(s) the takes are tagged with (each state() read costs seconds on a big store); the other realm
+  // is read only when some building id was not found (a wrongly tagged take).
+  const readRealm=async r=>{
     const fresh=await state(r),store=fresh.realmStores?.[realmKeyFromRealm(r)]||{};
     buildingsByRealm[r]=realmStoredBuildings(store,fresh,r);
     idsByRealm[r]=new Set(buildingsByRealm[r].map(b=>String(b?.id)));
-  }
-  const byRealm=collectStampsByRealm(batch,idsByRealm);
+    snapshotByRealm[r]=buildingsSnapshotMs(store);
+  };
+  const tagged=new Set(batch.map(([,v])=>v?.tagged));
+  const first=tagged.has(null)?[0,1]:[0,1].filter(r=>tagged.has(r));
+  for(const r of [0,1]){buildingsByRealm[r]=[];idsByRealm[r]=new Set();snapshotByRealm[r]=0;}
+  for(const r of first)await readRealm(r);
+  let byRealm=collectStampsByRealm(batch,idsByRealm);
+  const placed=Object.keys(byRealm[0]).length+Object.keys(byRealm[1]).length;
+  if(placed<batch.length){for(const r of [0,1])if(!first.includes(r))await readRealm(r);byRealm=collectStampsByRealm(batch,idsByRealm);}
   for(const r of [0,1]){
     if(!Object.keys(byRealm[r]).length)continue;
     const key=buildingCollectsKey(r);
+    const takes=batch.filter(([id])=>Object.prototype.hasOwnProperty.call(byRealm[r],String(id))).map(([id,v])=>({id,at:v.at,body:v.body??null}));
+    const startedMs=Math.min(...takes.map(t=>Number(t.at)||Date.now()));
+    let applied=null;
     await withRealmWriteLock(r,async()=>{
       if(gen!==extensionClearGeneration)return;
       const cur=(await chrome.storage.local.get({[key]:{}}))[key]||{};
-      await rawStorageSet({[key]:{...liveCollectStamps(cur,buildingsByRealm[r]),...byRealm[r]}});
+      const prior=liveCollectStamps(cur,buildingsByRealm[r]);
+      // 2.5.465: the collected output goes into the stored warehouse now (stamps from BEFORE this burst decide what an
+      // earlier collect already took); the queued collectWarehouse game read confirms it in the next game slot.
+      try{applied=await applyCollectBatchToWarehouse(r,takes,buildingsByRealm[r],prior,snapshotByRealm[r],gen);}catch(e){applied={ok:false,reason:'error',error:e?.message||String(e),buildings:takes.length};}
+      await rawStorageSet({[key]:{...prior,...byRealm[r]}});
     });
+    if(applied)recordCollectApplied(r,applied,startedMs);
   }
   for(const r of [0,1])if(Object.keys(byRealm[r]).length)scheduleGameOverlayRefreshNotification(r,150);
+}
+// Runs inside withRealmWriteLock(r). One storage write for the whole burst. Not applied (no write): nothing known about
+// the takes, no stored warehouse yet (fresh storage: the queued game read fills it, nothing is invented), a warehouse
+// capture at/after the first take (it already holds the collect), or a clear meanwhile.
+async function applyCollectBatchToWarehouse(r,takes,buildings,stamps,snapshotMs,gen){
+  const key=realmKeyFromRealm(r);
+  const plan=collectTakeChanges(takes,{buildings,stamps,snapshotMs});
+  const replyKeys=[...new Set(takes.flatMap(t=>{const b=Array.isArray(t.body)?t.body[0]:t.body;return b&&typeof b==='object'?Object.keys(b).slice(0,12):[];}))].slice(0,20);
+  const base={buildings:takes.length,fromReply:plan.fromReply,estimated:plan.estimated,unknown:plan.unknown.length,replyKeys};
+  if(!plan.changes.length)return {ok:false,reason:'nothing-known',...base};
+  const fresh=await state(r),existing={...(fresh.realmStores?.[key]||{})};
+  const rows=Array.isArray(existing.warehouseResources)?existing.warehouseResources:[];
+  if(!rows.length)return {ok:false,reason:'no-warehouse',...base};
+  const firstAt=Math.min(...takes.map(t=>Number(t.at)||Infinity)),capAt=Date.parse(String(existing.warehouseCapture?.receivedAt||''));
+  if(Number.isFinite(capAt)&&capAt>=firstAt)return {ok:false,reason:'warehouse-newer',...base};
+  if(gen!==extensionClearGeneration)return {ok:false,reason:'cleared',...base};
+  const {rows:next,added}=applyCollectToWarehouse(rows,plan.changes);
+  // warehouseCapture is NOT touched: the confirming game read must still run (its receivedAt stays the last real read).
+  const note={at:new Date().toISOString(),buildings:takes.length,units:added,fromReply:plan.fromReply,estimated:plan.estimated,unknown:plan.unknown.length};
+  const stores={...(fresh.realmStores||{}),[key]:{...existing,warehouseResources:next,warehouseCollectApplied:note}};
+  const patch={realmStores:stores};if(fresh.activeRealmKey===key)patch.warehouseResources=next;
+  await storageSet(patch);
+  return {ok:true,units:added,rows:next.length,...base};
+}
+// The burst's line: a warehouse-refresh success (trigger stock-mutation-or-forced, details.source 'collect') so the
+// monitor shows ONE toast "Collected from N buildings · warehouse updated"; not applied: a replay event with the reason
+// and the reply's keys (so a later export shows the reply shape).
+function recordCollectApplied(r,a,startedMs){
+  const now=Date.now(),start=Number(startedMs)||now;
+  // 'warehouse-newer': the game's own warehouse read after the collect is already stored, so it is updated too.
+  if(a?.ok||a?.reason==='warehouse-newer'){
+    const n=Number(a.buildings)||0;
+    recordBackgroundJobEvent(r,{job:'warehouse-refresh',trigger:'stock-mutation-or-forced',startedAt:new Date(start).toISOString(),finishedAt:new Date(now).toISOString(),durationMs:Math.max(0,now-start),outcome:'success',requested:0,fetched:0,refreshed:1,checked:1,cached:0,error:null,
+      details:{source:'collect',buildings:n,units:a.units,rows:a.rows,fromReply:a.fromReply,estimated:a.estimated,unknown:a.unknown,replyKeys:a.replyKeys,what:a?.ok?`Collect: ${n} building${n===1?'':'s'}, +${Math.round(Number(a.units)||0).toLocaleString('en-US')} units; game read queued to confirm`:`Collect: ${n} building${n===1?'':'s'}; warehouse already read from the game after the collect`}})
+      // Push to the game tabs so the toast turns to "warehouse updated" now, not at the next 3 s poll.
+      .then(()=>notifyGameCardsKeyChanged(backgroundJobHistoryKey(r))).catch(()=>{});
+    return;
+  }
+  try{replayEvent('collect-not-applied',{realm:r,detail:{reason:a?.reason||null,error:a?.error||null,buildings:a?.buildings??null,unknown:a?.unknown??null,replyKeys:a?.replyKeys||[]}});}catch{}
 }
 // Not awaited by its callers (the overlay build may already hold a realm lane).
 function pruneBuildingCollects(realm,buildings){
@@ -4007,10 +4120,10 @@ function accountingEndpointFreshForRealm(s,path,realm,maxAge=ACCOUNTING_REFRESH_
 function accountingRefreshLine(results,wanted,failedCount){
   const list=Array.isArray(results)?results:[];
   const read=list.filter(r=>r?.ok).length;
-  const nr=list.filter(r=>!r?.ok&&(r?.realmMismatch||r?.realmUnknown||r?.directReadsBlocked||r?.bridgeUnavailable));
+  const nr=list.filter(r=>!r?.ok&&(r?.realmMismatch||r?.realmUnknown||r?.bridgeUnavailable));
   const reasons=[...new Set(nr.map(r=>notReadReason(r).replace(/^Not read: /,'')))];
   const notReadText=nr.length?`${nr.length} not read: ${reasons.slice(0,2).join('; ')}`:'';
-  const details={read,wanted:Number(wanted)||list.length,...(nr.length?{notRead:nr.length}:{}),...(nr.some(r=>r.directReadsBlocked)?{directReadsBlocked:true}:{})};
+  const details={read,wanted:Number(wanted)||list.length,...(nr.length?{notRead:nr.length}:{})};
   if(!nr.length||failedCount)return {outcome:failedCount?'failure':'success',notRead:nr.length,notReadText,details,error:null};
   return {outcome:'not-read',notRead:nr.length,notReadText,details,error:`${read} read · ${notReadText}`};
 }
@@ -4052,7 +4165,7 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
         if(response?.realmUnknown){results.push({path,ok:false,skipped:true,realmUnknown:true,status:0,captureRealm:null,error:response.error||'Skipped: the game tab has not shown which realm it is in yet.'});continue;}
         // The game blocks the Manager's own reads: not read (no request was made during the pause); the statements
         // come from the Accounting page Sync walks or the player opens.
-        if(response?.directReadsBlocked){results.push({path,ok:false,skipped:true,directReadsBlocked:true,status:Number(response.status)||403,captureRealm:null,error:response.error||DIRECT_READS_BLOCKED_TEXT});continue;}
+        
         const ok=Boolean(response?.ok)&&responseRealm===realm;
         if(ok) await saveData(path,response.data,response.status,'GET',realm);
         results.push({path,ok,status:Number(response?.status)||0,captureRealm:responseRealm,error:ok?null:(response?.error||'Accounting response realm mismatch.')});
@@ -4072,8 +4185,7 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
   // Statements skipped because the game tab switched realm are not failures: no failure/partial entry, the realm
   // load status is left alone, and the caller sees realmMismatch so it can try again on its next cycle.
   const skippedOtherRealm=results.filter(r=>r.realmMismatch||r.realmUnknown);
-  const failed=results.filter(r=>!r.ok&&!r.realmMismatch&&!r.realmUnknown&&!r.directReadsBlocked&&!r.bridgeUnavailable);
-  const blockedReads=results.filter(r=>r.directReadsBlocked);
+  const failed=results.filter(r=>!r.ok&&!r.realmMismatch&&!r.realmUnknown&&!r.bridgeUnavailable);
   const bridgeSkipped=results.filter(r=>r.bridgeUnavailable);
   // Keep the Executives readout from the last Sync on the header line this refresh overwrites.
   const executivesSummary=freshState.realmStores?.[realmKeyFromRealm(realm)]?.executivesSyncSummary||'';
@@ -4083,8 +4195,6 @@ async function refreshAccountingForRealm(realmArg=null,{force=false,reason='manu
   const line=accountingRefreshLine(results,pending.length,failed.length);
   if(failed.length===0&&line.outcome==='not-read')logActivity(realm,'accounting-refresh','not-read',line.details,line.error,Date.now(),reason);
   if(skippedOtherRealm.length&&!failed.length)return {ok:false,skipped:true,realmMismatch:skippedOtherRealm.some(r=>r.realmMismatch),realmUnknown:skippedOtherRealm.every(r=>r.realmUnknown),realm,reason,requested:pending.length,successful,total:paths.length,failed,skippedOtherRealm:skippedOtherRealm.length,results,error:skippedOtherRealm[0].error};
-  // Blocked reads only (no real failure): the not-read line above, no failure, the load status from the last Sync stays.
-  if(blockedReads.length&&!failed.length&&!results.some(r=>r.ok))return {ok:false,skipped:true,directReadsBlocked:true,realm,reason,requested:pending.length,successful,total:paths.length,failed,results,error:blockedReads[0]?.error||DIRECT_READS_BLOCKED_TEXT};
   // Game tab not reachable (no request answered) and no real failure: no failure/partial entry, the load status from
   // the last Sync stays, the skipped statements stay not fresh so the next refresh retries them.
   if(bridgeSkipped.length&&!failed.length)return {ok:false,skipped:true,bridgeUnavailable:true,realm,reason,requested:pending.length,successful,total:paths.length,failed,bridgeSkipped:bridgeSkipped.length,results,error:bridgeSkipped[0].error};
@@ -4499,95 +4609,25 @@ const PAGE_GET_BACKGROUND_GRACE_MS=2000;
 // channel closed before a response was received" (or the content script answered pageClosed from pagehide). Not a
 // failed request: callers log a pageClosed error as "not read" (no failure); their next cycle reads again.
 function pageMessageChannelClosed(e){return Boolean(e?.pageClosed)||/message channel closed|message port closed|Receiving end does not exist|Extension context invalidated|No tab with id/i.test(String(e?.message||e||''));}
-// Since 2026-11-10 the game signs its own API requests (bot protection); a plain read the Manager makes through the
-// game tab gets HTTP 403. The Manager does not imitate that signature. After the first 403 it stops direct reads for
-// 30 min (storage.session scmDirectReadsBlocked, survives a worker restart), logs one line, and then lets one read
-// through to recheck: another 403 renews the pause (the caller logs a "not read ... (recheck)" line), so does a recheck with no answer (timeout, status 0,
-// closed page); a success clears it. Only one recheck is out at a time. Data keeps coming from the game's own
-// responses (pages the player opens, and the pages Sync walks). Code paths stay, so reads work again if the game drops it.
-const DIRECT_READ_BLOCK_KEY='scmDirectReadsBlocked';
-const DIRECT_READ_BLOCK_MS=30*60*1000;
-// DIRECT_READS_BUSY_TEXT: HTTP 503 to a Manager read (the game busy or refusing reads while its own page loads still
-// work) sets the same 30-min pause as a 403, worded for the status. isDirectReadsBlockedError matches both texts.
-const DIRECT_READS_BLOCKED_TEXT='The game now blocks direct reads; data updates from game pages you open and from Sync.',DIRECT_READS_BUSY_TEXT="The game answered 503 (busy or refusing reads); the Manager's own reads pause for 30 min. Data still updates from game pages you open.";
-function directReadsBlockedText(status){return Number(status)===503?DIRECT_READS_BUSY_TEXT:DIRECT_READS_BLOCKED_TEXT;}
-function currentDirectReadsBlockedText(){return directReadsBlockedText(directReadBlockMem?.status);}
 // Last 401 / 403 / 429 / 503 answer to any Manager read ({status,at,path}); Sync reads it to skip its automatic retry.
 let lastGameBackoffAnswer=null;
 const GAME_BACKOFF_STATUSES=new Set([401,403,429,503]);
 function noteGameBackoffAnswer(path,status){const st=Number(status)||0;if(GAME_BACKOFF_STATUSES.has(st))lastGameBackoffAnswer={status:st,at:Date.now(),path:String(path||'').slice(0,200)};}
-// The buildings list has its own Cloudflare 403 (see Warehouse in Sync): it is not evidence of the new block.
-const DIRECT_READ_BLOCK_EXEMPT_RX=/\/api\/v2\/companies\/me\/buildings\/?(?:\?.*)?$/i;
-let directReadBlockMem,directReadRecheckInFlight=false,directReadBlockTail=Promise.resolve();
-let directReadProven=false,directReadProbe=null;const DIRECT_READ_PROBE_WAIT_MS=10000;
-async function directReadBlockGet(){
-  if(directReadBlockMem!==undefined)return directReadBlockMem;
-  let v=null;try{if(chrome.storage?.session)v=(await chrome.storage.session.get(DIRECT_READ_BLOCK_KEY))?.[DIRECT_READ_BLOCK_KEY]||null;}catch{}
-  if(directReadBlockMem===undefined)directReadBlockMem=v&&typeof v==='object'?v:null;
-  return directReadBlockMem;
-}
-function directReadBlockSet(v){
-  directReadBlockMem=v;
-  const run=directReadBlockTail.then(async()=>{try{if(!chrome.storage?.session)return;if(v)await chrome.storage.session.set({[DIRECT_READ_BLOCK_KEY]:v});else await chrome.storage.session.remove(DIRECT_READ_BLOCK_KEY);}catch{}});
-  directReadBlockTail=run;return run;
-}
-// True while the pause runs; also true for concurrent callers while the one recheck read is out.
-async function directReadsBlockedNow(){
-  const b=await directReadBlockGet();
-  if(!b)return false;
-  if(Date.now()<Number(b.until))return true;
-  return Boolean(directReadRecheckInFlight);
-}
-function directReadsBlockedResponse(path,extra={}){
-  const st=Number(directReadBlockMem?.status)===503?503:403;
-  return {ok:false,status:st,skipped:true,directReadsBlocked:true,error:directReadsBlockedText(st),path:String(path||''),...extra};
-}
-function isDirectReadsBlockedError(v){const t=String(v?.error??v?.message??v??'');return t.includes(DIRECT_READS_BLOCKED_TEXT)||t.includes(DIRECT_READS_BUSY_TEXT);}
-// The one Activity line goes to the realm of the read (else the active / selected realm); logged:true once it is
-// written, so a block first seen before any realm is known gets its line at the next recheck.
-async function directReadBlockLogRealm(realm){
-  let n=validRealmNumber(realm);if(n==null)n=await activeRealmNumber();
-  if(n==null){try{n=validRealmNumber((await chrome.storage.local.get({selectedRealm:null})).selectedRealm);}catch{}}
-  return n;
-}
-async function noteDirectReadBlocked(path,status=403,realm=null){
-  directReadProven=false;
-  const prev=await directReadBlockGet(),now=Date.now();
-  const next={since:Number(prev?.since)||now,at:now,until:now+DIRECT_READ_BLOCK_MS,path:String(path||'').slice(0,200),status:Number(status)||403,rechecks:prev?(Number(prev.rechecks)||0)+1:0,logged:Boolean(prev?.logged),logRealm:validRealmNumber(prev?.logRealm)};
-  const lr=next.logged?null:await directReadBlockLogRealm(realm);
-  if(lr!=null){next.logged=true;next.logRealm=lr;}
-  await directReadBlockSet(next);
-  // One line per block, and one more when the status changes (a 403 pause renewed by a 503, or the other way).
-  const statusChanged=Boolean(prev&&prev.logged&&Number(prev.status)!==next.status&&(next.status===503||Number(prev.status)===503));
-  const logTo=lr!=null?lr:(statusChanged?validRealmNumber(next.logRealm):null);
-  if(logTo!=null){try{await logActivity(logTo,'direct-reads-blocked','skipped',{path:next.path,status:next.status,pauseMinutes:DIRECT_READ_BLOCK_MS/60000,directReadsBlocked:true},directReadsBlockedText(next.status));}catch{}}
-  else if(!prev)logError('direct-reads-blocked',directReadsBlockedText(next.status));
-  return next;
-}
-async function clearDirectReadBlock(path,realm=null){
-  const prev=await directReadBlockGet();if(!prev)return;
-  await directReadBlockSet(null);
-  try{const lr=validRealmNumber(prev?.logRealm)??await directReadBlockLogRealm(realm);if(lr!=null)await logActivity(lr,'direct-reads-blocked','success',{path:String(path||'').slice(0,200),recovered:true},null);}catch{}
-}
-// The recheck got no answer from the game (timeout, status 0 or 5xx, closed page, bridge not ready): nothing shows
-// the block has gone, so the pause is renewed for the same 30 min (no 'direct-reads-blocked' line; the caller's read
-// logs "Not read: the game still blocks direct reads (recheck)" from recheckFailed). Renewed only if the
-// block is still the one the recheck started from (Clear All or a newer 403 may have replaced it meanwhile).
-async function renewDirectReadBlockAfterFailedRecheck(block,reason){
-  if(!block||directReadBlockMem!==block)return null;
-  const now=Date.now();
-  const next={...block,at:now,until:now+DIRECT_READ_BLOCK_MS,rechecks:(Number(block.rechecks)||0)+1,lastRecheckError:String(reason||'').slice(0,200)};
-  await directReadBlockSet(next);
-  return next;
-}
+// 2.5.465: there is no Manager-wide read pause any more. A failed answer (403, 503, 429 ...) is recorded for that lane
+// job only (SCM_TIMERS_CORE.laneResult: per-key backoff 5/10/15 min); every other job keeps its turn.
+// Startup: the old pause record (storage.session 'scmDirectReadsBlocked', up to 2.5.464) is removed once.
+const LEGACY_DIRECT_READ_BLOCK_KEY='scmDirectReadsBlocked';
+try{chrome.storage?.session?.remove?.(LEGACY_DIRECT_READ_BLOCK_KEY)?.catch?.(()=>{});}catch{}
 // ---- Shared game-request lane (rules: SCM_TIMERS_CORE.laneDecide in timers-core.js) ----
-// The game's API guide: GET only, at most one request every 5 minutes; suspected bots get a captcha. Every unattended
-// Manager read (alarm, timer, card poll) passes options.lane '<job>[:realm]' to pageGet and takes the lane's one slot
-// right before the request; at most one such read per 5 min across both realms and all jobs. Any other pageGet is
-// user-initiated (Sync and its walk/crawl, Refresh, opening a product, the dashboard refresh button): not gated, but it
-// moves lastAt so the next unattended read waits 5 min after it. State: chrome.storage.session scmGameLane (survives
-// a worker restart), every change through one serialized chain. A refused alarm job is run again by the lane alarm.
-const GAME_LANE_WAIT_TEXT='Waiting for the shared game-request slot (one background game request every 5 min).';
+// The game's API guide: GET only, at most one request every 5 minutes; suspected bots get a captcha. EVERY Manager
+// game read (alarm, timer, card poll, Refresh button, opening a product, dashboard refresh, overlay) goes through the
+// lane: laneDecide right before the request, laneResult right after it. A read that does not get the slot makes no
+// request: its want stays queued and the lane alarm (scm-game-lane) serves it in the next slot; the caller gets
+// {queued:true, laneWait:true, nextAt} so the UI can say "next game read in m:ss". Sync makes no Manager read at all
+// (pure page walk: pageGet refuses while a Sync runs). State: chrome.storage.session scmGameLane (survives a worker
+// restart), every change through one serialized chain.
+const GAME_LANE_WAIT_TEXT='Queued for the next game slot (one Manager game read every 5 min).';
+const PAGE_GET_DURING_SYNC_TEXT='Not read: Sync is running (Sync only walks game pages; the read is queued for the next game slot).';
 let gameLaneMem,gameLaneTail=Promise.resolve();
 function gameLaneCore(){const C=globalThis.SCM_TIMERS_CORE;return C&&C.laneDecide?C:null;}
 async function gameLaneLoad(){
@@ -4599,28 +4639,55 @@ async function gameLaneLoad(){
 }
 function gameLaneSerial(fn){const run=gameLaneTail.then(fn,fn);gameLaneTail=run.catch(()=>{});return run;}
 async function gameLaneStore(st){gameLaneMem=st;try{const C=gameLaneCore();if(C&&chrome.storage?.session)await chrome.storage.session.set({[C.LANE.KEY]:st});}catch{}}
+// A queued want is served by the lane alarm when its job has a runner (GAME_LANE_RUNNERS, below).
+function gameLaneHasRunner(C,k){try{return Boolean(GAME_LANE_RUNNERS[C.laneBase(k)])||Boolean(C.laneSpec(k).runner);}catch{return false;}}
 // take (peek:false) stamps the slot: the caller sends exactly one request. A refusal keeps the job's place in the
-// queue (want) and, when an alarm job waits, arms the lane alarm for the next slot.
+// queue (want) and arms the lane alarm for the next slot.
 function gameLaneDecide(key,{peek=false}={}){
   return gameLaneSerial(async()=>{
     // timers-core.js is part of the package (importScripts); only a stripped harness lacks it: the read goes as before.
     const C=gameLaneCore();if(!C)return {take:true,noLane:true,nextAt:Date.now()};
     const d=C.laneDecide(await gameLaneLoad(),key,Date.now(),{peek});
     await gameLaneStore(d.state);
-    if(!d.take&&Object.keys(d.state.wants||{}).some(k=>C.laneSpec(k).runner))gameLaneScheduleAlarm(d.nextAt).catch(()=>{});
+    if(!d.take&&Object.keys(d.state.wants||{}).some(k=>gameLaneHasRunner(C,k)))gameLaneScheduleAlarm(d.nextAt).catch(()=>{});
     return d;
   });
 }
-function gameLaneNoteUser(job='user'){return gameLaneSerial(async()=>{const C=gameLaneCore();if(!C)return;await gameLaneStore(C.laneNote(await gameLaneLoad(),Date.now(),job));});}
+// Queue a want without taking the slot (Sync's not-on-page paths, a game Collect, a Refresh button): the lane alarm
+// serves it in the next slot. Returns {queued:true,nextAt}.
+async function gameLaneEnqueue(key){
+  const C=gameLaneCore();if(!C)return {queued:false,noLane:true};
+  const d=await gameLaneDecide(key,{peek:true});
+  const nextAt=d.take?Date.now():Number(d.nextAt)||Date.now();
+  if(Object.keys(d.state?.wants||{}).length)gameLaneScheduleAlarm(nextAt).catch(()=>{});
+  return {queued:true,key,reason:d.reason||(d.take?'free':null),nextAt};
+}
+// The answer of a read that took the slot: per-key result and failure backoff (laneResult, timers-core.js).
+function gameLaneResult(key,{ok,status}={}){
+  return gameLaneSerial(async()=>{
+    const C=gameLaneCore();if(!C||typeof C.laneResult!=='function')return;
+    const out=C.laneResult(await gameLaneLoad(),key,{ok:Boolean(ok),status:Number(status)||0},Date.now());
+    const st=out&&typeof out==='object'&&out.state&&typeof out.state==='object'?out.state:out;
+    if(st&&typeof st==='object')await gameLaneStore(st);
+  });
+}
 function gameLaneDropWant(key){return gameLaneSerial(async()=>{const C=gameLaneCore();if(!C)return;const st=C.laneState(await gameLaneLoad(),Date.now());if(!st.wants[key])return;delete st.wants[key];await gameLaneStore(st);});}
-function gameLaneWaitResponse(path,d){return {ok:false,status:0,skipped:true,laneWait:true,reason:d?.reason||'gap',nextAt:Number(d?.nextAt)||0,error:GAME_LANE_WAIT_TEXT,path:String(path||'')};}
+function gameLaneWaitResponse(path,d){return {ok:false,status:0,skipped:true,laneWait:true,queued:true,reason:d?.reason||'gap',nextAt:Number(d?.nextAt)||0,error:GAME_LANE_WAIT_TEXT,path:String(path||'')};}
 function isGameLaneWait(v){return Boolean(v?.laneWait)||String(v?.error??v?.message??v??'').includes(GAME_LANE_WAIT_TEXT);}
-// An unattended read answered 401 / 429 or with an HTML page (captcha, login or challenge page): the lane stops
-// through the direct-read block (30 min, one Activity line, one recheck after it). No retry loop.
-// A plain HTML answer (the game's app shell or a "Not found" page for a moved address: the page hook hands back the
-// raw text when it is not JSON) is an ordinary failed / moved read, never a stop.
-const GAME_CHALLENGE_PAGE_RX=/captcha|turnstile|cf-chl|challenge-platform|verify (?:that )?you are (?:a )?human|are you a robot/i;
-function gameLaneStopAnswer(r){const st=Number(r?.status)||0;if(st===401||st===429)return true;const d=r?.data;return typeof d==='string'&&GAME_CHALLENGE_PAGE_RX.test(d);}
+// The lane job of a read whose caller named none (Refresh buttons, opening a product, dashboard / overlay reads).
+// Keys are '<job>' or '<job>:<realm>' (laneKeyOk).
+function gameLaneKeyForPath(path,realm){
+  const p=String(path||'').split('?')[0],n=validRealmNumber(realm),sfx=n!=null?`:${n}`:'';
+  if(/\/api\/v3\/resources\/\d+\/?$/i.test(p)||/\/companies\/me\/buildings\/?$/i.test(p))return `warehouse${sfx}`;
+  if(/\/market-orders\/?$/i.test(p))return `marketOrders${sfx}`;
+  if(/\/contracts-(?:incoming|outgoing)\//i.test(p))return `contracts${sfx}`;
+  if(/\/auth-data\/?$/i.test(p))return `authData${sfx}`;
+  if(/\/accounting\/|\/sales-records\//i.test(p))return `accounting${sfx}`;
+  if(/\/market\/(?:\d+\/)?\d+\/?$|\/market\/.*order/i.test(p))return 'orderBook';
+  if(/\/market-ticker\//i.test(p))return `ticker${sfx}`;
+  if(/\/abundance\/?$/i.test(p))return `abundance${sfx}`;
+  return 'other';
+}
 async function gameLaneScheduleAlarm(atMs){
   const C=gameLaneCore();if(!C||!chrome.alarms)return;
   const now=Date.now(),when=Math.max(now+30000,Number(atMs)||0);
@@ -4629,147 +4696,68 @@ async function gameLaneScheduleAlarm(atMs){
   await scmAlarmCreate(C.LANE.ALARM,{when});
 }
 // Manager reads in flight (any pageGet): the image job does not start on dashboard open while this is above 0.
-// During a Sync (2.5.458) every Manager read that is not a lane read goes one at a time (syncReadTail) and at least
-// SYNC_READ_GAP_MS after the previous one that made a request; reads that make no request (blocked) do not wait.
-let managerReadsInFlight=0,syncReadTail=Promise.resolve(),syncReadLastAt=0;const SYNC_READ_GAP_MS=1000;
-function syncReadsSpaced(){return typeof realmSyncSessions!=='undefined'&&realmSyncSessions.size>0;}
-// Unattended (lane) reads go out only while the game tab is shown and the device is online. A phone asleep, Chrome in
-// the background or the Manager tab in front made every such read fail with "Failed to fetch" or hang until the 45 s
-// timeout (2.5.463 R2 export, 2026-11-11). From a BRIDGE_STATUS answer (an old content.js without the fields: go).
+let managerReadsInFlight=0;
+// Offline (device or game tab): no request, the slot is not used. The game tab being in the background is NOT a skip
+// (2.5.465: the slot is the gate). From a BRIDGE_STATUS answer (an old content.js without the fields: go).
 function laneTabSkipCode(bridge,workerOnline=(typeof navigator==='undefined'||navigator.onLine!==false)){
   if(bridge?.online===false||!workerOnline)return 'offline';
-  if(bridge?.visible===false)return 'game-tab-hidden';
   return null;
 }
-function laneTabSkipError(code){const e=new Error(notReadReason(code));if(code==='offline')e.offline=true;else e.tabHidden=true;return e;}
+function laneTabSkipError(code){const e=new Error(notReadReason(code));if(code==='offline')e.offline=true;return e;}
 async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticLabel=null, options=null){
-  if(!options?.__inner){
-    const spaced=!(typeof options?.lane==='string'&&options.lane)&&syncReadsSpaced();
-    let release=null;const sent={v:false};
-    if(spaced){const prev=syncReadTail;syncReadTail=new Promise(r=>{release=r;});await prev;}
-    managerReadsInFlight++;
-    try{return await pageGet(path,targetRealm,diagnosticTrace,diagnosticLabel,{...(options||{}),__inner:true,__sent:sent,__gap:spaced?async()=>{const w=syncReadLastAt+SYNC_READ_GAP_MS-Date.now();if(w>0)await new Promise(r=>setTimeout(r,w));}:null});}
-    finally{managerReadsInFlight--;if(spaced){if(sent.v)syncReadLastAt=Date.now();release();}}
-  }
-  const customTimeout=Number(options?.timeoutMs);
-  const hasCustomTimeout=Number.isFinite(customTimeout)&&customTimeout>0;
-  const timeoutMs=hasCustomTimeout?customTimeout:SYNC_PAGE_API_TIMEOUT_MS;
-  // The page is always told the timeout.
-  const raceMs=timeoutMs+PAGE_GET_BACKGROUND_GRACE_MS;
-  const customAttempts=Number(options?.attempts);
-  // An unattended (lane) read is one request in one slot: never a second attempt.
-  const laneKey=typeof options?.lane==='string'&&options.lane?options.lane:null;
-  const attempts=laneKey?1:Number.isInteger(customAttempts)&&customAttempts>0?customAttempts:SYNC_PAGE_API_ATTEMPTS;
   const traceDiag=(type,extra={})=>{
     try{ diagnosticTrace?.(type,{realm:targetRealm,path,label:diagnosticLabel,attempt:extra.attempt,...extra}); }catch{}
   };
-  let lastError=null,lastClosed=false;
-  // The game blocks the Manager's own reads (HTTP 403): no request during the pause, one recheck after it.
-  const blockExempt=DIRECT_READ_BLOCK_EXEMPT_RX.test(String(path||''));
-  // recheck: this call is the one read let through after the pause (token, so only its owner clears the flag).
-  let recheck=null,recheckSettled=false;
-  if(!blockExempt){
-    const b=await directReadBlockGet();
-    if(b&&(Date.now()<Number(b.until)||directReadRecheckInFlight)){traceDiag('pageget-direct-reads-blocked',{until:Number(b.until)||0});return directReadsBlockedResponse(path,{until:Number(b.until)||0});}
-    if(b){recheck={block:b};directReadRecheckInFlight=recheck;}
+  // Every Manager read is a lane read: the caller's job, else one derived from the path.
+  const laneKey=typeof options?.lane==='string'&&options.lane?options.lane:gameLaneKeyForPath(path,targetRealm);
+  // Sync is a pure page walk: no Manager read while it runs. The read is queued for the next slot instead.
+  if(coreSyncActive()){
+    traceDiag('pageget-refused-sync-running',{lane:laneKey});
+    try{logError('pageget-during-sync',`${PAGE_GET_DURING_SYNC_TEXT} ${String(path||'').slice(0,160)} (${diagnosticLabel||laneKey})`);}catch{}
+    const q=await gameLaneEnqueue(laneKey).catch(()=>null);
+    return {ok:false,status:0,skipped:true,syncRunning:true,laneWait:true,queued:Boolean(q?.queued),nextAt:Number(q?.nextAt)||0,error:PAGE_GET_DURING_SYNC_TEXT,path:String(path||'')};
   }
-  // Single-flight probe: until one direct read has answered 2xx in this worker (directReadProven), only one read goes
-  // out; the others wait for its answer (at most DIRECT_READ_PROBE_WAIT_MS) and then look at the block again. So a
-  // burst (Sync's 4 Accounting reads at once) sends one request into a new block instead of six; a healthy game costs
-  // one round trip. Reset by a new block and by a worker restart.
-  let probeOwner=null;
-  if(!blockExempt&&!recheck&&!directReadProven){
-    if(directReadProbe){
-      await Promise.race([directReadProbe,new Promise(res=>setTimeout(res,DIRECT_READ_PROBE_WAIT_MS))]);
-      const b2=await directReadBlockGet();
-      if(b2){traceDiag('pageget-direct-reads-blocked',{until:Number(b2.until)||0,afterProbe:true});return directReadsBlockedResponse(path,{until:Number(b2.until)||0});}
-    }else{let done;const p=new Promise(res=>{done=res;});directReadProbe=p;probeOwner={done,p};}
-  }
-  const recheckFailed=async(reason)=>{
-    const next=await renewDirectReadBlockAfterFailedRecheck(recheck.block,reason);
-    traceDiag('pageget-direct-reads-recheck-failed',{error:String(reason||''),until:Number(next?.until)||0});
-    return directReadsBlockedResponse(path,{until:Number(next?.until)||0,recheckFailed:true});
-  };
+  const customTimeout=Number(options?.timeoutMs);
+  const timeoutMs=Number.isFinite(customTimeout)&&customTimeout>0?customTimeout:SYNC_PAGE_API_TIMEOUT_MS;
+  const raceMs=timeoutMs+PAGE_GET_BACKGROUND_GRACE_MS;
+  managerReadsInFlight++;
   try{
-  for(let attempt=1;attempt<=attempts;attempt++){
     const tab=await simTab();
-    if(!tab?.id){ lastError=new Error('Open Sim Companies and log in before syncing.'); lastClosed=false; break; }
+    if(!tab?.id){const e=new Error('Open Sim Companies and log in before syncing.');e.noGameTab=true;throw e;}
+    traceDiag('pageget-start',{attempt:1,tabId:tab.id,lane:laneKey});
+    const bridgeReady=await waitForBridge(tab.id,3000);
+    traceDiag('pageget-bridge-ready',{attempt:1,tabId:tab.id,ready:bridgeReady});
+    if(!bridgeReady){traceDiag('pageget-bridge-not-ready',{attempt:1,tabId:tab.id});const e=new Error('Sim Companies page bridge is not ready.');e.bridgeNotReady=true;throw e;}
+    if(typeof bridgeReady==='object'){const skip=laneTabSkipCode(bridgeReady);if(skip){traceDiag('pageget-lane-tab-skip',{attempt:1,reason:skip});throw laneTabSkipError(skip);}}
+    // One request per slot: never a second attempt.
+    const slot=await gameLaneDecide(laneKey);
+    if(!slot.take){traceDiag('pageget-lane-wait',{attempt:1,reason:slot.reason,nextAt:slot.nextAt});return gameLaneWaitResponse(path,slot);}
+    traceDiag('pageget-send',{attempt:1,tabId:tab.id});
+    let r;
     try{
-      traceDiag('pageget-start',{attempt,tabId:tab.id});
-      const bridgeReady=await waitForBridge(tab.id,3000);
-      traceDiag('pageget-bridge-ready',{attempt,tabId:tab.id,ready:bridgeReady});
-      if(!bridgeReady){
-        traceDiag('pageget-bridge-not-ready',{attempt,tabId:tab.id});
-        lastError=new Error('Sim Companies page bridge is not ready.');lastClosed=false;
-        if(attempt<attempts) await new Promise(r=>setTimeout(r,1000));
-        continue;
-      }
-      // Shared game lane: an unattended read takes the slot now or makes no request; any other read moves lastAt.
-      // waitForBridge answers the tab's BRIDGE_STATUS (visible / online); no extra message.
-      if(laneKey&&bridgeReady&&typeof bridgeReady==='object'){const skip=laneTabSkipCode(bridgeReady);if(skip){traceDiag('pageget-lane-tab-skip',{attempt,reason:skip});lastError=laneTabSkipError(skip);lastClosed=false;break;}}
-      if(laneKey){const slot=await gameLaneDecide(laneKey);if(!slot.take){traceDiag('pageget-lane-wait',{attempt,reason:slot.reason,nextAt:slot.nextAt});return gameLaneWaitResponse(path,slot);}}
-      else await gameLaneNoteUser(diagnosticLabel||'user');
-      if(options?.__gap)await options.__gap();
-      if(options?.__sent)options.__sent.v=true;
-      traceDiag('pageget-send',{attempt,tabId:tab.id});
-      const r=await Promise.race([
+      r=await Promise.race([
         chrome.tabs.sendMessage(tab.id,{type:'PAGE_API_GET',path,realm:targetRealm,timeoutMs}),
         new Promise((_,reject)=>setTimeout(()=>reject(new Error('Sim Companies page bridge timed out.')),raceMs))
       ]);
-      traceDiag('pageget-response',{attempt,tabId:tab.id,ok:!!r?.ok,status:r?.status||0,error:r?.error||null});
-      // Answered from pagehide: same path as a closed channel (the attempt count is unchanged).
-      if(laneKey&&r&&!r.ok&&r.networkError&&(r.hidden||r.offline||laneTabSkipCode(null)==='offline')){const code=r.offline||laneTabSkipCode(null)==='offline'?'offline':'game-tab-hidden';traceDiag('pageget-lane-network-skip',{attempt,reason:code,error:r.error||null});lastError=laneTabSkipError(code);lastClosed=false;break;}
-      if(r?.pageClosed){const closedError=new Error(r.error||'The game page was reloaded or closed before the API answered.');closedError.pageClosed=true;throw closedError;}
-      // Unattended read answered 401 / 429 / an HTML page (captcha): stop the lane via the direct-read block.
-      if(laneKey&&!blockExempt&&gameLaneStopAnswer(r)){
-        recheckSettled=true;const rr0=validRealmNumber(r?.captureRealm);noteGameBackoffAnswer(path,r?.status);
-        await noteDirectReadBlocked(path,Number(r?.status)||0,validRealmNumber(targetRealm)??rr0);
-        traceDiag('pageget-lane-stopped',{attempt,tabId:tab.id,status:Number(r?.status)||0});
-        return directReadsBlockedResponse(path,{captureRealm:rr0,firstBlock:true,laneStopped:true,answerStatus:Number(r?.status)||0});
-      }
-      // A /me/ answer from a tab that is in the other realm belongs to that realm: never hand it to a
-      // caller that will file it under targetRealm. (auth-data is exempt: Sync checks it and explains the mismatch.)
-      const tr=validRealmNumber(targetRealm),rr=validRealmNumber(r?.captureRealm);
-      // Any 2xx shows reads work again (also one from the other realm, handled below): the block is cleared.
-      if(!blockExempt&&r?.ok&&directReadBlockMem){recheckSettled=true;await clearDirectReadBlock(path,tr??rr);}
-      if(!blockExempt&&r?.ok)directReadProven=true;
-      if(r?.ok&&tr!=null&&rr==null&&/\/me\//.test(String(path))&&!/\/api\/v3\/companies\/auth-data\//.test(String(path))){traceDiag('pageget-realm-unknown',{attempt,tabId:tab.id,targetRealm:tr});return {ok:false,status:0,error:'The game tab has not shown which realm it is in yet.',realmUnknown:true};}
-      if(r?.ok&&tr!=null&&rr!=null&&rr!==tr&&!/\/api\/v3\/companies\/auth-data\//.test(String(path))){traceDiag('pageget-realm-mismatch',{attempt,tabId:tab.id,targetRealm:tr,tabRealm:rr});return {ok:false,status:0,error:`The game tab is in ${realmDisplayNumber(rr)||'the other realm'}, not ${realmDisplayNumber(tr)||'the requested realm'}.`,captureRealm:rr,realmMismatch:true};}
-      const answerStatus=Number(r?.status)||0;
-      if(!r?.ok)noteGameBackoffAnswer(path,answerStatus);
-      // 403 (bot protection) or 503 (game busy / refusing reads) to any Manager read, unattended or user-initiated
-      // (Sync too): the 30-min direct-read block; on a recheck it renews it. 503 also on the buildings list (its
-      // exemption is only about that endpoint's own Cloudflare 403).
-      // 429 (too many requests) also stops the Manager's reads (2.5.458): never retried, the rest of a Sync is skipped.
-      if(!r?.ok&&((answerStatus===403&&!blockExempt)||answerStatus===503||answerStatus===429)){
-        recheckSettled=true;
-        await noteDirectReadBlocked(path,answerStatus,tr??rr);
-        traceDiag('pageget-direct-reads-blocked-now',{attempt,tabId:tab.id,status:answerStatus});
-        return directReadsBlockedResponse(path,{captureRealm:rr,firstBlock:!recheck,answerStatus,...(recheck?{recheckFailed:true}:{})});
-      }
-      if(recheck&&!recheckSettled&&!r?.ok)return await recheckFailed(r?.error||`HTTP ${Number(r?.status)||0}`);
-      return r||{ok:false,status:0,error:'No response from Sim Companies page.'};
     }catch(e){
-      traceDiag('pageget-error',{attempt,tabId:tab.id,error:e?.message||String(e)});
-      lastError=e;lastClosed=pageMessageChannelClosed(e);
-      if(attempt<attempts) await new Promise(r=>setTimeout(r,1000));
+      traceDiag('pageget-error',{attempt:1,tabId:tab.id,error:e?.message||String(e)});
+      await gameLaneResult(laneKey,{ok:false,status:0});
+      const fe=new Error(e?.message||'Sim Companies page bridge is not connected.');
+      if(pageMessageChannelClosed(e))fe.pageClosed=true;
+      throw fe;
     }
-  }
-  const finalError=new Error(lastError?.message||'Sim Companies page bridge is not connected.');
-  if(lastClosed)finalError.pageClosed=true;
-  if(!lastError||/page bridge is not ready/i.test(String(lastError?.message||'')))finalError.bridgeNotReady=true;
-  if(/Open Sim Companies and log in/i.test(String(lastError?.message||'')))finalError.noGameTab=true;
-  if(lastError?.tabHidden)finalError.tabHidden=true;
-  if(lastError?.offline)finalError.offline=true;
-  throw finalError;
-  }catch(e){
-    // Hidden tab / offline: no game answer, so the recheck neither passed nor failed (the block stays; the next read rechecks).
-    if(recheck&&!recheckSettled&&!(e?.tabHidden||e?.offline))return await recheckFailed(e?.message||String(e));
-    throw e;
-  }finally{
-    if(recheck&&directReadRecheckInFlight===recheck)directReadRecheckInFlight=false;
-    if(probeOwner){if(directReadProbe===probeOwner.p)directReadProbe=null;probeOwner.done();}
-  }
+    traceDiag('pageget-response',{attempt:1,tabId:tab.id,ok:!!r?.ok,status:r?.status||0,error:r?.error||null});
+    await gameLaneResult(laneKey,{ok:Boolean(r?.ok),status:Number(r?.status)||0});
+    if(r&&!r.ok&&r.networkError&&(r.offline||laneTabSkipCode(null)==='offline')){traceDiag('pageget-lane-network-skip',{attempt:1,reason:'offline',error:r.error||null});throw laneTabSkipError('offline');}
+    if(r?.pageClosed){const closedError=new Error(r.error||'The game page was reloaded or closed before the API answered.');closedError.pageClosed=true;throw closedError;}
+    // A /me/ answer from a tab that is in the other realm belongs to that realm: never hand it to a
+    // caller that will file it under targetRealm. (auth-data is exempt: Sync checks it and explains the mismatch.)
+    const tr=validRealmNumber(targetRealm),rr=validRealmNumber(r?.captureRealm);
+    if(r?.ok&&tr!=null&&rr==null&&/\/me\//.test(String(path))&&!/\/api\/v3\/companies\/auth-data\//.test(String(path))){traceDiag('pageget-realm-unknown',{attempt:1,tabId:tab.id,targetRealm:tr});return {ok:false,status:0,error:'The game tab has not shown which realm it is in yet.',realmUnknown:true};}
+    if(r?.ok&&tr!=null&&rr!=null&&rr!==tr&&!/\/api\/v3\/companies\/auth-data\//.test(String(path))){traceDiag('pageget-realm-mismatch',{attempt:1,tabId:tab.id,targetRealm:tr,tabRealm:rr});return {ok:false,status:0,error:`The game tab is in ${realmDisplayNumber(rr)||'the other realm'}, not ${realmDisplayNumber(tr)||'the requested realm'}.`,captureRealm:rr,realmMismatch:true};}
+    if(!r?.ok)noteGameBackoffAnswer(path,Number(r?.status)||0);
+    return r||{ok:false,status:0,error:'No response from Sim Companies page.'};
+  }finally{managerReadsInFlight--;}
 }
 // Sync's realm boundary from the game's own auth-data (the game loads it on every page load and every 3 min):
 // 1. a stored capture for this realm received in the last 10 min; 2. else reload the game tab so the game loads it,
@@ -4825,8 +4813,8 @@ async function syncAuthBoundaryFromGame(realm,tabId,session,trace){
   finally{session.capturePaths=prevPaths;session.walkCaptures=prevWalk;}
   if(found){trace('auth-from-game-capture',{realm:n,source:'reload',ms:Date.now()-reloadAt});return found;}
   trace('auth-capture-missing',{realm:n,waitedMs:Date.now()-reloadAt});
-  if(await directReadsBlockedNow())return directReadsBlockedResponse(AUTH_DATA_PATH);
-  return pageGet(AUTH_DATA_PATH,n);
+  // Sync makes no Manager read: the auth-data the game loads on its own pages is the only source.
+  return {ok:false,status:0,notOnPage:true,error:`The game page did not load its session data within ${Math.round(SYNC_AUTH_RELOAD_WAIT_MS/1000)} s after a reload.`};
 }
 const BUILDING_HISTORY_REFETCH_COOLDOWN_MS=15000;
 async function fetchBuildingHistoryForRealm(realm, buildingId){
@@ -4902,7 +4890,7 @@ async function fetchExchangeOrderBookForRealm(realm,resourceId,manual=false,opts
   // The game tab is in (or just moved to) the other realm: not read, nothing saved. realmMismatch is passed on
   // so the order-book alarm logs no failure and takes no backoff step; the 5 min gap for this product still counts.
   if(response?.realmMismatch||(responseRealm!=null&&responseRealm!==target))return {ok:false,skipped:true,realmMismatch:true,reason:'other-realm',error:'Order book came from the wrong realm.'};
-  if(!response?.ok||!hasUsableMarketRows(response.data)){orderBookFetchAt.set(k,last);return {ok:false,status:response?.status||0,directReadsBlocked:Boolean(response?.directReadsBlocked),skipped:Boolean(response?.directReadsBlocked),...(response?.recheckFailed?{recheckFailed:true}:{}),error:response?.error||'No usable order book returned (is the game tab open?).'};}
+  if(!response?.ok||!hasUsableMarketRows(response.data)){orderBookFetchAt.set(k,last);return {ok:false,status:response?.status||0,laneWait:Boolean(response?.laneWait),nextAt:Number(response?.nextAt)||0,skipped:Boolean(response?.laneWait),error:response?.error||'No usable order book returned (is the game tab open?).'};}
   await saveData(path,response.data,response.status,'GET',target);
   return {ok:true,rows:Array.isArray(response.data)?response.data.length:null};
 }
@@ -4913,7 +4901,7 @@ function logOrderBookSideRead(realm,resourceId,x,trigger){
   if(!x||x.ok||x.throttled)return;
   if(x.laneWait)return logLaneWait(realm,'order-book-refresh',x.nextAt,{resourceId},Date.now(),trigger);
   if(x.realmMismatch)return logNotRead(realm,'order-book-refresh',otherRealmReason('other-realm',realm),{resourceId},Date.now(),trigger);
-  if(x.directReadsBlocked)return logNotRead(realm,'order-book-refresh',x,{resourceId,directReadsBlocked:true,...(x.recheckFailed?{recheckFailed:true}:{})},Date.now(),trigger);
+  
   if(x.bridgeUnavailable)return logNotRead(realm,'order-book-refresh',x,{resourceId},Date.now(),trigger);
   const status=Number(x.status)||0;if(status>=200&&status<300)return;
   return logActivity(realm,'order-book-refresh','failure',{resourceId,status},x.error||null,Date.now(),trigger);
@@ -4992,16 +4980,13 @@ async function runOrderBookRefreshFiring(){
     const saved=(await chrome.storage.local.get({[ORDER_BOOK_REFRESH_STATE_KEY]:null}))[ORDER_BOOK_REFRESH_STATE_KEY]||{};
     const now=Date.now();
     if(Number(saved.backoffUntil)>now)return {ok:true,skipped:true};
-    // While the game blocks the Manager's own reads, order books come from game pages (and Sync's market crawl): a
-    // "not read" line (realm of the line: active, else selected realm, else the error log).
-    if(await directReadsBlockedNow()){logActivityAnyRealm('order-book-refresh','not-read',{directReadsBlocked:true},notReadReason({directReadsBlocked:true}));return {ok:true,skipped:true,reason:'direct-reads-blocked'};}
     const tab=await simTab();if(!tab?.id){logActivityAnyRealm('order-book-refresh','not-read',{},notReadReason('no-game-tab'));return {ok:true,skipped:true};}
     const bridge=await withSyncTimeout(chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),BRIDGE_STATUS_WAIT_MS,'Order book refresh bridge check').catch(()=>null);
     const realm=bridge?.ready&&(bridge.realm===0||bridge.realm===1)?bridge.realm:null;
     // Bridge not ready, or the tab has not shown its realm yet: a "not read" line. A Sync / day walk of that realm: planned, no line.
     if(realm==null){logActivityAnyRealm('order-book-refresh','not-read',{},notReadReason(bridge?.ready?'realm-unknown':'bridge-not-ready'));return {ok:true,skipped:true};}
     if(syncSessionForRealm(realm)||accountingDayWalkRunning.has(realm))return {ok:true,skipped:true};
-    {const skip=bridge?.online===false?'offline':bridge?.visible===false?'game-tab-hidden':null;if(skip){logNotRead(realm,'order-book-refresh',skip,{},now,'alarm');return {ok:true,skipped:true,reason:skip};}}
+    {const skip=bridge?.online===false?'offline':null;if(skip){logNotRead(realm,'order-book-refresh',skip,{},now,'alarm');return {ok:true,skipped:true,reason:skip};}}
     // Shared game lane: not this job's turn (5 min since the last game request not over, or a job before it is
     // waiting): a "waiting" line before any product attempt is stamped; the lane alarm runs it again when the slot opens.
     const peek=await gameLaneDecide('orderBook',{peek:true});
@@ -5022,7 +5007,7 @@ async function runOrderBookRefreshFiring(){
     // The game tab switched realm during the read: a "not read" line (no failure, no backoff, nothing saved).
     if(result?.realmMismatch){logNotRead(realm,'order-book-refresh',otherRealmReason('other-realm',realm),{resourceId},now,'alarm');return {...result,realm,resourceId};}
     // The game blocked this read (pageGet logged the block once): a "not read" line, no back-off.
-    if(result?.directReadsBlocked){logNotRead(realm,'order-book-refresh',result,{resourceId,directReadsBlocked:true,...(result.recheckFailed?{recheckFailed:true}:{})},now,'alarm');return {...result,realm,resourceId,skipped:true};}
+    
     // No game tab / bridge not ready: no request was answered: a "not read" line, no back-off.
     if(result?.bridgeUnavailable){logNotRead(realm,'order-book-refresh',result,{resourceId},now,'alarm');return {...result,realm,resourceId,skipped:true};}
     // A 2xx without usable rows is an empty book, not a failed request.
@@ -5045,7 +5030,6 @@ async function runMarketTickerRefresh(trigger='alarm'){
   if(!(await scmTimerEnabled('orderBook').catch(()=>true)))return {ok:true,skipped:true,reason:'off'};
   if(await scmSwitchedOff('marketTicker','market-ticker',null,trigger)){await gameLaneDropWant('ticker:0');await gameLaneDropWant('ticker:1');return {ok:true,skipped:true,reason:'switched-off'};}
   // Every read it wanted and did not make gets a "not read" / "waiting" line (a Sync or day walk of that realm: planned, no line).
-  if(await directReadsBlockedNow()){logActivityAnyRealm('market-ticker','not-read',{directReadsBlocked:true},notReadReason({directReadsBlocked:true}));return {ok:true,skipped:true,reason:'direct-reads-blocked'};}
   const tab=await simTab();if(!tab?.id){logActivityAnyRealm('market-ticker','not-read',{},notReadReason('no-game-tab'));return {ok:true,skipped:true,reason:'no-tab'};}
   const bridge=await withSyncTimeout(chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),BRIDGE_STATUS_WAIT_MS,'Market ticker bridge check').catch(()=>null);
   const realm=bridge?.ready&&(bridge.realm===0||bridge.realm===1)?bridge.realm:null;
@@ -5061,14 +5045,14 @@ async function runMarketTickerRefresh(trigger='alarm'){
     if(Date.now()-(marketTickerSimcoSkipLogAt.get(realm)||0)>=MARKET_TICKER_MAX_AGE_MS){marketTickerSimcoSkipLogAt.set(realm,Date.now());logActivity(realm,'market-ticker','skipped',{cached:true,source:'SimcoTools prices',...covered},'Not read: SimcoTools prices are fresh and every product image is known',t0,trigger);}
     return {ok:true,cached:true,simco:true,realm};
   }
-  {const skip=bridge?.online===false?'offline':bridge?.visible===false?'game-tab-hidden':null;if(skip){logNotRead(realm,'market-ticker',skip,{},t0,trigger);return {ok:true,skipped:true,reason:skip,realm};}}
+  {const skip=bridge?.online===false?'offline':null;if(skip){logNotRead(realm,'market-ticker',skip,{},t0,trigger);return {ok:true,skipped:true,reason:skip,realm};}}
   let r;
   try{r=await pageGet(path,realm,null,'market-ticker',{lane:`ticker:${realm}`,timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS});}
   catch(e){if(pageBridgeUnavailable(e)){logNotRead(realm,'market-ticker',e,{},t0,trigger);return {ok:true,skipped:true,bridgeUnavailable:true,realm};}r={ok:false,status:0,error:e?.message||String(e)};}
-  if(r?.laneWait||r?.directReadsBlocked||r?.realmMismatch||r?.realmUnknown){
+  if(r?.laneWait||r?.realmMismatch||r?.realmUnknown){
     if(r.laneWait)logLaneWait(realm,'market-ticker',r.nextAt,{},t0,trigger);
-    else logNotRead(realm,'market-ticker',r,r.directReadsBlocked?{directReadsBlocked:true,...(r.recheckFailed?{recheckFailed:true}:{})}:{},t0,trigger);
-    return {ok:true,skipped:true,laneWait:Boolean(r?.laneWait),directReadsBlocked:Boolean(r?.directReadsBlocked),realm};}
+    else logNotRead(realm,'market-ticker',r,{},t0,trigger);
+    return {ok:true,skipped:true,laneWait:Boolean(r?.laneWait),nextAt:Number(r?.nextAt)||0,realm};}
   if(!r?.ok||!r.data||typeof r.data!=='object'||endpointResponseRejected(path,r)){logActivity(realm,'market-ticker','failure',{status:Number(r?.status)||0},r?.error||`HTTP ${Number(r?.status)||0}`,t0,trigger);return {ok:false,realm,status:Number(r?.status)||0,error:r?.error||null};}
   await saveData(path,r.data,r.status,'GET',realm);
   logActivity(realm,'market-ticker','success',{rows:Array.isArray(r.data)?r.data.length:null},null,t0,trigger);
@@ -5084,12 +5068,21 @@ const GAME_LANE_RUNNERS={
   gameConstants:async()=>{const e=await scmTimerEntry('gameConstants').catch(()=>null);if(e&&!e.enabled)return;await refreshGameConstants(false,gameConstantsMaxAge(e),{quietNoTab:true});},
   abundance:async realm=>{if(realm!=null)await refreshAbundanceIfStale(realm,'lane');},
   // The held listings read (deferred retry); nothing queued: no read (the want is dropped).
-  listings:async realm=>{if(realm!=null)await runMarketOrdersRetry(realm);}
+  listings:async realm=>{if(realm!=null)await runMarketOrdersRetry(realm);},
+  // 2.5.465: queued reads (Refresh buttons, overlay, a game Collect, Sync not-on-page paths) are served here.
+  collectWarehouse:async realm=>{if(realm!=null)await refreshRealmWarehouseForOverlay(realm,0,{lane:`collectWarehouse:${realm}`});},
+  warehouse:async realm=>{if(realm!=null)await refreshRealmWarehouseForOverlay(realm,0);},
+  marketOrders:async realm=>{if(realm!=null)await refreshMarketOrders(realm,0,{lane:true});},
+  contracts:async realm=>{if(realm!=null)await refreshOutgoingContracts(realm,0,{lane:true});},
+  // executive:<realm>:<id>: one executive record Sync's pages did not load, read in its own slot.
+  executive:async(realm,key)=>{const id=Number(String(key||'').split(':')[2]);if(realm==null||!(id>0))return;const p=`/api/v4/executives/${id}/`;const x=await pageGet(p,realm,null,'executive-lane',{lane:key});if(x?.ok&&x.data&&typeof x.data==='object'&&!endpointResponseRejected(p,x))await saveData(p,x.data,x.status,'GET',realm);},
+  // syncMissing:<realm>: the path is not in the key; the next Sync or page visit fills it (want dropped by the alarm).
+  syncMissing:async()=>{}
 };
 async function runGameLaneAlarm(){
   const C=gameLaneCore();if(!C)return {ok:false};
   const now=Date.now(),st=C.laneState(await gameLaneLoad(),now);
-  const hasRunner=s=>Object.keys(s.wants).some(k=>C.laneSpec(k).runner);
+  const hasRunner=s=>Object.keys(s.wants).some(k=>gameLaneHasRunner(C,k));
   if(!hasRunner(st))return {ok:true,idle:true};
   const next=C.laneNextSlotAt(st,now);
   if(next>now){await gameLaneScheduleAlarm(next);return {ok:true,waiting:true,nextAt:next};}
@@ -5097,7 +5090,7 @@ async function runGameLaneAlarm(){
   const winner=C.laneWinner(st.wants,now,st.lastAt);const [base,rs]=String(winner||'').split(':');const run=GAME_LANE_RUNNERS[base];
   if(!run){await gameLaneScheduleAlarm(now+C.laneSpec(winner).wantTtlMs+1000);return {ok:true,winner,card:true};}
   const before=st.wants[winner]?.at;
-  try{await run(rs!=null&&rs!==''?Number(rs):null);}catch(e){logError('game-lane-run',e);}
+  try{await run(rs!=null&&rs!==''?Number(rs):null,winner);}catch(e){logError('game-lane-run',e);}
   const after=C.laneState(await gameLaneLoad(),Date.now());
   if(after.wants[winner]&&after.wants[winner].at===before){await gameLaneDropWant(winner);delete after.wants[winner];}
   if(hasRunner(after))await gameLaneScheduleAlarm(C.laneNextSlotAt(after,Date.now()));
@@ -5205,100 +5198,230 @@ function mergeDailyVwapHistory(existing, rows, day){
   }
   return history;
 }
+// Loads the live-market per-endpoint cooldowns (storage.local) and the channel's 429 cooldown mirror (storage.session).
 async function hydrateSimcoCooldowns(){
   try{
-    const saved=await chrome.storage.local.get({simcoToolsRateLimitUntil:0,simcoToolsRateLimitUntilByUrl:{}});
-    simcoRateLimitUntil=Math.max(simcoRateLimitUntil,Number(saved.simcoToolsRateLimitUntil)||0);
+    const saved=await chrome.storage.local.get({simcoToolsRateLimitUntilByUrl:{}});
     for(const [url,untilRaw] of Object.entries(saved.simcoToolsRateLimitUntilByUrl||{})){
       const until=Number(untilRaw); if(Number.isFinite(until)&&until>Date.now())simcoRateLimitUntilByUrl.set(url,Math.max(Number(simcoRateLimitUntilByUrl.get(url))||0,until));
     }
   }catch{}
+  try{const st=await simcoChannelPeek();simcoRateLimitUntil=Number(st?.cooldownUntil)||0;}catch{}
 }
 async function persistSimcoCooldowns(){
-  try{const byUrl={};for(const [url,until] of simcoRateLimitUntilByUrl.entries())if(Number(until)>Date.now())byUrl[url]=Number(until);await chrome.storage.local.set({simcoToolsRateLimitUntil:simcoRateLimitUntil,simcoToolsRateLimitUntilByUrl:byUrl});}catch{}
+  try{const byUrl={};for(const [url,until] of simcoRateLimitUntilByUrl.entries())if(Number(until)>Date.now())byUrl[url]=Number(until);await chrome.storage.local.set({simcoToolsRateLimitUntilByUrl:byUrl});}catch{}
 }
-async function simcoGateLoad(){
-  if(simcoGateMem)return simcoGateMem;
-  let v=null;try{if(chrome.storage?.session)v=(await chrome.storage.session.get(SIMCOTOOLS_GATE_KEY))?.[SIMCOTOOLS_GATE_KEY]||null;}catch{}
-  if(!simcoGateMem)simcoGateMem=v&&typeof v==='object'?v:{lastAt:0};
-  return simcoGateMem;
+// ---- SimcoTools channel (rules: SCM_TIMERS_CORE.simcoTake / simcoResult in timers-core.js) ----
+// State: chrome.storage.session scmSimcoChannel (survives a worker restart), every change through ONE serialized chain
+// (simcoChannelSerial), the same pattern as the game lane (scmGameLane). Wants are keyed by job: 'job' or 'job:<realm>'.
+// Job keys (SIMCO.JOBS priority): refresh:<realm> Market Refresh button (1); prices:<realm> /market/prices (2);
+// vwap:<realm> VWAP dataset and pairs (3); snapshot:<realm> one product, candles:<realm> its price history,
+// followed:<realm> the batched current prices (4); public:<realm> / public every other public-data job (5).
+// A refused job keeps its want; the 'scm-simco-channel' alarm (and a short timer for waits under 25 s) runs the queued
+// jobs' runners (SIMCO_CHANNEL_RUNNERS) in priority order. A job without a runner (snapshot, candles: the dashboard asks
+// again itself) drops when its want expires (SIMCO.WANT_TTL_MS); while SimcoTools is unreachable such a want is dropped
+// once its caller stopped asking (SIMCO_CHANNEL_STALE_WANT_MS), so it does not hold the probe of a queued job.
+const SIMCO_CHANNEL_ALARM='scm-simco-channel';
+const SIMCO_CHANNEL_STALE_WANT_MS=2*60000;
+// The Market Refresh press being served ({[realm]:{resourceId,quality,at}}), so the queued refresh:<realm> job reads the
+// same product later. storage.session, written in the channel chain.
+const SIMCO_REFRESH_WANT_KEY='scmSimcoRefreshWant';
+let simcoChannelMem,simcoChannelTail=Promise.resolve(),simcoChannelTimer=null,simcoChannelQueueRun=null;
+function simcoChannelCore(){const C=globalThis.SCM_TIMERS_CORE;return C&&C.SIMCO&&typeof C.simcoTake==='function'&&typeof C.simcoResult==='function'?C:null;}
+async function simcoChannelLoad(){
+  if(simcoChannelMem!==undefined)return simcoChannelMem;
+  const C=simcoChannelCore();let v=null;
+  try{if(C&&chrome.storage?.session)v=(await chrome.storage.session.get(C.SIMCO.KEY))?.[C.SIMCO.KEY]||null;}catch{}
+  if(simcoChannelMem===undefined)simcoChannelMem=v;
+  return simcoChannelMem;
 }
-// Time the next SimcoTools request may go out (0 when it may go now).
-async function simcoGateNextAt(){const g=await simcoGateLoad();const next=(Number(g.lastAt)||0)+SIMCOTOOLS_SHARED_GAP_MS;return next>Date.now()?next:0;}
-// Serialized check-and-take of the one request slot; persisted before the request goes out.
-function simcoGateReserve(url){
-  const run=simcoGateTail.then(async()=>{
-    const g=await simcoGateLoad(),now=Date.now(),next=(Number(g.lastAt)||0)+SIMCOTOOLS_SHARED_GAP_MS;
-    if(now<next)return {ok:false,retryAt:next,lastUrl:g.lastUrl||null};
-    simcoGateMem={lastAt:now,lastUrl:scmMobileNetSafeUrl(url).slice(0,200),count:(Number(g.count)||0)+1};
-    try{if(chrome.storage?.session)await chrome.storage.session.set({[SIMCOTOOLS_GATE_KEY]:simcoGateMem});}catch{}
-    return {ok:true,at:now};
+function simcoChannelSerial(fn){const run=simcoChannelTail.then(fn,fn);simcoChannelTail=run.catch(()=>{});return run;}
+async function simcoChannelStore(st){
+  simcoChannelMem=st;simcoRateLimitUntil=Number(st?.cooldownUntil)>Date.now()?Number(st.cooldownUntil):0;
+  try{const C=simcoChannelCore();if(C&&chrome.storage?.session)await chrome.storage.session.set({[C.SIMCO.KEY]:st});}catch{}
+}
+// The channel state now (read-only, no write).
+function simcoChannelPeek(){return simcoChannelSerial(async()=>{const C=simcoChannelCore();return C?C.simcoState(await simcoChannelLoad(),Date.now()):null;});}
+// The channel job of a SimcoTools URL whose caller named none.
+function simcoJobKeyForUrl(url){
+  let p='';try{p=new URL(String(url)).pathname;}catch{p=String(url||'').split(/[?#]/)[0];}
+  const m=p.match(/\/v1\/realms\/(\d+)(?:\/|$)/),sfx=m&&(m[1]==='0'||m[1]==='1')?`:${m[1]}`:'';
+  if(/\/market\/vwaps(?:\/|$)/i.test(p))return `vwap${sfx}`;
+  if(/\/market\/followed\/?$/i.test(p))return `followed${sfx}`;
+  if(/\/market\/prices\/?$/i.test(p))return `prices${sfx}`;
+  if(/\/market\/resources\/\d+\/\d+\/candlesticks\/?$/i.test(p))return `candles${sfx}`;
+  if(/\/market\/resources\/\d+\/\d+\/?$/i.test(p))return `snapshot${sfx}`;
+  return `public${sfx}`;
+}
+function simcoChannelClock(ms){const d=new Date(Number(ms)||Date.now());return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;}
+const SIMCO_OUTAGE_RETRY_TEXT='retrying 1, 2, 5, 10, then every 15 min';
+function simcoUnreachableText(since){return `SimcoTools unreachable since ${simcoChannelClock(since)}; ${SIMCO_OUTAGE_RETRY_TEXT}`;}
+// The channel's wants in serving order (prio, then oldest), as SCM_TIMERS_CORE orders them.
+function simcoChannelOrder(C,st){
+  return Object.entries(st?.wants||{}).map(([k,w])=>({k,since:Number(w?.since)||0,at:Number(w?.at)||0,prio:C.simcoSpec(k).prio,flying:w?.reason==='in flight'}))
+    .sort((a,b)=>a.prio-b.prio||a.since-b.since||(a.k<b.k?-1:a.k>b.k?1:0));
+}
+function simcoChannelHasRunner(C,k){try{return typeof SIMCO_CHANNEL_RUNNERS[C.laneBase(k)]==='function';}catch{return false;}}
+// When the queue may be served next: the cooldown end, the next probe, or when a token is back.
+function simcoChannelNextAt(st,now=Date.now()){
+  if(!st)return now;
+  if(Number(st.cooldownUntil)>now)return Number(st.cooldownUntil);
+  if(st.unreachableSince)return Math.max(now,Number(st.nextProbeAt)||now);
+  const C=simcoChannelCore(),rate=Number(C?.SIMCO?.RATE_PER_S)||2;
+  return Number(st.tokens)<1?now+Math.ceil((1-Number(st.tokens))*1000/rate):now;
+}
+// Arms the queue run when a queued want has a runner: a timer for a wait under 25 s (a token / a short Retry-After),
+// else (and also, as the backstop for a worker that sleeps) the one 'scm-simco-channel' alarm at the earliest time.
+function simcoChannelArm(st,hintAt=0){
+  const C=simcoChannelCore();if(!C||!st)return;
+  const now=Date.now();
+  if(!Object.entries(st.wants||{}).some(([k,w])=>w?.reason!=='in flight'&&simcoChannelHasRunner(C,k)))return;
+  const at=Math.max(Number(hintAt)||0,simcoChannelNextAt(st,now));
+  if(at-now<25000){if(simcoChannelTimer)clearTimeout(simcoChannelTimer);simcoChannelTimer=setTimeout(()=>{simcoChannelTimer=null;simcoChannelRunQueue('timer').catch(()=>{});},Math.max(250,at-now+50));}
+  (async()=>{
+    if(!chrome.alarms)return;
+    const when=Math.max(now+30000,at);
+    const cur=await chrome.alarms.get(SIMCO_CHANNEL_ALARM).catch(()=>null);
+    if(cur&&Number(cur.scheduledTime)>now&&Number(cur.scheduledTime)<=when+1000)return;
+    await scmAlarmCreate(SIMCO_CHANNEL_ALARM,{when});
+  })().catch(()=>{});
+}
+// take:true -> the caller sends exactly ONE request now. A refusal sends nothing: the want stays queued, the queue is armed.
+function simcoChannelTake(key,{peek=false}={}){
+  return simcoChannelSerial(async()=>{
+    // timers-core.js is part of the package (importScripts); only a stripped harness lacks it: the request goes as before.
+    const C=simcoChannelCore();if(!C)return {take:true,noChannel:true,nextAt:Date.now()};
+    const d=C.simcoTake(await simcoChannelLoad(),key,Date.now(),{peek});
+    await simcoChannelStore(d.state);
+    if(!d.take)simcoChannelArm(d.state,d.nextAt);
+    return d;
   });
-  simcoGateTail=run.catch(()=>{});
-  return run;
 }
-// opts.noRetry: one attempt only (the public-data jobs: a failed run waits for its next slot instead of retrying).
-async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS, opts=null){
-  // An executive search keeps the typed name out of every stored copy of the URL (net log, gate, per-URL cooldowns)
-  // and no body preview; the request itself uses the real URL.
-  const privateUrl=scmIsPrivateSimcoUrl(url);
-  const normalizedUrl=privateUrl?scmMobileNetSafeUrl(url):String(url);
-  const attempts=opts?.noRetry?1:SIMCOTOOLS_RETRY_DELAYS_MS.length;
-  await hydrateSimcoCooldowns();
-  const knownCooldown=Number(simcoRateLimitUntilByUrl.get(normalizedUrl))||0;
-  if(Math.max(knownCooldown,simcoRateLimitUntil)>Date.now()){const retryAt=new Date(Math.max(knownCooldown,simcoRateLimitUntil)).toISOString();await scmMobileNetLogBackground({kind:'request-skipped',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',status:429,reason:'rate-limit-cooldown-active',retryAt});return {ok:false,status:429,text:'rate limit cooldown active',retryAt,rateLimited:true,skipped:true};}
-  let lastError=null;
-  for(let attempt=0;attempt<attempts;attempt++){
-    const waitMs=SIMCOTOOLS_RETRY_DELAYS_MS[attempt];
-    if(waitMs) await new Promise(resolve=>setTimeout(resolve,waitMs+Math.floor(Math.random()*500)));
-    // Shared gate: calls at least 500 ms apart (SimcoTools limit 2 req/s, burst 25; a 429 starts a 5-min cooldown).
-    // A retry is a request too: once the gate is closed the last failure is returned.
-    const gate=await simcoGateReserve(normalizedUrl);
-    if(!gate.ok){
-      const retryAt=new Date(gate.retryAt).toISOString();
-      if(attempt>0)break;
-      await scmMobileNetLogBackground({kind:'request-skipped',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',status:429,reason:'simcotools-shared-gap',retryAt});
-      return {ok:false,status:429,text:'Waiting for the SimcoTools limit',retryAt,rateLimited:true,limited:true,skipped:true};
-    }
-    await simcoAcquireRequestSlot();
-    const controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(),timeoutMs);
-    let rateLimited=false;
-    try{
-      // A different request may have received 429 while this call was queued.
-      await hydrateSimcoCooldowns();
-      await simcoWaitForRateLimitCooldown();
-      const spacing=Math.max(0,SIMCOTOOLS_MIN_REQUEST_SPACING_MS-(Date.now()-simcoLastRequestAt));
-      if(spacing)await new Promise(resolve=>setTimeout(resolve,spacing));
-      await simcoWaitForRateLimitCooldown();
-      simcoLastRequestAt=Date.now();
-      const requestStartedAt=Date.now();
-      await scmMobileNetLogBackground({kind:'request-start',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',startedAt:new Date(requestStartedAt).toISOString()});
-      // No cookies or auth sent to SimcoTools (public API; nothing of the browser session goes to a third party).
-      const response=await fetch(url,{method:'GET',cache:'no-store',credentials:'omit',headers:{accept:'application/json'},signal:controller.signal});
-      const text=await response.text();
-      await scmMobileNetLogBackground({kind:'fetch',url:scmMobileNetSafeUrl(normalizedUrl),method:'GET',status:Number(response.status)||0,ok:Boolean(response.ok),durationMs:Date.now()-requestStartedAt,transport:'extension-background',contentType:String(response.headers?.get('content-type')||''),body:text?(privateUrl?{truncated:true,originalLength:text.length,preview:'',redacted:true}:{truncated:text.length>4000,originalLength:text.length,preview:text.slice(0,4000)}):null});
-      if(response.status===429){
-        const until=simcoActivateRateLimitCooldown(response);
-        simcoRateLimitUntilByUrl.set(normalizedUrl,until);
-        await persistSimcoCooldowns();
-        // Never retry a 429 per-request. Persisted global and per-URL cooldowns stop later jobs and survive worker restarts.
-        return {ok:false,status:429,text,retryAt:new Date(until).toISOString(),rateLimited:true};
+// ONE Activity line per outage (error log when no realm is known yet), one when SimcoTools answers again.
+function simcoChannelLogOutage(since){try{logActivityAnyRealm('simcotools-channel','not-read',{unreachableSince:new Date(Number(since)||Date.now()).toISOString(),outage:true},simcoUnreachableText(since));}catch{}}
+function simcoChannelLogRecovered(){try{logActivityAnyRealm('simcotools-channel','success',{recovered:true},'SimcoTools is reachable again');}catch{}}
+// The answer of a request that took a token: {ok,status,network,retryAfterMs}.
+function simcoChannelResult(key,res){
+  return simcoChannelSerial(async()=>{
+    const C=simcoChannelCore();if(!C)return null;
+    const now=Date.now(),out=C.simcoResult(await simcoChannelLoad(),key,res||{},now);
+    await simcoChannelStore(out.state);
+    if(out.logOutage)simcoChannelLogOutage(out.state?.unreachableSince||now);
+    if(out.recovered){simcoChannelLogRecovered();if(!simcoChannelQueueRun)setTimeout(()=>{simcoChannelRunQueue('recovered').catch(()=>{});},0);}
+    if(!res?.ok)simcoChannelArm(out.state);
+    return out;
+  });
+}
+function simcoChannelDropWant(key){return simcoChannelSerial(async()=>{const C=simcoChannelCore();if(!C)return;const st=C.simcoState(await simcoChannelLoad(),Date.now());if(!st.wants[key])return;delete st.wants[key];await simcoChannelStore(st);});}
+async function simcoRefreshWantSet(realm,product){
+  return simcoChannelSerial(async()=>{try{if(!chrome.storage?.session)return;const cur=(await chrome.storage.session.get(SIMCO_REFRESH_WANT_KEY))?.[SIMCO_REFRESH_WANT_KEY];
+    const next=cur&&typeof cur==='object'&&!Array.isArray(cur)?{...cur}:{};next[String(realm)]={resourceId:product?.resourceId??null,quality:product?.quality??null,at:Date.now()};
+    await chrome.storage.session.set({[SIMCO_REFRESH_WANT_KEY]:next});}catch{}});
+}
+async function simcoRefreshWantGet(realm){try{const cur=(await chrome.storage.session.get(SIMCO_REFRESH_WANT_KEY))?.[SIMCO_REFRESH_WANT_KEY];return cur&&typeof cur==='object'?cur[String(realm)]||null:null;}catch{return null;}}
+// What a refused request returns (nothing was sent): the caller keeps its stored data; the job runs later from the queue.
+function simcoChannelRefusal(key,d){
+  const st=d?.state||{},nextAt=Number(d?.nextAt)||Date.now(),reason=String(d?.reason||'rate');
+  const unreachableSince=Number(st.unreachableSince)||0;
+  const error=reason==='unreachable'?`${simcoUnreachableText(unreachableSince)} (next try ${simcoChannelClock(nextAt)})`
+    :reason==='cooldown'?`SimcoTools asked to wait (429) until ${simcoChannelClock(nextAt)}`
+    :reason==='bad-key'?'SimcoTools request refused: bad channel job'
+    :'Waiting for the SimcoTools limit (2 per second)';
+  return {ok:false,status:0,text:'',skipped:true,queued:reason!=='bad-key',limited:true,rateLimited:reason==='cooldown',unreachable:reason==='unreachable',
+    reason,job:key,nextAt,retryAt:new Date(nextAt).toISOString(),unreachableSince:unreachableSince||null,error};
+}
+// Queue run (alarm / timer / recovery): each queued job with a runner, in priority order, once per run. Its want keeps
+// its place while the runner asks again (a refusal keeps it queued and re-arms); a want the runner did not ask for drops. While SimcoTools is unreachable only the
+// first job runs (it is the probe); when it answers, the run goes on with the rest.
+const SIMCO_CHANNEL_RUNNERS={
+  refresh:async realm=>{if(realm==null)return;const w=await simcoRefreshWantGet(realm);await runSimcoMarketRefresh(realm,w?.resourceId,w?.quality,{fromQueue:true});},
+  prices:async()=>{await runSimcoPublicData('channel');},
+  public:async()=>{await runSimcoPublicData('channel');},
+  vwap:async realm=>{if(realm!=null)await runVwapSync({realm,reason:'simco-channel-queue'});},
+  followed:async realm=>{if(realm!=null)await runLiveMarketRefresh(realm);}
+};
+function simcoChannelRunQueue(trigger='alarm'){
+  if(simcoChannelQueueRun)return simcoChannelQueueRun;
+  let startLastAt=-1;
+  simcoChannelQueueRun=(async()=>{
+    const C=simcoChannelCore();if(!C)return {ok:false,reason:'no-channel'};
+    const done=new Set(),ran=[];startLastAt=Number((await simcoChannelPeek())?.lastAt)||0;
+    for(let i=0;i<16;i++){
+      if(coreSyncActive())break;
+      const now=Date.now(),st=await simcoChannelPeek();if(!st)break;
+      if(Number(st.cooldownUntil)>now)break;
+      if(st.unreachableSince&&now<Number(st.nextProbeAt))break;
+      const order=simcoChannelOrder(C,st).filter(x=>!x.flying&&!done.has(x.k));
+      if(st.unreachableSince){
+        // A want nobody can serve (no runner) and nobody asks for any more would hold the probe: dropped.
+        const first=order.find(x=>!simcoChannelHasRunner(C,x.k));
+        if(first&&order[0]===first&&now-first.at>=SIMCO_CHANNEL_STALE_WANT_MS){await simcoChannelDropWant(first.k);done.add(first.k);continue;}
       }
-      if(response.ok || (response.status>=400 && response.status<500)) return {ok:response.ok,status:response.status,text};
-      lastError=new Error(`SimcoTools HTTP ${response.status}`);
-      if(attempt===attempts-1) return {ok:false,status:response.status,text};
-    }catch(e){
-      lastError=e?.name==='AbortError'
-        ? new Error(`SimcoTools request timed out after ${Math.round(timeoutMs/1000)}s (attempt ${attempt+1}/${attempts})`)
-        : new Error(`SimcoTools network error: ${e?.message||String(e)} (attempt ${attempt+1}/${attempts})`);
-      // Only the final attempt is an error worth logging; earlier timeouts/drops are retried (common on mobile data).
-      // quietNetwork (SimcoTools public jobs): a network TypeError (no connection) is not an error-log entry; the job's
-      // own Activity line ("not read: no network", once per stretch) covers it. Timeouts are still logged.
-      if(attempt===attempts-1&&!(opts?.quietNetwork&&e?.name!=='AbortError'))logError('fetch:simcotools',lastError);
-    }finally{clearTimeout(timer);simcoReleaseRequestSlot()}
+      const next=order.find(x=>simcoChannelHasRunner(C,x.k));if(!next)break;
+      done.add(next.k);
+      const parts=next.k.split(':'),realm=parts.length>1?validRealmNumber(parts[1]):null;
+      try{await SIMCO_CHANNEL_RUNNERS[C.laneBase(next.k)](realm);}catch(e){logError('simco-channel-runner',e);}
+      ran.push(next.k);
+      // The want keeps its place (its age) while the runner asks again; a runner that asked nothing for it (its data was
+      // fresh, its timer off) leaves the want untouched: dropped, or it would be run again and again.
+      await simcoChannelSerial(async()=>{const s=C.simcoState(await simcoChannelLoad(),Date.now()),w=s.wants[next.k];if(w&&w.reason!=='in flight'&&Number(w.at)===next.at){delete s.wants[next.k];await simcoChannelStore(s);}});
+      // A probe that went out moved nextProbeAt (or a 429 opened the cooldown): the checks at the top end the run.
+    }
+    return {ok:true,trigger,ran};
+  // A run that sent nothing (every runner refused, e.g. a newer want ahead of it) re-arms no sooner than 30 s: no tight loop.
+  })().finally(async()=>{simcoChannelQueueRun=null;try{const st=await simcoChannelPeek();simcoChannelArm(st,(Number(st?.lastAt)||0)===startLastAt?Date.now()+30000:0);}catch{}});
+  return simcoChannelQueueRun;
+}
+try{chrome.alarms?.onAlarm?.addListener?.(a=>{if(a?.name===SIMCO_CHANNEL_ALARM)simcoChannelRunQueue('alarm').catch(()=>{});});}catch{}
+// THE SimcoTools request: the only fetch of api.simcotools.com. opts.job: the channel job key (else from the URL).
+// One attempt; a refused slot sends nothing. A network failure / timeout returns {ok:false,status:0,network:true}
+// (never thrown); the channel writes one line per outage, so callers write no per-attempt line for it (outageLogged).
+async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS, opts=null){
+  // An executive search keeps the typed name out of every stored copy of the URL (net log) and no body preview; the
+  // request itself uses the real URL.
+  const privateUrl=scmIsPrivateSimcoUrl(url);
+  const logUrl=scmMobileNetSafeUrl(privateUrl?scmMobileNetSafeUrl(url):String(url));
+  const key=typeof opts?.job==='string'&&opts.job?opts.job:simcoJobKeyForUrl(url);
+  const slot=await simcoChannelTake(key);
+  if(!slot.take){
+    const refused=simcoChannelRefusal(key,slot);
+    await scmMobileNetLogBackground({kind:'request-skipped',url:logUrl,method:'GET',status:0,reason:`simcotools-channel-${refused.reason}`,retryAt:refused.retryAt});
+    return refused;
   }
-  throw lastError||new Error('SimcoTools request failed.');
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  const requestStartedAt=Date.now();
+  try{
+    await scmMobileNetLogBackground({kind:'request-start',url:logUrl,method:'GET',startedAt:new Date(requestStartedAt).toISOString()});
+    // No cookies or auth sent to SimcoTools (public API; nothing of the browser session goes to a third party).
+    const response=await fetch(url,{method:'GET',cache:'no-store',credentials:'omit',headers:{accept:'application/json'},signal:controller.signal});
+    const text=await response.text();
+    const status=Number(response.status)||0;
+    await scmMobileNetLogBackground({kind:'fetch',url:logUrl,method:'GET',status,ok:Boolean(response.ok),durationMs:Date.now()-requestStartedAt,transport:'extension-background',contentType:String(response.headers?.get?.('content-type')||''),body:text?(privateUrl?{truncated:true,originalLength:text.length,preview:'',redacted:true}:{truncated:text.length>4000,originalLength:text.length,preview:text.slice(0,4000)}):null});
+    if(status===429){
+      // No per-request retry: the channel cooldown (Retry-After, else the default) holds every SimcoTools job.
+      const out=await simcoChannelResult(key,{ok:false,status:429,retryAfterMs:simcoRetryAfterMs(response)});
+      const until=Number(out?.state?.cooldownUntil)||Date.now()+SIMCOTOOLS_DEFAULT_RATE_LIMIT_COOLDOWN_MS;
+      return {ok:false,status:429,text,retryAt:new Date(until).toISOString(),nextAt:until,rateLimited:true,job:key};
+    }
+    await simcoChannelResult(key,{ok:Boolean(response.ok),status});
+    return {ok:Boolean(response.ok),status,text,job:key};
+  }catch(e){
+    // "Failed to fetch" / TypeError / timeout (abort) / a dropped body: SimcoTools did not answer -> network.
+    const timedOut=e?.name==='AbortError';
+    const error=timedOut?`SimcoTools request timed out after ${Math.round(timeoutMs/1000)}s`:`SimcoTools network error: ${e?.message||String(e)}`;
+    try{await scmMobileNetLogBackground({kind:'fetch',url:logUrl,method:'GET',status:0,ok:false,durationMs:Date.now()-requestStartedAt,transport:'extension-background',error:error.slice(0,200)});}catch{}
+    const out=await simcoChannelResult(key,{ok:false,status:0,network:true});
+    const st=out?.state||{},nextAt=Number(st.nextProbeAt)||0;
+    return {ok:false,status:0,text:'',network:true,timedOut,outageLogged:true,error,job:key,unreachableSince:Number(st.unreachableSince)||Date.now(),nextAt,retryAt:nextAt?new Date(nextAt).toISOString():null};
+  }finally{clearTimeout(timer);}
+}
+// A refused / failed simcoFetch answer as an Error (callers that throw), with the channel fields kept.
+function simcoRespError(resp){
+  const e=new Error(resp?.error||(resp?.limited?'Waiting for the SimcoTools limit':`HTTP ${Number(resp?.status)||0} from SimcoTools`));
+  for(const k of ['status','retryAt','rateLimited','limited','queued','nextAt','reason','unreachableSince','network','outageLogged','job'])if(resp&&resp[k]!==undefined)e[k]=resp[k];
+  e.rateLimited=Boolean(resp?.rateLimited);e.limited=Boolean(resp?.limited);
+  return e;
 }
 
 async function loadBundledVwapFallback(){
@@ -5407,7 +5530,7 @@ async function vwapPairsForRealm(store){
   for(const id of [101,102,108,111])add(id,0);
   return [...pairs.values()];
 }
-async function fetchSimcoVwapPairs(realm,pairs){
+async function fetchSimcoVwapPairs(realm,pairs,opts=null){
   const requested=Number.isFinite(Number(realm))?Number(realm):null;
   if(requested==null||!realmDefinition(requested))return {ok:false,rows:[],realm:requested,requested:0,failed:0,failures:[{error:'A valid realm is required for VWAP pair fetch.'}]};
   const list=Array.isArray(pairs)?pairs:[];
@@ -5417,9 +5540,10 @@ async function fetchSimcoVwapPairs(realm,pairs){
     const rid=Number(pair?.resourceId),q=Number(pair?.quality);
     const url=`https://api.simcotools.com/v1/realms/${requested}/market/vwaps/${rid}/${q}`;
     try{
-      const resp=await simcoFetch(url,15000);
-      if(resp?.limited){failures.push({resourceId:rid,quality:q,error:'Waiting for the SimcoTools limit',status:429,rateLimited:true,limited:true,retryAt:resp.retryAt});break;}
-      if(!resp.ok){const error=new Error(`HTTP ${resp.status}`);error.status=resp.status;error.retryAt=resp.retryAt||null;error.rateLimited=Boolean(resp.rateLimited);throw error;}
+      const resp=await simcoFetch(url,15000,{job:opts?.job||`vwap:${requested}`});
+      // Refused by the channel (nothing sent) or no connection: the remaining pairs wait for the queued run.
+      if(resp?.limited||resp?.network){failures.push({resourceId:rid,quality:q,error:resp.error||'Waiting for the SimcoTools limit',status:resp.status||0,rateLimited:Boolean(resp.rateLimited),limited:Boolean(resp.limited),network:Boolean(resp.network),queued:Boolean(resp.queued),nextAt:resp.nextAt||null,retryAt:resp.retryAt||null});break;}
+      if(!resp.ok)throw simcoRespError(resp);
       const data=parseSimcoResponse(resp.text);
       const value=extractSimcoExactVwap(data);
       if(value==null) throw new Error('No exact VWAP value returned');
@@ -5430,7 +5554,7 @@ async function fetchSimcoVwapPairs(realm,pairs){
   return {ok:rows.length>0,rows,realm:requested,requested:list.length,failed:failures.length,failures};
 }
 
-async function fetchSimcoVwapDataset(realm){
+async function fetchSimcoVwapDataset(realm,opts=null){
   const requestedRealm=Number.isFinite(Number(realm))?Number(realm):null;
   if(requestedRealm==null || !realmDefinition(requestedRealm)){
     return {ok:false,rows:[],source:'SimcoTools',realm:requestedRealm,failed:0,total:0,failures:[{error:'A valid game realm is required for VWAP data.'}]};
@@ -5438,10 +5562,11 @@ async function fetchSimcoVwapDataset(realm){
   // VWAP is strictly realm-specific. Never fall back to another realm.
   try{
     const url=`https://api.simcotools.com/v1/realms/${requestedRealm}/market/vwaps`;
-    const resp=await simcoFetch(url);
-    if(resp?.limited)return {ok:false,rows:[],source:'SimcoTools',realm:requestedRealm,failed:0,total:0,limited:true,retryAt:resp.retryAt,failures:[{error:'Waiting for the SimcoTools limit',status:429,rateLimited:true,limited:true,retryAt:resp.retryAt}]};
+    const resp=await simcoFetch(url,SIMCOTOOLS_TIMEOUT_MS,{job:opts?.job||`vwap:${requestedRealm}`});
+    if(resp?.limited)return {ok:false,rows:[],source:'SimcoTools',realm:requestedRealm,failed:0,total:0,limited:true,queued:Boolean(resp.queued),reason:resp.reason||null,nextAt:resp.nextAt||null,unreachableSince:resp.unreachableSince||null,retryAt:resp.retryAt,failures:[{error:resp.error||'Waiting for the SimcoTools limit',status:resp.status||0,rateLimited:Boolean(resp.rateLimited),limited:true,retryAt:resp.retryAt}]};
+    if(resp?.network)return {ok:false,rows:[],source:'SimcoTools',realm:requestedRealm,failed:0,total:0,network:true,unreachableSince:resp.unreachableSince||null,nextAt:resp.nextAt||null,retryAt:resp.retryAt||null,failures:[{error:resp.error,status:0,network:true}]};
     const data=parseSimcoResponse(resp.text);
-    if(!resp.ok) return {ok:false,rows:[],source:'SimcoTools',realm:requestedRealm,failed:0,total:0,failures:[{error:`HTTP ${resp.status} from SimcoTools realm ${requestedRealm}`}]};
+    if(!resp.ok) return {ok:false,rows:[],source:'SimcoTools',realm:requestedRealm,failed:0,total:0,status:resp.status,rateLimited:Boolean(resp.rateLimited),retryAt:resp.retryAt||null,failures:[{error:`HTTP ${resp.status} from SimcoTools realm ${requestedRealm}`,status:resp.status,rateLimited:Boolean(resp.rateLimited),retryAt:resp.retryAt||null}]};
     const allRows=normalizeSimcoVwapRows(data);
     if(!allRows.length) return {ok:false,rows:[],source:'SimcoTools',realm:requestedRealm,failed:0,total:0,failures:[{error:`SimcoTools realm ${requestedRealm} returned no usable VWAP rows.`}]};
     return {ok:true,rows:allRows,allRows,source:'SimcoTools bulk',realm:requestedRealm,requestedRealm,failed:0,total:allRows.length,datasetRows:allRows.length,failures:[]};
@@ -5515,11 +5640,13 @@ async function runVwapSyncForRealm(realm,targetKey,label,options={}){
 
   // A request is about to be made: only now is "Syncing…" shown (every path below writes vwapSyncing:false).
   await vwapLockedStatus({message:`Syncing ${label} VWAP data from SimcoTools…`,vwapSyncing:true,vwapError:null,vwapRealm:realm},realm);
-  let result=await fetchSimcoVwapDataset(realm);
-  // Inside the shared SimcoTools gap: nothing was requested; the stored VWAP stays and the next run asks again.
+  const vwapJob=typeof options.job==='string'&&options.job?options.job:`vwap:${realm}`;
+  let result=await fetchSimcoVwapDataset(realm,{job:vwapJob});
+  // Refused by the SimcoTools channel: nothing was requested; the stored VWAP stays and the queued job runs later.
   if(result.limited){
-    await vwapLockedStatus({message:`R${realm===0?'1':'2'} VWAP waits for the SimcoTools limit.`,vwapSyncing:false,vwapRealm:realm},realm);
-    return {ok:false,skipped:true,limited:true,realm,requested:0,failed:0,retryAt:result.retryAt,failures:result.failures};
+    const why=result.reason==='unreachable'?`SimcoTools (unreachable since ${simcoChannelClock(result.unreachableSince)})`:result.reason==='cooldown'?'SimcoTools (it asked to wait, 429)':'the SimcoTools limit';
+    await vwapLockedStatus({message:`${label} VWAP waits for ${why}.`,vwapSyncing:false,vwapRealm:realm},realm);
+    return {ok:false,skipped:true,limited:true,queued:Boolean(result.queued),reason:result.reason||null,nextAt:result.nextAt||null,unreachableSince:result.unreachableSince||null,realm,requested:0,failed:0,retryAt:result.retryAt,failures:result.failures};
   }
   let allVwaps=Array.isArray(result.allRows)?result.allRows:(Array.isArray(result.rows)?result.rows:[]);
   let sourceMode='live-bulk';
@@ -5527,9 +5654,10 @@ async function runVwapSyncForRealm(realm,targetKey,label,options={}){
 
   // If the bulk dataset is unavailable, use the realm-specific per-resource/per-quality
   // endpoint. This never crosses realms and does not reuse another realm's data.
-  if(!allVwaps.length){
+  // Not when SimcoTools did not answer or asked to wait: every pair request would be refused by the channel anyway.
+  if(!allVwaps.length&&!result.network&&!result.rateLimited){
     const pairs=await vwapPairsForRealm(targetStore);
-    const pairResult=await fetchSimcoVwapPairs(realm,pairs);
+    const pairResult=await fetchSimcoVwapPairs(realm,pairs,{job:vwapJob});
     if(pairResult.rows.length){
       allVwaps=pairResult.rows;
       sourceMode='live-pairs';
@@ -5652,14 +5780,16 @@ function simcoTrendFromSummary(root){
 }
 // One SimcoTools request for many products: GET /v1/realms/{realm}/market/followed?resources=<id>q<quality>,...
 // (40 pairs per request). Returns Map "id:q" -> the same snapshot shape as fetchSimcoMarketSnapshot.
-async function fetchSimcoFollowedSnapshots(realm,pairs){
+async function fetchSimcoFollowedSnapshots(realm,pairs,opts=null){
   const snaps=new Map();
   const list=(Array.isArray(pairs)?pairs:[]).map(p=>({id:Number(p.resourceId),q:Number(p.quality)})).filter(p=>Number.isSafeInteger(p.id)&&p.id>0&&Number.isSafeInteger(p.q)&&p.q>=0);
   for(let i=0;i<list.length;i+=40){
     const chunk=list.slice(i,i+40);
     const url=`https://api.simcotools.com/v1/realms/${realm}/market/followed?resources=${chunk.map(p=>`${p.id}q${p.q}`).join(',')}`;
-    const resp=await simcoFetch(url,20000);
-    if(resp?.limited)return {ok:false,error:'Waiting for the SimcoTools limit',status:429,rateLimited:true,limited:true,retryAt:resp.retryAt||null,snaps};
+    const resp=await simcoFetch(url,20000,{job:opts?.job||`followed:${realm}`});
+    if(resp?.limited)return {ok:false,error:resp.error||'Waiting for the SimcoTools limit',status:resp.status||0,rateLimited:Boolean(resp.rateLimited),limited:true,queued:Boolean(resp.queued),reason:resp.reason||null,nextAt:resp.nextAt||null,unreachableSince:resp.unreachableSince||null,retryAt:resp.retryAt||null,snaps};
+    // No connection: like a refusal (limited, no per-pair 429 cooldown); the channel probes and runs the queued job.
+    if(resp?.network)return {ok:false,error:resp.error,status:0,network:true,limited:true,unreachableSince:resp.unreachableSince||null,nextAt:resp.nextAt||null,retryAt:resp.retryAt||null,snaps};
     if(!resp?.ok)return {ok:false,error:`HTTP ${resp?.status||0} from SimcoTools`,status:resp?.status||0,rateLimited:Boolean(resp?.rateLimited),retryAt:resp?.retryAt||null,snaps};
     const data=parseSimcoResponse(resp.text);
     const rows=Array.isArray(data?.summaries)?data.summaries:[];
@@ -5667,10 +5797,10 @@ async function fetchSimcoFollowedSnapshots(realm,pairs){
   }
   return {ok:true,snaps};
 }
-async function fetchSimcoMarketSnapshot(realm,resourceId,quality){
+async function fetchSimcoMarketSnapshot(realm,resourceId,quality,opts=null){
   const url=`https://api.simcotools.com/v1/realms/${realm}/market/resources/${resourceId}/${quality}`;
-  const resp=await simcoFetch(url,12000);
-  if(!resp.ok){const error=new Error(resp.limited?'Waiting for the SimcoTools limit':`HTTP ${resp.status}`);error.status=resp.status;error.retryAt=resp.retryAt||null;error.rateLimited=Boolean(resp.rateLimited);error.limited=Boolean(resp.limited);throw error;}
+  const resp=await simcoFetch(url,12000,{job:opts?.job||`snapshot:${realm}`});
+  if(!resp.ok)throw simcoRespError(resp);
   return normalizeSimcoMarketSnapshot(parseSimcoResponse(resp.text),resourceId,quality);
 }
 function simcoCandleRows(data){
@@ -5712,10 +5842,10 @@ function normalizeSimcoCandle(row){
     volume:pick('volume','tradeVolume','quantity','count','v')
   };
 }
-async function fetchSimcoMarketCandles(realm,resourceId,quality){
+async function fetchSimcoMarketCandles(realm,resourceId,quality,opts=null){
   const url=`https://api.simcotools.com/v1/realms/${realm}/market/resources/${resourceId}/${quality}/candlesticks`;
-  const resp=await simcoFetch(url,12000);
-  if(!resp.ok){const error=new Error(resp.limited?'Waiting for the SimcoTools limit':`HTTP ${resp.status}`);error.status=resp.status;error.limited=Boolean(resp.limited);error.retryAt=resp.retryAt||null;throw error;}
+  const resp=await simcoFetch(url,12000,{job:opts?.job||`candles:${realm}`});
+  if(!resp.ok)throw simcoRespError(resp);
   const data=parseSimcoResponse(resp.text);
   return simcoCandleRows(data).map(normalizeSimcoCandle).filter(Boolean);
 }
@@ -5753,14 +5883,15 @@ async function getPriceHistory(realm,resourceIdArg,qualityArg,force=false){
   await priceHistoryWriteTail;
   return {ok:true,cached:false,...entry};
 }
-async function runLiveMarketProduct(realmArg,resourceIdArg,qualityArg){
+async function runLiveMarketProduct(realmArg,resourceIdArg,qualityArg,opts=null){
   const realm=validRealmNumber(realmArg),resourceId=validResourceId(resourceIdArg),quality=validQuality(qualityArg);
   if(realm==null||resourceId==null||quality==null)return {ok:false,error:'Invalid market resource selection.'};
 
   // Fetch one selected SimcoTools product only. Preserve each completed product
   // by resource+quality so out-of-order responses cannot erase the user's selection.
-  // One SimcoTools request per call (shared 500 ms gate): the current price, or - when the stored price is
-  // under 15 min old and the chart is missing or over 3 h old - the chart. A call inside the gap throws (limited).
+  // One SimcoTools request per call (SimcoTools channel): the current price, or - when the stored price is
+  // under 15 min old and the chart is missing or over 3 h old - the chart. A refused call throws (limited, queued).
+  // opts.job: the channel job (the Market Refresh button passes refresh:<realm>; else snapshot / candles).
   const pre=(await state(realm)).realmStores?.[realmKeyFromRealm(realm)]?.liveMarketProductCache?.[`${resourceId}:${quality}`]||null;
   const preAt=Date.parse(String(pre?.fetchedAt||'')),preCandlesAt=Date.parse(String(pre?.candlesFetchedAt||''));
   const preCandles=Array.isArray(pre?.selected?.candles)?pre.selected.candles:[];
@@ -5769,9 +5900,9 @@ async function runLiveMarketProduct(realmArg,resourceIdArg,qualityArg){
   let selectedRaw,snapshotAt=new Date().toISOString(),candlesFetchedAt=pre?.candlesFetchedAt||null;
   if(snapFresh&&candlesStale){
     selectedRaw={...pre.selected};snapshotAt=pre.fetchedAt;
-    selectedRaw.candles=await fetchSimcoMarketCandles(realm,resourceId,quality);candlesFetchedAt=new Date().toISOString();
+    selectedRaw.candles=await fetchSimcoMarketCandles(realm,resourceId,quality,opts);candlesFetchedAt=new Date().toISOString();
   }else{
-    selectedRaw=await fetchSimcoMarketSnapshot(realm,resourceId,quality);
+    selectedRaw=await fetchSimcoMarketSnapshot(realm,resourceId,quality,opts);
     selectedRaw.candles=preCandles;
   }
   // The candlestick endpoint can return no rows for thinly traded products.
@@ -5926,6 +6057,39 @@ async function runLiveMarketRefresh(realmArg=null){
   return run;
 }
 
+// SimcoTools channel status for a reply: {queued, nextAt, unreachableSince, nextProbeAt, cooldownUntil}. key: one job's
+// want (else any want). nextAt: when the channel serves again (0 when nothing waits and it is open).
+async function simcoChannelStatus(key=null){
+  const st=await simcoChannelPeek(),now=Date.now();
+  if(!st)return {queued:false,nextAt:0,unreachableSince:null,nextProbeAt:null,cooldownUntil:null};
+  const queued=key?Boolean(st.wants?.[key]&&st.wants[key].reason!=='in flight'):Object.keys(st.wants||{}).length>0;
+  const cool=Number(st.cooldownUntil)>now?Number(st.cooldownUntil):null;
+  return {queued,nextAt:queued||st.unreachableSince||cool?simcoChannelNextAt(st,now):0,unreachableSince:st.unreachableSince||null,nextProbeAt:st.unreachableSince?Number(st.nextProbeAt)||null:null,cooldownUntil:cool};
+}
+// The Market Refresh button (LIVE_MARKET_REFRESH manual:true): SimcoTools only, NEVER a game request. One request in the
+// channel job refresh:<realm> (priority 1): the product being viewed (its SimcoTools snapshot / chart, runLiveMarketProduct),
+// else all prices (the realm's VWAP dataset, fetchSimcoVwapDataset through runVwapSync). Refused or SimcoTools down: no
+// request now; the job stays queued and the channel queue runs it (same product, SIMCO_REFRESH_WANT_KEY) later.
+// Reply: {ok, queued, nextAt, unreachableSince, reason, realm, resourceId, quality, target:'product'|'all-prices',
+// source:'SimcoTools', noGameRead:true, fetchedAt, error} - the dashboard shows "SimcoTools unreachable since HH:MM · retry m:ss".
+async function runSimcoMarketRefresh(realmArg,resourceIdArg,qualityArg,{fromQueue=false}={}){
+  const realm=validRealmNumber(realmArg);
+  if(realm==null)return {ok:false,queued:false,nextAt:0,unreachableSince:null,noGameRead:true,source:'SimcoTools',error:'No valid realm.'};
+  const resourceId=resourceIdArg==null||resourceIdArg===''?null:validResourceId(resourceIdArg),quality=qualityArg==null||qualityArg===''?null:validQuality(qualityArg);
+  const product=resourceId!=null&&quality!=null,job=`refresh:${realm}`;
+  if(!fromQueue)await simcoRefreshWantSet(realm,product?{resourceId,quality}:null);
+  let r=null,err=null;
+  try{r=product?await runLiveMarketProduct(realm,resourceId,quality,{job}):await runVwapSync({realm,force:true,reason:'manual-market-refresh',job});}
+  catch(e){err=e;}
+  const ok=!err&&Boolean(r?.ok);
+  const s=await simcoChannelStatus(job);
+  const queued=!ok&&Boolean(s.queued||err?.queued||r?.queued);
+  return {ok,queued,nextAt:queued?(Number(s.nextAt)||Number(err?.nextAt||r?.nextAt)||0):0,unreachableSince:s.unreachableSince,
+    reason:queued?(err?.reason||r?.reason||(s.unreachableSince?'unreachable':s.cooldownUntil?'cooldown':'rate')):null,
+    realm,resourceId:product?resourceId:null,quality:product?quality:null,target:product?'product':'all-prices',source:'SimcoTools',noGameRead:true,
+    fetchedAt:ok?(r?.fetchedAt||new Date().toISOString()):null,error:ok?null:String(err?.message||r?.error||'').slice(0,300)||null};
+}
+
 // The VWAP sync's network work (SimcoTools downloads: hundreds of spaced requests, rate-limit cooldowns) runs outside
 // the realm storage queue, so game captures keep updating the warehouse and overlay meanwhile; each storage write is
 // its own short queued transaction. VWAP runs are still serialized with each other.
@@ -5948,7 +6112,7 @@ const MARKET_STAGE_ALARM_PREFIX='scm-market-stage-r';
 // Start optional market work as soon as core Sync releases its capture lock.
 // Resource-image downloads continue independently and provide natural API quiet time.
 const POST_SYNC_MARKET_COOLDOWN_MS=1000;
-// Chained stages (after Sync / Refresh) each make one SimcoTools request; they stay 5 min (+5 s) apart, well over the 500 ms gate.
+// Chained stages (after Sync / Refresh) each make one SimcoTools request; they stay 5 min (+5 s) apart, (the SimcoTools channel itself allows 2/s, burst 25).
 const MARKET_STAGE_COOLDOWN_MS=5*60*1000+5000;
 const MARKET_STAGE_REALM_COOLDOWN_MS=5*60*1000+5000;
 let liveMarketRefreshAlarmRun=null;
@@ -6043,22 +6207,24 @@ async function runScheduledLiveMarketRefresh(reason='scheduled'){
     const s=await state();
     const selected=validRealmNumber(s.activeRealmKey?.replace(/^realm:/,'')??s.selectedRealm??s.authData?.authCompany?.realmId);
     const first=selected??0,other=first===0?1:0;
-    // Every run (default every 5 min) makes at most ONE SimcoTools request (by design; the shared gate only spaces calls 500 ms):
+    // Every run (default every 5 min) makes at most ONE SimcoTools request (by design; the SimcoTools channel allows 2/s, burst 25):
     // 1. VWAP of the game's realm, then of the other realm, when due (one bulk call each, ~1-3 a day, see VWAP_RECHECK_MS);
     // 2. otherwise one backup price, alternating realms, the product with the oldest backup price first.
     // A step that needs no request (VWAP still current, no products) moves on to the next step in the same run.
     if(coreSyncActive())return {ok:true,skipped:true,reason:'core-sync-active'};
-    if(await simcoGateNextAt())return {ok:true,skipped:true,reason:'simcotools-gap',retryAt:new Date(await simcoGateNextAt()).toISOString()};
+    // SimcoTools cooling down after a 429, or unreachable and its next probe not due: no step (the queued jobs run from
+    // the channel queue at that time).
+    {const st=await simcoChannelPeek(),now=Date.now();if(st&&(Number(st.cooldownUntil)>now||(st.unreachableSince&&now<Number(st.nextProbeAt)))){const at=simcoChannelNextAt(st,now);return {ok:true,skipped:true,reason:st.unreachableSince?'simcotools-unreachable':'simcotools-cooldown',retryAt:new Date(at).toISOString(),unreachableSince:st.unreachableSince||null};}}
     let rot={};try{rot=(await chrome.storage.local.get({[LIVE_MARKET_ROTATION_KEY]:{}}))[LIVE_MARKET_ROTATION_KEY]||{};}catch{}
     const pricesFirst=validRealmNumber(rot.lastPricesRealm)===first?other:first;
     const steps=[['vwap',first],['vwap',other],['prices',pricesFirst],['prices',pricesFirst===first?other:first]];
     const ran=[];
     for(const [stage,realm] of steps){
       if(coreSyncActive())break;
-      const before=Number((await simcoGateLoad()).lastAt)||0;
+      const before=Number((await simcoChannelPeek())?.lastAt)||0;
       let result=null;
       try{result=stage==='vwap'?await runVwapSync({realm,reason:'timer-market-vwap'}):await runLiveMarketRefresh(realm);}catch(e){result={ok:false,error:e?.message||String(e)};}
-      const requested=(Number((await simcoGateLoad()).lastAt)||0)!==before;
+      const requested=(Number((await simcoChannelPeek())?.lastAt)||0)!==before;
       ran.push({stage,realm,ok:Boolean(result?.ok),requested,limited:Boolean(result?.limited)});
       if(stage==='prices'&&requested){try{await rawStorageSet({[LIVE_MARKET_ROTATION_KEY]:{lastPricesRealm:realm,at:Date.now()}});}catch{}}
       if(requested||result?.limited)break;
@@ -6098,8 +6264,9 @@ async function runScheduledLiveMarketRefresh(reason='scheduled'){
 //  scmSimcoResourcesRetry    {until, fails}                                                   after a non-200: 1 h doubling to 24 h
 // One alarm (scm-simco-public, every 5 min, 2.5 min after the live-market alarm so it never takes its slot) runs at most
 // ONE job per firing, so at most one SimcoTools request (gov orders: one page, newest 100).
-// Every request goes through simcoFetch (shared gate, 429 cooldowns), one attempt. Nothing runs during a Sync, while the
-// SimcoTools timer (liveMarket) is off, during a 429 cooldown or while the shared gate is closed (next firing tries again).
+// Every request goes through simcoFetch (the SimcoTools channel: 2/s, burst 25, 429 cooldown, outage probes), one attempt.
+// Nothing runs during a Sync, while the SimcoTools timer (liveMarket) is off, during a 429 cooldown or while SimcoTools is
+// unreachable and no probe is due (the channel queue runs the job then).
 const SIMCO_PUBLIC_ALARM='scm-simco-public';
 const SIMCO_PUBLIC_PERIOD_MINUTES=5,SIMCO_PUBLIC_OFFSET_MS=150000,SIMCO_PUBLIC_DUE_SLACK_MS=30000;
 const SIMCO_PRICES_MAX_AGE_MS=15*60000,SIMCO_PRICES_FRESH_FOR_TICKER_MS=30*60000;
@@ -6561,7 +6728,7 @@ function simcoPublicPickJob(g,realm,now=Date.now(),ctx=null){
 // Rotation (2.5.464): a job whose try gave no data (offline, timeout, failure, not-read) is marked
 // scmSimcoJobTried["<realm>|<job>"]=time (kept up to a day); a due job with no mark goes first, and when every due job
 // is marked the one tried longest ago goes, so with no connection the due jobs take turns (round robin) instead of
-// prices at every firing. A success clears the mark; a 429 or the shared gate sets none.
+// prices at every firing. A success clears the mark; a 429 or a channel refusal sets none.
 function simcoJobTriedRecently(map,realm,job,now=Date.now()){const t=Number(map&&typeof map==='object'?map[simcoJobBackoffKey(realm,job)]:0)||0;return t>0&&now-t<86400000;}
 function simcoPublicPickFair(g,realm,now=Date.now(),ctx=null){
   const base=ctx&&typeof ctx==='object'?ctx:null;
@@ -6602,19 +6769,25 @@ async function simcoJobBackoffRecord(realm,job,result){
     const patch={},next=simcoJobBackoffNext(got[SIMCO_JOB_BACKOFF_KEY],realm,job,result),tried=simcoJobTriedNext(got[SIMCO_JOB_TRIED_KEY],realm,job,result);
     if(next)patch[SIMCO_JOB_BACKOFF_KEY]=next;if(tried)patch[SIMCO_JOB_TRIED_KEY]=tried;if(Object.keys(patch).length)await rawStorageSet(patch);});}catch{}
 }
-// network: fetch threw a TypeError (no connection: phone asleep / Doze or offline), not a timeout and not an HTTP answer.
-async function simcoPublicFetch(url){try{return await simcoFetch(url,SIMCOTOOLS_TIMEOUT_MS,{noRetry:true,quietNetwork:true});}catch(e){const m=e?.message||String(e);return {ok:false,status:0,error:m,network:/^SimcoTools network error:/.test(m)};}}
+// One SimcoTools channel request (job from the URL: prices:<realm> for /market/prices, else public:<realm>). network:
+// SimcoTools did not answer (no connection, timeout); the channel wrote the one outage line.
+async function simcoPublicFetch(url,job=null){try{return await simcoFetch(url,SIMCOTOOLS_TIMEOUT_MS,job?{job}:null);}catch(e){const m=e?.message||String(e);return {ok:false,status:0,error:m};}}
 function simcoPublicLog(realm,job,outcome,details,error,t0,trigger){return realm!=null?logActivity(realm,job,outcome,details,error,t0,trigger):logActivityAnyRealm(job,outcome,details,error);}
 // A request that did not give data: not read (no request: gate / cooldown), rate-limited (server 429) or failed.
 function simcoPublicTooLarge(realm,job,p,t0,trigger,extra={}){simcoPublicLog(realm,job,'failure',{...extra,chars:p.length},'response too large',t0,trigger);return {ok:false,outcome:'failure',tooLarge:true};}
-// Set when a request was held by the shared SimcoTools gate / cooldown (not the job's fault): runSimcoPublicData marks that
+// Set when a request was held by the SimcoTools channel (refusal / cooldown) (not the job's fault): runSimcoPublicData marks that
 // result gateWait so it sets no job back-off.
 let simcoPublicGateMissSeen=false;
 function simcoPublicMiss(realm,job,resp,t0,trigger,extra={}){
   const status=Number(resp?.status)||0;
-  if(resp?.skipped||resp?.limited){simcoPublicGateMissSeen=true;simcoPublicLog(realm,job,'not-read',{...extra,retryAt:resp?.retryAt||null},'Not read: waiting for the SimcoTools limit',t0,trigger);return 'not-read';}
+  // Refused by the SimcoTools channel (nothing sent; the job stays queued). While SimcoTools is unreachable the channel's
+  // one outage line covers every job: no line per job and firing.
+  if(resp?.skipped||resp?.limited){simcoPublicGateMissSeen=true;if(resp?.reason!=='unreachable')simcoPublicLog(realm,job,'not-read',{...extra,retryAt:resp?.retryAt||null,reason:resp?.reason||null},resp?.error?`Not read: ${resp.error}`:'Not read: waiting for the SimcoTools limit',t0,trigger);return 'not-read';}
+  // SimcoTools did not answer (no connection / timeout): the channel logged the outage once; no line here.
+  // Returns 'offline' so no caller reads it as a rate limit and no back-off step is set.
+  if(status===0&&resp?.network&&resp?.outageLogged)return 'offline';
   // No connection at all (the same firing fails for the game too): not read, next firing tries again (no failure line).
-  // A manual request (user is on the page) stays a failure. Returns 'offline' so no caller reads it as a rate limit.
+  // A manual request (user is on the page) stays a failure.
   if(status===0&&resp?.network&&trigger!=='manual'){simcoPublicLog(realm,job,'not-read',{...extra,network:true,error:String(resp.error||'').slice(0,120)},'Not read: no network connection (phone asleep or offline); the next firing tries again',t0,trigger);return 'offline';}
   if(status===429){simcoPublicLog(realm,job,'rate-limited',{...extra,status,retryAt:resp?.retryAt||null},'SimcoTools answered 429 (rate limit); waiting for the cooldown',t0,trigger);return 'rate-limited';}
   simcoPublicLog(realm,job,'failure',{...extra,status},resp?.error||`HTTP ${status} from SimcoTools`,t0,trigger);return 'failure';
@@ -6845,9 +7018,9 @@ async function simcoPublicCertHolders(realm,kind,t0,trigger){
   simcoPublicLog(realm,job,status===404?'skipped':'success',{kind:k,rows:h.rows.length,total:h.total},status===404?`No holders of certificate ${k} on SimcoTools (404)`:null,t0,trigger);
   return {ok:true,kind:k,rows:h.rows.length};
 }
-// Executive name search (SCM_SIMCO_EXEC_LOOKUP). On demand, ONE request through the shared gate; the same search within
-// 24 h is answered from scmSimcoExecLookup:<realm>. No request during a Sync ({busy}), a 429 cooldown or while the gate is
-// closed ({limited, retryAt}); lookups at least SIMCO_EXEC_LOOKUP_GAP_MS apart (no burst from repeated clicks). A running
+// Executive name search (SCM_SIMCO_EXEC_LOOKUP). On demand, ONE request through the SimcoTools channel; the same search within
+// 24 h is answered from scmSimcoExecLookup:<realm>. No request during a Sync ({busy}), a 429 cooldown or while SimcoTools is
+// unreachable ({limited, retryAt}); lookups at least SIMCO_EXEC_LOOKUP_GAP_MS apart (no burst from repeated clicks). A running
 // request (lookup or alarm job) is never interrupted. A lookup started before Clear data writes nothing.
 // Lookups run one at a time (promise tail). The gap slot is reserved (memory at once, then storage.session so a worker
 // restart keeps it) only when a request will be made; a cache hit or a refusal uses no slot. A request simcoFetch did not
@@ -6869,9 +7042,11 @@ async function simcoExecLookupRun(m){
   const cache=(await simcoPublicGet({[key]:null}))[key];const hit=cache&&typeof cache==='object'?cache[q.key]:null;
   if(hit&&Array.isArray(hit.rows)&&simcoAgeOk(hit.at,SIMCO_EXEC_LOOKUP_MAX_AGE_MS,now))return {ok:true,cached:true,realm,at:Number(hit.at),rows:hit.rows};
   if(coreSyncActive()||realmSyncSessions.size>0)return {ok:false,busy:true};
-  await hydrateSimcoCooldowns();
-  const gateAt=(await simcoGateNextAt())||0,lastAt=await simcoExecLookupGapLoad(),t=Date.now();
-  const waitUntil=Math.max(simcoRateLimitUntil,gateAt,lastAt?lastAt+SIMCO_EXEC_LOOKUP_GAP_MS:0);
+  const ch=await simcoChannelPeek(),lastAt=await simcoExecLookupGapLoad(),t=Date.now();
+  // The channel's 429 cooldown or the next probe while SimcoTools is unreachable (a token wait is under a second: the
+  // request goes and the channel decides).
+  const chAt=ch&&(Number(ch.cooldownUntil)>t||ch.unreachableSince)?simcoChannelNextAt(ch,t):0;
+  const waitUntil=Math.max(chAt,lastAt?lastAt+SIMCO_EXEC_LOOKUP_GAP_MS:0);
   if(waitUntil>t)return {ok:false,limited:true,retryAt:new Date(waitUntil).toISOString()};
   simcoExecLookupLastAt=t;await simcoExecLookupGapSave(t);
   const t0=Date.now(),job='simcotools-exec-lookup';
@@ -6880,7 +7055,7 @@ async function simcoExecLookupRun(m){
   // Not sent (gate / cooldown): the slot goes back.
   if(resp?.skipped&&simcoExecLookupLastAt===t)await simcoExecLookupGapSave(lastAt);
   if(!resp?.ok){const outcome=simcoPublicMiss(realm,job,resp,t0,'manual',{position:q.position});
-    if(outcome==='not-read'||outcome==='rate-limited')return {ok:false,limited:true,retryAt:resp?.retryAt||new Date(Date.now()+SIMCOTOOLS_DEFAULT_RATE_LIMIT_COOLDOWN_MS).toISOString()};
+    if(outcome==='not-read'||outcome==='rate-limited'||outcome==='offline')return {ok:false,limited:true,...(resp?.network||resp?.unreachable?{unreachable:true,unreachableSince:resp?.unreachableSince||null}:{}),retryAt:resp?.retryAt||new Date(Date.now()+SIMCOTOOLS_DEFAULT_RATE_LIMIT_COOLDOWN_MS).toISOString()};
     return {ok:false,error:resp?.error||`HTTP ${Number(resp?.status)||0} from SimcoTools`};}
   const p=simcoPublicParse(resp.text);if(p.tooLarge){simcoPublicTooLarge(realm,job,p,t0,'manual');return {ok:false,error:'SimcoTools answer too large'};}
   const rows=simcoExecutivesFromResponse(p.data);
@@ -6914,9 +7089,9 @@ async function runSimcoPublicData(trigger='alarm'){
     // 2.5 min after it and leave the slot to the VWAP / followed prices run.
     if(trigger==='alarm'){const lm=await chrome.alarms.get(LIVE_MARKET_REFRESH_ALARM_NAME).catch(()=>null);const d=Number(lm?.scheduledTime)-Date.now();const p=Number(lm?.periodInMinutes)*60000;
       if(lm&&(Math.abs(d)<20000||(p>0&&Math.abs(d-p)<20000))){await chrome.alarms.clear(SIMCO_PUBLIC_ALARM).catch(()=>{});await ensureSimcoPublicAlarm();return {ok:true,skipped:true,reason:'live-market-slot'};}}
-    await hydrateSimcoCooldowns();
-    if(simcoRateLimitUntil>Date.now())return {ok:true,skipped:true,reason:'rate-limit-cooldown'};
-    if(await simcoGateNextAt())return {ok:true,skipped:true,reason:'simcotools-gap'};
+    // SimcoTools cooling down after a 429 or unreachable with no probe due: no request (the channel queue runs the job).
+    {const st=await simcoChannelPeek(),now=Date.now();if(st&&Number(st.cooldownUntil)>now)return {ok:true,skipped:true,reason:'rate-limit-cooldown'};
+      if(st&&st.unreachableSince&&now<Number(st.nextProbeAt)){const ar=await activeRealmNumber();await simcoChannelTake(ar===0||ar===1?`public:${ar}`:'public',{peek:true}).catch(()=>{});return {ok:true,skipped:true,reason:'simcotools-unreachable'};}}
     const realm=await activeRealmNumber();
     const keys={scmSimcoBuildingsMeta:null,scmSimcoResources:null,scmSimcoResourcesRetry:null,[SIMCO_JOB_BACKOFF_KEY]:null,scmSimcoJobTried:null};
     if(realm!=null){for(const k of [simcoPricesKey(realm),simcoGovOrdersKey(realm),simcoPhasesKey(realm),simcoEventsKey(realm),simcoCompanyKey(realm),simcoRankingKey(realm),simcoContestsKey(realm),simcoSummaryKey(realm),simcoBuildingStatsKey(realm),simcoCertKindsKey(realm),simcoCertHoldersKey(realm)])keys[k]=null;keys[`scmEconomyStateLog:${realm}`]=[];}
@@ -7323,7 +7498,7 @@ async function refreshContractsScheduled(reason='critical-data-guard',realmArg=n
     const k=`${realm}|${path}`;if(Date.now()-(lostDataReadAt.get(k)||0)<30*60000)continue;
     try{const r=await pageGet(path,realm,null,'lost-data-check',{lane});
       if(r?.laneWait){results.push({path,ok:false,skipped:true,laneWait:true,status:0});logLaneWait(realm,'lost-data-check',r.nextAt,{},Date.now(),reason);break;}
-      if(r?.directReadsBlocked){results.push({path,ok:false,skipped:true,directReadsBlocked:true,status:Number(r?.status)||403});logNotRead(realm,'lost-data-check',r,{directReadsBlocked:true,...(r.recheckFailed?{recheckFailed:true}:{})},Date.now(),reason);break;}
+      
       lostDataReadAt.set(k,Date.now());
       // Other realm / realm not shown yet: a "not read" line (flow unchanged: stamped, the next path goes on).
       if(!r?.ok&&(r?.realmMismatch||r?.realmUnknown)){results.push({path,ok:false,skipped:true,status:0});logNotRead(realm,'lost-data-check',r,{},Date.now(),reason);continue;}
@@ -7889,7 +8064,50 @@ async function restoreGamePageBounded(pageReturn,label='Return to the starting p
 // the page has loaded; a confirmed page with no traffic at all is given up on sooner than one still talking.
 const SYNC_WALK_QUIET_MS=1200,SYNC_WALK_NAV_GAP_MS=1000;
 const SYNC_WALK_NO_TRAFFIC_MS=3000;
-async function waitForWalkTraffic(session,sinceMs,capMs=SYNC_CAPTURE_FALLBACK_MS,{quietMs=SYNC_WALK_QUIET_MS,noTrafficMs=SYNC_WALK_NO_TRAFFIC_MS}={}){
+// ---- Sync = pure page walk (2.5.465) ----
+// Per walked page: wait until that page's expected paths are captured, at most SYNC_WALK_PATH_WAIT_MS (event-driven,
+// no fixed sleeps). A path still missing is 'not-on-page': traced, listed in the Sync result and queued for the lane.
+const SYNC_WALK_PATH_WAIT_MS=20000;
+async function waitForWalkPath(find,sinceMs,maxMs=SYNC_WALK_PATH_WAIT_MS){
+  const deadline=(Number(sinceMs)||Date.now())+maxMs;
+  for(;;){const c=find();if(c)return c;if(Date.now()>=deadline)return null;await new Promise(r=>setTimeout(r,100));}
+}
+// The lane job that serves a path Sync's pages did not load.
+function syncMissingLaneKey(path,realm){
+  const p=String(path||'').split('?')[0],n=validRealmNumber(realm),r=n!=null?n:0;
+  const ex=p.match(/^\/api\/v\d+\/companies\/(\d+)\/executives\/?/i);if(ex)return `executive:${r}:${ex[1]}`;
+  if(/\/api\/v\d+\/resources\/\d+\/?$/i.test(p))return `warehouse:${r}`;
+  if(/\/contracts-(?:incoming|outgoing)\//i.test(p))return `contracts:${r}`;
+  if(typeof ACCOUNTING_SYNC_PATHS!=='undefined'&&ACCOUNTING_SYNC_PATHS.includes(p))return `accounting:${r}`;
+  return `syncMissing:${r}`;
+}
+async function syncNotOnPage(session,realm,path,trace=()=>{}){
+  const key=syncMissingLaneKey(path,realm);
+  if(session){const l=session.notOnPage||(session.notOnPage=[]);if(!l.includes(path))l.push(path);}
+  try{trace('not-on-page',{path,lane:key});}catch{}
+  // Queued after the Sync ends (the lane alarm does not run a want while a Sync is active).
+  try{await gameLaneEnqueue(key);}catch{}
+}
+// Before walking: the page hook in the game tab must answer (hello). If not, the tab is reloaded once (navigation,
+// not an API read) and its hello awaited.
+async function syncEnsurePageHook(tabId,trace=()=>{}){
+  const first=await waitForBridge(tabId,3000).catch(()=>null);
+  if(first){trace('page-hook-alive',{tabId});return true;}
+  trace('page-hook-missing-reload',{tabId});
+  try{await chrome.tabs.reload(tabId);}catch(e){trace('page-hook-reload-error',{error:e?.message||String(e)});return false;}
+  const ok=Boolean(await waitForBridge(tabId,20000).catch(()=>null));
+  trace(ok?'page-hook-alive-after-reload':'page-hook-still-missing',{tabId});
+  return ok;
+}
+async function waitForWalkTraffic(session,sinceMs,capMs=SYNC_CAPTURE_FALLBACK_MS,{quietMs=SYNC_WALK_QUIET_MS,noTrafficMs=SYNC_WALK_NO_TRAFFIC_MS,expect=null}={}){
+  // Expected paths known (2.5.465): event-driven, done as soon as every one is captured from this visit, else at most 20 s.
+  const want=Array.isArray(expect)?expect.map(p=>String(p||'').split('?')[0]).filter(Boolean):[];
+  if(want.length){
+    const t0=Date.now(),end=t0+SYNC_WALK_PATH_WAIT_MS;
+    const have=()=>{const got=new Set(Object.entries(session?.walkCaptures||{}).filter(([,c])=>Number(c?.at)>=sinceMs&&Number(c?.status)>=200&&Number(c?.status)<300).map(([u])=>String(u).replace(/^https?:\/\/[^/]+/,'').split('?')[0]));return want.filter(p=>got.has(p));};
+    while(Date.now()<end){if(have().length===want.length)return {seen:want.length,reason:'all-captured',ms:Date.now()-t0};await new Promise(r=>setTimeout(r,100));}
+    const got=have();return {seen:got.length,reason:'cap',missing:want.filter(p=>!got.includes(p)),ms:Date.now()-t0};
+  }
   const started=Date.now(),deadline=started+Math.max(1000,Number(capMs)||SYNC_CAPTURE_FALLBACK_MS);
   let seen=0,lastAt=0;
   while(Date.now()<deadline){
@@ -7907,7 +8125,7 @@ async function waitForWalkTraffic(session,sinceMs,capMs=SYNC_CAPTURE_FALLBACK_MS
 // then its capture; (3) the direct read, only while reads are not blocked. Bounded by budgetMs (each record call has
 // its own persist timeout). Returns one {path,ok,source} per path.
 const SYNC_FINAL_RECOVERY_BUDGET_MS=60000;
-async function recoverRequiredEndpointsFinal({paths,sinceMs,captureFor,revisit=null,readsBlocked=async()=>false,directRead=null,record,trace=()=>{},budgetMs=SYNC_FINAL_RECOVERY_BUDGET_MS}){
+async function recoverRequiredEndpointsFinal({paths,sinceMs,captureFor,revisit=null,onMissing=null,record,trace=()=>{},budgetMs=SYNC_FINAL_RECOVERY_BUDGET_MS}){
   const started=Date.now(),out=[];
   const overBudget=()=>Date.now()-started>=budgetMs;
   const fromCapture=async(path,since,source)=>{
@@ -7931,16 +8149,10 @@ async function recoverRequiredEndpointsFinal({paths,sinceMs,captureFor,revisit=n
   }
   for(const path of pending){
     if(overBudget()){trace('required-endpoint-final-retry-skipped',{path,reason:'recovery-time-budget'});out.push({path,ok:false,source:null,reason:'recovery-time-budget'});continue;}
-    let blocked=false;try{blocked=Boolean(await readsBlocked());}catch{}
-    if(blocked||!directRead){trace('required-endpoint-final-retry-skipped',{path,reason:blocked?'direct-reads-blocked':'no-direct-read'});out.push({path,ok:false,source:null,reason:blocked?'direct-reads-blocked':'no-direct-read'});continue;}
-    let ok=false,status=0;
-    try{
-      const response=await directRead(path);
-      status=Number(response?.status)||0;
-      ok=response?.directReadsBlocked?false:Boolean(await record(path,response));
-    }catch(e){if(e instanceof SyncCancelledByClear)throw e;trace('required-endpoint-final-retry-error',{path,error:e?.message||String(e)});}
-    trace('required-endpoint-final-retry-result',{path,source:'direct-read',ok,status});
-    out.push({path,ok,source:'direct-read'});
+    // Sync makes no Manager read: a path the game's pages did not load is reported and queued for the game lane.
+    trace('not-on-page',{path,stage:'final-recovery'});
+    try{await onMissing?.(path);}catch{}
+    out.push({path,ok:false,source:null,reason:'not-on-page'});
   }
   return out;
 }
@@ -8288,13 +8500,13 @@ async function runDeferredAccountingWeekRefresh(realm,reason='scheduled',opts=nu
       const error=e?.message||String(e);
       // Not this job's lane slot: no request went out; status stays scheduled, the alarm asks again (no attempt).
       if(e?.laneWait){await setAccountingWeekLedgerStatus(n,'scheduled',null,{reason,waiting:'game-lane'});logLaneWait(n,'accounting-week-ledger',e.nextAt,{},started,reason);return {ok:false,skipped:true,laneWait:true,nextAt:e.nextAt||0,realm:n};}
-      // No game tab / bridge not ready or not connected, or the game blocks direct reads: no request was answered.
+      // No game tab / bridge not ready or not connected: no request was answered.
       // A "not read" line (no failed status, no error text in the status). The alarm path counts it as one of its
       // capped attempts, so it never loops; the next Sync starts again.
-      if(pageBridgeUnavailable(e)||e?.directReadsBlocked||isDirectReadsBlockedError(e)){
-        logNotRead(n,'accounting-week-ledger',e,e?.directReadsBlocked||isDirectReadsBlockedError(e)?{directReadsBlocked:true,...(e?.recheckFailed?{recheckFailed:true}:{})}:{},started,reason);
-        await setAccountingWeekLedgerStatus(n,'scheduled',null,{reason,skipped:e?.directReadsBlocked||isDirectReadsBlockedError(e)?'direct-reads-blocked':'bridge-unavailable',durationMs:Date.now()-started});
-        return {ok:false,skipped:true,realm:n,bridgeUnavailable:pageBridgeUnavailable(e),directReadsBlocked:Boolean(e?.directReadsBlocked||isDirectReadsBlockedError(e)),error};
+      if(pageBridgeUnavailable(e)){
+        logNotRead(n,'accounting-week-ledger',e,{},started,reason);
+        await setAccountingWeekLedgerStatus(n,'scheduled',null,{reason,skipped:'bridge-unavailable',durationMs:Date.now()-started});
+        return {ok:false,skipped:true,realm:n,bridgeUnavailable:pageBridgeUnavailable(e),error};
       }
       await setAccountingWeekLedgerStatus(n,'failed',error,{reason,durationMs:Date.now()-started});
       throw e;
@@ -8537,7 +8749,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     // The page to come back to. An Accounting walk this Sync interrupted has already moved the tab: use its start.
     pageReturn=createPageReturn(trace,{realm:selected});
     await pageReturn.remember(tab.id,dayWalkPageReturns.get(selected)?.tabs.get(tab.id)?.startUrl||null);
-    session.warnings=[];
+    session.warnings=[];session.notOnPage=[];
+    if(!await syncEnsurePageHook(tab.id,trace))throw new Error('The Manager could not reach the game page (page hook did not answer after a reload).');
     try{
       const sr=await chrome.tabs.sendMessage(tab.id,{type:'SET_SYNC_REALM',realm:selected,ttlMs:120000});
       if(!sr?.ok) throw new Error('Could not set the selected sync realm in the game page.');
@@ -8556,7 +8769,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       ??authBoundary?.data?.realmId
       ??authBoundary?.data?.realm
       ??authBoundary?.captureRealm);
-    if(!authBoundary?.ok) throw new Error(authBoundary?.directReadsBlocked?`Could not verify the game session for ${realmDisplayNumber(selected)||'selected realm'}: the game page did not load its session data within ${Math.round(SYNC_AUTH_RELOAD_WAIT_MS/1000)} s after a reload. ${currentDirectReadsBlockedText()}`:`Could not verify the game session for ${realmDisplayNumber(selected)||'selected realm'} before sync (HTTP ${authBoundary?.status||0}).`);
+    if(!authBoundary?.ok) throw new Error(authBoundary?.notOnPage?`Could not verify the game session for ${realmDisplayNumber(selected)||'selected realm'}: the game page did not load its session data within ${Math.round(SYNC_AUTH_RELOAD_WAIT_MS/1000)} s after a reload.`:`Could not verify the game session for ${realmDisplayNumber(selected)||'selected realm'} before sync (HTTP ${authBoundary?.status||0}).`);
     trace('auth-boundary-source',{source:authBoundary.fromPageCapture?'game-capture':'direct-read',ageMs:authBoundary.ageMs??null});
     if(authRealm!==selected) throw new Error(`Game session is still ${realmDisplayNumber(authRealm)||'an unknown realm'}; selected sync target is ${realmDisplayNumber(selected)||'the selected realm'}. Switch the game first, then Sync again.`);
     trace('auth-verified',{realm:selected,captureRealm:validRealmNumber(authBoundary.captureRealm),status:Number(authBoundary.status)||0});
@@ -8618,46 +8831,36 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       if(!c||st<200||st>=300||Number(c.at)<Number(sinceMs)||!endpointDataIsValid(path,c.data))return null;
       return {ok:true,status:st,data:c.data,captureRealm:selected,fromPageCapture:true,receivedAt:c.receivedAt};
     };
-    const pageGetWalked=async(path,...rest)=>{
+    // Sync makes ZERO Manager game requests (2.5.465): a path comes from the walked page's own traffic, or it is
+    // reported 'not-on-page' and queued for the game lane (served in the next 5-min slot after the Sync).
+    const capturedUnder=(walkedUrl)=>{
+      const want=String(walkedUrl||'').replace(/^https?:\/\/[^/]+/,'').split('?')[0];
+      for(const [url,c] of Object.entries(session.walkCaptures||{})){
+        if(String(url).replace(/^https?:\/\/[^/]+/,'').split('?')[0]!==want)continue;
+        const st=Number(c?.status)||0;if(st<200||st>=300||Number(c?.at)<walkSinceMs)continue;
+        return {ok:true,status:st,data:c.data,captureRealm:selected,fromPageCapture:true,receivedAt:c.receivedAt};
+      }
+      return null;
+    };
+    const pageGetWalked=async(path)=>{
       const page=walkCaptureFor(path);
       if(page){trace('walk-page-capture-used',{path,status:page.status});return page;}
-      const raw=await pageGet(path,...rest);
-      if(raw?.directReadsBlocked){
-        const late=walkCaptureFor(path);
-        if(late){trace('walk-page-capture-used',{path,status:late.status,late:true});return late;}
-        trace('direct-read-blocked-not-on-page',{path});
-        session.directReadsBlocked=true;
-        return raw;
-      }
-      if(!endpointFailureSuggestsMove(raw,path))return raw;
-      // A success that is not data is never stored as this endpoint's data.
-      const first=endpointResponseRejected(path,raw)?{...raw,ok:false,data:null,error:'The address did not return data.'}:raw;
+      // The page may still be answering: wait for this path (event-driven, at most SYNC_WALK_PATH_WAIT_MS since the visit).
+      const late=await waitForWalkPath(()=>walkCaptureFor(path),walkSinceMs);
+      if(late){trace('walk-page-capture-used',{path,status:late.status,late:true});return late;}
+      // A version-only move the page itself called (same data shape): its own response is used, stored under the fixed path.
       const stored=endpointDataForSyncRealm(await state(selected),selected);
-      const captured={...stored,...session.walkCaptures};
-      const known=[...ACCOUNTING_SYNC_PATHS,...realmContractPaths(selected)];
-      const walked=findMovedEndpoint(path,captured,known,walkSinceMs);
+      const walked=findMovedEndpoint(path,{...stored,...session.walkCaptures},[...ACCOUNTING_SYNC_PATHS,...realmContractPaths(selected)],walkSinceMs);
       if(walked&&!walked.suspected){
-        trace('endpoint-walked-path',{path,walked});
-        const second=await pageGet(walked.replace(/^https?:\/\/[^/]+/,''),...rest);
-        if(second?.ok&&endpointDataIsValid(path,second.data)){
+        const moved=capturedUnder(walked);
+        if(moved&&endpointDataIsValid(path,moved.data)){
+          trace('endpoint-walked-path',{path,walked});
           (session.movedReads||(session.movedReads={}))[path]=walked.replace(/^https?:\/\/[^/]+/,'');
-          return {...second,walkedPath:walked};
+          return {...moved,walkedPath:walked};
         }
-      }
-      const status=Number(first?.status)||0;
-      if(walked?.suspected){
-        // Same structure cannot prove same data (a market response once overwrote contract data), so report only.
-        trace('endpoint-suspected-move',{path,suspected:walked.suspected});
-        session.warnings?.push(`${path} (HTTP ${status}) may have moved to ${walked.suspected}; not adopted`);
-      }else if(endpointIsScalar(stored[path])||SCALAR_ENDPOINT_RX.test(path)){
-        // A single number has no structure to compare, so a rename cannot be traced. Say so; never guess.
-        trace('endpoint-untraceable',{path,status,reason:'scalar-response'});
-        session.warnings?.push(`${path} failed (HTTP ${status}); it returns a single number, so a new address cannot be identified automatically and none was guessed`);
-      }else{
-        trace('endpoint-moved-not-found',{path,status});
-        session.warnings?.push(`${path} failed (HTTP ${status}); no replacement seen on the page`);
-      }
-      return first;
+      }else if(walked?.suspected){trace('endpoint-suspected-move',{path,suspected:walked.suspected});session.warnings?.push(`${path} may have moved to ${walked.suspected}; not adopted`);}
+      await syncNotOnPage(session,selected,path,trace);
+      return {ok:false,status:0,notOnPage:true,captureRealm:selected,error:'Not on the walked game page (queued for the game lane).'};
     };
     // Visits a page by its link; if the link did not navigate and the route is known, by the game's router. The
     // result is true only if the page was reached. Stops visiting once the player has moved the tab themselves.
@@ -8678,7 +8881,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
           trace('walk-page-route-fallback',{name:target.name,ok:Boolean(spa?.ok),via:spa?.via||null,clickError:visit?.error||null});
           if(spa?.ok)visit={ok:true,navigated:true,via:`route-${spa.via}`,urlAfterClick:spa.url,clickError:visit?.error||null};
         }
-        if(visit?.ok&&visit.navigated)visit.traffic=await waitForWalkTraffic(sess,startedAt);
+        if(visit?.ok&&visit.navigated)visit.traffic=await waitForWalkTraffic(sess,startedAt,undefined,{expect:sess?.capturePaths});
         if(visit)visit.loaded=[...new Set(Object.keys(sess.walkCaptures||{}).map(u=>safeWalkText(String(u).split('?')[0])))].slice(0,40);
         return visit;
       }catch(e){return {ok:false,error:e?.message||String(e)};}
@@ -8773,10 +8976,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         row.authoritativeFailures=[{path:null,status:0,error:'No authoritative API path could be resolved from the selected realm state.'}];
       }
 
-      // A Sync the player clicked walks every page first, so moved endpoints are captured. Automatic runs
-      // only walk Executives here and use the page fallback below when a call fails.
-      // While the game blocks direct reads every run walks the pages: their own responses are the only data source.
-      if(fullWalk || session.directReadsBlocked || await directReadsBlockedNow() || (target.name==='Executives' && authoritativePaths.length)){
+      // Sync is a pure page walk (2.5.465): every target's page is visited; its own traffic is the only data source.
+      {
         // Walk the game's own page first, so its requests run as they do for a player. A failed visit only
         // skips the wait and is reported; the direct reads below (and their fallback) still run.
         row.pageVisit=await visitWalkPage(currentTab.id,target,session);
@@ -9018,7 +9219,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
           for(const path of authoritativePaths){
             try{
               trace('authoritative-retry',{name:target.name,path});
-              const response=await pageGet(path,selected);
+              const response=await pageGetWalked(path);
               const ok=await recordAuthoritative(path,response,row);
               if(ok && (target.name!=='Contracts' || path.includes('/contracts-incoming/'))){
                 row.ok=true;
@@ -9073,7 +9274,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
             // The game's own answer on this page is stored like any capture outside Sync (refreshExtraGameData cannot read it now).
             if(r?.fromPageCapture){try{await withSyncTimeout(saveData(path,r.data,r.status,'GET',selected),SYNC_PERSIST_VERIFY_TIMEOUT_MS,`Save ${path}`);}catch(e){trace('walk-extra-save-failed',{path,error:e?.message||String(e)});}}
             // The status that started (or holds) the pause is named per path: a 503 (busy) is not the 403 bot block.
-            if(r?.directReadsBlocked){const st=Number(r.status)||0;session.warnings.push(`${path}: the ${page.name} page did not load it, and ${st===503?'the game answered 503 (busy); direct reads are paused':`the game blocks direct reads${st?` (HTTP ${st})`:''}`}`);continue;}
+            
             if(r?.walkedPath)session.warnings.push(`${path} moved to ${r.walkedPath}`);
             else if(!r?.ok&&!endpointFailureSuggestsMove(r,path))session.warnings.push(`${path} failed (HTTP ${Number(r?.status)||0})`);
           }
@@ -9195,8 +9396,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
               return visit;
             }finally{session.walkCaptures=null;}
           },
-          readsBlocked:async()=>Boolean(session.directReadsBlocked)||await directReadsBlockedNow(),
-          directRead:async path=>{session.capturePaths=[path];return pageGet(path,selected,null,`final-durability-retry:${target.name}`);},
+          onMissing:async path=>{await syncNotOnPage(session,selected,path,trace);},
           record:(path,response)=>recordAuthoritative(path,response,result),
           trace:(event,detail)=>trace(event,{name:result.name,...detail})
         });
@@ -9237,7 +9437,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     const successful=successfulAfterDurability;
     const failed=failedAfterDurability;
     const executivesSummary=executivesSyncSuffix(results.find(result=>result.name==='Executives'));
-    if(session.directReadsBlocked||await directReadsBlockedNow())session.warnings.unshift(directReadsBlockedText((await directReadBlockGet())?.status));
+    if(session.notOnPage?.length)session.warnings.unshift(`${session.notOnPage.length} game address(es) were not loaded by the walked pages; queued for the game lane: ${session.notOnPage.slice(0,6).join(', ')}`);
     const endpointWarnings=[...new Set((session.warnings||[]).map(w=>safeWalkText(w)))];
     if(endpointWarnings.length)trace('endpoint-warnings',{count:endpointWarnings.length,warnings:endpointWarnings});
     const finalStatusBase=`${realmDisplayNumber(selected)||'Realm'} Sync ${requiredOk?'complete':'finished with errors'} · ${successful}/${targets.length} targets captured${accountingSuffix}${executivesSummary}`;
@@ -9420,7 +9620,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const traceFailed=Array.isArray(syncTrace)&&syncTrace.some(x=>SYNC_FAILED_STEP_RX.test(String(x?.type||'')));
       const partial=syncCoreSucceeded&&traceFailed?syncPartialSummary(syncTrace):null;
       const syncFailError=syncCoreSucceeded?null:([...syncTrace].reverse().find(x=>/sync-exception|sync-failed/i.test(String(x?.type||'')))?.error||null);
-      if(!syncCoreSucceeded)syncRetrySkip=syncAutoRetrySkipReason({error:syncFailError,blocked:await directReadsBlockedNow(),backoff:lastGameBackoffAnswer,startedAt});
+      if(!syncCoreSucceeded)syncRetrySkip=syncAutoRetrySkipReason({error:syncFailError,blocked:false,backoff:lastGameBackoffAnswer,startedAt});
       // A transient failure (no answer / timeout) that gets the automatic retry below is "retrying", not a failure;
       // the retry run (wasAutoRetry) logs failure if it fails too. A failure the game pushed back on is a failure.
       const coreOutcome=syncCoreSucceeded?(traceFailed?'partial':'success'):(!syncRetrySkip&&!syncAutoRetryRuns.has(selected)&&syncFailureIsTransient(syncFailError)?'retrying':'failure');
@@ -9749,22 +9949,22 @@ function warehouseNotReadReason(result){
   if(result?.otherRealm)return `Not read: ${String(result.error||'the game tab is in the other realm').replace(/^Skipped: /,'').replace(/(?:; nothing saved)?[.]?$/,'')}`;
   return notReadReason(result);
 }
-async function refreshRealmWarehouseForOverlay(realm,maxAgeMs=15000){
+async function refreshRealmWarehouseForOverlay(realm,maxAgeMs=15000,opts=null){
   const n=validRealmNumber(realm);if(n==null)return {ok:false,error:'Invalid realm.'};
   const existing=warehouseOverlayRefreshRuns.get(n);if(existing)return existing;
   if(coreSyncActive()){if(maxAgeMs===0)deferUntilSyncEnds(`warehouse:${n}`,()=>scheduleWarehouseRefreshAfterStockMutation(n,300));return {ok:false,skipped:true,deferredByCoreSync:true,error:'Warehouse refresh deferred until Sync completes.'};}
   if(warehouseOverlayRefreshInBackoff(n,maxAgeMs))return {ok:false,backoff:true,error:'Warehouse refresh paused after a failed attempt.'};
   const startedMs=Date.now(),startedAt=new Date(startedMs).toISOString();
-  const run=refreshRealmWarehouseForOverlayUnlocked(n,maxAgeMs).then(async result=>{
+  const run=refreshRealmWarehouseForOverlayUnlocked(n,maxAgeMs,opts).then(async result=>{
     noteWarehouseOverlayRefreshResult(n,maxAgeMs,result);
     const finishedAt=new Date().toISOString();
     // Lane slot taken: a "waiting" line. No company id yet / other realm / page unloaded / reads blocked / no tab or
     // bridge: a "not read" line with the reason (no backoff step, see noteWarehouseOverlayRefreshResult).
-    const notRead=!result?.ok&&!result?.laneWait&&Boolean(result?.notReady||result?.otherRealm||result?.pageClosed||result?.directReadsBlocked||result?.bridgeUnavailable);
+    const notRead=!result?.ok&&!result?.laneWait&&Boolean(result?.notReady||result?.otherRealm||result?.pageClosed||result?.bridgeUnavailable);
     const outcome=result?.ok?(result?.cached?'skipped':'success'):result?.laneWait?'waiting':notRead?'not-read':(result?.stale||result?.incomplete?'partial':'failure');
     const error=result?.laneWait?laneWaitText(result.nextAt):notRead?warehouseNotReadReason(result):(result?.error||null);
     const coveredByGame=maxAgeMs===0&&(warehouseMutationGameCoveredAt.get(n)||0)>=startedMs;
-    await recordBackgroundJobEvent(n,{job:'warehouse-refresh',trigger:maxAgeMs===0?(coveredByGame?'stock-mutation-confirm':'stock-mutation-or-forced'):'overlay-refresh',startedAt,finishedAt,durationMs:Date.now()-startedMs,outcome,requested:1,fetched:result?.refreshed?1:0,refreshed:result?.refreshed?1:0,checked:1,cached:result?.cached?1:0,error,details:{rows:result?.rows??null,requestDurationMs:result?.requestDurationMs??null,storageCommitDurationMs:result?.storageCommitDurationMs??null,totalDurationMs:result?.totalDurationMs??null,...(result?.laneWait?{laneWait:true,nextAt:Number(result.nextAt)||0}:{}),...(result?.directReadsBlocked?{directReadsBlocked:true,...(result.recheckFailed?{recheckFailed:true}:{})}:{})}}).catch(()=>{});
+    await recordBackgroundJobEvent(n,{job:'warehouse-refresh',trigger:maxAgeMs===0?(coveredByGame?'stock-mutation-confirm':'stock-mutation-or-forced'):'overlay-refresh',startedAt,finishedAt,durationMs:Date.now()-startedMs,outcome,requested:1,fetched:result?.refreshed?1:0,refreshed:result?.refreshed?1:0,checked:1,cached:result?.cached?1:0,error,details:{rows:result?.rows??null,requestDurationMs:result?.requestDurationMs??null,storageCommitDurationMs:result?.storageCommitDurationMs??null,totalDurationMs:result?.totalDurationMs??null,...(result?.laneWait?{laneWait:true,nextAt:Number(result.nextAt)||0}:{}),}}).catch(()=>{});
     return {...result,jobStartedAt:startedAt,jobFinishedAt:finishedAt,jobDurationMs:Date.now()-startedMs};
   }).finally(()=>{if(warehouseOverlayRefreshRuns.get(n)===run)warehouseOverlayRefreshRuns.delete(n);});
   warehouseOverlayRefreshRuns.set(n,run);return run;
@@ -10221,7 +10421,12 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     (async()=>{try{send(await runLiveMarketProduct(validRealmNumber(m.realm),m.resourceId,m.quality));}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;
   }
   if(m?.type==='LIVE_MARKET_REFRESH'){
-    (async()=>{try{const realm=validRealmNumber(m.realm);const r=await scheduleMarketCycle(realm,'manual-market-refresh');let nextAt=0;try{nextAt=await simcoGateNextAt();}catch{}send(nextAt?{...r,simcoNextAt:new Date(nextAt).toISOString()}:r);}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;
+    // manual:true (the Market Refresh button): SimcoTools only (runSimcoMarketRefresh), never a game request. Without it
+    // (the dashboard's market timer): the VWAP + prices cycle, plus the channel status for the note.
+    (async()=>{try{const realm=validRealmNumber(m.realm);
+      if(m.manual===true||m.resourceId!=null){send(await runSimcoMarketRefresh(realm,m.resourceId,m.quality));return;}
+      const r=await scheduleMarketCycle(realm,'manual-market-refresh');const s=await simcoChannelStatus();
+      send({...r,...s,simcoNextAt:s.nextAt?new Date(s.nextAt).toISOString():null});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;
   }
   // Manual refresh of the "Stock After Demand & Contracts" overlay: warehouse, outgoing contracts, own market orders.
   // Answers {ok,throttled,error} once the reads settle; never fetches order books.
@@ -10244,8 +10449,8 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         // counting it made the reply "<block notice> Refresh failed." and hid the block note on the card.
         const bad=outcomes.filter(r=>!r?.ok&&!r?.laneWait);
         const errors=[...new Set(bad.map(r=>r?.error||'Refresh failed.'))];
-        const directReadsBlocked=bad.length>0&&bad.every(r=>r?.directReadsBlocked);
-        send({ok:errors.length===0,throttled:false,directReadsBlocked,error:directReadsBlocked?(bad[0]?.error||DIRECT_READS_BLOCKED_TEXT):errors.length?errors.join(' '):null});
+        const queuedAll=bad.length>0&&bad.every(r=>r?.laneWait||r?.queued);const nextAt=Math.max(0,...bad.map(r=>Number(r?.nextAt)||0));
+        send({ok:errors.length===0,throttled:false,queued:queuedAll,nextAt:queuedAll?nextAt:0,error:queuedAll?null:errors.length?errors.join(' '):null});
       }catch(e){send({ok:false,throttled:false,error:e?.message||String(e)});}
     })();return true;
   }
@@ -10647,10 +10852,9 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         await gameConstantsRetrySet(null);
         // The constants-on-bridge flag (scmGameConstantsOnBridge, storage.session) and its in-memory copy go too.
         try{await gameConstantsOnBridgeSet(false);}catch{}
-        // Direct-read block (scmDirectReadsBlocked) and the shared SimcoTools gate (scmSimcoToolsGate) live in
-        // storage.session: drop both, so the next read rechecks the block and the gate starts empty.
-        directReadRecheckInFlight=false;await directReadBlockSet(null);
-        {const run=simcoGateTail.then(async()=>{simcoGateMem=null;try{await chrome.storage.session?.remove(SIMCOTOOLS_GATE_KEY);}catch{}});simcoGateTail=run.catch(()=>{});await run.catch(()=>{});}
+        // The SimcoTools channel (scmSimcoChannel, storage.session): its queued jobs and the pending Refresh product go;
+        // the rate tokens, a 429 cooldown and an outage stay (they describe SimcoTools, not the user's data).
+        {const C=simcoChannelCore();await simcoChannelSerial(async()=>{if(C){const st=C.simcoState(await simcoChannelLoad(),Date.now());st.wants={};await simcoChannelStore(st);}try{await chrome.storage.session?.remove(SIMCO_REFRESH_WANT_KEY);}catch{}}).catch(()=>{});}
         scmTimersMemoGen++;scmTimersMemo=null; // scmSyncTimers was cleared: every timer is back to its default
         simcoPricesMemo.clear(); // scmSimcoPrices:<n> was cleared
         realmStorageMigrationChecked=false;realmMigrationPromise=null;
@@ -10774,16 +10978,22 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     queueEndpointSeen(url,method,m.captureRealm).then(()=>send({ok:true,queued:true})).catch(e=>send({ok:false,error:e?.message||String(e)}));
     return true;
   }
+  // Both request channels at a glance (game lane + SimcoTools): SCM_TIMERS_CORE.channelSnapshot over storage.session.
+  if(m?.type==='scm-channels-snapshot'){(async()=>{try{const C=globalThis.SCM_TIMERS_CORE;if(!C||typeof C.channelSnapshot!=='function'){send({ok:false,error:'channelSnapshot unavailable'});return;}const simKey=C.SIMCO?.KEY||'scmSimcoChannel';const v=await chrome.storage.session.get([C.LANE.KEY,simKey]);const snap=C.channelSnapshot(v?.[C.LANE.KEY]||null,v?.[simKey]||null,Date.now());send({ok:true,snapshot:snap,...snap});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;}
   if(m?.type==='STOCK_MUTATION_COMPLETE'){
     // An untagged action belongs to the active realm. Check for null first: validRealmNumber(null) is 0 (R1).
     (async()=>{let realm=(m.captureRealm===null||m.captureRealm===undefined||m.captureRealm==='')?null:validRealmNumber(m.captureRealm);
       // A building collect is stamped at once (no reply is read); an id that is not a stored building writes nothing.
-      if(String(m.method||'').toUpperCase()==='POST'&&collectTakeBuildingIdFromUrl(m.url)!=null){try{noteBuildingTake(m.url,realm);}catch{}}
+      // m.data: the game's parsed reply (page-hook.js, take path only, at most 20,000 chars) or absent.
+      if(String(m.method||'').toUpperCase()==='POST'&&collectTakeBuildingIdFromUrl(m.url)!=null){try{noteBuildingTake(m.url,realm,m.data);}catch{}}
       if(realm==null){try{const meta=await chrome.storage.local.get({activeRealmKey:null});realm=validRealmNumber(realmNumberFromKey(meta.activeRealmKey)??meta.activeRealmKey);}catch{}}
       // A collect (POST /api/v2/order/take/<id>/, one per building for "Collect all") is NOT followed by a game warehouse
       // GET (the game updates its own state from the POST replies; captures of 2026-11-11 show the next /api/v3/resources/
       // only when the warehouse page is opened). So it gets the same batched warehouse read as a contract accept; a burst
       // of collects shares one read (scheduleWarehouseRefreshAfterStockMutation: 150 ms debounce, 3 s floor).
+      const isTake=String(m.method||'').toUpperCase()==='POST'&&collectTakeBuildingIdFromUrl(m.url)!=null;
+      // 2.5.465: a game Collect queues collectWarehouse:<realm> (prio 1, first in the next game slot); a burst shares one want.
+      if(realm!=null&&isTake){gameLaneEnqueue(`collectWarehouse:${realm}`).catch(()=>{});return;}
       if(realm!=null){scheduleWarehouseRefreshAfterStockMutation(realm,150);scheduleOwnOrdersRefresh(realm);}})();
     send({ok:true});return true}
   if(m?.type==='WAREHOUSE_COST_DETAIL'){saveWarehouseCostDetail(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
@@ -10843,6 +11053,9 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
   if(m?.type==='SCM_NOTIFY_SETTINGS'){(async()=>{try{if(m.set&&typeof m.set==='object'){const cur=await notifySettings();await rawStorageSet({[NOTIFY_SETTINGS_KEY]:{...cur,...sanitizeNotifySet(m.set)}});await scheduleDailySummary();for(const n of [0,1]){const st=(await chrome.storage.local.get({[`scmRealmStore:${n}`]:null}))[`scmRealmStore:${n}`];if(st)await scheduleProductionFinishAlarms(n,st.buildings);}}const prodfin=(await chrome.alarms.getAll()).filter(x=>String(x.name).startsWith('scm-prodfin:'));const nameStores={};for(const a of prodfin){const r=String(a.name).split(':')[1];if(!(r in nameStores))nameStores[r]=(await chrome.storage.local.get({[`scmRealmStore:${r}`]:null}))[`scmRealmStore:${r}`]||{};}
 // Building names for the Alerts "Next" line, so the dashboard can show it before its own state has loaded.
 const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(Array.isArray(nameStores[r]?.buildings)?nameStores[r].buildings:[]).find(y=>String(y?.id)===bid);return {name:x.name,when:x.scheduledTime,buildingName:b?.name?String(b.name):null};});const daily=await chrome.alarms.get('scm-daily-summary');send({ok:true,settings:await notifySettings(),available:!!chrome.notifications?.create,alarms,dailyAt:daily?.scheduledTime||null});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;}
+  // The Market Refresh press (manual:true) makes no game request: SimcoTools only (LIVE_MARKET_REFRESH manual / LIVE_MARKET_PRODUCT);
+  // the order book updates from the game pages you open. Answers the SimcoTools channel status instead.
+  if(m?.type==='FETCH_EXCHANGE_ORDER_BOOK'&&m.manual===true){(async()=>{try{const s=await simcoChannelStatus();send({ok:false,skipped:true,noGameRead:true,simcoOnly:true,...s,error:'Refresh reads SimcoTools only; the order book updates from the game pages you open.'});}catch(e){send({ok:false,skipped:true,noGameRead:true,error:e?.message||String(e)});}})();return true;}
   if(m?.type==='FETCH_EXCHANGE_ORDER_BOOK'){if(m.manual!==undefined&&typeof m.manual!=='boolean'){send({ok:false,error:'Invalid request.'});return true;}fetchExchangeOrderBookForRealm(m.realm,m.resourceId,m.manual===true,m.manual===true?null:{onView:true}).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='FETCH_BUILDING_HISTORY'){fetchBuildingHistoryForRealm(m.realm,m.buildingId).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='SAVE_PRODUCTION_PLANNER_STATE'){
