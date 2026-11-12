@@ -665,7 +665,9 @@ if(!globalThis.__scmTimers)globalThis.__scmTimers=(()=>{
       return false;
     }
     if (message?.type === 'BRIDGE_STATUS') {
-      sendResponse({ok:true, ready:!!hookReady, realm:directKnownRealm===0||directKnownRealm===1?directKnownRealm:null});
+      // visible / online: an unattended (lane) read goes out only while the game tab is shown and the device has a
+      // network (phone asleep, Chrome in the background or another tab in front: no read, a "not read" line).
+      sendResponse({ok:true, ready:!!hookReady, realm:directKnownRealm===0||directKnownRealm===1?directKnownRealm:null, visible:document.visibilityState==='visible', online:navigator.onLine!==false});
       return false;
     }
     if (message?.type === 'PAGE_GAME_STATE') {
@@ -1513,8 +1515,9 @@ function scmPageTextNoLayout(){
     const paint=()=>{const s=signature();const have=document.getElementById(L.open?CARD:PILL);
       if(s===L.sig&&have){if(L.open)updateAgo();return;}
       L.sig=s;render();};
-    const requestL=(refresh=false)=>{
-      if(!L.open&&!refresh&&L.data)return;
+    // force: the stored listings changed (SCM_CARD_KEY_CHANGED), so the closed card's pill count is re-read too.
+    const requestL=(refresh=false,force=false)=>{
+      if(!L.open&&!refresh&&!force&&L.data)return;
       const realm=currentRealm();if(realm==null){paint();return;}
       const seq=++L.seq;
       try{chrome.runtime.sendMessage({type:'GET_OWN_LISTINGS_DATA',realm,refresh},r=>{
@@ -1555,8 +1558,10 @@ function scmPageTextNoLayout(){
     // Background tells us when a small key changes (no storage.onChanged: it would deliver every large realm-store write).
     chrome.runtime?.onMessage?.addListener((msg)=>{
       if(msg?.type!=='SCM_CARD_KEY_CHANGED')return false;
-      const realm=currentRealm();if(realm==null||!L.open)return false;
-      if(msg.key===`scmMarketOrders:${realm}`){clearTimeout(L.changeTimer);L.changeTimer=setTimeout(()=>requestL(false),300);}
+      // Closed (the pill; 360 px starts closed) too: the pill count must follow the stored listings / contracts, and the
+      // card opened later starts from them (no game read: a stored-data request only).
+      const realm=currentRealm();if(realm==null)return false;
+      if(msg.key===`scmMarketOrders:${realm}`){clearTimeout(L.changeTimer);L.changeTimer=setTimeout(()=>requestL(false,true),300);}
       else if(msg.key===`scmOutgoingContracts:${realm}`){clearTimeout(L.cchangeTimer);L.cchangeTimer=setTimeout(()=>requestC(false),300);}
       return false;
     });

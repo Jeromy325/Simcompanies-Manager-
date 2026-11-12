@@ -239,11 +239,20 @@ async function scmNetPersistSession(){try{await chrome.storage.session?.set({[SC
 async function scmNetRecoverStaleSession(){try{if(!chrome.storage.session)return;const st=(await chrome.storage.session.get(SCM_NET_SESSION_KEY))[SCM_NET_SESSION_KEY];if(!st?.active||scmNetCapture.active)return;try{if(st.tabId!=null&&chrome.debugger?.detach)await chrome.debugger.detach({tabId:st.tabId});}catch{}await chrome.storage.session.set({[SCM_NET_SESSION_KEY]:{...st,active:false}});const cur=(await chrome.storage.local.get('scmNetworkCaptureV3Status')).scmNetworkCaptureV3Status||{};if(cur.captureId===st.captureId&&cur.status==='recording'&&cur.mode!=='mobile-page')await chrome.storage.local.set({scmNetworkCaptureV3Status:{...cur,status:'stopped',stopReason:'service-worker-restart',stoppedAt:new Date().toISOString()}});}catch{}}
 const scmNetRecoveryPromise=scmNetRecoverStaleSession();
 // debugger is an optional permission (some Android browsers remove extensions that require it), so bind only once it exists.
-let scmNetDebuggerBound=false;
-function scmNetBindDebugger(){if(scmNetDebuggerBound||!chrome.debugger?.onEvent)return scmNetDebuggerBound;scmNetDebuggerBound=true;chrome.debugger.onEvent.addListener(scmNetDebuggerEvent);chrome.debugger.onDetach.addListener((source,reason)=>{if(source.tabId===scmNetCapture.tabId){scmNetCapture.active=false;scmNetPersistSession();scmNetSave({kind:'capture-detached',reason:String(reason||'unknown')}).catch(()=>{});}});return true;}
-scmNetBindDebugger();
-chrome.permissions?.onAdded?.addListener(p=>{if(p?.permissions?.includes('debugger'))scmNetBindDebugger();});
-async function scmNetStart(tabId){try{await scmNetRecoveryPromise;}catch{}if(!scmNetBindDebugger())throw new Error('Debugger permission not granted. Use page capture instead.');if(scmNetCapture.active)throw new Error('A network capture is already active. Stop it first.');const tab=await chrome.tabs.get(tabId);if(!tab?.url||!/^https:\/\/(www\.)?simcompanies\.com\//i.test(tab.url))throw new Error('Selected tab is not a Sim Companies page.');scmNetCapture.tabId=tabId;scmNetCapture.captureId=`net3-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;scmNetCapture.requestMap.clear();scmNetCapture.counters={events:0,requests:0,responses:0,bodies:0,errors:0};scmNetCapture.startedAt=new Date().toISOString();await scmNetClearEvents(scmNetCapture.captureId);await chrome.debugger.attach({tabId},'1.3');try{await chrome.debugger.sendCommand({tabId},'Network.enable',{maxTotalBufferSize:20000000,maxResourceBufferSize:10000000,maxPostDataSize:1000000});scmNetCapture.active=true;await scmNetPersistSession();await scmNetSave({kind:'capture-start',tabId,pageUrl:tab.url,coverage:'Chrome DevTools Protocol Network domain; browser-observed requests for this tab'});return {ok:true,captureId:scmNetCapture.captureId,tabId,status:'recording',note:'Chrome may display a debugging notification while capture is active.'};}catch(err){try{await chrome.debugger.detach({tabId});}catch{}scmNetCapture.active=false;throw err;}}
+// Chrome 157 with "debugger" granted but not active throws on chrome.debugger / .onEvent (the worker died at load):
+// every touch is wrapped, and the listeners bind only after chrome.permissions.contains says granted (async, never at
+// load). A throw leaves it unbound and logs one error line.
+let scmNetDebuggerBound=false,scmNetDebuggerDetachBound=false,scmNetDebuggerBindLogged=false;
+function scmNetDebuggerBindFailed(err){if(scmNetDebuggerBindLogged)return;scmNetDebuggerBindLogged=true;try{logError('debugger-bind',err);}catch{}}
+function scmNetBindDebugger(){if(scmNetDebuggerBound&&scmNetDebuggerDetachBound)return true;try{const d=chrome.debugger;const on=d&&d.onEvent,off=d&&d.onDetach;if(!on||typeof on.addListener!=='function'||!off||typeof off.addListener!=='function')return false;
+  if(!scmNetDebuggerBound){on.addListener(scmNetDebuggerEvent);scmNetDebuggerBound=true;}
+  if(!scmNetDebuggerDetachBound){off.addListener((source,reason)=>{if(source?.tabId===scmNetCapture.tabId){scmNetCapture.active=false;scmNetPersistSession();scmNetSave({kind:'capture-detached',reason:String(reason||'unknown')}).catch(()=>{});}});scmNetDebuggerDetachBound=true;}
+  return true;}catch(err){scmNetDebuggerBindFailed(err);return false;}}
+async function scmNetDebuggerGranted(){try{const P=chrome.permissions;if(!P||typeof P.contains!=='function')return false;return Boolean(await P.contains({permissions:['debugger']}));}catch(err){scmNetDebuggerBindFailed(err);return false;}}
+async function scmNetBindDebuggerIfGranted(){try{if(await scmNetDebuggerGranted())return scmNetBindDebugger();}catch(err){scmNetDebuggerBindFailed(err);}return false;}
+scmNetBindDebuggerIfGranted().catch(()=>{});
+try{chrome.permissions?.onAdded?.addListener(p=>{if(p?.permissions?.includes('debugger'))scmNetBindDebuggerIfGranted().catch(()=>{});});}catch(err){scmNetDebuggerBindFailed(err);}
+async function scmNetStart(tabId){try{await scmNetRecoveryPromise;}catch{}if(!(await scmNetBindDebuggerIfGranted()))throw new Error('Debugger permission not granted. Use page capture instead.');if(scmNetCapture.active)throw new Error('A network capture is already active. Stop it first.');const tab=await chrome.tabs.get(tabId);if(!tab?.url||!/^https:\/\/(www\.)?simcompanies\.com\//i.test(tab.url))throw new Error('Selected tab is not a Sim Companies page.');scmNetCapture.tabId=tabId;scmNetCapture.captureId=`net3-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;scmNetCapture.requestMap.clear();scmNetCapture.counters={events:0,requests:0,responses:0,bodies:0,errors:0};scmNetCapture.startedAt=new Date().toISOString();await scmNetClearEvents(scmNetCapture.captureId);await chrome.debugger.attach({tabId},'1.3');try{await chrome.debugger.sendCommand({tabId},'Network.enable',{maxTotalBufferSize:20000000,maxResourceBufferSize:10000000,maxPostDataSize:1000000});scmNetCapture.active=true;await scmNetPersistSession();await scmNetSave({kind:'capture-start',tabId,pageUrl:tab.url,coverage:'Chrome DevTools Protocol Network domain; browser-observed requests for this tab'});return {ok:true,captureId:scmNetCapture.captureId,tabId,status:'recording',note:'Chrome may display a debugging notification while capture is active.'};}catch(err){try{await chrome.debugger.detach({tabId});}catch{}scmNetCapture.active=false;throw err;}}
 async function scmNetStop(){if(!scmNetCapture.captureId)return {ok:false,error:'No capture session exists.'};const tabId=scmNetCapture.tabId;scmNetCapture.active=false;await scmNetPersistSession();await scmNetSave({kind:'capture-stop',tabId,stopReason:'user-request'}).catch(()=>{});try{if(tabId!=null)await chrome.debugger.detach({tabId});}catch(err){await scmNetSave({kind:'capture-detach-error',error:String(err?.message||err)}).catch(()=>{});}const status={ok:true,captureId:scmNetCapture.captureId,tabId,status:'stopped',...scmNetCapture.counters};await chrome.storage.local.set({scmNetworkCaptureV3Status:{...status,startedAt:scmNetCapture.startedAt,stoppedAt:new Date().toISOString()}});return status;}
 
 const BUILD_VERSION=chrome.runtime.getManifest().version;
@@ -478,6 +487,11 @@ async function scmGateStampGet(name){let v=Number(scmGateStampsMem[name])||0;try
 function scmGateStampSet(name,at){if(at)scmGateStampsMem[name]=at;else delete scmGateStampsMem[name];
   const run=scmGateStampTail.then(async()=>{try{if(!chrome.storage?.session)return;const cur=(await chrome.storage.session.get(SCM_GATE_STAMPS_KEY))?.[SCM_GATE_STAMPS_KEY];const next={...(cur&&typeof cur==='object'?cur:{})};if(at)next[name]=at;else delete next[name];await chrome.storage.session.set({[SCM_GATE_STAMPS_KEY]:next});}catch{}});
   scmGateStampTail=run;return run;}
+// Install / update / worker start with no game tab (opts.quietNoTab): no "not read" line (the built-in copy already
+// applies); a flag in storage.session (scmGameConstantsOnBridge) makes the next GAME_STATE from a game tab run it.
+const GAME_CONSTANTS_ON_BRIDGE_KEY='scmGameConstantsOnBridge';let gameConstantsOnBridgeMem=false;
+async function gameConstantsOnBridgeSet(v){gameConstantsOnBridgeMem=Boolean(v);try{if(chrome.storage?.session){if(v)await chrome.storage.session.set({[GAME_CONSTANTS_ON_BRIDGE_KEY]:Date.now()});else await chrome.storage.session.remove(GAME_CONSTANTS_ON_BRIDGE_KEY);}}catch{}}
+async function gameConstantsOnBridgeTake(){let v=gameConstantsOnBridgeMem;try{if(chrome.storage?.session)v=v||Boolean((await chrome.storage.session.get(GAME_CONSTANTS_ON_BRIDGE_KEY))?.[GAME_CONSTANTS_ON_BRIDGE_KEY]);}catch{}if(v)await gameConstantsOnBridgeSet(false);return v;}
 function refreshGameConstants(force=false,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,opts={}){
   if(gameConstantsInFlight)return gameConstantsInFlight;
   gameConstantsInFlight=refreshGameConstantsOnce(force,maxAgeMs,opts).then(gameConstantsResultSource).finally(()=>{gameConstantsInFlight=null;});
@@ -492,7 +506,7 @@ async function gameConstantsResultSource(r){
   return r;
 }
 // The game tab cannot be asked right now (no content script / page hook yet, or the page unloaded): not a failed read.
-function pageBridgeUnavailable(e){return Boolean(e?.pageClosed||e?.bridgeNotReady||e?.noGameTab)||/page bridge is not (?:ready|connected)|Open Sim Companies and log in/i.test(String(e?.message||e||''));}
+function pageBridgeUnavailable(e){return Boolean(e?.pageClosed||e?.bridgeNotReady||e?.noGameTab||e?.tabHidden||e?.offline)||/page bridge is not (?:ready|connected)|Open Sim Companies and log in/i.test(String(e?.message||e||''));}
 // Activity line when the active realm is not known yet (fresh install): the selected realm, else the error log
 // (failure, partial and not-read lines; a waiting line is planned pace and goes nowhere without a realm).
 async function logActivityAnyRealm(job,outcome,details={},error=null){
@@ -538,6 +552,9 @@ function gameConstantsBlockedResult(cur,extra={}){
     error:(typeof directReadBlockMem==='object'&&Number(directReadBlockMem?.status)===503?DIRECT_READS_BUSY_TEXT:DIRECT_READS_BLOCKED_TEXT),...extra};
 }
 async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,opts={}){
+  // No game tab / bridge not up: quiet (flag, read on the next GAME_STATE) for every caller but a Sync or a forced
+  // read, so a caller that forgets the option cannot bring the line back.
+  opts={...(opts||{}),quietNoTab:opts?.quietNoTab??(!force&&!opts?.afterSync)};
   // Missing constants are filled from the built-in copy first, whatever happens with the API read below.
   let bundled=null;try{bundled=await applyBundledGameConstants();}catch{}
   if(bundled?.applied){try{const b=await bundledGameConstants();logActivityAnyRealm('game-constants','success',{source:'bundled',bundle:bundled.bundle,replaced:bundled.replaced,note:bundledGameConstantsText(b)});}catch{}}
@@ -548,10 +565,10 @@ async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,
     // when its pause ends); the built-in or last live copy stays. The API path below stays for when the block is lifted.
     if(await directReadsBlockedNow()){logActivityAnyRealm('game-constants','not-read',{directReadsBlocked:true},notReadReason({directReadsBlocked:true}));return gameConstantsBlockedResult(cur);}
     // A real backoff / missing tab only matters for the API read: the built-in copy already covers missing constants.
-    if(cur?.source==='bundled'&&!(await simTab())?.id){logActivityAnyRealm('game-constants','not-read',{},notReadReason('no-game-tab'));return {ok:true,skipped:true,source:'bundled',bundle:cur.bundle||null,message:bundledGameConstantsText(cur),error:'No Sim Companies tab open.'};}
+    if(cur?.source==='bundled'&&!(await simTab())?.id){if(opts?.quietNoTab){await gameConstantsOnBridgeSet(true);return {ok:true,skipped:true,quiet:true,source:'bundled',bundle:cur.bundle||null,message:bundledGameConstantsText(cur),error:'No Sim Companies tab open.'};}logActivityAnyRealm('game-constants','not-read',{},notReadReason('no-game-tab'));return {ok:true,skipped:true,source:'bundled',bundle:cur.bundle||null,message:bundledGameConstantsText(cur),error:'No Sim Companies tab open.'};}
     const retry=await gameConstantsRetryGet();
     if(!force&&!opts?.ignoreBackoff&&retry&&Number(retry.nextAt)>Date.now())return {ok:false,backoff:true,error:retry.error||null,nextAt:retry.nextAt};
-    if(!(await simTab())?.id){logActivityAnyRealm('game-constants','not-read',{},notReadReason('no-game-tab'));return {ok:false,skipped:true,error:'No Sim Companies tab open.'};}
+    if(!(await simTab())?.id){if(opts?.quietNoTab){await gameConstantsOnBridgeSet(true);return {ok:false,skipped:true,quiet:true,error:'No Sim Companies tab open.'};}logActivityAnyRealm('game-constants','not-read',{},notReadReason('no-game-tab'));return {ok:false,skipped:true,error:'No Sim Companies tab open.'};}
   }catch(e){return {ok:false,error:String(e?.message||e)};}
   // Unattended (alarm, worker start, a game page or the dashboard asking for missing data): the three reads go through
   // the shared game lane (job 'gameConstants'), one per free slot; the parts already read wait in storage.session
@@ -582,6 +599,9 @@ async function refreshGameConstantsOnce(force,maxAgeMs=GAME_CONSTANTS_PERIOD_MS,
     if(e?.laneWait){logActivityAnyRealm('game-constants','waiting',{laneWait:true,nextAt:Number(e.nextAt)||0,parts:Object.keys(partial).length},laneWaitText(e.nextAt));return {ok:true,skipped:true,laneWait:true,reason:'lane',parts:Object.keys(partial).length};}
     const error=capRefreshError(e?.message||e);
     // No game tab / page bridge not ready / page unloaded: a "not read" line, no backoff step.
+    // Unattended (quietNoTab) and the tab went away / its bridge was not up yet (page loading after an update): no line,
+    // the read runs on the next GAME_STATE. Hidden tab / offline lines go through the quiet-stretch rule instead.
+    if(pageBridgeUnavailable(e)&&opts?.quietNoTab&&!e?.tabHidden&&!e?.offline&&!e?.pageClosed){await gameConstantsOnBridgeSet(true);return {ok:false,skipped:true,quiet:true,reason:'bridge-not-ready',error};}
     if(pageBridgeUnavailable(e)){logActivityAnyRealm('game-constants','not-read',{},notReadReason(e));return {ok:false,skipped:true,reason:'bridge-not-ready',reachedTab:!(e?.bridgeNotReady||e?.noGameTab)&&!/page bridge is not (?:ready|connected)|Open Sim Companies and log in/i.test(error),error};}
     // The game does not load /api/v2/constants/* on its own pages (2026-11-10 bundle), so there is no capture to use:
     // the stored constants stay, and the next read is the block's recheck.
@@ -599,6 +619,8 @@ async function notifyGameCardsKeyChanged(key){
     for(const t of tabs){if(t?.id!=null)chrome.tabs.sendMessage(t.id,{type:'SCM_CARD_KEY_CHANGED',key}).catch(()=>{});}
   }catch{}
 }
+// BRIDGE_STATUS answers took 2.6-3.6 s on a phone with real storage (2.5.464 phone-realistic run): local message waits.
+const BRIDGE_STATUS_WAIT_MS=5000,SELF_TEST_BRIDGE_WAIT_MS=8000;
 const ownListingsRefreshError=new Map(); // realm → {error,at} of the last failed refreshMarketOrders (cleared on success; memory only)
 // One gate for every own-listings read (card refresh, game action, overlay refresh, Sync tail, undercut check), per
 // realm: one read in flight (callers share it); at least 15 s between network reads whatever the caller or maxAgeMs;
@@ -617,8 +639,10 @@ async function marketOrdersGateSet(r,v){const key=MARKET_ORDERS_GATE_KEY+r;marke
 async function marketOrdersTabSkip(r,background){
   let tab=null;try{tab=await simTab();}catch{}
   if(!tab?.id)return 'no-game-tab';
-  if(background&&!tab.active)return 'game-tab-not-active';
-  let b=null;try{b=await Promise.race([chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),new Promise(res=>setTimeout(()=>res(null),1500))]);}catch{}
+  let b=null;try{b=await Promise.race([chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),new Promise(res=>setTimeout(()=>res(null),BRIDGE_STATUS_WAIT_MS))]);}catch{}
+  // tab.active is not reliable on Chrome for Android (the game tab on screen reads active:false): the page's own
+  // document.visibilityState (BRIDGE_STATUS.visible) also counts as "in use".
+  if(background&&!tab.active&&b?.visible!==true)return 'game-tab-not-active';
   const tabRealm=b?.realm===0||b?.realm===1?b.realm:null;
   return tabRealm!=null&&tabRealm!==r?'other-realm':null;
 }
@@ -629,6 +653,106 @@ function scheduleMarketOrdersTrailing(r,atMs){
   const e={at:atMs,id:0};
   e.id=setTimeout(()=>{if(marketOrdersTrailing.get(r)===e)marketOrdersTrailing.delete(r);refreshMarketOrders(r,0).catch(()=>{});},Math.max(0,atMs-Date.now())+25);
   marketOrdersTrailing.set(r,e);
+}
+// A listings read after a game action, or from the overlay's refresh button, that found the shared 5-min game slot
+// taken (lane wait), its own 15 s gap or a backoff is not dropped: ONE deferred retry per realm (alarm
+// scm-listings-retry-r<realm>, state {queuedAt,at,why} in storage.session scmMarketOrdersRetry:<realm>) runs when the
+// slot frees (lane lastAt + 5 min, the 15 s gap and any backoff over). It is the read the action asked for, so it goes
+// as a user read (it moves the lane's lastAt like one). While Sync runs, the game tab is hidden or the device is
+// offline it waits (re-checked every minute; dropped 30 min after it was queued). A second queue call only moves it.
+const MARKET_ORDERS_RETRY_ALARM_PREFIX='scm-listings-retry-r',MARKET_ORDERS_RETRY_KEY='scmMarketOrdersRetry:',MARKET_ORDERS_RETRY_MAX_MS=30*60000,MARKET_ORDERS_RETRY_RECHECK_MS=60000;
+const marketOrdersRetryMem=new Map();let marketOrdersRetryTail=Promise.resolve();
+function marketOrdersRetrySerial(fn){const run=marketOrdersRetryTail.then(fn,fn);marketOrdersRetryTail=run.catch(()=>{});return run;}
+async function marketOrdersRetryGet(r){const key=MARKET_ORDERS_RETRY_KEY+r;try{if(chrome.storage?.session){const v=(await chrome.storage.session.get(key))?.[key];return v&&typeof v==='object'?v:null;}}catch{}return marketOrdersRetryMem.get(r)||null;}
+async function marketOrdersRetrySet(r,v){const key=MARKET_ORDERS_RETRY_KEY+r;if(v)marketOrdersRetryMem.set(r,v);else marketOrdersRetryMem.delete(r);try{if(chrome.storage?.session){if(v)await chrome.storage.session.set({[key]:v});else await chrome.storage.session.remove(key);}}catch{}}
+// Earliest time the retry may read: the lane's next free slot, the listings 15 s gap, a backoff.
+async function marketOrdersRetryAt(r,now=Date.now()){
+  let laneAt=0;try{const C=gameLaneCore();if(C)laneAt=C.laneNextSlotAt(await gameLaneLoad(),now);}catch{}
+  const g=(await marketOrdersGateGet(r))||{};
+  return Math.max(now+1000,laneAt,(Number(g.lastAt)||0)+MARKET_ORDERS_GAP_MS,Number(g.nextAt)||0);
+}
+// x: what refreshMarketOrders answered. True when that read was held back (no request made, no trailing read set).
+function marketOrdersNeedsRetry(x){return Boolean(x&&!x.ok&&x.laneWait)||Boolean(x&&x.skipped&&(x.reason==='gap'||x.reason==='backoff')&&!x.trailingAt);}
+function queueMarketOrdersRetry(realm,why='lane'){
+  const r=validRealmNumber(realm);if(r==null)return Promise.resolve({queued:false});
+  const clearGen=extensionClearGeneration;
+  return marketOrdersRetrySerial(async()=>{
+    if(clearGen!==extensionClearGeneration)return {queued:false,cleared:true};
+    const cur=await marketOrdersRetryGet(r),now=Date.now();
+    const queuedAt=Number(cur?.queuedAt)>0&&now-Number(cur.queuedAt)<MARKET_ORDERS_RETRY_MAX_MS?Number(cur.queuedAt):now;
+    const at=await marketOrdersRetryAt(r,now);
+    await marketOrdersRetrySet(r,{queuedAt,at,why:String(why).slice(0,20)});
+    await scmCreateShortAlarm(MARKET_ORDERS_RETRY_ALARM_PREFIX+r,Math.max(0,at-now));
+    return {queued:true,at,already:Boolean(cur)};
+  });
+}
+// The game tab's BRIDGE_STATUS (local message, no network): b is null when there is no tab or it does not answer.
+async function gameTabBridgeStatus(){
+  let tab=null;try{tab=await simTab();}catch{}
+  if(!tab?.id)return {tab:null,b:null};
+  let b=null;try{b=await Promise.race([chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),new Promise(res=>setTimeout(()=>res(null),BRIDGE_STATUS_WAIT_MS))]);}catch{}
+  return {tab,b};
+}
+function marketOrdersRetryClearAll(){return marketOrdersRetrySerial(async()=>{marketOrdersRetryMem.clear();try{await chrome.storage.session?.remove([MARKET_ORDERS_RETRY_KEY+0,MARKET_ORDERS_RETRY_KEY+1]);}catch{}});}
+async function runMarketOrdersRetry(realm){
+  const r=validRealmNumber(realm);if(r==null)return {ok:false};
+  const step=await marketOrdersRetrySerial(async()=>{
+    const cur=await marketOrdersRetryGet(r),now=Date.now();if(!cur)return {run:false,reason:'none'};
+    const rearm=async(at,reason)=>{await marketOrdersRetrySet(r,{...cur,at});await scmCreateShortAlarm(MARKET_ORDERS_RETRY_ALARM_PREFIX+r,Math.max(0,at-now));return {run:false,reason};};
+    if(now-(Number(cur.queuedAt)||now)>=MARKET_ORDERS_RETRY_MAX_MS){await marketOrdersRetrySet(r,null);return {run:false,reason:'expired'};}
+    if(coreSyncActive())return await rearm(now+MARKET_ORDERS_RETRY_RECHECK_MS,'sync');
+    const at=await marketOrdersRetryAt(r,now);if(at>now+1500)return await rearm(at,'slot');
+    const {tab,b}=await gameTabBridgeStatus();
+    const skip=!tab?'no-game-tab':b?.online===false||(typeof navigator!=='undefined'&&navigator.onLine===false)?'offline':b?.visible===false?'game-tab-hidden':null;
+    if(skip==='offline'||skip==='game-tab-hidden'){logNotRead(r,'market-orders',skip,{deferredRetry:true},now,'retry');return await rearm(now+MARKET_ORDERS_RETRY_RECHECK_MS,skip);}
+    if(skip){await marketOrdersRetrySet(r,null);logNotRead(r,'market-orders',skip,{deferredRetry:true},now,'retry');return {run:false,reason:skip};}
+    return {run:true,cur};
+  });
+  if(!step.run)return {ok:true,...step};
+  // A shared-lane read (job listings:<realm>): the lane keeps its place between slots, and once it has waited through
+  // a slot it gets the next one (laneWinner). Lane says wait: still queued, asked again at the next slot.
+  const res=await refreshMarketOrders(r,0,{deferredRetry:true,lane:`listings:${r}`});
+  await marketOrdersRetrySerial(async()=>{const cur=await marketOrdersRetryGet(r);if(!cur||Number(cur.queuedAt)!==Number(step.cur?.queuedAt))return;
+    if(res?.laneWait&&Date.now()-(Number(cur.queuedAt)||0)<MARKET_ORDERS_RETRY_MAX_MS){const at=Math.max(Date.now()+1000,Number(res.nextAt)||0);await marketOrdersRetrySet(r,{...cur,at});await scmCreateShortAlarm(MARKET_ORDERS_RETRY_ALARM_PREFIX+r,Math.max(0,at-Date.now()));return;}
+    await marketOrdersRetrySet(r,null);});
+  return res;
+}
+// One read serves every listings reader: a stored read or the game's own capture stamps the card poll's lane job (its
+// 15 min spacing starts now) and drops the waiting card poll / held retry that asked before it (no second request).
+function marketOrdersServed(realm,at=Date.now()){
+  const r=validRealmNumber(realm);if(r==null)return;
+  if(typeof gameLaneSerial==='function')gameLaneSerial(async()=>{const C=gameLaneCore();if(!C)return;const st=C.laneState(await gameLaneLoad(),Date.now());let ch=false;const k=`marketOrders:${r}`;
+    if(!(Number(st.jobs[k])>=at)){st.jobs[k]=Math.min(at,Date.now());ch=true;}
+    for(const w of [k,`listings:${r}`])if(st.wants[w]&&Number(st.wants[w].since)<=at){delete st.wants[w];ch=true;}
+    if(ch)await gameLaneStore(st);}).catch(()=>{});
+  marketOrdersRetrySerial(async()=>{const cur=await marketOrdersRetryGet(r);if(cur&&Number(cur.queuedAt)<=at)await marketOrdersRetrySet(r,null);}).catch(()=>{});
+}
+chrome.alarms.onAlarm.addListener(a=>{const m=String(a?.name||'').match(/^scm-listings-retry-r([01])$/);if(m)runMarketOrdersRetry(Number(m[1])).catch(e=>logError('alarm:listings-retry',e));});
+// The game's own GET of your listings (warehouse page: /api/v2/companies/me/market-orders/; your company page:
+// /api/v2/companies/<your id>/market-orders/) is the list refreshMarketOrders reads: store it as scmMarketOrders:<realm>
+// with no request of our own, and count it as a read for the 15 s gap. Another company's list (its profile page) is
+// never taken: a numeric id must be this realm's own company id.
+// Path only, or the game origin (a foreign host is not the game's own listings).
+const OWN_MARKET_ORDERS_URL_RE=/^(?:https:\/\/(?:www\.)?simcompanies\.com)?\/api\/v2\/companies\/(me|\d+)\/market-orders\/?(?:\?.*)?$/i;
+async function captureOwnMarketOrders(realm,url,data){
+  const r=validRealmNumber(realm);if(r==null)return {ok:false,reason:'no-realm'};
+  const m=String(url||'').match(OWN_MARKET_ORDERS_URL_RE);if(!m)return {ok:false,reason:'not-own-orders-url'};
+  const keys=['data','items','results','orders','marketOrders'];
+  if(!Array.isArray(data)&&!(data&&typeof data==='object'&&keys.some(f=>Array.isArray(data[f]))))return {ok:false,reason:'not-a-list'};
+  const clearGen=extensionClearGeneration;
+  const k=`scmMarketOrders:${r}`;
+  const st=await notifyRealmStore(r),ac=st?.authData?.authCompany;
+  const acRealm=validRealmNumber(ac?.realmId??ac?.realm??st?.authData?.realmId??st?.authData?.realm);
+  const safeCid=v=>{const n=Number(v);return Number.isSafeInteger(n)&&n>0?n:0;};
+  const cur=(await chrome.storage.local.get({[k]:null}))[k];
+  const own=(acRealm==null||acRealm===r?safeCid(ac?.companyId??ac?.id):0)||capturedCompanyIdForRealm(st,r)||safeCid(cur?.companyId);
+  if(m[1].toLowerCase()!=='me'&&!(own>0&&Number(m[1])===own))return {ok:false,reason:'other-company'};
+  const orders=helperArray(data,keys);
+  if(clearGen!==extensionClearGeneration)return {ok:false,reason:'cleared'};
+  await rawStorageSet({[k]:{companyId:own||null,orders,at:new Date().toISOString(),source:'game'}});ownListingsRefreshError.delete(r);
+  {const at=Date.now();await marketOrdersGateSet(r,{lastAt:at});notifyGameCardsKeyChanged(k);if(typeof marketOrdersServed==='function')marketOrdersServed(r,at);}
+  logActivity(r,'market-orders','success',{rows:orders.length,source:'game'},null,Date.now(),'game');
+  return {ok:true,rows:orders.length};
 }
 // Read through the game tab (pageGet): a plain service-worker fetch of this URL now gets a Cloudflare 403 page.
 async function refreshMarketOrders(realm,maxAgeMs=5*60000,opts=null){
@@ -642,7 +766,7 @@ async function refreshMarketOrders(realm,maxAgeMs=5*60000,opts=null){
   // every 15 min), never a trailing read. Without it (a game action, the refresh button, after Sync) it reads now.
   const running=marketOrdersInFlight.get(r);
   if(running){const s=marketOrdersNetStart.get(r);if(s&&!opts?.background&&!opts?.lane)scheduleMarketOrdersTrailing(r,Math.max(s+MARKET_ORDERS_GAP_MS,Date.now()+1000));return running;}
-  const p=marketOrdersReadOnce(r,cur,Boolean(opts?.background),Boolean(opts?.lane)).finally(()=>{if(marketOrdersInFlight.get(r)===p){marketOrdersInFlight.delete(r);marketOrdersNetStart.delete(r);}});
+  const p=marketOrdersReadOnce(r,cur,Boolean(opts?.background),typeof opts?.lane==='string'&&opts.lane?opts.lane:Boolean(opts?.lane)).finally(()=>{if(marketOrdersInFlight.get(r)===p){marketOrdersInFlight.delete(r);marketOrdersNetStart.delete(r);}});
   marketOrdersInFlight.set(r,p);
   return p;
 }
@@ -661,6 +785,7 @@ function capturedCompanyIdForRealm(store,r){
   return best?best.cid:0;
 }
 async function marketOrdersReadOnce(r,cur,background,lane=false){
+  const laneKey=typeof lane==='string'&&lane?lane:`marketOrders:${r}`;
   const k=`scmMarketOrders:${r}`;
   let gate={},lastAt=0;
   // Clear Stored Data during this read: nothing it learns may be written afterwards (orders key, gate, error).
@@ -700,9 +825,9 @@ async function marketOrdersReadOnce(r,cur,background,lane=false){
     if(!(Number.isSafeInteger(cid)&&cid>0)){logNotRead(r,'market-orders','no-company-id');return {ok:false,skipped:true,reason:'no-company-id'};}
     if(cleared())return cancelled;
     // Not this job's lane slot: a "waiting" line before the gate is stamped (no request, no storage write but the line).
-    if(lane){const pk=await gameLaneDecide(`marketOrders:${r}`,{peek:true});if(!pk.take){logLaneWait(r,'market-orders',pk.nextAt);return {ok:false,skipped:true,laneWait:true,reason:'lane',nextAt:pk.nextAt};}}
+    if(lane){const pk=await gameLaneDecide(laneKey,{peek:true});if(!pk.take){logLaneWait(r,'market-orders',pk.nextAt);return {ok:false,skipped:true,laneWait:true,reason:'lane',nextAt:pk.nextAt};}}
     lastAt=Date.now();marketOrdersNetStart.set(r,lastAt);await marketOrdersGateSet(r,{...gate,lastAt});
-    const x=await pageGet(`/api/v2/companies/${cid}/market-orders/`,r,null,'own-listings-card',{timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS,attempts:1,...(lane?{lane:`marketOrders:${r}`}:{})});
+    const x=await pageGet(`/api/v2/companies/${cid}/market-orders/`,r,null,'own-listings-card',{timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS,attempts:1,...(lane?{lane:laneKey}:{})});
     if(x?.laneWait){logLaneWait(r,'market-orders',x.nextAt);return {ok:false,skipped:true,laneWait:true,reason:'lane',nextAt:x.nextAt};}
     // The tab moved to the other realm meanwhile: a "not read" line (the gap still counts, no backoff step).
     if(x?.realmMismatch){logNotRead(r,'market-orders',x);return {ok:false,skipped:true,reason:'other-realm'};}
@@ -713,7 +838,7 @@ async function marketOrdersReadOnce(r,cur,background,lane=false){
     const orders=helperArray(x.data,['data','items','results','orders','marketOrders']);
     if(cleared())return cancelled;
     await rawStorageSet({[k]:{companyId:cid,orders,at:new Date().toISOString()}});ownListingsRefreshError.delete(r);
-    await marketOrdersGateSet(r,{lastAt});notifyGameCardsKeyChanged(k);
+    await marketOrdersGateSet(r,{lastAt});notifyGameCardsKeyChanged(k);if(typeof marketOrdersServed==='function')marketOrdersServed(r,lastAt);
     logActivity(r,'market-orders','success',{rows:orders.length});
     return {ok:true};
   }catch(e){
@@ -764,7 +889,8 @@ function scheduleOwnOrdersRefresh(realm,delayMs=800){
   ownOrdersRefreshTimers.set(n,setTimeout(()=>{
     ownOrdersRefreshTimers.delete(n);ownOrdersRefreshFiredAt.set(n,Date.now());
     // Game reads after an action use the shared 5-min game slot (lane), like the card poll. A slot taken = "waiting" line.
-    refreshMarketOrders(n,0,{lane:true}).catch(()=>{});
+    // Held back (slot taken, 15 s gap, backoff): ONE deferred retry when the slot frees (queueMarketOrdersRetry).
+    refreshMarketOrders(n,0,{lane:true}).then(x=>{if(marketOrdersNeedsRetry(x))return queueMarketOrdersRetry(n,'action');}).catch(()=>{});
     refreshOutgoingContracts(n,0,{lane:true}).catch(()=>{});
   },wait));
 }
@@ -820,6 +946,8 @@ function notReadReason(v){
   if(v?.realmUnknown||code==='realm-unknown')return 'Not read: the game tab has not shown its realm yet';
   if(code==='no-company-id')return 'Not read: no company id yet (open the game once)';
   if(code==='game-tab-not-active')return 'Not read: the game tab is not the active tab';
+  if(v?.offline||code==='offline')return 'Not read: no network on this device (phone asleep or offline)';
+  if(v?.tabHidden||code==='game-tab-hidden')return 'Not read: the game tab is in the background (open the game to read)';
   if(v?.pageClosed||code==='page-closed'||(typeof v!=='string'&&pageMessageChannelClosed(v))||/reloaded or closed|message channel closed|message port closed|Receiving end does not exist/i.test(msg))return 'Not read: the game page was reloaded or closed during the read';
   if(v?.noGameTab||code==='no-game-tab'||/Open Sim Companies and log in|No Sim Companies tab/i.test(msg))return 'Not read: no game tab is open';
   if(/page bridge is not connected/i.test(msg))return 'Not read: the game page was not connected (extension just restarted)';
@@ -851,6 +979,38 @@ function activityRepeatCheck(n,event,now=Date.now()){
   if(activityRepeatMem.size>200){for(const [kk,vv] of activityRepeatMem)if(now-vv.at>=(Number(vv.windowMs)||ACTIVITY_REPEAT_MS)&&kk!==k)activityRepeatMem.delete(kk);}
   return {log:true,repeats:cur?cur.held:0};
 }
+// Quiet not-read lines of unattended reads (game tab in the background / not the active tab, no network on the
+// device, SimcoTools with no connection): ONE line per realm + job per stretch, not one every 5 min. The stretch
+// lasts until that job writes any other line (a success, a failure, another reason); then the next quiet line is
+// written again. Kept in storage.session (scmActivityQuietStretch) because the 5-min alarms wake a new service worker
+// each time; memory fallback. Real failures (a visible, online "Failed to fetch", HTTP errors) are never held back.
+const ACTIVITY_QUIET_RX=/^Not read: (?:the game tab is in the background|the game tab is not the active tab|no network on this device|no network connection)/;
+const ACTIVITY_STRETCH_KEY='scmActivityQuietStretch';let activityStretchMem=null,activityStretchTail=Promise.resolve();
+function activityStretchCheck(n,event,now=Date.now()){
+  const run=activityStretchTail.then(async()=>{
+    if(activityStretchMem==null){let v=null;try{if(chrome.storage?.session)v=(await chrome.storage.session.get(ACTIVITY_STRETCH_KEY))?.[ACTIVITY_STRETCH_KEY];}catch{}if(activityStretchMem==null)activityStretchMem=v&&typeof v==='object'&&!Array.isArray(v)?v:{};}
+    const k=`${n}|${String(event.job||'unknown')}`,err=String(event.error||''),cur=activityStretchMem[k];
+    const save=async()=>{try{if(chrome.storage?.session)await chrome.storage.session.set({[ACTIVITY_STRETCH_KEY]:activityStretchMem});}catch{}};
+    if(event.outcome==='not-read'&&ACTIVITY_QUIET_RX.test(err)){
+      if(cur&&cur.err===err){cur.held=(Number(cur.held)||0)+1;cur.lastAt=now;await save();return {log:false};}
+      const prevEnded=cur&&Number(cur.held)>0?{held:Number(cur.held)||0,since:cur.at,err:cur.err}:null;
+      activityStretchMem[k]={err,at:now,lastAt:now,held:0};
+      const keys=Object.keys(activityStretchMem);if(keys.length>100)for(const kk of keys.sort((a,b)=>(activityStretchMem[a].lastAt||0)-(activityStretchMem[b].lastAt||0)).slice(0,keys.length-100))delete activityStretchMem[kk];
+      await save();return {log:true,stretch:true,...(prevEnded?{ended:prevEnded}:{})};
+    }
+    // 'running' marks are not an end of the stretch.
+    if(cur&&event.outcome!=='running'){delete activityStretchMem[k];await save();return {log:true,ended:{held:Number(cur.held)||0,since:cur.at,err:cur.err}};}
+    return {log:true};
+  });
+  activityStretchTail=run.catch(()=>{});
+  return run.catch(()=>({log:true}));
+}
+function activityStretchClear(){const run=activityStretchTail.then(async()=>{activityStretchMem={};try{await chrome.storage.session?.remove(ACTIVITY_STRETCH_KEY);}catch{}});activityStretchTail=run.catch(()=>{});return run;}
+// "· 7 similar lines held back while the phone slept": added (details.what, shown by the monitor; details.heldBack = the
+// count) to the first line after a quiet stretch that held lines back.
+function activityHeldBackNote(ended){const n=Number(ended?.held)||0;if(n<=0)return null;
+  const why=/no network/i.test(String(ended?.err||''))?'while the phone slept or was offline':'while the game tab was in the background';
+  return `${n} similar line${n===1?'':'s'} held back ${why}`;}
 async function activeRealmNumber(){try{const r=await chrome.storage.local.get({activeRealmKey:null});return validRealmNumber(realmNumberFromKey(r.activeRealmKey));}catch{return null;}}
 // "Game data saved" lines in the monitor: one per kind of data, at most once a minute each.
 const GAME_CAPTURE_FAMILIES=[[/\/companies\/me\/buildings\/?$/,'Buildings'],[/\/resources\/\d+\/?$/,'Warehouse'],[/\/contracts-(?:incoming|outgoing)/,'Contracts'],[/\/abundance\/?$/,'Abundance'],[/\/cashflow\/recent/,'Cash flow (sales)'],[/\/market\/\d+\/\d+\/?$/,'Exchange order book'],[/\/buildings\/\d+\/history/,'Building history'],[/\/government-orders/,'Government orders'],[/\/(?:balance-sheet|income-statement|cashflow-statement|past-finances)/,'Accounting'],[/\/executives\/?$/,'Executives']];
@@ -905,7 +1065,7 @@ function extraReadPath(path,movedReads){const m=movedReads?.[path];return typeof
 // lane: the shared game-lane job of an unattended caller (abundance refresh); after Sync there is none.
 async function readFollowingMoves(path,realm,{movedReads=null,captured=null,lane=null}={}){
   const from=extraReadPath(path,movedReads);
-  const x=await pageGet(from,realm,null,null,lane?{lane}:null);
+  const x=await pageGet(from,realm,null,null,lane?{lane,timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS}:null);
   if(x?.ok&&endpointDataIsValid(path,x.data))return {ok:true,data:x.data,status:x.status,walkedPath:from!==path?from:null};
   const status=Number(x?.status)||0,failed={ok:false,status,error:x?.error||`HTTP ${status}`};
   // No request (lane slot taken) or the game blocks direct reads: no move to look for; the caller logs a waiting / not-read line.
@@ -919,7 +1079,7 @@ async function readFollowingMoves(path,realm,{movedReads=null,captured=null,lane
   if(found?.suspected)return {...failed,suspected:found.suspected};
   const to=found?String(found).replace(/^https?:\/\/[^/]+/,''):null;
   if(!to||extraReadPath(path,{[path]:to})===path||to===from)return failed;
-  const y=await pageGet(to,realm,null,null,lane?{lane}:null);
+  const y=await pageGet(to,realm,null,null,lane?{lane,timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS}:null);
   if(y?.laneWait)return {...failed,laneWait:true,nextAt:Number(y.nextAt)||0};
   return y?.ok&&endpointDataIsValid(path,y.data)?{ok:true,data:y.data,status:y.status,walkedPath:to}:failed;
 }
@@ -955,14 +1115,14 @@ async function refreshExtraGameData(realm,{movedReads=null,captured=null}={}){
 // Sync timers (gameConstants): off = no alarm and no read on worker start (Sync still reads them); a slower
 // interval also raises the age below which the stored constants count as fresh.
 function gameConstantsMaxAge(e){const C=globalThis.SCM_TIMERS_CORE;return e&&C&&!C.isDefault('gameConstants',{...e,enabled:true})?Math.max(GAME_CONSTANTS_PERIOD_MS,C.intervalMs('gameConstants',e)-60000):GAME_CONSTANTS_PERIOD_MS;}
-chrome.alarms.onAlarm.addListener(a=>{if(a?.name!==GAME_CONSTANTS_ALARM)return;(async()=>{const e=await scmTimerEntry('gameConstants');if(e&&!e.enabled){await chrome.alarms.clear(GAME_CONSTANTS_ALARM);return;}await refreshGameConstants(false,gameConstantsMaxAge(e));})().catch(()=>{});});
+chrome.alarms.onAlarm.addListener(a=>{if(a?.name!==GAME_CONSTANTS_ALARM)return;(async()=>{const e=await scmTimerEntry('gameConstants');if(e&&!e.enabled){await chrome.alarms.clear(GAME_CONSTANTS_ALARM);return;}await refreshGameConstants(false,gameConstantsMaxAge(e),{quietNoTab:true});})().catch(()=>{});});
 // Only created when missing or its period changed: re-creating it on every service-worker start (delay 1 min)
 // re-armed it each time and, with stale constants, retried the read about every minute.
 // Timer off: the stored constants count as fresh whatever their age, so only completely missing constants are read.
 // Timer off (2.5.458): no read at all on worker start (a fresh install starts with it off); Sync still reads them.
 async function ensureGameConstantsAlarm(){try{await scmEnsureTimerAlarm('gameConstants',{delayInMinutes:1,periodInMinutes:360},'period');}catch{}const e=await scmTimerEntry('gameConstants').catch(()=>null);
   // Off: no game read, but the built-in copy (constants.json, no network) still fills missing constants at once.
-  if(e&&!e.enabled){await applyBundledGameConstants().catch(()=>{});return;}refreshGameConstants(false,gameConstantsMaxAge(e)).catch(()=>{});}
+  if(e&&!e.enabled){await applyBundledGameConstants().catch(()=>{});return;}refreshGameConstants(false,gameConstantsMaxAge(e),{quietNoTab:true}).catch(()=>{});}
 ensureGameConstantsAlarm();
 // Data the Manager cannot work without: game constants (scmGameConstants) and resource images (scmResourceImages).
 // Triggers: a finished Sync (afterSync: constants by age as before, backoff ignored since the Sync proved the bridge
@@ -1002,7 +1162,9 @@ async function fillMissingGameDataOnce(reason,afterSync,onlyMissing){
   const out={ok:true};
   const r=await chrome.storage.local.get({scmGameConstants:null,scmResourceImagesValidatedAt:0});
   const cEntry=await scmTimerEntry('gameConstants').catch(()=>null);
-  if(!r.scmGameConstants&&(afterSync||!cEntry||cEntry.enabled))out.constants=await refreshGameConstants(false,GAME_CONSTANTS_PERIOD_MS,{ignoreBackoff:afterSync,afterSync});
+  // Not after a Sync (a game tab is up): no "no game tab" line (dashboard open, realm switch, a game page right after an
+  // update); the built-in copy already applies and the read runs on the next GAME_STATE (quietNoTab flag).
+  if(!r.scmGameConstants&&(afterSync||!cEntry||cEntry.enabled))out.constants=await refreshGameConstants(false,GAME_CONSTANTS_PERIOD_MS,{ignoreBackoff:afterSync,afterSync,quietNoTab:!afterSync});
   else if(afterSync)out.constants=await refreshGameConstants(false,gameConstantsMaxAge(cEntry),{ignoreBackoff:true,afterSync:true});
   // Timer off and constants missing: no game read, but the built-in copy (no network) still fills them.
   else if(!r.scmGameConstants&&cEntry&&!cEntry.enabled){try{const b=await applyBundledGameConstants();if(b?.applied)out.constants={ok:true,bundled:true,source:'bundled'};}catch{}}
@@ -1898,6 +2060,10 @@ async function recordBackgroundJobEvent(realm,event={}){
     event={...event,outcome:event.outcome==='failure'||event.outcome==null?'skipped':event.outcome,details:{...details0,directReadsBlocked:true}};
   }
   // not-read / waiting: identical lines at most once per 60 s, "no game tab" once per 30 min (activityRepeatCheck); the next one carries details.repeats.
+  // Quiet not-read lines (tab hidden / offline): one per job per stretch (activityStretchCheck).
+  if(typeof activityStretchCheck==='function'){const st=await activityStretchCheck(n,{job:String(event.job||'unknown'),outcome:event.outcome,error:event.error?String(event.error).slice(0,400):''});if(!st.log)return {ok:true,suppressed:'stretch'};
+    const note=typeof activityHeldBackNote==='function'?activityHeldBackNote(st.ended):null;
+    if(note){const d0=event.details&&typeof event.details==='object'?event.details:{};event={...event,details:{...d0,heldBack:Number(st.ended.held)||0,what:d0.what?`${d0.what} · ${note}`:note}};}}
   {const rep=activityRepeatCheck(n,{job:String(event.job||'unknown'),outcome:event.outcome,error:event.error?String(event.error).slice(0,400):''});
     if(!rep.log)return {ok:true,suppressed:'repeat'};
     if(rep.repeats>0)event={...event,details:{...(event.details&&typeof event.details==='object'?event.details:{}),repeats:rep.repeats}};}
@@ -2121,7 +2287,23 @@ let notifyRecipesMemo=null;
 async function gameRecipesFromBundle(list){try{const c=(await chrome.storage.local.get({scmGameConstants:null})).scmGameConstants;return globalThis.SCM_TOOLS_CORE.recipesFromGameConstants(list,c);}catch{return Array.isArray(list)?list:[];}}
 globalThis.__scmOwnWriteHooks?.push(items=>{if(Object.prototype.hasOwnProperty.call(items,'scmGameConstants')){notifyRecipesMemo=null;gameOverlayAssetsPromise=null;}});
 async function notifyRecipes(){if(notifyRecipesMemo)return notifyRecipesMemo;try{const list=await gameRecipesFromBundle(await (await fetch(chrome.runtime.getURL('recipes.json'))).json());const byId=new Map(),names=new Map();for(const r of Array.isArray(list)?list:[]){byId.set(Number(r.id),r);names.set(Number(r.id),String(r.name||''));}notifyRecipesMemo={byId,names};}catch{notifyRecipesMemo={byId:new Map(),names:new Map()};}return notifyRecipesMemo;}
-async function notifyRealmStore(realm){return (await chrome.storage.local.get({[`scmRealmStore:${realm}`]:null}))[`scmRealmStore:${realm}`]||{};}
+// Read-only copy of scmRealmStore:<realm> (1-2 MB on a real install: each read is a full structured clone on the worker
+// thread, which delayed every message answer). Concurrent callers share one read; the value is kept 3 s and dropped at
+// once when this worker writes or removes the key (own-write hook) or clears storage. Callers must not mutate it.
+const REALM_STORE_MEMO_MS=3000,realmStoreMemo=new Map();let realmStoreMemoGen=0;
+globalThis.__scmOwnWriteHooks?.push(items=>{for(const k of Object.keys(items)){const m=/^scmRealmStore:(\d+)$/.exec(k);if(m){realmStoreMemo.delete(Number(m[1]));realmStoreMemoGen++;}}});
+{const lr=globalThis.chrome?.storage?.local;if(lr&&typeof lr.remove==='function'&&typeof lr.clear==='function'){const __rm=lr.remove.bind(lr),__cl=lr.clear.bind(lr);
+  lr.remove=(keys,...rest)=>{for(const k of [].concat(keys||[])){const m=/^scmRealmStore:(\d+)$/.exec(String(k));if(m){realmStoreMemo.delete(Number(m[1]));realmStoreMemoGen++;}}return __rm(keys,...rest);};
+  lr.clear=(...rest)=>{realmStoreMemo.clear();realmStoreMemoGen++;return __cl(...rest);};}}
+function notifyRealmStore(realm){
+  const n=validRealmNumber(realm),key=`scmRealmStore:${realm}`;
+  if(n==null)return chrome.storage.local.get({[key]:null}).then(r=>r[key]||{});
+  const now=Date.now(),cur=realmStoreMemo.get(n);
+  if(cur&&(cur.pending||now-cur.at<REALM_STORE_MEMO_MS))return cur.promise;
+  const gen=realmStoreMemoGen,e={at:now,pending:true,promise:null};
+  e.promise=chrome.storage.local.get({[key]:null}).then(r=>{const v=r[key]||{};e.pending=false;e.at=Date.now();if(realmStoreMemoGen!==gen&&realmStoreMemo.get(n)===e)realmStoreMemo.delete(n);return v;},err=>{if(realmStoreMemo.get(n)===e)realmStoreMemo.delete(n);throw err;});
+  realmStoreMemo.set(n,e);return e.promise;
+}
 async function notifyAfterPriceUpdate(realm){
   const n=validRealmNumber(realm);if(n==null)return;const cfg=await notifySettings();
   const wantTargets=Array.isArray(cfg.priceTargets)&&cfg.priceTargets.some(t=>Number(t?.realm??n)===n);
@@ -2381,9 +2563,10 @@ function overlayProductionRunHours(store){
 }
 
 // The realm store holds this realm's auth-data (its authCompany says this realm, or no realm). Storage read only.
+function realmStoreHasAuthData(st,n){const ac=st?.authData?.authCompany;if(!ac)return false;const ar=validRealmNumber(ac.realmId??ac.realm);return ar==null||ar===n;}
 async function realmHasStoredAuthData(realm){
   const n=validRealmNumber(realm);if(n==null)return false;
-  try{const ac=(await notifyRealmStore(n))?.authData?.authCompany;if(!ac)return false;const ar=validRealmNumber(ac.realmId??ac.realm);return ar==null||ar===n;}catch{return false;}
+  try{return realmStoreHasAuthData(await notifyRealmStore(n),n);}catch{return false;}
 }
 async function ensureRealmAuthData(realmArg){
   const realm=validRealmNumber(realmArg);
@@ -3999,6 +4182,8 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   {const isB=/\/api\/v2\/companies\/me\/buildings\/?(?:\?.*)?$/i.test(String(url||'')),isA=/\/api\/v3\/companies\/auth-data\//i.test(String(url||''));const r=capturedRealm??(isA?responseRealm:null);
    if((isB||isA)&&Number(status)>=200&&Number(status)<300&&r!=null)setTimeout(()=>{refreshAbundanceIfStale(r,isA?'game-auth-data':'game-buildings').catch(()=>{});},3000);}
   {const ob=String(url||'').match(/\/api\/v3\/market\/(\d+)\/(\d+)\/?(?:\?.*)?$/);if(ob&&Number(status)>=200&&Number(status)<300&&Array.isArray(data)){const r=Number(ob[1]),id=Number(ob[2]);setTimeout(()=>{notifyOrderBook(r,id,data).catch(()=>{});},1500);}}
+  // Your listings as the game itself loaded them (warehouse page): kept for the listings card and the undercut check.
+  if(OWN_MARKET_ORDERS_URL_RE.test(String(url||''))&&String(method||'GET').toUpperCase()==='GET'&&Number(status)>=200&&Number(status)<300&&capturedRealm!=null)captureOwnMarketOrders(capturedRealm,url,data).catch(()=>{});
   if(/\/api\/v2\/companies\/me\/cashflow\/recent\/?(?:\?.*)?$/i.test(String(url||''))&&Number(status)>=200&&Number(status)<300){const r=validRealmNumber(capturedRealm);if(r!=null)setTimeout(()=>{notifySales(r,data).catch(()=>{});},1500);}
   // Accounting responses are realm-sensitive even when the API path uses /me/.
   // A missing capture realm must never be assigned to the current active realm:
@@ -4213,6 +4398,11 @@ async function saveData(url,data,status=200,method='GET',captureRealm=null,onTim
   const schedulerAtEnqueue=apiStorageSchedulers.get(queueKey);
   const queuedJobsAheadAtEnqueue=schedulerAtEnqueue?(schedulerAtEnqueue.queue.length+(schedulerAtEnqueue.running?1:0)):0;
   const clearGen=extensionClearGeneration;
+  // The game's own warehouse GET after a stock action is noted on arrival (its line + toast, the pending Manager read
+  // cancelled): behind a long API storage queue (large realm stores) it used to be seen after the 10 s window, so the
+  // single Collect had no line until the slow Manager read finished. The overlay is told after the save below.
+  let gameWh=null;
+  if(String(method||'GET').toUpperCase()==='GET'&&Number(status)>=200&&Number(status)<300&&(captureRealm===0||captureRealm===1)&&/\/api\/v3\/resources\/\d+\/?(?:\?.*)?$/i.test(String(url||''))){try{gameWh=noteGameWarehouseCapture(captureRealm,data,enqueuedAt,{notify:false});}catch{}}
   return enqueueApiStorage(async()=>{
     if(clearGen!==extensionClearGeneration)return; // queued before Clear Stored Data: must not bring the record back
     const queueWaitMs=Date.now()-enqueuedAt;
@@ -4223,6 +4413,8 @@ async function saveData(url,data,status=200,method='GET',captureRealm=null,onTim
     const reportCommitTiming=detail=>Object.assign(commitTiming,detail||{});
     try{
       const result=await saveDataUnlocked(url,data,status,method,captureRealm,reportCommitTiming);
+      // The game's own warehouse GET after a stock action: the action's update (noteGameWarehouseCapture).
+      if(gameWh?.logged)scheduleGameOverlayRefreshNotification(gameWh.realm,50);
       let durableVerification=null;
       // Keep the per-endpoint read-back inside the same serialized API queue
       // slot as the write. Otherwise a later same-URL capture can race the
@@ -4441,6 +4633,15 @@ async function gameLaneScheduleAlarm(atMs){
 // SYNC_READ_GAP_MS after the previous one that made a request; reads that make no request (blocked) do not wait.
 let managerReadsInFlight=0,syncReadTail=Promise.resolve(),syncReadLastAt=0;const SYNC_READ_GAP_MS=1000;
 function syncReadsSpaced(){return typeof realmSyncSessions!=='undefined'&&realmSyncSessions.size>0;}
+// Unattended (lane) reads go out only while the game tab is shown and the device is online. A phone asleep, Chrome in
+// the background or the Manager tab in front made every such read fail with "Failed to fetch" or hang until the 45 s
+// timeout (2.5.463 R2 export, 2026-11-11). From a BRIDGE_STATUS answer (an old content.js without the fields: go).
+function laneTabSkipCode(bridge,workerOnline=(typeof navigator==='undefined'||navigator.onLine!==false)){
+  if(bridge?.online===false||!workerOnline)return 'offline';
+  if(bridge?.visible===false)return 'game-tab-hidden';
+  return null;
+}
+function laneTabSkipError(code){const e=new Error(notReadReason(code));if(code==='offline')e.offline=true;else e.tabHidden=true;return e;}
 async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticLabel=null, options=null){
   if(!options?.__inner){
     const spaced=!(typeof options?.lane==='string'&&options.lane)&&syncReadsSpaced();
@@ -4504,6 +4705,8 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
         continue;
       }
       // Shared game lane: an unattended read takes the slot now or makes no request; any other read moves lastAt.
+      // waitForBridge answers the tab's BRIDGE_STATUS (visible / online); no extra message.
+      if(laneKey&&bridgeReady&&typeof bridgeReady==='object'){const skip=laneTabSkipCode(bridgeReady);if(skip){traceDiag('pageget-lane-tab-skip',{attempt,reason:skip});lastError=laneTabSkipError(skip);lastClosed=false;break;}}
       if(laneKey){const slot=await gameLaneDecide(laneKey);if(!slot.take){traceDiag('pageget-lane-wait',{attempt,reason:slot.reason,nextAt:slot.nextAt});return gameLaneWaitResponse(path,slot);}}
       else await gameLaneNoteUser(diagnosticLabel||'user');
       if(options?.__gap)await options.__gap();
@@ -4515,6 +4718,7 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
       ]);
       traceDiag('pageget-response',{attempt,tabId:tab.id,ok:!!r?.ok,status:r?.status||0,error:r?.error||null});
       // Answered from pagehide: same path as a closed channel (the attempt count is unchanged).
+      if(laneKey&&r&&!r.ok&&r.networkError&&(r.hidden||r.offline||laneTabSkipCode(null)==='offline')){const code=r.offline||laneTabSkipCode(null)==='offline'?'offline':'game-tab-hidden';traceDiag('pageget-lane-network-skip',{attempt,reason:code,error:r.error||null});lastError=laneTabSkipError(code);lastClosed=false;break;}
       if(r?.pageClosed){const closedError=new Error(r.error||'The game page was reloaded or closed before the API answered.');closedError.pageClosed=true;throw closedError;}
       // Unattended read answered 401 / 429 / an HTML page (captcha): stop the lane via the direct-read block.
       if(laneKey&&!blockExempt&&gameLaneStopAnswer(r)){
@@ -4555,9 +4759,12 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
   if(lastClosed)finalError.pageClosed=true;
   if(!lastError||/page bridge is not ready/i.test(String(lastError?.message||'')))finalError.bridgeNotReady=true;
   if(/Open Sim Companies and log in/i.test(String(lastError?.message||'')))finalError.noGameTab=true;
+  if(lastError?.tabHidden)finalError.tabHidden=true;
+  if(lastError?.offline)finalError.offline=true;
   throw finalError;
   }catch(e){
-    if(recheck&&!recheckSettled)return await recheckFailed(e?.message||String(e));
+    // Hidden tab / offline: no game answer, so the recheck neither passed nor failed (the block stays; the next read rechecks).
+    if(recheck&&!recheckSettled&&!(e?.tabHidden||e?.offline))return await recheckFailed(e?.message||String(e));
     throw e;
   }finally{
     if(recheck&&directReadRecheckInFlight===recheck)directReadRecheckInFlight=false;
@@ -4789,11 +4996,12 @@ async function runOrderBookRefreshFiring(){
     // "not read" line (realm of the line: active, else selected realm, else the error log).
     if(await directReadsBlockedNow()){logActivityAnyRealm('order-book-refresh','not-read',{directReadsBlocked:true},notReadReason({directReadsBlocked:true}));return {ok:true,skipped:true,reason:'direct-reads-blocked'};}
     const tab=await simTab();if(!tab?.id){logActivityAnyRealm('order-book-refresh','not-read',{},notReadReason('no-game-tab'));return {ok:true,skipped:true};}
-    const bridge=await withSyncTimeout(chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),3000,'Order book refresh bridge check').catch(()=>null);
+    const bridge=await withSyncTimeout(chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),BRIDGE_STATUS_WAIT_MS,'Order book refresh bridge check').catch(()=>null);
     const realm=bridge?.ready&&(bridge.realm===0||bridge.realm===1)?bridge.realm:null;
     // Bridge not ready, or the tab has not shown its realm yet: a "not read" line. A Sync / day walk of that realm: planned, no line.
     if(realm==null){logActivityAnyRealm('order-book-refresh','not-read',{},notReadReason(bridge?.ready?'realm-unknown':'bridge-not-ready'));return {ok:true,skipped:true};}
     if(syncSessionForRealm(realm)||accountingDayWalkRunning.has(realm))return {ok:true,skipped:true};
+    {const skip=bridge?.online===false?'offline':bridge?.visible===false?'game-tab-hidden':null;if(skip){logNotRead(realm,'order-book-refresh',skip,{},now,'alarm');return {ok:true,skipped:true,reason:skip};}}
     // Shared game lane: not this job's turn (5 min since the last game request not over, or a job before it is
     // waiting): a "waiting" line before any product attempt is stamped; the lane alarm runs it again when the slot opens.
     const peek=await gameLaneDecide('orderBook',{peek:true});
@@ -4839,7 +5047,7 @@ async function runMarketTickerRefresh(trigger='alarm'){
   // Every read it wanted and did not make gets a "not read" / "waiting" line (a Sync or day walk of that realm: planned, no line).
   if(await directReadsBlockedNow()){logActivityAnyRealm('market-ticker','not-read',{directReadsBlocked:true},notReadReason({directReadsBlocked:true}));return {ok:true,skipped:true,reason:'direct-reads-blocked'};}
   const tab=await simTab();if(!tab?.id){logActivityAnyRealm('market-ticker','not-read',{},notReadReason('no-game-tab'));return {ok:true,skipped:true,reason:'no-tab'};}
-  const bridge=await withSyncTimeout(chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),3000,'Market ticker bridge check').catch(()=>null);
+  const bridge=await withSyncTimeout(chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),BRIDGE_STATUS_WAIT_MS,'Market ticker bridge check').catch(()=>null);
   const realm=bridge?.ready&&(bridge.realm===0||bridge.realm===1)?bridge.realm:null;
   if(realm==null){logActivityAnyRealm('market-ticker','not-read',{},notReadReason(bridge?.ready?'realm-unknown':'bridge-not-ready'));return {ok:true,skipped:true,reason:'no-realm'};}
   if(syncSessionForRealm(realm)||accountingDayWalkRunning.has(realm))return {ok:true,skipped:true,reason:'no-realm'};
@@ -4853,6 +5061,7 @@ async function runMarketTickerRefresh(trigger='alarm'){
     if(Date.now()-(marketTickerSimcoSkipLogAt.get(realm)||0)>=MARKET_TICKER_MAX_AGE_MS){marketTickerSimcoSkipLogAt.set(realm,Date.now());logActivity(realm,'market-ticker','skipped',{cached:true,source:'SimcoTools prices',...covered},'Not read: SimcoTools prices are fresh and every product image is known',t0,trigger);}
     return {ok:true,cached:true,simco:true,realm};
   }
+  {const skip=bridge?.online===false?'offline':bridge?.visible===false?'game-tab-hidden':null;if(skip){logNotRead(realm,'market-ticker',skip,{},t0,trigger);return {ok:true,skipped:true,reason:skip,realm};}}
   let r;
   try{r=await pageGet(path,realm,null,'market-ticker',{lane:`ticker:${realm}`,timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS});}
   catch(e){if(pageBridgeUnavailable(e)){logNotRead(realm,'market-ticker',e,{},t0,trigger);return {ok:true,skipped:true,bridgeUnavailable:true,realm};}r={ok:false,status:0,error:e?.message||String(e)};}
@@ -4872,8 +5081,10 @@ const GAME_LANE_RUNNERS={
   orderBook:async()=>{if(!(await scmTimerEnabled('orderBook').catch(()=>true)))return;await runOrderBookRefreshFiring();},
   ticker:async()=>runMarketTickerRefresh('lane'),
   lostData:async()=>{if(!(await scmTimerEnabled('criticalGuard').catch(()=>true)))return;await runCriticalDataGuard('lane');},
-  gameConstants:async()=>{const e=await scmTimerEntry('gameConstants').catch(()=>null);if(e&&!e.enabled)return;await refreshGameConstants(false,gameConstantsMaxAge(e));},
-  abundance:async realm=>{if(realm!=null)await refreshAbundanceIfStale(realm,'lane');}
+  gameConstants:async()=>{const e=await scmTimerEntry('gameConstants').catch(()=>null);if(e&&!e.enabled)return;await refreshGameConstants(false,gameConstantsMaxAge(e),{quietNoTab:true});},
+  abundance:async realm=>{if(realm!=null)await refreshAbundanceIfStale(realm,'lane');},
+  // The held listings read (deferred retry); nothing queued: no read (the want is dropped).
+  listings:async realm=>{if(realm!=null)await runMarketOrdersRetry(realm);}
 };
 async function runGameLaneAlarm(){
   const C=gameLaneCore();if(!C)return {ok:false};
@@ -4883,7 +5094,7 @@ async function runGameLaneAlarm(){
   const next=C.laneNextSlotAt(st,now);
   if(next>now){await gameLaneScheduleAlarm(next);return {ok:true,waiting:true,nextAt:next};}
   if(coreSyncActive()){await gameLaneScheduleAlarm(now+60000);return {ok:true,sync:true};}
-  const winner=C.laneWinner(st.wants,now);const [base,rs]=String(winner||'').split(':');const run=GAME_LANE_RUNNERS[base];
+  const winner=C.laneWinner(st.wants,now,st.lastAt);const [base,rs]=String(winner||'').split(':');const run=GAME_LANE_RUNNERS[base];
   if(!run){await gameLaneScheduleAlarm(now+C.laneSpec(winner).wantTtlMs+1000);return {ok:true,winner,card:true};}
   const before=st.wants[winner]?.at;
   try{await run(rs!=null&&rs!==''?Number(rs):null);}catch(e){logError('game-lane-run',e);}
@@ -5082,7 +5293,9 @@ async function simcoFetch(url, timeoutMs=SIMCOTOOLS_TIMEOUT_MS, opts=null){
         ? new Error(`SimcoTools request timed out after ${Math.round(timeoutMs/1000)}s (attempt ${attempt+1}/${attempts})`)
         : new Error(`SimcoTools network error: ${e?.message||String(e)} (attempt ${attempt+1}/${attempts})`);
       // Only the final attempt is an error worth logging; earlier timeouts/drops are retried (common on mobile data).
-      if(attempt===attempts-1)logError('fetch:simcotools',lastError);
+      // quietNetwork (SimcoTools public jobs): a network TypeError (no connection) is not an error-log entry; the job's
+      // own Activity line ("not read: no network", once per stretch) covers it. Timeouts are still logged.
+      if(attempt===attempts-1&&!(opts?.quietNetwork&&e?.name!=='AbortError'))logError('fetch:simcotools',lastError);
     }finally{clearTimeout(timer);simcoReleaseRequestSlot()}
   }
   throw lastError||new Error('SimcoTools request failed.');
@@ -6317,33 +6530,92 @@ function simcoExecLookupCachePut(cache,key,entry){
 // phasePassiveAt, govPassiveAt} (runSimcoPublicData builds it from the realm store); a call without ctx (older callers) never
 // picks the phases / events / company / ranking / contests / summaries / building-stats jobs. Gov orders with ctx: not read
 // while the game's own list is under 1 h old.
+// A job whose last try failed or was not read waits out its back-off (g.scmSimcoJobBackoff, simcoJobBackedOff), so the
+// jobs after it get their turn instead of the same job being picked at every firing (2.5.464: prices failing every
+// firing kept ranking / certificate kinds from ever running).
 function simcoPublicPickJob(g,realm,now=Date.now(),ctx=null){
-  const slack=SIMCO_PUBLIC_DUE_SLACK_MS,withCtx=realm!=null&&ctx!=null&&typeof ctx==='object';
-  if(realm!=null&&!simcoAgeOk(g?.[simcoPricesKey(realm)]?.at,SIMCO_PRICES_MAX_AGE_MS-slack,now))return {job:'prices'};
-  if(realm!=null&&simcoGovOrdersDue(g,realm,withCtx?ctx:null,now))return {job:'gov-orders'};
-  if(withCtx&&simcoPhasesDue(g,realm,ctx,now))return {job:'phases'};
-  if(withCtx&&simcoEventsDue(g,realm,ctx,now))return {job:'events'};
+  const slack=SIMCO_PUBLIC_DUE_SLACK_MS,withCtx=realm!=null&&ctx!=null&&typeof ctx==='object'&&!ctx.__none;
+  // ctx.__rotate (set by simcoPublicPickFair): also skip a due job tried in the last firing (scmSimcoJobTried), and the
+  // jobs already found (__exclude) while collecting every due job.
+  const rot=ctx&&typeof ctx==='object'?ctx.__rotate:null,excl=ctx&&typeof ctx==='object'?ctx.__exclude:null;
+  const ok=j=>!simcoJobBackedOff(g?.scmSimcoJobBackoff,realm,j,now)&&!(rot&&simcoJobTriedRecently(g?.scmSimcoJobTried,realm,j,now))&&!(excl&&excl.has(j));
+  if(realm!=null&&ok('prices')&&!simcoAgeOk(g?.[simcoPricesKey(realm)]?.at,SIMCO_PRICES_MAX_AGE_MS-slack,now))return {job:'prices'};
+  if(realm!=null&&ok('gov-orders')&&simcoGovOrdersDue(g,realm,withCtx?ctx:null,now))return {job:'gov-orders'};
+  if(withCtx&&ok('phases')&&simcoPhasesDue(g,realm,ctx,now))return {job:'phases'};
+  if(withCtx&&ok('events')&&simcoEventsDue(g,realm,ctx,now))return {job:'events'};
   const meta=g?.scmSimcoBuildingsMeta||{};
-  if(!simcoAgeOk(meta.listAt,SIMCO_BUILDINGS_LIST_MAX_AGE_MS-slack,now))return {job:'buildings-list'};
-  if(realm!=null&&!(Number(g?.scmSimcoResourcesRetry?.until)>now)&&!simcoAgeOk(g?.scmSimcoResources?.at,SIMCO_RESOURCES_MAX_AGE_MS-slack,now))return {job:'resources'};
+  if(ok('buildings-list')&&!simcoAgeOk(meta.listAt,SIMCO_BUILDINGS_LIST_MAX_AGE_MS-slack,now))return {job:'buildings-list'};
+  if(realm!=null&&ok('resources')&&!(Number(g?.scmSimcoResourcesRetry?.until)>now)&&!simcoAgeOk(g?.scmSimcoResources?.at,SIMCO_RESOURCES_MAX_AGE_MS-slack,now))return {job:'resources'};
   // No company id yet: not picked (the lower jobs go on); runSimcoPublicData logs a 'not-read' line for it.
-  if(withCtx&&simcoCompanyDue(g,realm,ctx,now)==='due')return {job:'company',companyId:simcoSafeCompanyId(ctx.companyId)};
-  if(withCtx){const rk=simcoRankingDue(g,realm,ctx,now);if(rk)return {job:'ranking',companyId:simcoSafeCompanyId(ctx.companyId),...rk};}
-  if(withCtx&&simcoContestsDue(g,realm,ctx,now))return {job:'contests'};
-  if(withCtx&&simcoSummariesDue(g,realm,ctx,now))return {job:'summaries'};
-  if(withCtx&&simcoBuildingStatsDue(g,realm,ctx,now))return {job:'building-stats'};
-  if(withCtx&&simcoCertKindsDue(g,realm,ctx,now))return {job:'cert-kinds'};
-  if(withCtx){const kind=simcoCertHoldersDue(g,realm,ctx,now);if(kind!=null)return {job:'cert-holders',kind};}
+  if(withCtx&&ok('company')&&simcoCompanyDue(g,realm,ctx,now)==='due')return {job:'company',companyId:simcoSafeCompanyId(ctx.companyId)};
+  if(withCtx&&ok('ranking')){const rk=simcoRankingDue(g,realm,ctx,now);if(rk)return {job:'ranking',companyId:simcoSafeCompanyId(ctx.companyId),...rk};}
+  if(withCtx&&ok('contests')&&simcoContestsDue(g,realm,ctx,now))return {job:'contests'};
+  if(withCtx&&ok('summaries')&&simcoSummariesDue(g,realm,ctx,now))return {job:'summaries'};
+  if(withCtx&&ok('building-stats')&&simcoBuildingStatsDue(g,realm,ctx,now))return {job:'building-stats'};
+  if(withCtx&&ok('cert-kinds')&&simcoCertKindsDue(g,realm,ctx,now))return {job:'cert-kinds'};
+  if(withCtx&&ok('cert-holders')){const kind=simcoCertHoldersDue(g,realm,ctx,now);if(kind!=null)return {job:'cert-holders',kind};}
+  if(!ok('building'))return null;
   const id=simcoNextBuildingId(meta,now);
   return id?{job:'building',id}:null;
 }
-async function simcoPublicFetch(url){try{return await simcoFetch(url,SIMCOTOOLS_TIMEOUT_MS,{noRetry:true});}catch(e){return {ok:false,status:0,error:e?.message||String(e)};}}
+// Rotation (2.5.464): a job whose try gave no data (offline, timeout, failure, not-read) is marked
+// scmSimcoJobTried["<realm>|<job>"]=time (kept up to a day); a due job with no mark goes first, and when every due job
+// is marked the one tried longest ago goes, so with no connection the due jobs take turns (round robin) instead of
+// prices at every firing. A success clears the mark; a 429 or the shared gate sets none.
+function simcoJobTriedRecently(map,realm,job,now=Date.now()){const t=Number(map&&typeof map==='object'?map[simcoJobBackoffKey(realm,job)]:0)||0;return t>0&&now-t<86400000;}
+function simcoPublicPickFair(g,realm,now=Date.now(),ctx=null){
+  const base=ctx&&typeof ctx==='object'?ctx:null;
+  const first=simcoPublicPickJob(g,realm,now,base?{...base,__rotate:true}:{__rotate:true,__none:true});
+  if(first)return first;
+  // Every due job was tried in the last firing (or none is due): the due job tried longest ago.
+  const exclude=new Set(),due=[];
+  for(let i=0;i<20;i++){const d=simcoPublicPickJob(g,realm,now,base?{...base,__exclude:exclude}:{__exclude:exclude,__none:true});if(!d)break;due.push(d);exclude.add(d.job);}
+  if(!due.length)return null;
+  const tried=j=>Number(g?.scmSimcoJobTried?.[simcoJobBackoffKey(realm,j)])||0;
+  return due.reduce((a,b)=>tried(b.job)<tried(a.job)?b:a);
+}
+function simcoJobTriedNext(map,realm,job,result,now=Date.now()){
+  const m=map&&typeof map==='object'&&!Array.isArray(map)?{...map}:{},k=simcoJobBackoffKey(realm,job);
+  for(const [kk,v] of Object.entries(m))if(!(Number(v)>now-86400000))delete m[kk];
+  if(result?.ok){if(!(k in m))return null;delete m[k];return m;}
+  if(result?.gateWait||String(result?.outcome||'')==='rate-limited')return null;
+  m[k]=now;return m;
+}
+// scmSimcoJobBackoff {"<realm>|<job>": {until, fails}} (storage.local, cleared with the data): after a failed or
+// not-read try a job waits 30 min, doubling per further miss up to 4 h; a success removes it. A 429, the shared
+// gate and "no network" are not the job's fault and set no back-off (the global cooldowns cover them).
+const SIMCO_JOB_BACKOFF_KEY='scmSimcoJobBackoff',SIMCO_JOB_BACKOFF_MS=30*60000,SIMCO_JOB_BACKOFF_MAX_MS=4*3600000;
+function simcoJobBackoffKey(realm,job){return `${realm==null?'-':realm}|${job}`;}
+function simcoJobBackedOff(map,realm,job,now=Date.now()){const e=map&&typeof map==='object'?map[simcoJobBackoffKey(realm,job)]:null;return Boolean(e&&Number(e.until)>now);}
+function simcoJobBackoffNext(map,realm,job,result,now=Date.now()){
+  const m=map&&typeof map==='object'&&!Array.isArray(map)?{...map}:{},k=simcoJobBackoffKey(realm,job);
+  for(const [kk,v] of Object.entries(m))if(!v||!(Number(v.until)>now-SIMCO_JOB_BACKOFF_MAX_MS))delete m[kk];
+  if(result?.ok){if(!(k in m))return null;delete m[k];return m;}
+  const o=String(result?.outcome||'');if(result?.gateWait||(o!=='failure'&&o!=='not-read'))return null;
+  const fails=Math.min(10,(Number(m[k]?.fails)||0)+1);
+  m[k]={until:now+Math.min(SIMCO_JOB_BACKOFF_MAX_MS,SIMCO_JOB_BACKOFF_MS*2**(fails-1)),fails};
+  return m;
+}
+const SIMCO_JOB_TRIED_KEY='scmSimcoJobTried';
+async function simcoJobBackoffRecord(realm,job,result){
+  try{await simcoPublicWrite(async()=>{if(simcoPublicGen!==extensionClearGeneration)return;const got=await chrome.storage.local.get({[SIMCO_JOB_BACKOFF_KEY]:null,[SIMCO_JOB_TRIED_KEY]:null});
+    const patch={},next=simcoJobBackoffNext(got[SIMCO_JOB_BACKOFF_KEY],realm,job,result),tried=simcoJobTriedNext(got[SIMCO_JOB_TRIED_KEY],realm,job,result);
+    if(next)patch[SIMCO_JOB_BACKOFF_KEY]=next;if(tried)patch[SIMCO_JOB_TRIED_KEY]=tried;if(Object.keys(patch).length)await rawStorageSet(patch);});}catch{}
+}
+// network: fetch threw a TypeError (no connection: phone asleep / Doze or offline), not a timeout and not an HTTP answer.
+async function simcoPublicFetch(url){try{return await simcoFetch(url,SIMCOTOOLS_TIMEOUT_MS,{noRetry:true,quietNetwork:true});}catch(e){const m=e?.message||String(e);return {ok:false,status:0,error:m,network:/^SimcoTools network error:/.test(m)};}}
 function simcoPublicLog(realm,job,outcome,details,error,t0,trigger){return realm!=null?logActivity(realm,job,outcome,details,error,t0,trigger):logActivityAnyRealm(job,outcome,details,error);}
 // A request that did not give data: not read (no request: gate / cooldown), rate-limited (server 429) or failed.
 function simcoPublicTooLarge(realm,job,p,t0,trigger,extra={}){simcoPublicLog(realm,job,'failure',{...extra,chars:p.length},'response too large',t0,trigger);return {ok:false,outcome:'failure',tooLarge:true};}
+// Set when a request was held by the shared SimcoTools gate / cooldown (not the job's fault): runSimcoPublicData marks that
+// result gateWait so it sets no job back-off.
+let simcoPublicGateMissSeen=false;
 function simcoPublicMiss(realm,job,resp,t0,trigger,extra={}){
   const status=Number(resp?.status)||0;
-  if(resp?.skipped||resp?.limited){simcoPublicLog(realm,job,'not-read',{...extra,retryAt:resp?.retryAt||null},'Not read: waiting for the SimcoTools limit',t0,trigger);return 'not-read';}
+  if(resp?.skipped||resp?.limited){simcoPublicGateMissSeen=true;simcoPublicLog(realm,job,'not-read',{...extra,retryAt:resp?.retryAt||null},'Not read: waiting for the SimcoTools limit',t0,trigger);return 'not-read';}
+  // No connection at all (the same firing fails for the game too): not read, next firing tries again (no failure line).
+  // A manual request (user is on the page) stays a failure. Returns 'offline' so no caller reads it as a rate limit.
+  if(status===0&&resp?.network&&trigger!=='manual'){simcoPublicLog(realm,job,'not-read',{...extra,network:true,error:String(resp.error||'').slice(0,120)},'Not read: no network connection (phone asleep or offline); the next firing tries again',t0,trigger);return 'offline';}
   if(status===429){simcoPublicLog(realm,job,'rate-limited',{...extra,status,retryAt:resp?.retryAt||null},'SimcoTools answered 429 (rate limit); waiting for the cooldown',t0,trigger);return 'rate-limited';}
   simcoPublicLog(realm,job,'failure',{...extra,status},resp?.error||`HTTP ${status} from SimcoTools`,t0,trigger);return 'failure';
 }
@@ -6646,15 +6918,25 @@ async function runSimcoPublicData(trigger='alarm'){
     if(simcoRateLimitUntil>Date.now())return {ok:true,skipped:true,reason:'rate-limit-cooldown'};
     if(await simcoGateNextAt())return {ok:true,skipped:true,reason:'simcotools-gap'};
     const realm=await activeRealmNumber();
-    const keys={scmSimcoBuildingsMeta:null,scmSimcoResources:null,scmSimcoResourcesRetry:null};
+    const keys={scmSimcoBuildingsMeta:null,scmSimcoResources:null,scmSimcoResourcesRetry:null,[SIMCO_JOB_BACKOFF_KEY]:null,scmSimcoJobTried:null};
     if(realm!=null){for(const k of [simcoPricesKey(realm),simcoGovOrdersKey(realm),simcoPhasesKey(realm),simcoEventsKey(realm),simcoCompanyKey(realm),simcoRankingKey(realm),simcoContestsKey(realm),simcoSummaryKey(realm),simcoBuildingStatsKey(realm),simcoCertKindsKey(realm),simcoCertHoldersKey(realm)])keys[k]=null;keys[`scmEconomyStateLog:${realm}`]=[];}
     const g=await simcoPublicGet(keys);
     const ctx=realm!=null?await simcoPublicContext(realm,g[`scmEconomyStateLog:${realm}`]):null;
-    const due=simcoPublicPickJob(g,realm,Date.now(),ctx);
+    const due=simcoPublicPickFair(g,realm,Date.now(),ctx);
     if(ctx&&(!due||['building','ranking','contests','summaries','building-stats','cert-kinds','cert-holders'].includes(due.job))&&simcoCompanyDue(g,realm,ctx,Date.now())==='no-id'&&Date.now()-simcoCompanyNoIdLogAt>=3600000){
       simcoCompanyNoIdLogAt=Date.now();simcoPublicLog(realm,'simcotools-company','not-read',{},'Not read: no company id yet (open the game once)',Date.now(),trigger);}
     if(!due)return {ok:true,skipped:true,reason:'all-fresh'};
     if(coreSyncActive())return {ok:true,skipped:true,reason:'sync'};
+    simcoPublicGateMissSeen=false;
+    let res=await simcoPublicRunJob(due,realm,trigger);
+    if(simcoPublicGateMissSeen&&!res?.ok)res={...res,gateWait:true};
+    await simcoJobBackoffRecord(realm,due.job,res);
+    return res;
+  })().catch(e=>{logError('simcotools-public',e);return {ok:false,error:e?.message||String(e)};}).finally(()=>{simcoPublicRun=null;});
+  return simcoPublicRun;
+}
+async function simcoPublicRunJob(due,realm,trigger){
+  {
     const t0=Date.now();
     if(due.job==='prices')return {job:due.job,...(await simcoPublicPrices(realm,t0,trigger))};
     if(due.job==='gov-orders')return {job:due.job,...(await simcoPublicGovOrders(realm,t0,trigger))};
@@ -6670,8 +6952,7 @@ async function runSimcoPublicData(trigger='alarm'){
     if(due.job==='cert-kinds')return {job:due.job,...(await simcoPublicCertKinds(realm,t0,trigger))};
     if(due.job==='cert-holders')return {job:due.job,...(await simcoPublicCertHolders(realm,due.kind,t0,trigger))};
     return {job:due.job,...(await simcoPublicBuilding(realm,due.id,t0,trigger))};
-  })().catch(e=>{logError('simcotools-public',e);return {ok:false,error:e?.message||String(e)};}).finally(()=>{simcoPublicRun=null;});
-  return simcoPublicRun;
+  }
 }
 // Created when missing (or its period changed), 2.5 min after the live-market alarm's next firing, so the two never meet.
 async function ensureSimcoPublicAlarm(){
@@ -7106,10 +7387,14 @@ const STANDING_ALARMS=[
 // startup so browsers that still hold them drop them; a firing one is cleared too.
 const OBSOLETE_ALARMS=['scm-production-events-daily','scm-production-events-watch'];
 async function clearObsoleteAlarms(){for(const n of OBSOLETE_ALARMS){try{await chrome.alarms.clear(n);}catch{}}}
-async function ensureStandingAlarms(){
+async function ensureStandingAlarms({simcoPublic=true}={}){
   await clearObsoleteAlarms();
   for(const [,info,id] of STANDING_ALARMS)await scmEnsureTimerAlarm(id,info,'missing');
   await scmEnsureTimerAlarm('gameConstants',{delayInMinutes:1,periodInMinutes:360},'missing'); // GAME_CONSTANTS_ALARM
+  // scm-simco-public (no timer id: it stays registered with the timer off, as the self-test "Background alarms" row
+  // expects): re-created when missing at every start that runs this. simcoPublic:false when the caller places it itself
+  // after re-creating the live-market alarm (clear data), so it keeps its 2.5 min offset.
+  if(simcoPublic&&typeof ensureSimcoPublicAlarm==='function')await ensureSimcoPublicAlarm();
 }
 // Chrome drops an extension's alarms when it is updated (and may on a browser restart), so the alarms that
 // carry your state are re-created from storage: follow-ups, the daily summary, batch-finished alerts (from the stored
@@ -7258,6 +7543,9 @@ chrome.runtime.onInstalled.addListener(async(details)=>{
   await scmLifecycleStep('installed:order-book-alarm',()=>ensureOrderBookRefreshAlarm());
   await scmLifecycleStep('installed:obsolete-alarms',()=>clearObsoleteAlarms());
   for(const [name,info,id] of STANDING_ALARMS)await scmLifecycleStep(`installed:alarm:${name}`,()=>scmEnsureTimerAlarm(id,info,'period'));
+  // scm-simco-public is not in INSTALL_KEEP_ALARM_PREFIXES, so the clear above removed the copy the top-level call made;
+  // re-created here, after the live-market alarm (it is placed 2.5 min after it).
+  await scmLifecycleStep('installed:simco-public-alarm',()=>ensureSimcoPublicAlarm());
   await scmLifecycleStep('installed:critical-data-guard',()=>ensureCriticalDataGuard('installed'));
   await scmLifecycleStep('installed:storage-prune',()=>scmPruneStorage({reason:'installed'}));
   await scmLifecycleStep('installed:restore-alarms',()=>restorePersistedAlarms('installed'));
@@ -7276,6 +7564,7 @@ chrome.runtime.onStartup.addListener(async()=>{
   await scmLifecycleStep('startup:live-bridge-token',()=>migrateLiveBridgeToken());
   await scmLifecycleStep('startup:live-market-alarm',()=>ensureLiveMarketRefreshAlarm('service-worker-startup'));
   await scmLifecycleStep('startup:order-book-alarm',()=>ensureOrderBookRefreshAlarm());
+  await scmLifecycleStep('startup:simco-public-alarm',()=>ensureSimcoPublicAlarm());
   await scmLifecycleStep('startup:standing-alarms',()=>ensureStandingAlarms());
   await scmLifecycleStep('startup:storage-prune',()=>scmPruneStorage({reason:'startup'}));
   await scmLifecycleStep('startup:restore-alarms',()=>restorePersistedAlarms('browser-startup'));
@@ -7413,7 +7702,7 @@ async function waitForBridge(tabId, timeoutMs=10000){
   while(Date.now()<deadline){
     try{
       const r=await chrome.tabs.sendMessage(tabId,{type:'BRIDGE_STATUS'});
-      if(r?.ready) return true;
+      if(r?.ready) return r; // truthy: callers test it; pageGet reads visible / online from it
     }catch{}
     // If the tab was already open before the extension loaded, inject the
     // isolated content script without reloading the game page. content.js is
@@ -9412,6 +9701,25 @@ const warehouseMutationRefreshTimers=new Map();
 // If an action lands while a fetch is already running, one more fetch runs afterwards so it is never missed.
 const warehouseMutationLastAt=new Map();
 const warehouseMutationRefreshStartAt=new Map(),WAREHOUSE_MUTATION_MIN_GAP_MS=3000;
+// The game's own GET /api/v3/resources/<id>/ stored within 10 s of a reported stock action (GAME_STOCK_MUTATION) is that
+// action's warehouse update: a warehouse-refresh success line (trigger stock-mutation-or-forced, source game, so the
+// monitor toasts at once) and the Manager read still waiting for it is cancelled. When the game sends no GET the
+// Manager read stays the fallback. A Manager read already on the wire when the game's copy lands logs its own line as
+// stock-mutation-confirm (no second toast).
+const GAME_WAREHOUSE_MUTATION_WINDOW_MS=10000,warehouseMutationGameCoveredAt=new Map();
+function noteGameWarehouseCapture(realm,data,now=Date.now(),{notify=true}={}){
+  const n=validRealmNumber(realm);if(n==null)return {logged:false,reason:'realm'};
+  const at=warehouseMutationLastAt.get(n)||0;if(!at||now-at>GAME_WAREHOUSE_MUTATION_WINDOW_MS)return {logged:false,reason:'no-recent-action'};
+  if((warehouseMutationGameCoveredAt.get(n)||0)>=at)return {logged:false,reason:'already-covered'};
+  const timer=warehouseMutationRefreshTimers.get(n);let cancelled=false;
+  if(timer){clearTimeout(timer);warehouseMutationRefreshTimers.delete(n);cancelled=true;}
+  warehouseMutationGameCoveredAt.set(n,now);
+  let rows=null;try{rows=normalizeWarehouse(data).length;}catch{}
+  const iso=new Date(now).toISOString();
+  recordBackgroundJobEvent(n,{job:'warehouse-refresh',trigger:'stock-mutation-or-forced',startedAt:new Date(at).toISOString(),finishedAt:iso,durationMs:now-at,outcome:'success',requested:0,fetched:0,refreshed:1,checked:1,cached:0,error:null,details:{rows,source:'game',managerReadCancelled:cancelled}}).catch(()=>{});
+  if(notify)scheduleGameOverlayRefreshNotification(n,50);
+  return {logged:true,cancelled,rows,realm:n};
+}
 function scheduleWarehouseRefreshAfterStockMutation(realm,delayMs=300){
   const n=validRealmNumber(realm); if(n==null)return;
   warehouseMutationLastAt.set(n,Date.now());
@@ -9455,7 +9763,8 @@ async function refreshRealmWarehouseForOverlay(realm,maxAgeMs=15000){
     const notRead=!result?.ok&&!result?.laneWait&&Boolean(result?.notReady||result?.otherRealm||result?.pageClosed||result?.directReadsBlocked||result?.bridgeUnavailable);
     const outcome=result?.ok?(result?.cached?'skipped':'success'):result?.laneWait?'waiting':notRead?'not-read':(result?.stale||result?.incomplete?'partial':'failure');
     const error=result?.laneWait?laneWaitText(result.nextAt):notRead?warehouseNotReadReason(result):(result?.error||null);
-    await recordBackgroundJobEvent(n,{job:'warehouse-refresh',trigger:maxAgeMs===0?'stock-mutation-or-forced':'overlay-refresh',startedAt,finishedAt,durationMs:Date.now()-startedMs,outcome,requested:1,fetched:result?.refreshed?1:0,refreshed:result?.refreshed?1:0,checked:1,cached:result?.cached?1:0,error,details:{rows:result?.rows??null,requestDurationMs:result?.requestDurationMs??null,storageCommitDurationMs:result?.storageCommitDurationMs??null,totalDurationMs:result?.totalDurationMs??null,...(result?.laneWait?{laneWait:true,nextAt:Number(result.nextAt)||0}:{}),...(result?.directReadsBlocked?{directReadsBlocked:true,...(result.recheckFailed?{recheckFailed:true}:{})}:{})}}).catch(()=>{});
+    const coveredByGame=maxAgeMs===0&&(warehouseMutationGameCoveredAt.get(n)||0)>=startedMs;
+    await recordBackgroundJobEvent(n,{job:'warehouse-refresh',trigger:maxAgeMs===0?(coveredByGame?'stock-mutation-confirm':'stock-mutation-or-forced'):'overlay-refresh',startedAt,finishedAt,durationMs:Date.now()-startedMs,outcome,requested:1,fetched:result?.refreshed?1:0,refreshed:result?.refreshed?1:0,checked:1,cached:result?.cached?1:0,error,details:{rows:result?.rows??null,requestDurationMs:result?.requestDurationMs??null,storageCommitDurationMs:result?.storageCommitDurationMs??null,totalDurationMs:result?.totalDurationMs??null,...(result?.laneWait?{laneWait:true,nextAt:Number(result.nextAt)||0}:{}),...(result?.directReadsBlocked?{directReadsBlocked:true,...(result.recheckFailed?{recheckFailed:true}:{})}:{})}}).catch(()=>{});
     return {...result,jobStartedAt:startedAt,jobFinishedAt:finishedAt,jobDurationMs:Date.now()-startedMs};
   }).finally(()=>{if(warehouseOverlayRefreshRuns.get(n)===run)warehouseOverlayRefreshRuns.delete(n);});
   warehouseOverlayRefreshRuns.set(n,run);return run;
@@ -9719,17 +10028,21 @@ async function scmRunSelfTest(opts={}){
   await safe('tab-open','Game tab open',async()=>{tab=await simTab();const n=(await chrome.tabs.query({url:GAME_URLS})).length;add('tab-open','Game tab open',tab?'pass':'fail',tab?'A simcompanies.com tab is open':'Open www.simcompanies.com and log in, then run again',{tabs:n});});
   await safe('tab-content','Content script & page bridge',async()=>{
     if(!tab?.id){add('tab-content','Content script & page bridge','skip','No game tab');return;}
-    try{bridge=await Promise.race([chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),new Promise(r=>setTimeout(()=>r(null),3000))]);}catch{bridge=null;}
+    try{bridge=await Promise.race([chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),new Promise(r=>setTimeout(()=>r(null),SELF_TEST_BRIDGE_WAIT_MS))]);}catch{bridge=null;}
     tabRealm=validRealmNumber(bridge?.realm);
     add('tab-content','Content script & page bridge',!bridge?'fail':bridge.ready?'pass':'warn',!bridge?'Content script did not answer (reload the game tab)':bridge.ready?'Content script answered; page-hook bridge connected':'Content script answered but the page-hook bridge is not ready',{contentScript:!!bridge,bridgeReady:!!bridge?.ready,realmKnown:tabRealm!=null});});
   // 3. Captured data per realm
   const stores={};
+  // The realm you play now (game tab, else the active / selected realm): only its gaps are a warning; the other
+  // realm's partial data (an old visit, no auth-data) is reported as info (skip).
+  let playRealm=tabRealm;if(playRealm==null){try{playRealm=await activeRealmNumber();}catch{}}
+  if(playRealm==null){try{playRealm=validRealmNumber((await chrome.storage.local.get({selectedRealm:null})).selectedRealm);}catch{}}
   for(const n of Object.keys(REALM_DEFINITIONS).map(Number)){
     const id=`realm-${n}`,name=`Captured data ${realmDisplayNumber(n)}`;
     await safe(id,name,async()=>{const st=await notifyRealmStore(n);stores[n]=st;const s=C.realmDataSummary(st);
       const mo=(await chrome.storage.local.get({[`scmMarketOrders:${n}`]:null}))[`scmMarketOrders:${n}`];s.marketOrders=Array.isArray(mo?.data)?mo.data.length:Array.isArray(mo?.orders)?mo.orders.length:0;
-      const v=C.evalRealmData(s);
-      add(id,name,v,v==='skip'?'No data captured for this realm yet':`auth ${s.hasAuthData?'yes':'no'}, ${s.buildings} buildings, ${s.resources} resources, ${s.marketOrders} market orders, ${s.contracts} contracts; last sync ${s.lastSync||'never'}${s.hasSyncError?' (last sync reported an error)':''}`,s);});
+      const v0=C.evalRealmData(s),other=playRealm!=null&&n!==playRealm,v=other&&v0==='warn'?'skip':v0;
+      add(id,name,v,v0==='skip'?'No data captured for this realm yet':`${other&&v0==='warn'?`Not the realm you play (${realmDisplayNumber(playRealm)}), info only: `:''}auth ${s.hasAuthData?'yes':'no'}, ${s.buildings} buildings, ${s.resources} resources, ${s.marketOrders} market orders, ${s.contracts} contracts; last sync ${s.lastSync||'never'}${s.hasSyncError?' (last sync reported an error)':''}`,s);});
   }
   await safe('api-fresh','Recent game API capture',async()=>{const cand=[scmSelfTestSeen.apiDataAt,scmSelfTestSeen.apiSeenAt,...Object.values(stores).map(s=>Date.parse(C.realmDataSummary(s).latestReceived||''))].filter(Number.isFinite).sort((a,b)=>b-a);const f=C.evalFreshness(cand[0],now,30,24*60);const iso=v=>v?new Date(v).toISOString():null;add('api-fresh','Recent game API capture',f.status,f.ageMin==null?'No API data captured yet':`Last captured ${f.ageMin} min ago`,{ageMin:f.ageMin,apiSeenAt:iso(scmSelfTestSeen.apiSeenAt),apiDataAt:iso(scmSelfTestSeen.apiDataAt)});});
   // 4. Live read-only fetch: one GET through the existing page path, own cooldown, skipped during a sync
@@ -9923,6 +10236,8 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         gameOverlayManualRefreshAt.set(realm,now);
         const results=await Promise.allSettled([refreshRealmWarehouseForOverlay(realm,0),refreshOutgoingContracts(realm,0,{lane:true}),refreshMarketOrders(realm,0,{lane:true})]);
         const outcomes=results.map(r=>r.status==='fulfilled'?r.value:{ok:false,error:r.reason?.message||String(r.reason)});
+        // Your listings held back (slot taken / 15 s gap / backoff): not dropped, ONE deferred retry when the slot frees.
+        if(marketOrdersNeedsRetry(outcomes[2]))queueMarketOrdersRetry(realm,'overlay').catch(()=>{});
         if(outcomes.some(r=>r?.ok))scheduleGameOverlayRefreshNotification(realm,150);
         // One text per cause: under the direct-read block all three reads fail with the same notice.
         // A shared-lane wait (laneWait: no request made, the lane's next slot is later) is a planned skip, not a failure;
@@ -10040,12 +10355,14 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       try{
         const realm=validRealmNumber(m.realm);if(realm==null){send({ok:false,error:'No realm.'});return;}
         // No stored auth-data for this realm yet: no lane read (the auth-data fallback needs the slot first).
-        if(m.refresh&&await realmHasStoredAuthData(realm))refreshMarketOrders(realm,0,{lane:true}).catch(()=>{});
+        // One realm-store read for the auth-data check and the VWAP column (it was read twice per card request).
+        const storeP=notifyRealmStore(realm).catch(()=>({}));
+        if(m.refresh&&realmStoreHasAuthData(await storeP,realm))refreshMarketOrders(realm,0,{lane:true}).catch(()=>{});
         const k=`scmMarketOrders:${realm}`;const mo=(await chrome.storage.local.get({[k]:null}))[k];
         // refreshError: the last refresh failed (message + when), so old or empty rows are not real "0 listings".
         const refreshError=ownListingsRefreshError.get(realm)||null;
         if(!mo||!Array.isArray(mo.orders)){send({ok:true,realm,at:null,rows:[],missing:true,refreshError});return;}
-        const [assets,store]=await Promise.all([gameOverlayAssets(),notifyRealmStore(realm)]);
+        const [assets,store]=await Promise.all([gameOverlayAssets(),storeP]);
         const rows=mo.orders.map(o=>{
           const kind=Number(o?.kind??o?.resourceId??o?.resource?.id),quality=Number(o?.quality)||0,quantity=Number(o?.quantity??o?.amount)||0,price=Number(o?.price)||0;
           const file=assets.images?.[String(kind)];const vwap=overlayVwap(store,kind,quality,realm);
@@ -10321,10 +10638,15 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         // A listings read still on the wire sees the new generation and writes nothing; new reads may start at once.
         marketOrdersInFlight.clear();marketOrdersNetStart.clear();ownListingsRefreshError.clear();
         await chrome.storage.session?.remove([MARKET_ORDERS_GATE_KEY+0,MARKET_ORDERS_GATE_KEY+1]).catch(()=>{});
+        // Deferred listings retries (their alarms went with clearAll above) and the quiet not-read stretches.
+        try{await marketOrdersRetryClearAll();}catch{}
+        try{await activityStretchClear();}catch{}
         outgoingContractsRefreshAt.clear();abundanceAutoState.clear();gameCaptureLogAt.clear();gameOverlayManualRefreshAt.clear();
         // The constants were just cleared: drop their retry backoff too, so the scm-game-constants alarm that
         // ensureStandingAlarms re-creates below (1 min delay) reads them again instead of waiting out an old backoff.
         await gameConstantsRetrySet(null);
+        // The constants-on-bridge flag (scmGameConstantsOnBridge, storage.session) and its in-memory copy go too.
+        try{await gameConstantsOnBridgeSet(false);}catch{}
         // Direct-read block (scmDirectReadsBlocked) and the shared SimcoTools gate (scmSimcoToolsGate) live in
         // storage.session: drop both, so the next read rechecks the block and the gate starts empty.
         directReadRecheckInFlight=false;await directReadBlockSet(null);
@@ -10334,7 +10656,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
         realmStorageMigrationChecked=false;realmMigrationPromise=null;
         const resetDefaults={...DEFAULTS,selectedRealm:null,activeRealmKey:null,vwapStatus:{message:'Waiting for VWAP sync.'},marketQueueStatus:{message:'Waiting for the logged-in Sim Companies tab.',updatedAt:new Date().toISOString()},resourceImageData:{}};
         await storageSet(resetDefaults);
-        await ensureStandingAlarms();
+        await ensureStandingAlarms({simcoPublic:false}); // scm-simco-public is placed below, after the live-market alarm
         await applyBundledGameConstants().catch(()=>{}); // scmGameConstants back from the built-in copy (constants.json) at once
         await ensureCriticalDataGuard('clear-extension-data');
         await ensureLiveMarketRefreshAlarm('clear-extension-data'); // ClearAll removed it too
@@ -10458,10 +10780,11 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       // A building collect is stamped at once (no reply is read); an id that is not a stored building writes nothing.
       if(String(m.method||'').toUpperCase()==='POST'&&collectTakeBuildingIdFromUrl(m.url)!=null){try{noteBuildingTake(m.url,realm);}catch{}}
       if(realm==null){try{const meta=await chrome.storage.local.get({activeRealmKey:null});realm=validRealmNumber(realmNumberFromKey(meta.activeRealmKey)??meta.activeRealmKey);}catch{}}
-      // A collect (POST /api/v2/order/take/<id>/) is followed by the game's own warehouse refresh, which the page hook
-      // captures. The Manager sends no warehouse read for it (game-request rule); other stock actions still read.
-      const isCollect=String(m.method||'').toUpperCase()==='POST'&&/\/api\/v2\/order\/take\/\d+\/?/i.test(String(m.url||''));
-      if(realm!=null){if(!isCollect)scheduleWarehouseRefreshAfterStockMutation(realm,150);scheduleOwnOrdersRefresh(realm);}})();
+      // A collect (POST /api/v2/order/take/<id>/, one per building for "Collect all") is NOT followed by a game warehouse
+      // GET (the game updates its own state from the POST replies; captures of 2026-11-11 show the next /api/v3/resources/
+      // only when the warehouse page is opened). So it gets the same batched warehouse read as a contract accept; a burst
+      // of collects shares one read (scheduleWarehouseRefreshAfterStockMutation: 150 ms debounce, 3 s floor).
+      if(realm!=null){scheduleWarehouseRefreshAfterStockMutation(realm,150);scheduleOwnOrdersRefresh(realm);}})();
     send({ok:true});return true}
   if(m?.type==='WAREHOUSE_COST_DETAIL'){saveWarehouseCostDetail(m).then(send).catch(e=>send({ok:false,error:e?.message||String(e)}));return true;}
   if(m?.type==='REPLAY_EVENT'){
@@ -10510,6 +10833,8 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
       send({...result,autoDetected:false,autoFollow:{ok:true,changed:false,reason:'game-state-isolation'}});
       // The game tab is up: fill constants / images that are completely missing (fresh install).
       fillMissingGameData('game-tab',{onlyMissing:true}).catch(()=>{});
+      // A constants read held back at install / update / worker start for want of a game tab runs now.
+      (async()=>{if(!(await gameConstantsOnBridgeTake()))return;const e=await scmTimerEntry('gameConstants').catch(()=>null);if(e&&!e.enabled)return;await refreshGameConstants(false,gameConstantsMaxAge(e),{quietNoTab:true});})().catch(()=>{});
     })().catch(e=>send({ok:false,error:e?.message||String(e)}));
     return true;
   }

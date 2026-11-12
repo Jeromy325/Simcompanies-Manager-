@@ -1204,7 +1204,9 @@
       } catch {}
       emit('API_RESULT', { id, ok: response.ok, status: response.status, statusText: response.statusText, data, captureRealm: (Number.isFinite(forcedCaptureRealm) && forcedCaptureRealmUntil > Date.now()) ? forcedCaptureRealm : lastKnownRealm });
     } catch (error) {
-      emit('API_RESULT', { id, ok: false, status: 0, error: error?.name === 'AbortError' ? 'Sim Companies page API request timed out.' : (error?.message || String(error)) });
+      // networkError: fetch rejected (no HTTP answer: offline, connection dropped, page frozen) or timed out; hidden /
+      // offline: the page state at that moment, so the background can tell "no network" from a game failure.
+      emit('API_RESULT', { id, ok: false, status: 0, error: error?.name === 'AbortError' ? 'Sim Companies page API request timed out.' : (error?.message || String(error)), networkError: true, hidden: document.visibilityState !== 'visible', offline: navigator.onLine === false });
     } finally {
       clearTimeout(timeout);
     }

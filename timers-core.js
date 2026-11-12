@@ -148,6 +148,9 @@
       contractBook: Object.freeze({ prio: 2, everyMs: 5 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Order book for an incoming contract' }),
       contracts: Object.freeze({ prio: 3, everyMs: 15 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Outgoing contracts' }),
       marketOrders: Object.freeze({ prio: 3, everyMs: 15 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Your exchange listings' }),
+      // A listings read held back after a game action (scheduleOwnOrdersRefresh / overlay refresh): its retry asks the
+      // lane (key listings:<realm>) and the lane alarm runs it, so it keeps its place in the queue between slots.
+      listings: Object.freeze({ prio: 3, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Your exchange listings (after a game action)' }),
       lostData: Object.freeze({ prio: 3, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Lost data check' }),
       ticker: Object.freeze({ prio: 4, everyMs: 60 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Market ticker' }),
       gameConstants: Object.freeze({ prio: 5, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Game constants' }),
@@ -180,13 +183,24 @@
   // Who gets the free slot: among the starved wants if there are any, else among all: the lowest prio, then the
   // oldest, then the key. So a job waiting 10 min goes before a higher job that has not waited that long; a want
   // older than STARVE_LONG_MS (30 min) goes first whatever its priority (oldest first), so every job gets a turn.
-  function laneWinner(wants, now = Date.now()) {
+  // lastAt (when the last slot went out): after your stock (prio 1, at most one slot in three), a want that already
+  // lost a slot goes first (oldest first), then the wants made while this slot was busy (oldest first); so no job waits more than one slot after the slot frees (2.5.464: the held
+  // listings read lost every slot to the order-book alarm and the contracts poll for 7+ min).
+  function laneWinner(wants, now = Date.now(), lastAt = 0) {
     const list = Object.entries(wants || {}).map(([k, w]) => ({ k, since: laneNum(w && w.since), prio: laneSpec(k).prio }));
     if (!list.length) return null;
+    const last = laneNum(lastAt);
+    const byAge = (a, b) => a.since - b.since || a.prio - b.prio || (a.k < b.k ? -1 : a.k > b.k ? 1 : 0);
     // A waiting priority-1 job (your warehouse, the company auth-data it needs) always goes first: those have their
     // own 15 min spacing, so they never hold the lane for more than two slots in three.
     const top = list.filter(x => x.prio === 1);
     if (top.length) { top.sort((a, b) => a.since - b.since || (a.k < b.k ? -1 : a.k > b.k ? 1 : 0)); return top[0].k; }
+    // 2. a want that already lost a slot (made before the last slot went out): next, oldest first.
+    const lost = last ? list.filter(x => x.since < last) : [];
+    if (lost.length) { lost.sort(byAge); return lost[0].k; }
+    // 3. a want made while this slot was still busy (it waited for it): oldest first, before one asking only now.
+    const waited = last ? list.filter(x => x.since < last + LANE.GAP_MS) : [];
+    if (waited.length) { waited.sort(byAge); return waited[0].k; }
     const long = list.filter(x => now - x.since >= LANE.STARVE_LONG_MS);
     if (long.length) { long.sort((a, b) => a.since - b.since || a.prio - b.prio || (a.k < b.k ? -1 : a.k > b.k ? 1 : 0)); return long[0].k; }
     const starved = list.filter(x => now - x.since >= LANE.STARVE_MS);
@@ -206,7 +220,7 @@
     const prev = st.wants[key];
     st.wants[key] = { since: prev ? prev.since : now, at: now };
     if (st.lastAt && now - st.lastAt < LANE.GAP_MS) return { take: false, reason: 'gap', nextAt: st.lastAt + LANE.GAP_MS, state: st };
-    const winner = laneWinner(st.wants, now);
+    const winner = laneWinner(st.wants, now, st.lastAt);
     if (winner !== key) return { take: false, reason: 'yield', winner, nextAt: now, state: st };
     if (peek) return { take: true, peek: true, nextAt: now, state: st };
     delete st.wants[key];
