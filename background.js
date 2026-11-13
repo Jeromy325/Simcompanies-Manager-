@@ -3290,6 +3290,9 @@ function shouldPersistPassiveApiCaptureDuringSync(session,url,method='GET'){
   const allowed=Array.isArray(session.capturePaths)?session.capturePaths:[];
   // The market ticker the game page loads itself is kept even during a Sync (the Manager no longer reads it).
   if(/^\/api\/v3\/market-ticker\/\d+\/?$/.test(String(url||'')))return true;
+  // So is a product's order book (live R2 2026-11-12: Power opened on the game tab 8 s before the crawl was dropped
+  // here; the crawl's visit then got the game's cached copy and no request, so Power stayed missing).
+  if(/^\/api\/v3\/market\/[01]\/\d+\/?$/.test(String(url||'')))return true;
   return allowed.includes(String(url||''));
 }
 function enqueueApiStorageCommit(task,realm=null){
@@ -3377,7 +3380,11 @@ function syncCaptureFromSyncTab(session,sender){const id=session?.gameTabId;retu
 function recordSyncWalkCapture(session,m,sender){
   if(!session||!syncCaptureFromSyncTab(session,sender))return false;
   const url=String(m?.url||'');
-  if(session?.syncCaptures&&session.syncCapturePaths&&validRealmNumber(m.captureRealm)===validRealmNumber(session.realm)&&Number(m.status)>=200&&Number(m.status)<300){const p=url.replace(/^https?:\/\/[^/]+/,'').split('?')[0];if(session.syncCapturePaths.has(p))session.syncCaptures[p]={status:m.status,data:m.data,receivedAt:new Date().toISOString(),at:Date.now()};}
+  if(validRealmNumber(m.captureRealm)===validRealmNumber(session.realm)&&Number(m.status)>=200&&Number(m.status)<300){const p=url.replace(/^https?:\/\/[^/]+/,'').split('?')[0];const c={status:m.status,data:m.data,receivedAt:new Date().toISOString(),at:Date.now()};
+    if(session.syncCaptures&&session.syncCapturePaths?.has(p))session.syncCaptures[p]=c;
+    // Before the capture list is ready (auth reload, realm switch) the game already loads target data (live R2 2026-11-12:
+    // both contracts at boot, 8 s before the list; later visits got the game cache and no request). Kept for this Sync.
+    else if(!session.syncCapturePathsReady&&p.startsWith('/api/'))(session.syncEarlyCaptures||(session.syncEarlyCaptures={}))[p]=c;}
   if(session?.walkCaptures&&validRealmNumber(m.captureRealm)===validRealmNumber(session.realm)){session.walkCaptures[url]={status:m.status,data:m.data,receivedAt:new Date().toISOString(),at:Date.now()};if(/\/buildings\/\d+\/abundance\//.test(url)&&Number(m.status)>=200&&Number(m.status)<300)(session.abundanceCaptures||(session.abundanceCaptures={}))[url]=session.walkCaptures[url];}
   return true;
 }
@@ -4677,6 +4684,8 @@ function endpointPayloadsEqual(left,right){
 // that window (same realm, valid data) counts as verified, flagged fromGamePage ("from the game page at HH:MM").
 // The stored record has no source marker: any realm-stamped 2xx record is the game's own answer (passive capture, or
 // a Manager lane read of the same address).
+// Age is taken at Sync start (options.recentGameAtMs): live R2 2026-11-12 the game kept its 14-min-old past-finances-overview
+// for the whole Sync and never reloaded it, so judged at the final check (17.7 min) it failed Accounting.
 const SYNC_RECENT_GAME_CAPTURE_MS=15*60000;
 function syncRecentGameCaptureOk(entry,realm,path,now=Date.now(),maxAgeMs=SYNC_RECENT_GAME_CAPTURE_MS){
   const n=validRealmNumber(realm);
@@ -4705,7 +4714,7 @@ async function verifyDurableEndpointWrite(realm,path,startedAtMs,expectedData=nu
   const attemptedAt=Date.parse(String(entry.lastAttempt?.receivedAt||''));
   const freshRecord=Number.isFinite(receivedAt)&&receivedAt>=Number(startedAtMs||0);
   const freshAttempt=Number.isFinite(attemptedAt)&&attemptedAt>=Number(startedAtMs||0);
-  if(!freshRecord&&!(allowPreserved&&freshAttempt)&&Number(options?.acceptRecentGameMs)>0&&syncRecentGameCaptureOk(entry,n,path,Date.now(),Number(options.acceptRecentGameMs))){
+  if(!freshRecord&&!(allowPreserved&&freshAttempt)&&Number(options?.acceptRecentGameMs)>0&&syncRecentGameCaptureOk(entry,n,path,Number(options.recentGameAtMs)>0?Number(options.recentGameAtMs):Date.now(),Number(options.acceptRecentGameMs))){
     return {ok:true,realm:n,path,status,receivedAt:entry.receivedAt||null,lastAttemptAt:entry.lastAttempt?.receivedAt||null,preservedPriorData:false,fromGamePage:true,fromGamePageAt:simcoChannelClock(receivedAt)};
   }
   if(!freshRecord&&!(allowPreserved&&freshAttempt))return {ok:false,reason:'stored-endpoint-is-stale',receivedAt:entry.receivedAt||null,lastAttemptAt:entry.lastAttempt?.receivedAt||null};
@@ -8881,8 +8890,12 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
             syncTrace
           }),selected);
         })(),5000,'Sync diagnostic persistence');
+        // A checkpoint that timed out is only a gap once a later one is saved (live R2 2026-11-12: one mid-Sync
+        // checkpoint missed its 5 s, the rest saved, and a 4/4 Sync was reported "partial: diagnostic persist").
+        if(session.diagnosticPersistGaps){for(const x of syncTrace)if(x.type==='diagnostic-persist-failed')x.type='diagnostic-persist-late';session.diagnosticPersistGaps=0;}
         return true;
       }catch(e){
+        session.diagnosticPersistGaps=(session.diagnosticPersistGaps||0)+1;
         syncTrace.push({at:Date.now(),type:'diagnostic-persist-failed',error:e?.message||String(e)});
         return false;
       }
@@ -8986,7 +8999,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     // per page), so the final durability recovery can re-save the game's own answer without a direct read.
     session.syncCapturePaths=new Set();session.syncCaptures={};
     const syncCaptureFor=(path,sinceMs)=>{
-      const c=session.syncCaptures?.[path];
+      const c=session.syncCaptures?.[path]||session.syncEarlyCaptures?.[path];
       const st=Number(c?.status)||0;
       if(!c||st<200||st>=300||Number(c.at)<Number(sinceMs)||!endpointDataIsValid(path,c.data))return null;
       return {ok:true,status:st,data:c.data,captureRealm:selected,fromPageCapture:true,receivedAt:c.receivedAt};
@@ -9149,7 +9162,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       let cid=0;
       try{const cur=await state();const st0=cur.realmStores?.[realmKeyFromRealm(selected)]||{};cid=Number(st0.authData?.authCompany?.companyId||st0.authData?.authCompany?.id||cur.authData?.authCompany?.companyId||cur.authData?.authCompany?.id)||0;}catch{}
       for(const t of targets)for(const p of syncTargetPaths(t.name,cid))session.syncCapturePaths.add(p);
-      trace('sync-capture-paths',{count:session.syncCapturePaths.size});
+      session.syncCapturePathsReady=true;
+      trace('sync-capture-paths',{count:session.syncCapturePaths.size,early:Object.keys(session.syncEarlyCaptures||{}).filter(p=>session.syncCapturePaths.has(p))});
     }
     for(let i=0;i<targets.length;i++){
       const target=targets[i];
@@ -9615,7 +9629,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       const retryPaths=[];
       const verifyPath=async requiredPath=>{
         const v=await withSyncTimeout(
-          verifyDurableEndpointWrite(selected,requiredPath,result.startedAtMs||startedAt,null,null,target.name==='Accounting',{acceptRecentGameMs:SYNC_RECENT_GAME_CAPTURE_MS}),
+          verifyDurableEndpointWrite(selected,requiredPath,result.startedAtMs||startedAt,null,null,target.name==='Accounting',{acceptRecentGameMs:SYNC_RECENT_GAME_CAPTURE_MS,recentGameAtMs:startedAt}),
           3000,`Final durable endpoint verification ${requiredPath}`
         );
         if(v?.ok&&v.fromGamePage){
@@ -9687,7 +9701,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         trace('target-durable-verification-failed',{name:result.name,requiredCount:verification.requiredCount,verifiedCount:verification.verifiedCount,missingEndpoints:missing});
       }
     }
-    session.capturePaths=[];session.syncCaptures=null;session.syncCapturePaths=null;
+    session.capturePaths=[];session.syncCaptures=null;session.syncCapturePaths=null;session.syncEarlyCaptures=null;
     const missingRequiredEndpoints=results.filter(result=>!result.optional).flatMap(result=>(result.finalDurableVerification?.endpoints||[]).filter(item=>!item.ok).map(item=>({target:result.name,path:item.path,reason:item.reason||'unverified'})));
     const missingRequiredWrites=[...new Set(missingRequiredEndpoints.map(item=>item.target))];
     const successfulAfterDurability=results.filter(result=>result.ok&&result.finalDurableVerification?.ok).length;
@@ -9755,6 +9769,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
       syncPolicy:{apiFirst:true,clickTimeoutMs:SYNC_CLICK_TIMEOUT_MS,fallbackCaptureMs:SYNC_CAPTURE_FALLBACK_MS,pageApiTimeoutMs:SYNC_PAGE_API_TIMEOUT_MS,pageApiAttempts:SYNC_PAGE_API_ATTEMPTS},
       syncTrace
     },selected),5000,'Final Sync diagnostic persistence');
+    if(session.diagnosticPersistGaps){for(const x of syncTrace)if(x.type==='diagnostic-persist-failed')x.type='diagnostic-persist-late';session.diagnosticPersistGaps=0;}
 
     await withSyncTimeout(enqueueApiStorage(async()=>{
       const finalPersist=await state(selected); // The synced realm's own store, even if the tab switched realms meanwhile
