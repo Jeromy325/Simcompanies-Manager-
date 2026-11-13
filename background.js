@@ -4556,7 +4556,8 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
     const realmPatch={...patch};
     if(endpointResult?.store?.apiEndpoints)realmPatch.apiEndpoints=endpointResult.store.apiEndpoints;
     await storageSetRealmPatch(targetRealm,realmPatch,onTiming);
-    if(overlayRelevant) scheduleGameOverlayRefreshNotification(targetRealm);
+    // A new warehouse snapshot is what the overlay shows: tell it at once (150 ms coalesces the same page's other saves).
+    if(overlayRelevant) scheduleGameOverlayRefreshNotification(targetRealm,Object.prototype.hasOwnProperty.call(patch,'warehouseResources')?150:650);
     if(buildingMatch&&incomingStatus>=200&&incomingStatus<300&&Array.isArray(data))recordRunHistoryCapture(targetRealm,Number(buildingMatch[1])).catch(()=>{});
     if(Array.isArray(patch.buildings)&&patch.buildings.length)reconcileProductionBuildings(targetRealm).catch(()=>{});
     {const sm=String(url||'').replace(/[?#].*$/,'').match(STATEMENT_DAY_RX);if(sm&&incomingStatus>=200&&incomingStatus<300&&data&&typeof data==='object')queueStatementHistory(targetRealm,[{kind:sm[1],data}]).catch(()=>{});}
@@ -4565,6 +4566,21 @@ async function saveDataUnlocked(url,data,status=200,method='GET',captureRealm=nu
   };
   if(redispatch)return enqueueApiStorage(commitTail,targetRealm,{url:String(url||'')});
   return commitTail();
+}
+const warehouseArrivalSeq=new Map(); // realm -> number of the newest game warehouse answer
+async function holdArrivedWarehouse(realm,data,seq=0){
+  const n=validRealmNumber(realm);if(n==null)return false;
+  if(currentCaptureSyncSession())return false; // a Sync commits its own captures
+  const rows=normalizeWarehouse(data);if(!looksLikeWarehouseRows(rows))return false;
+  const clearGen=extensionClearGeneration;
+  const cur=await readPhysicalRealmStore(n);
+  if(clearGen!==extensionClearGeneration||(seq&&warehouseArrivalSeq.get(n)!==seq))return false;
+  await storageSetRealmPatch(n,{warehouseResources:mergeWarehouseSnapshot(rows,cur?.warehouseResources)});
+  // The overlay's data is built in this worker, which reads the buffer: no need to wait for the physical write. Build it
+  // first, then tell the page, so its first redraw already has the new rows (a page asking first gets the last snapshot).
+  gameOverlayDirty.add(n);
+  setTimeout(()=>{refreshGameOverlayDataHeavy(n).then(()=>notifyGameOverlayRefresh(n)).catch(()=>{});},0);
+  return true;
 }
 async function saveData(url,data,status=200,method='GET',captureRealm=null,onTiming=null,durableOptions=null){
   const enqueuedAt=Date.now();
@@ -4577,10 +4593,24 @@ async function saveData(url,data,status=200,method='GET',captureRealm=null,onTim
   // cancelled): behind a long API storage queue (large realm stores) it used to be seen after the 10 s window, so the
   // single Collect had no line until the slow Manager read finished. The overlay is told after the save below.
   let gameWh=null;
-  if(String(method||'GET').toUpperCase()==='GET'&&Number(status)>=200&&Number(status)<300&&(captureRealm===0||captureRealm===1)&&/\/api\/v3\/resources\/\d+\/?(?:\?.*)?$/i.test(String(url||''))){try{gameWh=noteGameWarehouseCapture(captureRealm,data,enqueuedAt,{notify:false});}catch{}}
+  // The game's warehouse answer (e.g. back on Warehouse after posting on the exchange) is saved ahead of other queued
+  // captures (live R2 2026-11-12: it waited 4.7 s behind the two contract saves the same page loads), so the overlay
+  // follows at once. It never overtakes an older save of the same URL (enqueueApiStorage).
+  const warehouseGet=String(method||'GET').toUpperCase()==='GET'&&Number(status)>=200&&Number(status)<300&&(captureRealm===0||captureRealm===1)&&/\/api\/v3\/resources\/\d+\/?(?:\?.*)?$/i.test(String(url||''));
+  // Newest warehouse answer per realm: an older one still queued (two answers seconds apart) is not written over it.
+  const warehouseSeq=warehouseGet?(warehouseArrivalSeq.set(queueRealm,(warehouseArrivalSeq.get(queueRealm)||0)+1),warehouseArrivalSeq.get(queueRealm)):0;
+  if(warehouseGet){try{gameWh=noteGameWarehouseCapture(captureRealm,data,enqueuedAt,{notify:false});}catch{}
+    // Shown at once: the rows go into the realm patch buffer (every reader sees it; it writes itself within 750 ms) and the
+    // overlay is told now. Live R2 2026-11-12 the full save below still waited 4-5 s behind the page's other captures.
+    holdArrivedWarehouse(captureRealm,data,warehouseSeq).catch(()=>{});}
   return enqueueApiStorage(async()=>{
     if(clearGen!==extensionClearGeneration)return; // queued before Clear Stored Data: must not bring the record back
     const queueWaitMs=Date.now()-enqueuedAt;
+    // A newer warehouse answer arrived while this one waited: it is saved next (same URL, FIFO); this one is not.
+    if(warehouseGet&&!durableOptions&&warehouseArrivalSeq.get(queueRealm)!==warehouseSeq){
+      try{onTiming?.({queueWaitMs,queuedJobsAheadAtEnqueue,ok:true,skipped:'newer-warehouse'});}catch{}
+      return {ok:true,skipped:'newer-warehouse'};
+    }
     const schedulerAtStart=apiStorageSchedulers.get(queueKey);
     const queuedJobsBehindAtStart=schedulerAtStart?.queue?.length||0;
     const saveStartedAt=Date.now();
@@ -4615,7 +4645,7 @@ async function saveData(url,data,status=200,method='GET',captureRealm=null,onTim
       try{onTiming?.({queueWaitMs,queuedJobsAheadAtEnqueue,queuedJobsBehindAtStart,saveDurationMs:Date.now()-saveStartedAt,totalDurationMs:Date.now()-enqueuedAt,...commitTiming,ok:false,error:error?.message||String(error)});}catch{}
       throw error;
     }
-  },captureRealm,{priority:Boolean(durableOptions),url:String(url||'')});
+  },captureRealm,{priority:Boolean(durableOptions)||warehouseGet,url:String(url||'')});
 }
 
 // Compare JSON endpoint payloads independent of object property insertion
@@ -11341,7 +11371,9 @@ const alarms=prodfin.map(x=>{const [,r,bid]=String(x.name).split(':');const b=(A
         send({ok:true,skipped:true,reason:'outside-current-sync-target-paths'});
         return;
       }
-      await saveData(url,m.data,m.status,m.method||'GET',m.captureRealm);
+      // Warehouse answers: how long the save waited and took (replay journal), so overlay lag can be traced.
+      const whTiming=/\/api\/v3\/resources\/\d+\/?(?:\?.*)?$/i.test(url)?t=>replayEvent('warehouse-save-timing',{realm:validRealmNumber(m.captureRealm),queueWaitMs:t?.queueWaitMs,aheadAtEnqueue:t?.queuedJobsAheadAtEnqueue,saveMs:t?.saveDurationMs,totalMs:t?.totalDurationMs,ok:t?.ok}):null;
+      await saveData(url,m.data,m.status,m.method||'GET',m.captureRealm,whTiming);
       if(/\/api\/v3\/companies\/auth-data\//.test(url)){
         const responseRealm=validRealmNumber(m.data?.authCompany?.realmId??m.data?.authCompany?.realm??m.data?.realmId??m.data?.realm);
         const captureRealm=validRealmNumber(m.captureRealm);
