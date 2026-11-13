@@ -147,6 +147,28 @@
     return result;
   }
 
+  // Demand the production does not cover, per "id:quality" (same allocation order as productionSurplusByKey). The
+  // shortfall goes on the lowest produced quality that could serve it, else on the demanded minimum quality.
+  function productionDeficitByKey(productionRows = [], demandRows = []){
+    const sup=new Map(),dem=new Map();
+    const add=(map,id,row)=>{const n=Number(id);if(!Number.isFinite(n)||n<=0)return;if(!map.has(n))map.set(n,[]);map.get(n).push(row);};
+    for(const row of Array.isArray(productionRows)?productionRows:[]){const id=Number(row?.id??row?.resourceId??row?.kind),quality=Math.max(0,Number(row?.quality??row?.q)||0),amount=Number(row?.amount??row?.qty??row?.quantity);if(Number.isFinite(amount)&&amount>0)add(sup,id,{quality,amount});}
+    for(const row of Array.isArray(demandRows)?demandRows:[]){const id=Number(row?.id??row?.resourceId??row?.kind),minQuality=Math.max(0,Number(row?.minQuality??row?.quality??row?.q)||0),amount=Number(row?.amount??row?.qty??row?.quantity);if(Number.isFinite(amount)&&amount>0)add(dem,id,{minQuality,amount});}
+    const result=new Map();
+    for(const [id,demands] of dem){
+      const supplies=(sup.get(id)||[]).map(x=>({...x})).sort((a,b)=>b.quality-a.quality||b.amount-a.amount);
+      for(const d of [...demands].sort((a,b)=>b.minQuality-a.minQuality||b.amount-a.amount)){
+        let need=d.amount;
+        for(const x of supplies){if(need<=1e-9)break;if(x.amount<=1e-9||x.quality<d.minQuality)continue;const take=Math.min(need,x.amount);x.amount-=take;need-=take;}
+        if(need<=1e-9)continue;
+        const ok=supplies.filter(x=>x.quality>=d.minQuality).map(x=>x.quality);
+        const key=vwapKey(id,ok.length?Math.min(...ok):d.minQuality);
+        result.set(key,(result.get(key)||0)+need);
+      }
+    }
+    return result;
+  }
+
   function productionBalance(specs, recipeByProduct, hours, resourceNames){
     const ledger=productionPlanLedger(specs,recipeByProduct,hours);
     const resourceMap=new Map();
@@ -813,7 +835,11 @@
   // A resource+quality that running buildings need as input stays listed even when nothing produces it right now
 // (producing:false; reason 'upgrading' when its only producer is being expanded, else 'not producing'), so a shortfall shows.
 // upgradingKeys: Set of "id:quality" (or "id:*" when the quality is unknown) made by expanding buildings (network.upgradingKeys).
-function stockAfterDemand({ warehouse = [], productionRows = [], demandRows = [], savedContracts = [], upgradingKeys = null } = {}) {
+// runsByKey (network.etaRunsByKey): the running buildings' countdown runs per "id:quality". Their outstanding amount (made
+// and not collected, plus still to make) reaches the warehouse by the run end, so Left counts it: Left = warehouse +
+// run output still to come + saved incoming − demand − saved outgoing. stockLeft is the same without the run output
+// (what can be sold or sent now). Surplus is signed: demand the production does not cover is negative.
+function stockAfterDemand({ warehouse = [], productionRows = [], demandRows = [], savedContracts = [], upgradingKeys = null, runsByKey = null } = {}) {
     const grouped = new Map();
     for (const row of Array.isArray(warehouse) ? warehouse : []) {
       const id = Number(row?.id ?? row?._id ?? row?.kind ?? row?.resourceId), q = Number(row?.quality ?? row?._quality ?? row?.q ?? row?.resourceQuality);
@@ -824,7 +850,12 @@ function stockAfterDemand({ warehouse = [], productionRows = [], demandRows = []
     }
     const groupedRows = [...grouped.values()];
     const warehouseRowsForCore = groupedRows.map(r => ({ id: r.id, quality: r.quality, amount: r.qty }));
-    const surplusByKey = productionSurplusByKey(productionRows, demandRows);
+    const surplusByKey = productionSurplusByKey(productionRows, demandRows), deficitByKey = productionDeficitByKey(productionRows, demandRows);
+    const pendingByKey = new Map();
+    if (runsByKey && typeof runsByKey.forEach === 'function') runsByKey.forEach((runs, key) => {
+      let n = 0; for (const x of Array.isArray(runs) ? runs : []) { const a = x?.amount == null ? NaN : Number(x.amount); if (Number.isFinite(a) && a > 0) n += a; }
+      if (n > 0) pendingByKey.set(String(key), n);
+    });
     // Baseline without contracts: Left quantities come from the current input balance, never from an earlier snapshot.
     const baseCoreRows = balanceSupplyDemandContracts({ warehouseRows: warehouseRowsForCore, productionRows, demandRows, includeQualityRows: true });
     const baseDetailRows = Array.isArray(baseCoreRows?.qualityRows) && baseCoreRows.qualityRows.length ? baseCoreRows.qualityRows : baseCoreRows;
@@ -888,11 +919,11 @@ function stockAfterDemand({ warehouse = [], productionRows = [], demandRows = []
     const rows = detailRows.map(r => {
       const quality = Number(r.quality) || 0, key = `${Number(r.id)}:${quality}`;
       const outgoing = Number(outgoingByKey.get(key) || 0), incoming = Number(incomingByKey.get(key) || 0);
-      const left = (Number(r.warehouseOnlyLeft) || 0) + incoming;
+      const stockLeft = (Number(r.warehouseOnlyLeft) || 0) + incoming, pending = Number(pendingByKey.get(key) || 0), left = stockLeft + pending;
       const producing = producedKeys.has(key);
       const upgrading = !producing && upgradingKeys && typeof upgradingKeys.has === 'function' && (upgradingKeys.has(key) || upgradingKeys.has(`${Number(r.id)}:*`));
-      return { ...r, quality, contracted: outgoing - incoming, incoming, outgoing, leftover: left, difference: left, warehouseOnlyLeft: left,
-        surplus: Math.max(0, Number(surplusByKey.get(key)) || 0), producing, reason: producing ? null : (upgrading ? 'upgrading' : 'not producing') };
+      return { ...r, quality, contracted: outgoing - incoming, incoming, outgoing, pending, stockLeft, leftover: left, difference: left, warehouseOnlyLeft: stockLeft,
+        surplus: Math.max(0, Number(surplusByKey.get(key)) || 0) - Number(deficitByKey.get(key) || 0), producing, reason: producing ? null : (upgrading ? 'upgrading' : 'not producing') };
     }).filter(r => {
       const key = `${Number(r.id)}:${Number(r.quality) || 0}`;
       const visible = producedKeys.has(key) || savedContractKeys.has(key) || (Number(r.demand) || 0) > 1e-9;
@@ -908,12 +939,14 @@ function stockAfterDemand({ warehouse = [], productionRows = [], demandRows = []
       const wh = groupedRows.filter(r => r.id === id).reduce((n, r) => n + r.qty, 0);
       idMap.set(id, { id, warehouse: wh, produced: 0, incoming: 0, demand: 0, contracted: 0, leftover: wh, warehouseOnlyLeft: wh });
     }
+    const pendingById = new Map();
+    for (const [key, n] of pendingByKey) { const id = Number(key.split(':')[0]); pendingById.set(id, (pendingById.get(id) || 0) + n); }
     const idRows = [...idMap.values()].sort((a, b) => a.id - b.id).map(r => {
-      const outgoing = Number(r.contracted) || 0, incoming = Number(incomingById.get(Number(r.id)) || 0);
-      const left = (Number(r.warehouse) || 0) - (Number(r.demand) || 0) - (outgoing - incoming);
-      return { ...r, incoming, outgoing, contracted: outgoing - incoming, leftover: left, difference: left, warehouseOnlyLeft: left, quality: null };
+      const outgoing = Number(r.contracted) || 0, incoming = Number(incomingById.get(Number(r.id)) || 0), pending = Number(pendingById.get(Number(r.id)) || 0);
+      const stockLeft = (Number(r.warehouse) || 0) - (Number(r.demand) || 0) - (outgoing - incoming), left = stockLeft + pending;
+      return { ...r, incoming, outgoing, pending, stockLeft, contracted: outgoing - incoming, leftover: left, difference: left, warehouseOnlyLeft: stockLeft, quality: null };
     });
-    return { rows, idRows, surplusByKey, baseBalanceByKey, savedQuantities, savedContractKeys, producedKeys, incomingByKey, outgoingByKey };
+    return { rows, idRows, surplusByKey, deficitByKey, pendingByKey, baseBalanceByKey, savedQuantities, savedContractKeys, producedKeys, incomingByKey, outgoingByKey };
   }
 
   // Everything the rate resolution reads, taken from a realm store (the overlay's store and the Production page's state
@@ -996,7 +1029,7 @@ function stockAfterDemand({ warehouse = [], productionRows = [], demandRows = []
     lastMondayUtc,
     EVENTS_PASSIVE_FRESH_MS,
     EVENTS_SIMCO_FRESH_MS,
-    productionSurplusByKey,
+    productionSurplusByKey, productionDeficitByKey,
     productionBalance,
     balanceSupplyDemandContracts,
     foldQualityStock,

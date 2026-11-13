@@ -913,41 +913,56 @@
     return { costUnits, buildDuration, source: (sc != null || sd != null) ? 'simcotools' : 'game' };
   }
 
-  // Government orders: game payload wins (amounts never changed); SimcoTools only names resources or supplies orders when the game has none.
-  // Game need mirrors dashboard renderGovernmentOrders: finite mult -> max(1, ceil(amountBase*mult)), else the base amount.
+  // Government orders. The game list (amounts at your tier) is only a snapshot from the last Government orders visit.
+  // When SimcoTools has open orders, its list decides WHICH orders are shown; game amounts fill in for orders in both
+  // (same project, same resource + quality). The game list alone is used only when SimcoTools has no open orders.
+  // Game need mirrors the game: finite mult -> max(1, ceil(amountBase*mult)), else the base amount.
   function mergeGovOrders(gameData, tierMult, simco, now = Date.now()) {
     const num = v => { if (v == null || v === '' || typeof v === 'boolean') return null; const x = Number(v); return Number.isFinite(x) ? x : null; };
+    const key = v => String(v ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     const mult = num(tierMult);
-    if (Array.isArray(gameData) && gameData.length) {
+    const gameRows = (Array.isArray(gameData) ? gameData : []).map(o => ({
+      title: o?.projectKey ?? null, daysToFulfill: o?.daysToFulfill ?? null,
+      resources: (Array.isArray(o?.governmentorderrequiredresourceSet) ? o.governmentorderrequiredresourceSet : []).map(r => {
+        const base = num(r?.amountBase), kind = Number(r?.kind);
+        return { kind, quality: Number(r?.quality), need: base == null ? null : mult != null ? Math.max(1, Math.ceil(base * mult)) : base, name: null };
+      })
+    }));
+    // SimcoTools daysToFulfill is the total window: report days LEFT from created; expired orders are dropped; unparsable created keeps the raw value.
+    const open = [];
+    for (const o of Array.isArray(simco?.orders) ? simco.orders : []) {
+      const total = o?.daysToFulfill ?? null, t0 = Date.parse(String(o?.created ?? '')), tot = Number(total);
+      let days = total;
+      if (Number.isFinite(t0) && total != null && Number.isFinite(tot)) { days = Math.ceil((t0 + tot * 86400000 - now) / 86400000); if (days <= 0) continue; }
+      open.push({
+        title: o?.projectName ?? null, daysToFulfill: days,
+        resources: (Array.isArray(o?.resources) ? o.resources : []).map(r => ({ kind: Number(r?.resourceId), quality: Number(r?.quality), need: null, name: r?.resourceName != null ? String(r.resourceName) : null }))
+      });
+    }
+    if (!open.length) {
+      if (!gameRows.length) return { source: null, rows: [], amountsMissing: false };
       const names = new Map();
       for (const o of Array.isArray(simco?.orders) ? simco.orders : []) for (const r of Array.isArray(o?.resources) ? o.resources : []) {
         const id = num(r?.resourceId); if (id != null && r?.resourceName && !names.has(id)) names.set(id, String(r.resourceName));
       }
-      const rows = gameData.map(o => ({
-        title: o?.projectKey ?? null, daysToFulfill: o?.daysToFulfill ?? null,
-        resources: (Array.isArray(o?.governmentorderrequiredresourceSet) ? o.governmentorderrequiredresourceSet : []).map(r => {
-          const base = num(r?.amountBase), kind = Number(r?.kind);
-          return { kind, quality: Number(r?.quality), need: base == null ? null : mult != null ? Math.max(1, Math.ceil(base * mult)) : base, name: names.get(kind) ?? null };
-        })
-      }));
-      return { source: 'game', rows, amountsMissing: mult == null };
+      for (const o of gameRows) for (const r of o.resources) r.name = names.get(r.kind) ?? null;
+      return { source: 'game', rows: gameRows, amountsMissing: mult == null };
     }
-    if (Array.isArray(simco?.orders) && simco.orders.length) {
-      // SimcoTools daysToFulfill is the total window: report days LEFT from `created`; expired orders are dropped; unparsable `created` keeps the raw value.
-      const rows = [];
-      for (const o of simco.orders) {
-        const total = o?.daysToFulfill ?? null, t0 = Date.parse(String(o?.created ?? '')), tot = Number(total);
-        let days = total;
-        if (Number.isFinite(t0) && total != null && Number.isFinite(tot)) { days = Math.ceil((t0 + tot * 86400000 - now) / 86400000); if (days <= 0) continue; }
-        rows.push({
-          title: o?.projectName ?? null, daysToFulfill: days,
-          resources: (Array.isArray(o?.resources) ? o.resources : []).map(r => ({ kind: Number(r?.resourceId), quality: Number(r?.quality), need: null, name: r?.resourceName != null ? String(r.resourceName) : null }))
-        });
-      }
-      if (!rows.length) return { source: null, rows: [], amountsMissing: false };
-      return { source: 'simcotools', rows, amountsMissing: true };
+    const byTitle = new Map(gameRows.map(o => [key(o.title), o]));
+    let matched = 0;
+    const rows = open.map(o => {
+      const g = byTitle.get(key(o.title));
+      if (!g) return o;
+      matched++;
+      return { ...o, resources: o.resources.map(r => { const gr = g.resources.find(x => x.kind === r.kind && x.quality === r.quality); return gr && gr.need != null ? { ...r, need: gr.need } : r; }) };
+    });
+    // Same open orders as the game list: the game snapshot is current.
+    if (gameRows.length && matched === open.length && matched === gameRows.length) {
+      const names = new Map(); for (const o of open) for (const r of o.resources) if (r.name && !names.has(r.kind)) names.set(r.kind, r.name);
+      for (const o of gameRows) for (const r of o.resources) r.name = names.get(r.kind) ?? null;
+      return { source: 'game', rows: gameRows, amountsMissing: mult == null };
     }
-    return { source: null, rows: [], amountsMissing: false };
+    return { source: 'simcotools', rows, amountsMissing: rows.some(o => o.resources.some(r => r.need == null)), gameAmounts: matched };
   }
 
   // Company history (SimcoTools rows, oldest first, missing = null) -> chart series for one field.

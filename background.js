@@ -980,9 +980,12 @@ function logLaneWait(realm,job,nextAt,details={},startedMs=Date.now(),trigger='m
 // the count). Success / failure lines are never held back. "No game tab is open" uses 30 min (ACTIVITY_REPEAT_NO_TAB_MS):
 // with no game tab the order-book and ticker alarms would otherwise write it every 5 min and fill the 300-line history.
 const ACTIVITY_REPEAT_MS=60000,ACTIVITY_REPEAT_NO_TAB_MS=30*60000,activityRepeatMem=new Map();
-function activityRepeatWindow(err){return /no game tab is open|switched off \(Background timers\)/i.test(String(err||''))?ACTIVITY_REPEAT_NO_TAB_MS:ACTIVITY_REPEAT_MS;}
+// The security-check pause line names its next try (the same for one pause): one line per job per pause, not one a minute.
+const ACTIVITY_REFUSAL_RE=/security check \(Cloudflare\) refuses/i;
+function activityRepeatWindow(err){const t=String(err||'');if(ACTIVITY_REFUSAL_RE.test(t))return 60*60000;return /no game tab is open|switched off \(Background timers\)/i.test(t)?ACTIVITY_REPEAT_NO_TAB_MS:ACTIVITY_REPEAT_MS;}
 function activityRepeatCheck(n,event,now=Date.now()){
-  if(event.outcome!=='not-read'&&event.outcome!=='waiting')return {log:true,repeats:0};
+  const refusedSkip=event.outcome==='skipped'&&ACTIVITY_REFUSAL_RE.test(String(event.error||''));
+  if(event.outcome!=='not-read'&&event.outcome!=='waiting'&&!refusedSkip)return {log:true,repeats:0};
   // A waiting line's slot time changes each time; the repeat key ignores it.
   const err=String(event.error||'').replace(/ \(next at \d\d:\d\d\)$/,'');
   const k=`${n}|${event.job}|${event.outcome}|${err}`,cur=activityRepeatMem.get(k);
@@ -2712,7 +2715,7 @@ async function overlayProductionStock(store,realm,globalState){
   // Manager-saved contracts only. Captured live API contracts (store.contracts) are never an input: once sent, those
   // resources are already gone from the warehouse, so counting them would take them off twice.
   const savedContracts=Array.isArray(store?.savedContracts)?store.savedContracts:[];
-  const stock=core.stockAfterDemand({warehouse:grouped.map(r=>({id:r.id,quality:r.quality,qty:r.qty})),productionRows:network.productionRows,demandRows:network.demandRows,savedContracts,upgradingKeys:network.upgradingKeys});
+  const stock=core.stockAfterDemand({warehouse:grouped.map(r=>({id:r.id,quality:r.quality,qty:r.qty})),productionRows:network.productionRows,demandRows:network.demandRows,savedContracts,upgradingKeys:network.upgradingKeys,runsByKey:network.etaRunsByKey});
   return {assets,ctx,network,stock,grouped,savedContracts};
 }
 // Countdown run as the game-page strip reads it. Only fields that stay fixed while the run lasts, so an unchanged run
@@ -2952,13 +2955,22 @@ function collectEstimateFromBuilding(building,{at,snapshotMs,priorStampMs}={}){
   const remaining=Number(res.amount),avail=Math.max(0,Number(res.amountAvailableNow)||0),T=Number(at);
   if(!(kind>0)||!Number.isFinite(startedMs)||!Number.isFinite(finishMs)||!Number.isFinite(remaining)||remaining<=0||!Number.isFinite(T))return null;
   if(startedMs>T)return null;
-  const snap=Number(snapshotMs);
-  // Uncollected output made by time t, counted from the snapshot (or from the take time when no snapshot time is known).
-  const base=Number.isFinite(snap)&&snap<=T?snap:T;
-  const rate=finishMs>base?(remaining-avail)/(finishMs-base):0;
-  const madeBy=t=>Math.min(remaining,avail+Math.max(0,rate)*Math.max(0,Math.min(t,finishMs)-base));
-  const prior=Number(priorStampMs);
-  const from=Number.isFinite(prior)&&prior>base&&prior<=T&&prior>=startedMs?madeBy(prior):0;
+  const snap=Number(snapshotMs),prior=Number(priorStampMs);
+  let madeBy,origin;
+  if(avail>0){
+    // The snapshot names the uncollected part: count on from the snapshot (or the take time when no snapshot time is known).
+    origin=Number.isFinite(snap)&&snap<=T?snap:T;
+    const rate=finishMs>origin?(remaining-avail)/(finishMs-origin):0;
+    madeBy=t=>Math.min(remaining,avail+Math.max(0,rate)*Math.max(0,Math.min(t,finishMs)-origin));
+  }else{
+    // The game often sends amountAvailableNow 0 (R2 export 2026-11-12: Silicon, Power ...). amount then counts from the
+    // run start, or from a collect of this run seen before the snapshot, evenly up to the finish.
+    origin=Number.isFinite(prior)&&prior>=startedMs&&(!Number.isFinite(snap)||prior<=snap)&&prior<=T?prior:startedMs;
+    const rate=finishMs>origin?remaining/(finishMs-origin):0;
+    madeBy=t=>Math.min(remaining,rate*Math.max(0,Math.min(t,finishMs)-origin));
+  }
+  // A collect stamp after that point (an earlier collect of the same run) starts the count from 0 at that stamp.
+  const from=Number.isFinite(prior)&&prior>origin&&prior<=T&&prior>=startedMs?madeBy(prior):0;
   const amount=Math.floor(Math.max(0,madeBy(T)-from));
   return amount>0?{kind,quality:Math.max(0,Math.floor(quality)),amount,mode:'add'}:null;
 }
@@ -3276,6 +3288,8 @@ const apiStorageSchedulers=new Map();
 function shouldPersistPassiveApiCaptureDuringSync(session,url,method='GET'){
   if(!session||String(method||'GET').toUpperCase()!=='GET')return true;
   const allowed=Array.isArray(session.capturePaths)?session.capturePaths:[];
+  // The market ticker the game page loads itself is kept even during a Sync (the Manager no longer reads it).
+  if(/^\/api\/v3\/market-ticker\/\d+\/?$/.test(String(url||'')))return true;
   return allowed.includes(String(url||''));
 }
 function enqueueApiStorageCommit(task,realm=null){
@@ -4848,7 +4862,7 @@ async function pageGet(path, targetRealm=null, diagnosticTrace=null, diagnosticL
 // Sync's realm boundary from the game's own auth-data (the game loads it on every page load and every 3 min):
 // 1. a stored capture for this realm received in the last 10 min; 2. else reload the game tab so the game loads it,
 // and wait up to 15 s for that capture; 3. else, only while direct reads are not blocked, read it directly.
-const SYNC_AUTH_CAPTURE_MAX_AGE_MS=10*60*1000,SYNC_AUTH_RELOAD_WAIT_MS=15000;
+const SYNC_AUTH_CAPTURE_MAX_AGE_MS=10*60*1000,SYNC_AUTH_RELOAD_WAIT_MS=30000;
 const AUTH_DATA_PATH='/api/v3/companies/auth-data/';
 function authDataRealmOf(data){return validRealmNumber(data?.authCompany?.realmId??data?.authCompany?.realm??data?.realmId??data?.realm);}
 function freshCapturedAuthData(s,realm,sinceMs,now=Date.now()){
@@ -4885,15 +4899,21 @@ async function syncAuthBoundaryFromGame(realm,tabId,session,trace){
     trace('auth-reload-for-capture',{realm:n,tabId});
     await chrome.tabs.reload(tabId);
     const deadline=reloadAt+SYNC_AUTH_RELOAD_WAIT_MS;
-    let boundarySet=false;
+    let boundarySet=false,storedCheckedAt=0;
+    // Live R2 2026-11-12: the reloaded page sent its first request 10 s after the reload, and one slow stored-copy
+    // read ran past the deadline, so the answer already in walkCaptures was never looked at. Now: the in-memory
+    // copy is checked every 250 ms and once more after the deadline; the stored copy at most every 3 s; the bridge
+    // ask is bounded.
     while(Date.now()<deadline&&!found){
       if(session.cancelled)throw new SyncCancelledByClear();
       if(!boundarySet){
-        try{const br=await chrome.tabs.sendMessage(tabId,{type:'BRIDGE_STATUS'});if(br?.ready){const sr=await chrome.tabs.sendMessage(tabId,{type:'SET_SYNC_REALM',realm:n,ttlMs:120000});boundarySet=Boolean(sr?.ok);if(boundarySet)trace('capture-boundary-set',{realm:n,afterReload:true});}}catch{}
+        try{const br=await withSyncTimeout(chrome.tabs.sendMessage(tabId,{type:'BRIDGE_STATUS'}),1500,'Bridge status after reload');if(br?.ready){const sr=await withSyncTimeout(chrome.tabs.sendMessage(tabId,{type:'SET_SYNC_REALM',realm:n,ttlMs:120000}),1500,'Sync realm after reload');boundarySet=Boolean(sr?.ok);if(boundarySet)trace('capture-boundary-set',{realm:n,afterReload:true});}}catch{}
       }
-      found=walkCapturedAuthData(session,n)||freshCapturedAuthData(await state(n),n,reloadAt);
+      found=walkCapturedAuthData(session,n);
+      if(!found&&Date.now()-storedCheckedAt>=3000){storedCheckedAt=Date.now();found=freshCapturedAuthData(await state(n),n,reloadAt);}
       if(!found)await new Promise(r=>setTimeout(r,250));
     }
+    if(!found)found=walkCapturedAuthData(session,n);
     if(!boundarySet&&await waitForBridge(tabId,5000)){try{await chrome.tabs.sendMessage(tabId,{type:'SET_SYNC_REALM',realm:n,ttlMs:120000});}catch{}}
   }catch(e){if(e instanceof SyncCancelledByClear)throw e;trace('auth-reload-error',{error:e?.message||String(e)});}
   finally{session.capturePaths=prevPaths;session.walkCaptures=prevWalk;}
@@ -5106,50 +5126,18 @@ async function runOrderBookRefreshFiring(){
   }finally{orderBookRefreshRunning=false;}
 }
 
-// Market ticker (lane job 'ticker', priority 4): GET /api/v3/market-ticker/<realm>/ gives the lowest Q0 ask of ~142
-// products ({kind, price, is_up, realmId}). Read at most once an hour, only when no capture of it (the game's own pages
-// load it; passive captures are free) is under 1 h old; saved through saveData into endpointData like a capture.
-const MARKET_TICKER_MAX_AGE_MS=60*60000;
-const marketTickerSimcoSkipLogAt=new Map();
-async function runMarketTickerRefresh(trigger='alarm'){
-  if(coreSyncActive())return {ok:true,skipped:true,reason:'sync'};
-  if(!(await scmTimerEnabled('orderBook').catch(()=>true)))return {ok:true,skipped:true,reason:'off'};
-  if(await scmSwitchedOff('marketTicker','market-ticker',null,trigger)){await gameLaneDropWant('ticker:0');await gameLaneDropWant('ticker:1');return {ok:true,skipped:true,reason:'switched-off'};}
-  // Every read it wanted and did not make gets a "not read" / "waiting" line (a Sync or day walk of that realm: planned, no line).
-  const tab=await simTab();if(!tab?.id){logActivityAnyRealm('market-ticker','not-read',{},notReadReason('no-game-tab'));return {ok:true,skipped:true,reason:'no-tab'};}
-  const bridge=await withSyncTimeout(chrome.tabs.sendMessage(tab.id,{type:'BRIDGE_STATUS'}),BRIDGE_STATUS_WAIT_MS,'Market ticker bridge check').catch(()=>null);
-  const realm=bridge?.ready&&(bridge.realm===0||bridge.realm===1)?bridge.realm:null;
-  if(realm==null){logActivityAnyRealm('market-ticker','not-read',{},notReadReason(bridge?.ready?'realm-unknown':'bridge-not-ready'));return {ok:true,skipped:true,reason:'no-realm'};}
-  if(syncSessionForRealm(realm)||accountingDayWalkRunning.has(realm))return {ok:true,skipped:true,reason:'no-realm'};
-  const path=`/api/v3/market-ticker/${realm}/`,t0=Date.now();
-  const store=await notifyRealmStore(realm);const at=Date.parse(String(store?.endpointData?.[path]?.receivedAt||''));
-  if(Number.isFinite(at)&&Date.now()-at<MARKET_TICKER_MAX_AGE_MS){await gameLaneDropWant(`ticker:${realm}`);return {ok:true,cached:true,realm};}
-  // Fresh SimcoTools prices and every product image known: no game read (passive captures still save it). One line per hour.
-  const covered=await marketTickerCoveredBySimco(realm,store).catch(()=>null);
-  if(covered){
-    await gameLaneDropWant(`ticker:${realm}`);
-    if(Date.now()-(marketTickerSimcoSkipLogAt.get(realm)||0)>=MARKET_TICKER_MAX_AGE_MS){marketTickerSimcoSkipLogAt.set(realm,Date.now());logActivity(realm,'market-ticker','skipped',{cached:true,source:'SimcoTools prices',...covered},'Not read: SimcoTools prices are fresh and every product image is known',t0,trigger);}
-    return {ok:true,cached:true,simco:true,realm};
-  }
-  {const skip=bridge?.online===false?'offline':null;if(skip){logNotRead(realm,'market-ticker',skip,{},t0,trigger);return {ok:true,skipped:true,reason:skip,realm};}}
-  let r;
-  try{r=await pageGet(path,realm,null,'market-ticker',{lane:`ticker:${realm}`,timeoutMs:SLOW_SERVER_PAGE_READ_TIMEOUT_MS});}
-  catch(e){if(pageBridgeUnavailable(e)){logNotRead(realm,'market-ticker',e,{},t0,trigger);return {ok:true,skipped:true,bridgeUnavailable:true,realm};}r={ok:false,status:0,error:e?.message||String(e)};}
-  if(r?.laneWait||r?.realmMismatch||r?.realmUnknown){
-    if(r.laneWait)logLaneWait(realm,'market-ticker',r.nextAt,{},t0,trigger);
-    else logNotRead(realm,'market-ticker',r,{},t0,trigger);
-    return {ok:true,skipped:true,laneWait:Boolean(r?.laneWait),nextAt:Number(r?.nextAt)||0,realm};}
-  if(!r?.ok||!r.data||typeof r.data!=='object'||endpointResponseRejected(path,r)){logActivity(realm,'market-ticker','failure',{status:Number(r?.status)||0},r?.error||`HTTP ${Number(r?.status)||0}`,t0,trigger);return {ok:false,realm,status:Number(r?.status)||0,error:r?.error||null};}
-  await saveData(path,r.data,r.status,'GET',realm);
-  logActivity(realm,'market-ticker','success',{rows:Array.isArray(r.data)?r.data.length:null},null,t0,trigger);
-  return {ok:true,realm,rows:Array.isArray(r.data)?r.data.length:null};
+// Market ticker: no active read any more. Nothing uses its prices (market-core reads them only with opts.gameBook), and
+// the product images it carries are in the game constants. The game pages load it themselves; those passive captures are
+// still saved (also during a Sync). This only clears ticker wants an older version left in the game lane.
+async function runMarketTickerRefresh(){
+  await gameLaneDropWant('ticker:0').catch(()=>{});await gameLaneDropWant('ticker:1').catch(()=>{});
+  return {ok:true,skipped:true,reason:'no-active-read'};
 }
 // The lane alarm: the slot is free and an alarm job waits. Only the winner runs (it takes the slot through pageGet);
 // a card poll that wins asks again by itself within seconds while its tab is visible. A winner that ran without
 // asking again (nothing to read, no tab) is dropped from the queue, so the alarm never spins on it.
 const GAME_LANE_RUNNERS={
   orderBook:async()=>{if(!(await scmTimerEnabled('orderBook').catch(()=>true)))return;await runOrderBookRefreshFiring();},
-  ticker:async()=>runMarketTickerRefresh('lane'),
   lostData:async()=>{if(!(await scmTimerEnabled('criticalGuard').catch(()=>true)))return;await runCriticalDataGuard('lane');},
   gameConstants:async()=>{const e=await scmTimerEntry('gameConstants').catch(()=>null);if(e&&!e.enabled)return;await refreshGameConstants(false,gameConstantsMaxAge(e),{quietNoTab:true});},
   abundance:async realm=>{if(realm!=null)await refreshAbundanceIfStale(realm,'lane');},
@@ -6377,7 +6365,7 @@ async function runScheduledLiveMarketRefresh(reason='scheduled'){
 // unreachable and no probe is due (the channel queue runs the job then).
 const SIMCO_PUBLIC_ALARM='scm-simco-public';
 const SIMCO_PUBLIC_PERIOD_MINUTES=5,SIMCO_PUBLIC_OFFSET_MS=150000,SIMCO_PUBLIC_DUE_SLACK_MS=30000;
-const SIMCO_PRICES_MAX_AGE_MS=15*60000,SIMCO_PRICES_FRESH_FOR_TICKER_MS=30*60000;
+const SIMCO_PRICES_MAX_AGE_MS=15*60000;
 const SIMCO_GOV_ORDERS_MAX_AGE_MS=60*60000,SIMCO_GOV_ORDERS_CAPTURE_MAX_AGE_MS=24*3600000;
 const SIMCO_BUILDINGS_LIST_MAX_AGE_MS=24*3600000,SIMCO_BUILDING_ENTRY_MAX_AGE_MS=24*3600000;
 const SIMCO_RESOURCES_MAX_AGE_MS=24*3600000,SIMCO_RESOURCES_RETRY_MIN_MS=3600000,SIMCO_RESOURCES_RETRY_MAX_MS=24*3600000;
@@ -7278,17 +7266,6 @@ async function runContestReminders(realm){
 async function runContestRemindersAll(){for(const r of [0,1])await runContestReminders(r).catch(e=>logError('contest-reminders',e));}
 chrome.alarms.onAlarm.addListener(a=>{if(a?.name!==SIMCO_PUBLIC_ALARM)return;runContestRemindersAll().catch(()=>{});runSimcoPublicData('alarm').catch(()=>{});});
 ensureSimcoPublicAlarm();
-// Market ticker: the active game read is not needed while the SimcoTools prices are fresh and every product in them
-// already has its image (from a captured ticker or the constants). Returns why, or null when the read is needed.
-async function marketTickerCoveredBySimco(realm,store){
-  const sp=await simcoPricesFor(realm);
-  if(!sp||!simcoAgeOk(sp.at,SIMCO_PRICES_FRESH_FOR_TICKER_MS))return null;
-  const ids=new Set(sp.rows.map(r=>String(r?.[0])).filter(id=>/^\d+$/.test(id)));
-  if(!ids.size)return null;
-  const imgs={...(await constantsResourceImages()),...capturedResourceImages(store)};
-  for(const id of ids)if(!imgs[id])return null;
-  return {resources:ids.size,priceAgeMin:Math.round((Date.now()-Number(sp.at))/60000)};
-}
 // Game gov-orders list read after Sync: not needed while the SimcoTools copy is under 1 h old and the game's own list
 // was captured within 24 h. Only the list; the tier read stays.
 async function govOrdersListCoveredBySimco(realm,endpointData){
@@ -7817,6 +7794,7 @@ chrome.runtime.onInstalled.addListener(async(details)=>{
   // Fresh install: every server-contacting timer starts off, before any alarm or read below looks at the timers.
   if(details?.reason==='install')await scmLifecycleStep('installed:fresh-timers-off',()=>scmApplyFreshInstallTimers());
   await scmLifecycleStep('installed:global-patch',()=>scmInstalledGlobalPatch());
+  await scmLifecycleStep('installed:drop-ticker-wants',()=>runMarketTickerRefresh());
   await scmLifecycleStep('installed:live-bridge-token',()=>migrateLiveBridgeToken());
   await scmLifecycleStep('installed:realm-migration',()=>ensureRealmStorageMigration());
   // Only the scheduler alarms re-created below (and retired legacy ones) are cleared; batch-finished alerts,
@@ -7845,6 +7823,7 @@ chrome.runtime.onInstalled.addListener(async(details)=>{
 });
 chrome.runtime.onStartup.addListener(async()=>{
   await scmLifecycleStep('startup:live-bridge-token',()=>migrateLiveBridgeToken());
+  await scmLifecycleStep('startup:drop-ticker-wants',()=>runMarketTickerRefresh());
   await scmLifecycleStep('startup:live-market-alarm',()=>ensureLiveMarketRefreshAlarm('service-worker-startup'));
   await scmLifecycleStep('startup:order-book-alarm',()=>ensureOrderBookRefreshAlarm());
   await scmLifecycleStep('startup:simco-public-alarm',()=>ensureSimcoPublicAlarm());
@@ -7914,7 +7893,7 @@ chrome.alarms.onAlarm.addListener(async a=>{
   const marketStageMatch=String(a?.name||'').match(/^scm-market-stage-r([01])-(vwap|prices)$/);
   if(marketStageMatch){await runMarketStage(Number(marketStageMatch[1]),marketStageMatch[2],'alarm').catch(e=>logError('alarm:market-stage',e));return;}
   if(a.name===LIVE_MARKET_REFRESH_ALARM_NAME){ await runScheduledLiveMarketRefresh('hourly-market-cycle').catch(()=>{}); return; }
-  if(a.name===ORDER_BOOK_REFRESH_ALARM){ if(await scmOrderBookShouldThrottle())return; await runOrderBookRefreshFiring().catch(e=>logError('order-book-refresh',e)); await runMarketTickerRefresh('alarm').catch(e=>logError('market-ticker',e)); return; }
+  if(a.name===ORDER_BOOK_REFRESH_ALARM){ if(await scmOrderBookShouldThrottle())return; await runOrderBookRefreshFiring().catch(e=>logError('order-book-refresh',e)); return; }
   if(a.name===globalThis.SCM_TIMERS_CORE?.LANE?.ALARM){ await runGameLaneAlarm().catch(e=>logError('game-lane',e)); return; }
   if(a.name==='scm-storage-prune'){ await scmPruneStorage({reason:'daily-alarm'}).catch(()=>{}); return; }
   if(a.name===CRITICAL_DATA_GUARD_ALARM){ await runCriticalDataGuard('scheduled').catch(()=>{}); return; }
@@ -8067,6 +8046,11 @@ async function spaNavigateGameTab(tabId,url){
   },args:[url]}).then(r=>r?.[0]?.result||{ok:false,error:'No result from the game page.'},e=>({ok:false,error:e?.message||String(e)}));
   return Promise.race([run,new Promise(r=>setTimeout(()=>r({ok:false,error:'SPA navigation did not return.'}),2500))]);
 }
+// Same game page: path only, without query, hash or a trailing slash (relative paths resolve on the game origin).
+function gameUrlSamePage(a,b){
+  const k=u=>{try{const x=new URL(String(u||''),'https://www.simcompanies.com');return x.host.replace(/^www\./,'')+x.pathname.replace(/\/+$/,'');}catch{return String(u||'');}};
+  return a!=null&&b!=null&&k(a)===k(b);
+}
 function pageReturnPendingKey(realm){return `scmSyncReturnPending:${realm}`;}
 function createPageReturn(traceFn=null,{realm=null}={}){
   const tabs=new Map();
@@ -8097,7 +8081,7 @@ function createPageReturn(traceFn=null,{realm=null}={}){
     async checkUser(tabId){
       const e=await api.remember(tabId);if(!e)return false;
       const now=await gameTabUrl(tabId);
-      if(now&&now!==e.walkUrl&&GAME_URL_RX.test(now)){e.userMoved=true;e.startUrl=now;e.walkUrl=now;note('page-return-user-navigated',{tabId,url:now});await persist();}
+      if(now&&!gameUrlSamePage(now,e.walkUrl)&&GAME_URL_RX.test(now)){e.userMoved=true;e.startUrl=now;e.walkUrl=now;note('page-return-user-navigated',{tabId,url:now});await persist();}
       return e.userMoved;
     },
     // Once the player moved the tab, no walk step (page visit, bounce, fallback click, post-Sync tail) touches it again.
@@ -8111,7 +8095,15 @@ function createPageReturn(traceFn=null,{realm=null}={}){
     async walkTo(tabId,url){
       if(await api.checkUser(tabId)){note('page-return-route-skipped',{tabId});return {ok:false,skipped:'user-navigated',error:'The player moved the game tab; Sync leaves it there.'};}
       const r=await spaNavigateGameTab(tabId,url);
-      const e=tabs.get(tabId);if(e&&r?.url){e.walkUrl=r.url;await persist();}
+      // A slow page (navigation answer after 2.5 s) left walkUrl on the previous page, so the next check took the
+      // walk's own move for the player's (live R2 2026-11-12: market crawl stopped after 1 of 16 pages). The tab on
+      // the walk's destination is the walk's page.
+      const e=tabs.get(tabId);
+      if(e){
+        let landed=r?.url||null;
+        if(!landed){const now=await gameTabUrl(tabId);if(now&&gameUrlSamePage(now,url))landed=now;}
+        if(landed){e.walkUrl=landed;await persist();}
+      }
       return r;
     },
     async restore(){
@@ -8699,7 +8691,9 @@ function endpointFailureSuggestsMove(response,path=''){
 // unconfirmed: if its link is not found the visit is reported as failed rather than forced to a guessed address.
 // Sync market crawl: at most this many product pages per Sync, each waited on at most this long.
 const SYNC_MARKET_CRAWL_MAX_PRODUCTS=60;
-const SYNC_MARKET_CRAWL_WAIT_MS=6000;
+// The first product page also loads the game's market page code, so it gets longer; a page that gave no answer is
+// visited once more after the others (R2 2026-11-12: Power, the first page, missed at 6 s).
+const SYNC_MARKET_CRAWL_WAIT_MS=6000,SYNC_MARKET_CRAWL_FIRST_WAIT_MS=15000,SYNC_MARKET_CRAWL_RETRY_WAIT_MS=10000,SYNC_MARKET_CRAWL_RETRY_MAX=3,SYNC_MARKET_CRAWL_FRESH_MS=15*60000;
 function syncExtraWalkPages(realm){
   return [
     {name:'Map',labels:['Map'],hrefHints:['/landscape/','/map/','/map'],route:'/landscape/',expects:[/\/api\/v2\/companies\/me\/buildings\/?$/i],paths:[]},
@@ -9021,7 +9015,7 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         }
       }else if(walked?.suspected){trace('endpoint-suspected-move',{path,suspected:walked.suspected});session.warnings?.push(`${path} may have moved to ${walked.suspected}; not adopted`);}
       // The game page did request it, and the game answered with an error: that answer is reported with its status
-      // (an optional address only on the info list). The stored record is kept (recordAuthoritative refuses a failure).
+      // (an optional address only on the info list). The stored record is kept (the record step refuses a failure).
       const failed=walkFailedCaptureFor(path);
       if(failed){
         trace('walk-page-capture-failed',{path,status:failed.status,optional:syncPathOptional(path)});
@@ -9494,25 +9488,65 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
         if(crawlTab?.id)session.gameTabId=crawlTab.id;
         const origin=crawlTab?.id?(await gameTabUrl(crawlTab.id)||'').match(/^https:\/\/[^/]+/)?.[0]:null;
         session.capturePaths=[];
-        for(const id of ids){
+        // One capture list for the whole crawl: an answer that lands after its page's wait (while the next page loads) still counts.
+        session.walkCaptures={};
+        const gotFor=path=>{
+          for(const [url,c] of Object.entries(session.walkCaptures||{})){
+            if(String(url).replace(/^https?:\/\/[^/]+/,'').split('?')[0]!==path)continue;
+            const st=Number(c?.status)||0;if(st>=200&&st<300&&Array.isArray(c?.data))return c;
+          }
+          return null;
+        };
+        const saved=new Set();
+        const saveGot=async(id,path,got)=>{
+          if(saved.has(id))return true;
+          try{await withSyncTimeout(saveData(path,got.data,Number(got.status)||200,'GET',selected),SYNC_PERSIST_VERIFY_TIMEOUT_MS,`Save ${path}`);saved.add(id);marketCrawl.captured++;return true;}
+          catch(e){marketCrawl.missed.push({id,reason:'save-failed'});return false;}
+        };
+        const visit=async(id,waitMs)=>{
+          const path=`/api/v3/market/${selected}/${id}/`,dest=`${origin}/market/resource/${id}/`,t0=Date.now();
+          // The tab already on this product (live R2 2026-11-12: Power, where the player left it) loads nothing new
+          // when "opened" again: open the Market page first, then the product.
+          if(gameUrlSamePage(await gameTabUrl(crawlTab.id).catch(()=>null),dest))await pageReturn.walkTo(crawlTab.id,`${origin}/market/`).catch(()=>null);
+          let nav=await pageReturn.walkTo(crawlTab.id,dest).catch(e=>({ok:false,error:e?.message||String(e)}));
+          // A slow page answers after the navigation's 2.5 s limit: the tab on the product still gets its wait.
+          if(!nav?.ok&&!nav?.skipped&&gameUrlSamePage(await gameTabUrl(crawlTab.id).catch(()=>null),dest))nav={...nav,ok:true,slow:true};
+          let got=null;
+          while(nav?.ok&&!got&&Date.now()-t0<waitMs){got=gotFor(path);if(!got)await new Promise(res=>setTimeout(res,100));}
+          return {path,nav,got,ms:Date.now()-t0};
+        };
+        const late=[];
+        for(let i=0;i<ids.length;i++){
+          const id=ids[i];
           if(session.cancelled)throw new SyncCancelledByClear();
           if(!origin)break;
           if(await pageReturn.checkUser(crawlTab.id)){marketCrawl.stopped='user-navigated';break;}
-          const path=`/api/v3/market/${selected}/${id}/`,t0=Date.now();
-          session.walkCaptures={};
-          const nav=await pageReturn.walkTo(crawlTab.id,`${origin}/market/resource/${id}/`).catch(e=>({ok:false,error:e?.message||String(e)}));
-          let got=null;
-          while(nav?.ok&&!got&&Date.now()-t0<SYNC_MARKET_CRAWL_WAIT_MS){
-            for(const [url,c] of Object.entries(session.walkCaptures||{})){
-              if(String(url).replace(/^https?:\/\/[^/]+/,'').split('?')[0]!==path)continue;
-              const st=Number(c?.status)||0;if(st>=200&&st<300&&Array.isArray(c?.data)){got=c;break;}
-            }
-            if(!got)await new Promise(res=>setTimeout(res,100));
+          const v=await visit(id,i===0?SYNC_MARKET_CRAWL_FIRST_WAIT_MS:SYNC_MARKET_CRAWL_WAIT_MS);
+          if(v.got)await saveGot(id,v.path,v.got);
+          else late.push({id,path:v.path,reason:v.nav?.ok?'no-response':'not-reached',ms:v.ms});
+        }
+        // Answers that came late, then one more visit for up to SYNC_MARKET_CRAWL_RETRY_MAX pages that still have none.
+        let retries=0;
+        for(const m of late){
+          let got=gotFor(m.path);
+          if(!got&&m.reason==='no-response'&&retries<SYNC_MARKET_CRAWL_RETRY_MAX&&origin&&!marketCrawl.stopped&&!session.cancelled){
+            if(await pageReturn.checkUser(crawlTab.id)){marketCrawl.stopped='user-navigated';}
+            else{retries++;const v=await visit(m.id,SYNC_MARKET_CRAWL_RETRY_WAIT_MS);got=v.got;m.retryMs=v.ms;}
           }
-          if(got){
-            try{await withSyncTimeout(saveData(path,got.data,Number(got.status)||200,'GET',selected),SYNC_PERSIST_VERIFY_TIMEOUT_MS,`Save ${path}`);marketCrawl.captured++;}
-            catch(e){marketCrawl.missed.push({id,reason:'save-failed'});}
-          }else marketCrawl.missed.push({id,reason:nav?.ok?'no-response':'not-reached',ms:Date.now()-t0});
+          if(got){if(await saveGot(m.id,m.path,got))continue;}
+          else marketCrawl.missed.push({id:m.id,reason:m.reason,ms:m.ms,...(m.retryMs!=null?{retryMs:m.retryMs}:{})});
+        }
+        marketCrawl.retried=retries;
+        // The game keeps an order book it loaded a little while ago and asks for nothing when the page opens again
+        // (live R2 2026-11-12: Power loaded 2 min before Sync). That stored copy, same realm and recent, counts.
+        if(marketCrawl.missed.some(m=>m.reason==='no-response')){
+          const ed=((await state(selected)).realmStores?.[realmKeyFromRealm(selected)]||{}).endpointData||{},now=Date.now();
+          marketCrawl.missed=marketCrawl.missed.filter(m=>{
+            if(m.reason!=='no-response')return true;
+            const e=ed[`/api/v3/market/${selected}/${m.id}/`],at=Date.parse(String(e?.receivedAt||''));
+            if(e?.captureRealm==null||Number(e.captureRealm)!==Number(selected)||!Array.isArray(e?.data)||!(now-at>=0&&now-at<SYNC_MARKET_CRAWL_FRESH_MS))return true;
+            marketCrawl.captured++;(marketCrawl.fresh||(marketCrawl.fresh=[])).push({id:m.id,ageMs:now-at});return false;
+          });
         }
       }catch(e){if(e instanceof SyncCancelledByClear)throw e;marketCrawl.error=e?.message||String(e);}
       session.walkCaptures=null;session.capturePaths=[];
@@ -9808,6 +9842,8 @@ async function syncNow(requestedRealm=null,{fullWalk=false}={}){
     if(sel!=null){
       const status=`Sync failed · ${realmDisplayNumber(sel)||'selected realm'}`;
       await withSyncTimeout(setRealmLoadStatus(sel,status,error),5000,'Sync failure status persistence').catch(()=>{});
+      // The small root status still held the last progress line ("R2 Sync: 4/4 Accounting ✓" from an older run).
+      await persistTransientSyncUi(sel,status,error);
       try{
         const failedState=await state(sel);
         const failedStore=failedState.realmStores?.[realmKeyFromRealm(sel)]||{};
@@ -10034,6 +10070,7 @@ function overlaySnapshotSignature(data){
       outgoing:Number(r.outgoing)||0,
       stock:Number(r.stock)||0,
       difference:Number(r.difference)||0,
+      stockLeft:Number(r.stockLeft)||0,
       surplus:Number(r.surplus)||0,
       vwap:Number.isFinite(Number(r.vwap))?Number(r.vwap):null,
       marketPriceSource:r.marketPriceSource||null,
@@ -11197,7 +11234,7 @@ chrome.runtime.onMessage.addListener((m,sender,send)=>{
     return true;
   }
   // Both request channels at a glance (game lane + SimcoTools): SCM_TIMERS_CORE.channelSnapshot over storage.session.
-  if(m?.type==='scm-channels-snapshot'){(async()=>{try{const C=globalThis.SCM_TIMERS_CORE;if(!C||typeof C.channelSnapshot!=='function'){send({ok:false,error:'channelSnapshot unavailable'});return;}const simKey=C.SIMCO?.KEY||'scmSimcoChannel';const v=await chrome.storage.session.get([C.LANE.KEY,simKey]);const snap=C.channelSnapshot(v?.[C.LANE.KEY]||null,v?.[simKey]||null,Date.now());{const ref=await gameRefusalGet();if(ref&&Number(ref.until)>Date.now()&&snap?.game)snap.game.nextAt=Math.max(Number(snap.game.nextAt)||0,Number(ref.until)),snap.game.paused={until:Number(ref.until),refused:true,reason:"the game's security check refuses Manager reads; pages you open and SimcoTools keep the data current"};}send({ok:true,snapshot:snap,...snap});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;}
+  if(m?.type==='scm-channels-snapshot'){(async()=>{try{const C=globalThis.SCM_TIMERS_CORE;if(!C||typeof C.channelSnapshot!=='function'){send({ok:false,error:'channelSnapshot unavailable'});return;}const simKey=C.SIMCO?.KEY||'scmSimcoChannel';const v=await chrome.storage.session.get([C.LANE.KEY,simKey]);const snap=C.channelSnapshot(v?.[C.LANE.KEY]||null,v?.[simKey]||null,Date.now());{const ref=await gameRefusalGet();if(ref&&Number(ref.until)>Date.now()&&snap?.game){snap.game.nextAt=Math.max(Number(snap.game.nextAt)||0,Number(ref.until));snap.game.paused={until:Number(ref.until),refused:true,reason:"the game's security check refuses Manager reads; pages you open and SimcoTools keep the data current"};if(Array.isArray(snap.game.queue))snap.game.queue=snap.game.queue.map(q=>({...q,reason:'paused (security check)'}));}}send({ok:true,snapshot:snap,...snap});}catch(e){send({ok:false,error:e?.message||String(e)});}})();return true;}
   if(m?.type==='STOCK_MUTATION_COMPLETE'){
     // An untagged action belongs to the active realm. Check for null first: validRealmNumber(null) is 0 (R1).
     (async()=>{let realm=(m.captureRealm===null||m.captureRealm===undefined||m.captureRealm==='')?null:validRealmNumber(m.captureRealm);

@@ -41,8 +41,6 @@
       description: 'When the Manager opens and your statements are over 5 min old, re-reads them from the game one at a time in the shared game-request slot (one request every 5 min). When off, statements update from Sync and the Accounting pages you open.' },
     { id: 'abundanceOnLoad', label: 'Mine abundance read when the game page loads', group: 'Game page', kind: 'toggle', unit: null, default: null, defaultText: 'on', min: null, max: null, hitsServer: true, server: 'game',
       description: 'When the game page loads your buildings, reads the abundance of each mine, oil rig or quarry whose value is over 1 h old, one per shared game-request slot. When off, abundance updates from Sync and the mine pages you open.' },
-    { id: 'marketTicker', label: 'Game market ticker (about hourly)', group: 'Service worker', kind: 'toggle', unit: null, default: null, defaultText: 'on', min: null, max: null, hitsServer: true, server: 'game',
-      description: "About once an hour reads the game's market ticker (lowest price of each product) in the shared game-request slot, when no game page loaded it in the last hour. When off, the ticker updates only from game pages you open." },
     { id: 'afterSyncExtras', label: 'After Sync: research, government orders, abundance', group: 'Sync', kind: 'toggle', unit: null, default: null, defaultText: 'on', min: null, max: null, hitsServer: true, server: 'game',
       description: 'Right after each Sync, reads research, government orders and your tier, and mine abundance. When off, Sync ends without them; they update from the game pages you open.' }
   ];
@@ -155,6 +153,7 @@
       orderBook: Object.freeze({ prio: 6, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Game order book' }),
       contractBook: Object.freeze({ prio: 6, everyMs: 5 * LANE_MIN, wantTtlMs: LANE_MIN, label: 'Order book for an incoming contract' }),
       lostData: Object.freeze({ prio: 6, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Lost data check' }),
+      // No job enqueues ticker since 2.5.466 (the active read is gone); kept so a want an older version stored still has its label until start-up drops it.
       ticker: Object.freeze({ prio: 6, everyMs: 60 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Market ticker' }),
       gameConstants: Object.freeze({ prio: 6, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Game constants' }),
       abundance: Object.freeze({ prio: 6, everyMs: 5 * LANE_MIN, wantTtlMs: 11 * LANE_MIN, runner: true, label: 'Abundance' }),

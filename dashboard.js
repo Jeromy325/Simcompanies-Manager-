@@ -1788,7 +1788,7 @@ function scmTimerOff(id){const e=__timersCfg&&__timersCfg[id];return !!e&&e.enab
 const SCM_OFF_LINK='<button type="button" class="tm-reset" data-open-timers>Open settings</button>';
 function scmOffNoteHtml(label){return `${escapeHtml(label)}: off in Background timers · ${SCM_OFF_LINK}`;}
 // Market price source: the game order book is off, or none of the other price sources is on.
-function scmMarketSourceOff(){return scmTimerOff('orderBook')||(scmTimerOff('dashLiveMarket')&&scmTimerOff('liveMarket')&&(__timersCfg.marketTicker===undefined||scmTimerOff('marketTicker')));}
+function scmMarketSourceOff(){return scmTimerOff('orderBook')||(scmTimerOff('dashLiveMarket')&&scmTimerOff('liveMarket'));}
 let __offSig='';
 function scmUpdateOffNotes(){
   const set=(sel,on,label)=>{const el=document.querySelector(sel);if(!el)return;if(on){const h=scmOffNoteHtml(label);if(el.__scmOff!==h){el.innerHTML=h;el.__scmOff=h;}el.hidden=false;}else{el.hidden=true;el.__scmOff=null;el.textContent='';}};
@@ -4188,7 +4188,14 @@ function savedContractStockModel(s,data){
     net=plannerProductionNetwork(s,raws.map(raw=>({raw})),d.recipes,d.rates||{},runHours,{});
   }
   const warehouse=warehouseRows(s).map(r=>({id:r._id,quality:r._quality,qty:warehouseQuantity(r)}));
-  const sd=core.stockAfterDemand({warehouse,productionRows:net?.productionRows||[],demandRows:net?.demandRows||[],savedContracts:contracts,upgradingKeys:net?.upgradingKeys});
+  // Run output still to come counts in Left. The game-page overlay snapshot has the runs cut by this Manager's collect
+  // stamps (the dashboard has none), so it is used when it is for this realm; else the network's own runs.
+  const snap=s?.gameOverlaySnapshot,realmNow=validRealmNumber(s?.viewRealm??s?.captureRealm);
+  let runsByKey=net?.etaRunsByKey||null;
+  if(snap&&Array.isArray(snap.rows)&&realmNow!=null&&Number(snap.realm)===realmNow&&snap.rows.some(r=>Array.isArray(r?.etaRuns))){
+    runsByKey=new Map();for(const r of snap.rows)if(Array.isArray(r?.etaRuns)&&r.etaRuns.length)runsByKey.set(`${Number(r.id)}:${Number(r.quality)||0}`,r.etaRuns);
+  }
+  const sd=core.stockAfterDemand({warehouse,productionRows:net?.productionRows||[],demandRows:net?.demandRows||[],savedContracts:contracts,upgradingKeys:net?.upgradingKeys,runsByKey});
   __savedContractModel={key:keyOf,net,sd,runHours};
   return __savedContractModel;
 }
@@ -4305,7 +4312,7 @@ async function renderContractSurplusAfterOutgoing(s,force=false){
       body.dataset.ready='1';
       return;
     }
-    body.innerHTML=result.rows.map(r=>{const warehouseLeft=Number(r.warehouse||0)-Number(r.demand||0)-Number(r.contracted||0);return `<tr><td class="contract-product-cell"><span>${escapeHtml(r.name||'—')}</span></td><td>${num(r.warehouse)}</td><td>${num(r.demand)}</td><td>${num(r.contracted)}</td><td class="${warehouseLeft<0?'contract-surplus-negative':''}">${num(warehouseLeft)}</td></tr>`;}).join('');
+    body.innerHTML=result.rows.map(r=>{const warehouseLeft=Number.isFinite(Number(r.leftover))?Number(r.leftover):Number(r.warehouse||0)-Number(r.demand||0)-Number(r.contracted||0),pend=Number(r.pending)||0;return `<tr><td class="contract-product-cell"><span>${escapeHtml(r.name||'—')}</span></td><td>${num(r.warehouse)}</td><td>${num(r.demand)}</td><td>${num(r.contracted)}</td><td class="${warehouseLeft<0?'contract-surplus-negative':''}"${pend>0?` title="${escapeHtml(`Includes ${num(pend)} still to come from running buildings`)}"`:''}>${num(warehouseLeft)}</td></tr>`;}).join('');
     body.dataset.ready='1';
   }catch(e){
     if(renderToken===contractSurplusRenderToken){body.innerHTML=`<tr><td colspan="5">Unable to calculate surplus: ${escapeHtml(e?.message||String(e))}</td></tr>`;body.dataset.ready='1';}
@@ -4329,7 +4336,7 @@ function renderGovernmentOrders(s){
   const title=k=>String(k||'').toLowerCase().replace(/_/g,' ').replace(/^./,c=>c.toUpperCase());
   const fromGame=merged.source==='game';
   const at=fromGame?Date.parse(String(ep[`/api/v3/government-orders/${realm}/`]?.receivedAt||'')):Number(simco?.at);
-  const sub=fromGame?(Number.isFinite(mult)?`Amounts at your tier (×${num(+mult.toFixed(3))})`:'Base amounts (tier not captured yet)'):'Amounts need a visit to the game\u2019s Government orders page.';
+  const sub=fromGame?(Number.isFinite(mult)?`Amounts at your tier (×${num(+mult.toFixed(3))})`:'Base amounts (tier not captured yet)'):merged.gameAmounts?'Open orders from SimcoTools; amounts at your tier from your last Government orders visit where the order is the same. Open that page for the rest.':'Amounts need a visit to the game\u2019s Government orders page.';
   box.dataset.collapse='contracts:gov';box.innerHTML=`<h3 data-collapse-head>Government orders</h3><p class="gov-sub">${escapeHtml(sub)}${Number.isFinite(at)?` · ${plannerAge(Date.now()-at)}`:''}</p>`+merged.rows.map(o=>{
     const req=o.resources.map(r=>{
       const nm=fromGame?(resourceInfo({kind:Number(r.kind)},s).name||`#${r.kind}`):(r.name||resourceInfo({kind:Number(r.kind)},s).name||`#${r.kind}`);

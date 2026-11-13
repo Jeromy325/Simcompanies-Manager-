@@ -1651,7 +1651,7 @@ function scmPageTextNoLayout(){
   };
   const leftRows=()=>{
     const rows=Array.isArray(S.data?.rows)?S.data.rows:[];
-    return rows.filter(r=>{const remaining=Number(r.remaining??r.difference);return Number.isFinite(remaining)&&remaining>0;});
+    return rows.filter(r=>{const remaining=Number(r.stockLeft??r.remaining??r.difference);return Number.isFinite(remaining)&&remaining>0;});
   };
   const buildLeftCopyText=()=>{
     const d=Math.max(0,Number(S.leftCopyDiscount)||0);
@@ -1660,7 +1660,7 @@ function scmPageTextNoLayout(){
     for(const r of rows){
       const id=Number(r.id);
       const name=String(r.name||`Resource #${id||0}`);
-      const remaining=Number(r.remaining??r.difference);
+      const remaining=Number(r.stockLeft??r.remaining??r.difference);
       const rawVwap=r?.vwap;
       const vwap=Number(rawVwap);
       const hasVwap=rawVwap!==null&&rawVwap!==undefined&&String(rawVwap).trim()!==''&&Number.isFinite(vwap)&&vwap>0;
@@ -1757,7 +1757,7 @@ function scmPageTextNoLayout(){
       const rows=Array.isArray(S.data?.rows)?S.data.rows:[];
       document.querySelectorAll('#scm-game-balance-card [data-eta-row]').forEach(el=>{
         const r=rows.find(x=>`${x.id}:${Number(x.quality)||0}`===el.getAttribute('data-eta-row'));if(!r)return;
-        const t=document.createElement('template');t.innerHTML=etaStrip(r,Number(r.remaining??r.difference)||0);
+        const t=document.createElement('template');t.innerHTML=etaStrip(r,Number(r.stockLeft??r.remaining??r.difference)||0);
         if(t.content.firstElementChild)el.replaceWith(t.content.firstElementChild);
       });
     }
@@ -1791,7 +1791,7 @@ function scmPageTextNoLayout(){
     host.className='';
     const rows=Array.isArray(S.data?.rows)?S.data.rows:[];
     const title=`${S.realm!=null?`R${S.realm+1}`:'Game'} · Stock After Demand & Contracts`;
-    const items=rows.map(r=>{const remaining=Number(r.remaining??r.difference)||0;const cls=remaining>0?'positive':remaining<0?'negative':'balanced';const sub=Array.isArray(r.substituteQualities)&&r.substituteQualities.length?` scm-go-sub ${remaining<0?'scm-go-sub-neg':'scm-go-sub-pos'}`:'';return `<div class="scm-go-row${sub}"${sub?` title="Includes Q${r.substituteQualities.join(', Q')} stock"`:''}><span>${r.image?`<img src="${esc(r.image)}" alt="">`:''}</span><span class="scm-go-name">${esc(r.name)}${Number.isFinite(Number(r.quality))?` Q${Number(r.quality)}`:''}</span><span class="scm-go-stock">Warehouse ${num(r.warehouse)}${sub&&Array.isArray(r.warehouseByQuality)?`<span class="scm-go-split">${r.warehouseByQuality.map(x=>`${num(x.amount)} Q${x.quality}`).join(' + ')}</span>`:''}</span><span class="scm-go-contract">Demand ${num(r.demand)}</span><span class="scm-go-contract">Contracts (net) ${num(r.contracted)}</span><span class="scm-go-remaining ${cls}">Left ${num(remaining)}</span>${etaStrip(r,remaining)}</div>`;}).join('');
+    const items=rows.map(r=>{const remaining=Number(r.remaining??r.difference)||0;const cls=remaining>0?'positive':remaining<0?'negative':'balanced';const sub=Array.isArray(r.substituteQualities)&&r.substituteQualities.length?` scm-go-sub ${remaining<0?'scm-go-sub-neg':'scm-go-sub-pos'}`:'';return `<div class="scm-go-row${sub}"${sub?` title="Includes Q${r.substituteQualities.join(', Q')} stock"`:''}><span>${r.image?`<img src="${esc(r.image)}" alt="">`:''}</span><span class="scm-go-name">${esc(r.name)}${Number.isFinite(Number(r.quality))?` Q${Number(r.quality)}`:''}</span><span class="scm-go-stock">Warehouse ${num(r.warehouse)}${sub&&Array.isArray(r.warehouseByQuality)?`<span class="scm-go-split">${r.warehouseByQuality.map(x=>`${num(x.amount)} Q${x.quality}`).join(' + ')}</span>`:''}</span><span class="scm-go-contract">Demand ${num(r.demand)}</span><span class="scm-go-contract">Contracts (net) ${num(r.contracted)}</span><span class="scm-go-remaining ${cls}"${Number(r.pending)>0?` title="${esc(`Includes ${num(r.pending)} still to come from running buildings`)}"`:''}>Left ${num(remaining)}</span>${etaStrip(r,Number(r.stockLeft??remaining)||0)}</div>`;}).join('');
     // Status area under the header: both request channels in one line, and the note of a refresh that waits for the game slot.
     Channels.start();
     const chanText=Channels.summary(Channels.snap);
@@ -2079,7 +2079,7 @@ function scmPageTextNoLayout(){
     const rows=S.data&&res&&res.quality!=null&&Number(S.data.realm)===Number(S.realm)&&Array.isArray(S.data.rows)?S.data.rows:[];
     const row=rows.find(r=>Number(r?.id)===res.id&&(Number(r?.quality)||0)===res.quality)||null;
     const whole=v=>Number.isFinite(Number(v))?Math.floor(Math.max(0,Number(v))):null;
-    return {row,left:row?whole(row.remaining??row.difference):null,surplus:row?whole(row.surplus):null};
+    return {row,left:row?whole(row.stockLeft??row.remaining??row.difference):null,surplus:row?whole(row.surplus):null};
   };
   const placeSellCard=(card,x,y)=>{
     const w=card.offsetWidth||220,h=card.offsetHeight||90;
@@ -2213,6 +2213,7 @@ function scmPageTextNoLayout(){
           demand:Number(row?.demand)||0,
           contracted:Number(row?.contracted)||0,
           difference:Number(row?.difference)||0,
+          stockLeft:Number(row?.stockLeft)||0,
           etaRuns:row?.etaRuns,
           marketPrice:Number.isFinite(Number(row?.marketPrice))?Number(row.marketPrice):null,
           vwap:Number.isFinite(Number(row?.vwap))?Number(row.vwap):null
